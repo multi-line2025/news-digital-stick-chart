@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""記録への OpenTimestamps の時刻証明。T-005。
+"""記録への OpenTimestamps の時刻証明。T-005、T-007。
 
 OpenTimestamps のクライアント（ots）をそのまま使う。中身は送らない。
 - stamp: 記録の先頭 N 行のバイト列を ots の標準入力に渡す。ots はそれを手元で sha256 にし、
@@ -33,12 +33,9 @@ DEFAULT_LEDGER = os.path.join(PROJECT, "sealed", "ledger.jsonl")
 DEFAULT_OTS = os.path.join(PROJECT, ".venv", "bin", "ots")
 
 # ots の stamp が使う公開カレンダー（ots の既定と同じ 4 つ）。2 つ以上が応答すれば完了。
-CALENDARS = (
-    "https://a.pool.opentimestamps.org",
-    "https://b.pool.opentimestamps.org",
-    "https://a.pool.eternitywall.com",
-    "https://ots.btc.catallaxy.com",
-)
+# 一覧は ledger.STAMP_CALENDARS に置く。検証は、.ots の Pending の宛先を、これらの集約先が
+# 返す実体のカレンダー（ledger.ALLOWED_PENDING_URIS）に限る。
+CALENDARS = tuple(submit for submit, _uri in ledger.STAMP_CALENDARS)
 MIN_CALENDARS = 2
 TIMEOUT_SECONDS = 20
 

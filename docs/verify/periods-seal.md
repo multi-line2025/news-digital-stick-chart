@@ -1,20 +1,21 @@
-# 期間の区切りの封印を検証する手順（T-005）
+# 期間の区切りの封印を検証する手順（T-005、T-007）
 
-この文書は、第三者が次の四つを自分で確かめるための手順である。
+この文書は、第三者が次のことを自分で確かめるための手順である。
 
 1. 封印の記録（`sealed/ledger.jsonl`）の鎖が正しいこと
 2. 封印した対象のファイルのハッシュが、記録と一致すること
-3. 時刻証明（OpenTimestamps）が正しいこと
-4. 封印と、試運転の手順3（GDELT のファイル一覧の取得）との前後。何が示せて、何が示せないか（7章）
+3. 時刻証明（OpenTimestamps）の対象が記録と一致し、Pending の宛先が許可した4つのカレンダーであること
+4. 採用される版。採用は鎖の順番で決まる（T-007。1章）
+5. 試運転の手順3の取得の記録（`acquisition`）の照合。何が示せて、何が示せないか（7章）
 
 封印したことは、現時点では公開していない（オーナーの決定）。公開するかどうかは、試運転のあとでオーナーが判断する。
 
-`<!-- test:offline -->` の印が付いたコマンドの塊は、`tests/sealer/test_verify_doc.py` が実行する。このテストは、リポジトリを手元に複製し、この文書からコマンドを取り出して、そのまま実行する。壊した複製では同じコマンドが失敗することも、同じテストで確かめている。
+`<!-- test:offline -->` の印が付いたコマンドの塊は、`tests/sealer/test_verify_doc.py` が実行する。このテストは、リポジトリを手元に複製し、複製の中のこの文書からコマンドを取り出して、そのまま実行する。使うのはコミットされた版だけで、作業ツリーのファイルは重ねない。壊した複製では同じコマンドが失敗することも、同じテストで確かめている。
 
 ## 0. 用意
 
 - 必要なもの：git、python3（標準ライブラリだけを使う）、`shasum`（Linux では `sha256sum` でもよい）。
-- 時刻証明が Bitcoin に入っていることを確かめるときだけ、OpenTimestamps のクライアント（`ots`）を使う。
+- 時刻証明を Bitcoin で確かめるときと、自分で upgrade するときだけ、OpenTimestamps のクライアント（`ots`）を使う。
   ```sh
   python3 -m venv .venv
   .venv/bin/pip install opentimestamps-client
@@ -38,7 +39,7 @@
 |---|---|---|---|
 | `periods` | 期間の区切り | doc / code / test / output | `src/sealer/seal_periods.py` |
 | `periods-triggers` | 区切りを作り直すきっかけの値（docs/stats/periods.md 8章 (2)） | triggers | `src/sealer/seal_triggers.py` |
-| `acquisition` | 試運転の手順3の取得の記録（形式の案は 7章。まだ無い） | acquisition | 後のタスク |
+| `acquisition` | 試運転の手順3の取得の記録（形式は 7章。まだ無い） | acquisition | 後のタスク |
 
 行は正規の形（キーを並べ替え、区切りに空白を入れず、UTF-8）で書く。同じ中身を別の書き方で書いた行は、検証で失敗になる。
 
@@ -48,28 +49,32 @@
   - 記録の仕組みは、記録のファイルを追記のモードでだけ開く。
   - 出力の JSON・きっかけの値の JSON・`.ots` は、新しいファイルとしてだけ作る。既にあれば上書きしない。
   - 誤りの訂正は、新しい番号の記録として出す。
-- **すべての seq に、その seq 自身の時刻証明が要る。**
-  - 記録を 1 件追記するたびに、先頭からその行までに `.ots` を付ける（`sealed/ledger.jsonl.seqNNNNNN.ots`）。
-  - どれか一つでも欠けていれば、検証は失敗する。途中の `.ots` を出すか出さないかで、採用される版を選べないようにするため。
 - **版の番号は記録に書かない。** その種類の記録の何件目かで決まる（`version_of`）。`periods` の1件目が v1 である。
-- **採用の規則。** 同じ種類の記録が期限前に複数ある場合は、**期限前の最後の追記**（`seq` が最大のもの）だけを有効とする（`adopted_record`）。
-  - 「期限前」は `recorded_at`（申告）では決めない。時刻証明で決める。
-  - 記録 k の時刻には、**seq k 自身の `.ots`**（と、その upgrade の `.bitcoin.ots`）が Bitcoin で確定した時刻だけを使う。後の seq の `.ots` の時刻では代わりにしない。
-  - Bitcoin で確定していない（Pending の）記録は、「期限前とは示せない」として扱う。
-  - 確定した時刻に安全の幅 3 時間を足しても期限より前なら、期限前とする。
-  - 期限は、手順3の取得の記録（`kind` が `acquisition` の最初の記録）に入れた drand の回の公開時刻とする（7章）。その記録が無いうちは、期限は未確定で、採用の判定は保留する。
-- **安全の幅 3 時間の根拠。**
-  - Bitcoin のブロックに書く時刻は、直前 11 ブロックの時刻の中央値より後であればよい（median time past の決まり）。
-  - 中央値は 6 ブロック前、平均で約 1 時間前にあたる。そのため、ブロックの時刻は、実際に掘られた時刻より 1 時間ほど早く書かれうる。
-  - その 1 時間に、ブロックの間隔のばらつきの分の余裕を足して 3 時間とした。
-  - 掘り手の大多数が共謀して時刻をずらす場合は、この幅では足りない。この前提を置いている。
+- **採用の規則（T-007 で改めた。`adoption`）。**
+  - 採用するのは、**最初の `kind=acquisition` の記録より `seq` が小さい記録のうち、その種類（`periods`、`periods-triggers`）の最後のもの**である。
+  - `acquisition` の記録がまだ無いうちは、「採用は保留」とする。仮の候補として、今ある最後の記録を示す。
+  - 時刻（Bitcoin で確定した時刻、drand の回の公開時刻）は、採用の判定に使わない。Pending かどうかも使わない。`recorded_at`（申告）も使わない。`adoption` の引数は、記録の一覧と種類の二つだけである。
+  - 理由：鎖は行を消せず、順番も入れ替えられない（3章の `chain`）。そのため、`.ots` を Pending のままにする、upgrade を出さない、drand のどの回を書く、のどれを選んでも、採用は変わらない。T-005 の監査の R-1 と、R-2 のうち採用を選べる部分は、この規則で無くなる。
+- **すべての seq に、その seq 自身の時刻証明が要る。**
+  - 記録を 1 件追記するたびに、先頭からその行までに `.ots` を付ける（`sealed/ledger.jsonl.seqNNNNNN.ots`）。どれか一つでも欠けていれば、検証は失敗する。
+  - `.ots` が示すのは「記録の先頭から seq N 行目までが、Bitcoin で確定した時刻に存在した」ことだけである。採用の判定には使わない。
+- **Pending の宛先は4つに限る。**
+  - `.ots` の Pending の証明の宛先は、stamp で使った4つの公開カレンダーが返す、次の4つの実体のカレンダーに限る（`ledger.STAMP_CALENDARS`）。それ以外の宛先が1つでもあれば、検証は失敗する。
+    | stamp で送る先 | Pending の宛先（`.ots` の中） |
+    |---|---|
+    | `https://a.pool.opentimestamps.org` | `https://alice.btc.calendar.opentimestamps.org` |
+    | `https://b.pool.opentimestamps.org` | `https://bob.btc.calendar.opentimestamps.org` |
+    | `https://a.pool.eternitywall.com` | `https://finney.calendar.eternitywall.com` |
+    | `https://ots.btc.catallaxy.com` | `https://btc.calendar.catallaxy.com` |
+  - 理由：運営側が自前のカレンダーの Pending を入れると、第三者がその証明を upgrade できない。許可した4つなら、第三者は自分で upgrade できる（5章）。
 - **きっかけの値と deadline_status の照合**（`judge_deadline_status`）。
-  - `periods` の出力の `rebuild_triggers` を、期限前と示せる最後の `periods-triggers` の記録と比べる。完全に一致すれば `before_deadline`、そうでなければ `after_deadline` が、記録から決まる値である。
+  - `periods` の出力の `rebuild_triggers` を、**採用された** `periods-triggers` の記録と比べる。完全に一致すれば `before_deadline`、そうでなければ `after_deadline` が、記録から決まる値である。
+  - docs/stats/periods.md 8章 (2) の「期限前に追記した」は、この規則では「最初の `acquisition` の記録より前に鎖に入った」ことに当たる。
   - 出力の `deadline_status`（統計係の申告）がこれと違えば、失敗になる。次の二つの誤りを、どちらも検出する。
-    - `before_deadline` と申告したが、期限前とは示せない場合
-    - `after_deadline` と申告したが、期限前と示せる場合
+    - `before_deadline` と申告したが、きっかけの値が採用された記録と一致しない（または採用された記録が無い）場合
+    - `after_deadline` と申告したが、採用された記録と一致する場合
   - きっかけの値が無い出力（v1 の形）では、`deadline_status` は null でなければならない。
-  - 期限が未確定のうちは、この照合を保留し、そのことを出力に出す。
+  - `acquisition` の記録が無いうちは、この照合を保留し、そのことを出力に出す。
 - **区画の一致。**
   - `periods` の2件目以降の出力の `block_start` と `block_end` は、1件目（最初に封印した版）の出力と一致しなければならない（`check_blocks`）。
   - 封印の仕組みは、一致しない版を追記しない。仕組みを通さずに追記された場合も、3章の検証（`periods`）で見つかる。
@@ -84,7 +89,7 @@ git clone <リポジトリの場所> stick-chart-check
 cd stick-chart-check
 ```
 
-## 3. 記録の鎖・対象のハッシュ・区画・期限をまとめて確かめる
+## 3. 記録の鎖・対象のハッシュ・区画・採用をまとめて確かめる
 
 <!-- test:offline -->
 ```sh
@@ -99,24 +104,32 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py all --rev auto
 - `anchors`：
   - すべての seq に、その seq 自身の `.ots` があることを確かめる。
   - 各 `.ots` の対象のハッシュが、記録の先頭 N 行の sha256 と一致することを確かめる。
-  - 各 `.ots` の証明の状態（Pending か、Bitcoin のどの高さか）を表示する。
+  - Pending の宛先が、1章の4つのどれかであることを確かめる。
+  - 各 seq の証明の状態（Pending か、Bitcoin のどの高さか）を表示する。
 - `targets --rev auto`：
   - 各記録について、その記録を最初に含んだコミットを Git の履歴から探す。そのコミットの中の対象のファイルの sha256 が、記録と一致することを確かめる。
   - 対象のファイルが後で書き換えられても、封印した時点の中身で確かめられる。
   - 履歴の中で記録そのものが書き換えられていれば失敗する。
+- `acquisition`：`acquisition` の記録ごとに、7章の二つの照合をする。記録が無ければ、そう表示する。
 - `periods`：
   - すべての版の区画の境目が、1件目と一致することを確かめる。
-  - `deadline_status` を記録と照合する。期限が未確定のうちは保留する。
-- `adopted`：期限（未確定ならそのこと）と、各記録の状態を表示する。状態は「期限前と示せる」「期限前とは示せない（Pending）」「期限前とは示せない（期限以後）」「保留」のどれか。採用される版も表示する。
+  - `deadline_status` を記録と照合する。`acquisition` の記録が無いうちは保留する。
+- `adopted`：採用の規則と、種類ごとの採用される版を表示する。
+  - 採用が決まっているときは、「採用 = seq N」に条件を付けて出す。条件は二つある。この記録の系列が公開されたものと同じであること。時刻の主張は、照合したヘッダが Bitcoin の本当の鎖にある場合に限ること（この検査では確かめていない）。
 
-**この検査では、時刻証明が Bitcoin の本当の鎖に入っているかは確かめない。** それは 5章の `ots verify` で確かめる。出力の最後にも、そう表示する。
+**この検査で確かめていないことが二つある。** 出力の最後にも、そう表示する。
 
-現在の記録（seq 1 だけ、`.ots` は Pending、取得の記録は無い）では、次のように出る。
+- ヘッダが Bitcoin の本当の鎖にあること。5章の `ots verify` か、自分の Bitcoin のノードで確かめる。
+- drand の署名（BLS）。7章の方法で確かめる。
 
-- `anchors`：seq 1 が「Pending」で、Bitcoin で確定していない。
-- `adopted`：「期限：未確定」。seq 1 は「保留（期限が未確定）。この seq 自身の .ots は Pending」。
+現在の記録（seq 1 だけ、`.ots` は Pending、`acquisition` の記録は無い）では、次のように出る。
 
-`all` の代わりに `chain`、`anchors`、`targets`、`periods`、`adopted` を一つずつ実行してもよい。
+- `anchors`：「seq 1: Pending」。Pending の宛先は1章の4つ。
+- `acquisition`：「acquisition の記録：なし」。
+- `adopted`：「採用は保留（acquisition の記録が無いため）」。`periods` の仮の候補は seq 1。
+- 最後：「この検査で確かめていないこと：(1) … ヘッダが、Bitcoin の本当の鎖にあること … (2) drand の署名（BLS）は、オフラインでは検証していない …」。
+
+`all` の代わりに `chain`、`anchors`、`targets`、`acquisition`、`periods`、`adopted` を一つずつ実行してもよい。
 
 ## 4. 検証のコードを使わずに確かめる
 
@@ -138,10 +151,12 @@ head -n 1 sealed/ledger.jsonl | shasum -a 256
 
 - N 行目の `prev_hash` が、N−1 行目の末尾の改行を除いたバイト列の sha256 と一致すること。
 - 先頭 N 行の sha256 が、`sealed/ledger.jsonl.seq00000N.ots` の対象と一致すること。
+- 採用：`kind` が `acquisition` の最初の行を探し、それより上の行のうち、種類ごとに一番下の行が採用である。
 
 ```sh
 sed -n 1p sealed/ledger.jsonl | tr -d '\n' | shasum -a 256      # 2 行目の prev_hash と比べる
 head -n 2 sealed/ledger.jsonl | shasum -a 256                    # seq000002.ots の対象と比べる
+grep -n '"kind":"acquisition"' sealed/ledger.jsonl | head -n 1   # 最初の acquisition の行
 ```
 
 対象のファイルが後で書き換えられている場合は、その記録を含んだ最初のコミットに戻してから確かめる。
@@ -153,7 +168,7 @@ git show <そのコミット>:docs/stats/periods.md | shasum -a 256
 
 ## 5. 時刻証明を確かめる
 
-`.ots` は、記録の先頭 N 行のバイト列を対象にしている。ファイル名は `sealed/ledger.jsonl.seqNNNNNN.ots`。
+`.ots` は、記録の先頭 N 行のバイト列を対象にしている。ファイル名は `sealed/ledger.jsonl.seqNNNNNN.ots`。時刻証明は、採用の判定には使わない。示すのは「先頭 N 行が、その時刻に存在した」ことだけである。
 
 ```sh
 # .ots の対象のハッシュ（File sha256 hash）と、カレンダーの一覧を見る（ネットワークを使わない）
@@ -164,7 +179,7 @@ git show <そのコミット>:docs/stats/periods.md | shasum -a 256
 ```
 
 - `ots info` の `File sha256 hash` が、4章の最後のコマンドの値と同じであること。
-- `ots verify` は、Bitcoin で確定していれば「Success! Bitcoin block <高さ> attests existence as of <時刻>」と出す。この時刻が、seq N の記録が存在した時刻の上限である。
+- `ots verify` は、Bitcoin で確定していれば「Success! Bitcoin block <高さ> attests existence as of <時刻>」と出す。この時刻が、先頭 N 行が存在した時刻の上限である。
   - ブロックを確かめるために、手元の Bitcoin Core のノード（刈り込んだものでもよい）が要る。
   - ノードが無い場合は、https://opentimestamps.org/ の画面に、`.ots` と `head -n 1 sealed/ledger.jsonl` で作ったファイルを渡して確かめる。
   - または、`ots info` が示すブロックの高さとマークルルートを、複数のブロックエクスプローラーで見比べる。
@@ -172,25 +187,26 @@ git show <そのコミット>:docs/stats/periods.md | shasum -a 256
 
 ### 確定した時刻を verify.py に渡す（自由な値では通らない）
 
-`verify.py` は、期限との比較に使う確定の時刻を、**利用者が入力した時刻からは取らない**。取り方は次のとおり。
+`verify.py` は、確定の時刻を、利用者が入力した時刻からは取らない。取り方は次のとおり。
 
-- seq 自身の `.ots` の中の Bitcoin の証明（高さ）に対して、その高さのブロックのヘッダ（80 バイト）を照合する。照合に通ったヘッダの時刻を使う。
-- ヘッダは、`sealed/bitcoin-header-<高さ>.hex` のファイル（後のタスクで仕組みが書く）か、`--btc-header <高さ>=<ヘッダの16進>` で渡す。
+- seq の `.ots` の中の Bitcoin の証明（高さ）に対して、その高さのブロックのヘッダ（80 バイト）を照合する。照合に通ったヘッダの時刻を使う。
+- ヘッダは、`sealed/bitcoin-header-<高さ>.hex` のファイル（後のタスクで仕組みが書く）、`--ots-dir` のディレクトリの中の同じ名前のファイル、または `--btc-header <高さ>=<ヘッダの16進>` で渡す。
 - 照合する中身（`src/sealer/otsfile.py`）は次の三つで、どれかが通らなければ失敗になる。
   1. ヘッダのマークルルートが、`.ots` の証明の木で計算した値と一致すること
   2. ヘッダのハッシュが、ヘッダ自身の目標値以下であること（作業量の証明）
   3. その目標値が、下限（2^77 回分のハッシュ）より難しいこと
 - `.ots` の中に無い高さのヘッダを渡すと、エラーで止まる。
 - ヘッダが本当の鎖の、その高さのブロックかどうかは確かめない。出力されるブロックのハッシュを、自分のノードやエクスプローラーで見比べること。
+- 確定時刻を使うのは、7章の acquisition の照合と、表示だけである。採用は変わらない。
 
 ```sh
 # 自分の Bitcoin のノードからヘッダを取る例
 H=<.ots の中の高さ>
 HDR=$(bitcoin-cli getblockheader "$(bitcoin-cli getblockhash $H)" false)
-PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py adopted --btc-header "$H=$HDR"
+PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py all --rev auto --btc-header "$H=$HDR"
 ```
 
-### 確定前の .ots を upgrade する
+### 運営側の upgrade
 
 `ots upgrade` は、そのままでは `.ots` を書き換える。封印済みのファイルは追記のみなので、運営側は次の仕組みを使う。
 
@@ -202,43 +218,60 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py adopted --btc-header "
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/stamp.py upgrade --seq 1
 ```
 
-第三者は、運営側の upgrade を待たずに、自分の写しで upgrade してよい。
+### 第三者が自分で upgrade した .ots を検証に読ませる（--ots-dir）
 
-- カレンダーは、誰にでも同じ証明を返す。そのため運営側は、upgrade を出さないことで結果を変えられない。
-- どの seq の `.ots` も、第三者が自分で確定させられる。
+第三者は、運営側の upgrade を待たずに、自分の写しで upgrade してよい。upgrade した `.ots` は、`--ots-dir <ディレクトリ>` で `verify.py` に読ませる。
+
+1. 自分のディレクトリに `.ots` を写す。名前は変えない（`ledger.jsonl.seqNNNNNN.ots`）。
+2. そのディレクトリで `ots upgrade` を実行する（ネットワークを使う）。`ots` は元のファイルを `.bak` に移すが、`verify.py` は `.bak` を読まない。
+3. `--ots-dir` を付けて検証する。必要ならヘッダも渡す。
 
 ```sh
-cp sealed/ledger.jsonl.seq000001.ots /tmp/check.ots
-.venv/bin/ots upgrade /tmp/check.ots
-.venv/bin/ots verify -d "$(head -n 1 sealed/ledger.jsonl | shasum -a 256 | cut -d' ' -f1)" /tmp/check.ots
+mkdir -p my-ots
+cp sealed/ledger.jsonl.seq*.ots my-ots/
+.venv/bin/ots upgrade my-ots/ledger.jsonl.seq*.ots
+PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py all --rev auto --ots-dir my-ots \
+    [--btc-header <高さ>=<ヘッダの16進>] ...
 ```
+
+- `--ots-dir` の `.ots` も、`sealed/` の `.ots` と同じ検査を受ける。対象のハッシュが記録の先頭 N 行と一致しなければ、また Pending の宛先が1章の4つの外なら、失敗になる。
+- `--ots-dir` の `.ots` は、`sealed/` の必須の `.ots`（その seq 自身の stamp の `.ots`）の代わりにはならない。必須の `.ots` が欠けていれば、`--ots-dir` を付けても失敗する。
+- 次のブロックは、upgrade せずに写しを読ませる形で、コマンドの形が通ることを確かめる（テストが実行する）。
+
+<!-- test:offline -->
+```sh
+mkdir -p my-ots
+cp sealed/ledger.jsonl.seq*.ots my-ots/
+PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py all --rev auto --ots-dir my-ots
+```
+
+### upgrade を出さないことで、何が変わり、何が変わらないか
+
+- **採用は変わらない。** 採用は鎖の順番だけで決まり、時刻も Pending かどうかも使わない（1章）。運営側が、ある seq の upgrade を出す・出さない、Pending のままにする、のどれを選んでも、採用される版は同じである。テスト（`tests/sealer/test_ledger.py` の `TestAuditRepro`）で、seq 2 の upgrade を出す場合と出さない場合、seq 2 を自前のカレンダーの Pending にした場合、drand の回を前後に動かした場合を試し、採用が変わらないことを確かめている。自前のカレンダーの場合は、検証そのものが失敗する。
+- **変わりうるのは、時刻の主張を示せるかどうかだけである。** 運営側が upgrade を出さなければ、その seq が存在した時刻の上限は、運営側の出したファイルからは示せない。第三者は、上の手順で自分で upgrade して補える。補えるのは、Pending の宛先を1章の4つに限っているからである。
+- 自分で補えるのは、4つのカレンダーのどれかが、その証明の Bitcoin への確定を返す間に限る。4つとも応答しなくなれば、Pending の `.ots` は確定させられない。そのときは、その seq の時刻の主張は示せない（採用は変わらない）。
 
 ### 通信するもの
 
 - `ots stamp` が公開カレンダーに送るのは、記録の先頭 N 行の sha256 に 16 バイトのランダムな値（nonce）を付けて、もう一度 sha256 にしたものだけである。記録の中身も、記録の sha256 そのものも送らない。
-- seq 1 の封印のとき（2026-10-05T21:41Z ごろ、UTC）に送った先は、次の4つである。
-  - `https://a.pool.opentimestamps.org`
-  - `https://b.pool.opentimestamps.org`
-  - `https://a.pool.eternitywall.com`
-  - `https://ots.btc.catallaxy.com`
-- `ots info` に出るカレンダー（`alice.btc.calendar.opentimestamps.org` など）は、これらの集約先の実際のカレンダーである。
+- seq 1 の封印のとき（2026-10-05T21:41Z ごろ、UTC）に送った先は、1章の表の左側の4つである。`.ots` の中の Pending の宛先は、表の右側の4つである。
 
 ## 6. 採用される版を確かめる
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py adopted [--btc-header <高さ>=<ヘッダ>] ...
+PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py adopted
 ```
 
-- 期限は、記録の中の取得の記録（7章）から決まる。コマンドの引数で期限を渡すことはできない。
-- 各記録の状態と、種類ごとの採用される版が出る。
-  - 期限前と示せる記録が無ければ、「採用される版は無い」と出る。
-  - 期限が未確定なら、「保留」と出る。
+- 採用は、記録の中の最初の `acquisition` の記録の位置だけで決まる。コマンドの引数（`--btc-header`、`--ots-dir`）で採用は変わらない。期限や時刻を引数で渡すこともできない。
+- 出力の形。
+  - `acquisition` の記録が無い：「採用は保留（acquisition の記録が無いため）」。種類ごとに「仮の候補 = seq N」。
+  - `acquisition` の記録がある：種類ごとに「採用 = seq N（…）。条件：…」。その種類の記録が `acquisition` より前に無ければ、「採用される版は無い」。`acquisition` より後の記録は「採用しない」と表示する。
 
-## 7. 封印と試運転の手順3との前後
+## 7. 取得の記録（acquisition）と、何が示せて何が示せないか
 
-### 取得の記録の形式（案。後のタスクで作る）
+### 取得の記録の形式（後のタスクで作る仕組みの案）
 
-手順3でファイル一覧を取得する仕組みは、次の順で動くことを提案する。
+手順3でファイル一覧を取得する仕組みは、次の順で動く。**取得の記録は、データを扱う前に鎖へ追記する。**
 
 1. drand の最新の回（回の番号・randomness・signature）を取る。
 2. 下の JSON を `sealed/acquisition-<sha256>.json` として書き、記録に `kind: "acquisition"` の行を 1 件追記する。その seq 自身の `.ots` を作る。
@@ -253,25 +286,35 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py adopted [--btc-header 
     "randomness": "<signature の sha256 の16進>",
     "signature": "<16進>"
   },
-  "ledger_head": {"seq": 1, "sha256": "<この行を足す前の、記録の先頭 seq 行の sha256>"},
+  "ledger_head": {"seq": 3, "sha256": "<この行を足す前の、記録の先頭 seq 行の sha256>"},
   "fetch": {"code_sha256": "<取得のコードの sha256>", "kept_rows_sha256": "<捨てたあとの一覧の sha256>"}
 }
 ```
 
-- 検証のコード（`deadline_from_acquisition`）が今確かめるのは、次の三つである。
-  - `step` が 3 であること
-  - `randomness` が `signature` の sha256 であること（drand の決まり）
-  - `chain_hash` が知っている鎖であること（quicknet：公開の間隔 3 秒、default：30 秒）
-- 期限 T3 は、その回の公開時刻（genesis の時刻 ＋（回の番号 − 1）× 間隔）とする。
-- 署名（BLS）が正しいかは、drand の公開の API（`https://api.drand.sh/<chain_hash>/public/<round>`）か drand の検証の道具で確かめる。
-- 取得の記録が無いうちは、`verify.py` は「期限：未確定」と出し、採用の判定と deadline_status の照合を保留する。
+### 検証のコードが照合すること（`check_acquisition`）
+
+- **ledger_head が、直前の記録のハッシュと一致すること。** acquisition の記録が seq N なら、`ledger_head` は `{"seq": N−1, "sha256": 先頭 N−1 行の sha256}` でなければならない。この値は seq N−1 の `.ots` の対象と同じである。一致しなければ失敗になる。
+  ```sh
+  head -n <N−1> sealed/ledger.jsonl | shasum -a 256   # acquisition の JSON の ledger_head.sha256 と比べる
+  ```
+- **drand の回の公開時刻が、その acquisition の記録自身の `.ots` の確定時刻より前であること。**
+  - 回の公開時刻は、genesis の時刻 ＋（回の番号 − 1）× 間隔（quicknet：3 秒、default：30 秒）。
+  - その記録自身の `.ots` が Bitcoin で確定していれば比べる。前でなければ失敗になる。
+  - Pending のうちは、この照合を保留し、そのことを出力に出す。
+  - 比べるのは、ブロックのヘッダに書かれた時刻である。Bitcoin の決まりでは、ブロックの時刻は実際に掘られた時刻から 1〜2 時間ずれうる。この照合は、その幅の精度しか持たない。
+- `step` が 3 であること、`randomness` が `signature` の sha256 であること、`chain_hash` が知っている鎖であること。
+- **drand の署名（BLS）は、オフラインでは検証していない。** 出力にもそう表示する。署名が正しいかは、drand の公開の API（`https://api.drand.sh/<chain_hash>/public/<round>`）の値と見比べるか、drand の検証の道具で確かめる。
 
 ### 何が示せて、何が示せないか
 
-seq 1 の `.ots` が Bitcoin で確定し、その時刻を T1 とする。取得の記録の drand の回の公開時刻を T3 とする。T1 + 3 時間 < T3 のとき、示せるのは次の二つだけである。
+採用された記録を seq a、最初の acquisition の記録を seq q（a < q）とする。drand の回の公開時刻を T3 とする。
 
-1. **この系列の記録（このリポジトリの `sealed/ledger.jsonl`）の先頭 1 行は、T1 の時点で存在した。** 区切りの中身は、その行の `targets` の sha256 で固定されている。
-2. **取得の記録は、T3 より後に作られた。** drand の値は T3 より前には誰にも分からないからである。
+示せること。
+
+1. **この系列の記録では、seq a は seq q より前に鎖に入った。** 鎖は行を消せず、順番も入れ替えられない。採用はこの順番だけで決まる。
+2. **seq q の取得の記録は、T3 より後に作られた。** drand の値は T3 より前には誰にも分からないからである（署名が正しいことは、上の方法で別に確かめる）。
+3. seq q の `.ots` が Bitcoin で確定し、その時刻を Tq とする。**先頭 q 行（採用された記録と、取得の記録を含む）は、Tq の時点で存在した。** 3 から、取得の記録は T3 と Tq の間に作られたことになる。この区間の幅は、出力に出る二つの時刻で確かめられる。
+4. seq a 自身の `.ots` が確定し、その時刻 Ta が T3 より前なら、**採用された記録は、取得の記録より前の時刻に存在した**ことも示せる。これは時刻の主張の上乗せで、採用には影響しない。
 
 次のことは、この照合では示せない。
 
@@ -282,9 +325,8 @@ seq 1 の `.ots` が Bitcoin で確定し、その時刻を T1 とする。取�
 - **記録に無い取得が、先にあったこと。**
   - 取得の記録より前に、記録を残さずにファイル一覧を取得していたとしても、この照合では分からない。
   - 示せるのは「記録に結び付いた正式な取得が T3 より後だった」ことまでである。
-- **T1 + 3 時間 ≥ T3 の場合。** 封印が取得の記録より前だったとは示せない。その場合は、示せなかったことを公開物に書く。
-
-取得の記録を同じ記録の `periods` の後の行として追記すれば、鎖の順でも前後が分かる。ただし、行の順は運営側が決められる。そのため、前後の根拠には時刻（T1 と T3）を使う。
+- **drand の回が、取得の直前の回であること。** 運営側は、古い回を書くことができる。古い回を書いても採用は変わらない。ただし、3 の区間（T3 から Tq まで）が広がり、取得の時刻の主張が弱くなる。区間の幅は出力で確かめる。
+- 4 の Ta が T3 以後、または seq a が Pending の場合は、採用された記録が取得より前の時刻に存在したことを、時刻では示せない。示せるのは 1 の順番だけである。
 
 ### データの手元の跡
 
@@ -296,7 +338,15 @@ git ls-tree -r --name-only <seq 1 を含むコミット> -- data/
 
 `.gitkeep` 以外が出なければ、そのコミットにはデータが無い。`.gitignore` の対象（`data/raw`）と Git の外の置き場は、この方法では確かめられない。
 
-## 8. 引用
+## 8. 検証の手順のテストを、コミットの前に試す
+
+`tests/sealer/test_verify_doc.py` は、既定ではコミットされた版（HEAD）だけを複製して試す。コミットの前に、作業ツリーのコードと手順書を試すときは、次のようにする。テストは複製の中で一時的にコミットしてから試す。元のリポジトリには何も書かない。この結果は、コミットされた版の検証にはならない。
+
+```sh
+SEALER_DOC_TEST_WORKTREE=1 PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/sealer
+```
+
+## 9. 引用
 
 この封印の対象（期間の区切り）は、GDELT のデータに適用するためのものである。区切りを決めるときに GDELT のデータは使っていない。
 

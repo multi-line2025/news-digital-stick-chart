@@ -1,26 +1,37 @@
 #!/usr/bin/env python3
-"""封印の記録の検証（第三者向け）。T-005。
+"""封印の記録の検証（第三者向け）。T-005、T-007。
 
 標準ライブラリと git だけを使う。ネットワークは使わない。手順は docs/verify/periods-seal.md。
 
 使い方（プロジェクトのルートで）
     python3 -B src/sealer/verify.py chain              記録の鎖と、種類ごとの版の番号
     python3 -B src/sealer/verify.py anchors            各 seq 自身の .ots の有無、対象のハッシュ、
-                                                       証明の状態（Pending か Bitcoin か）
+                                                       証明の状態（Pending か Bitcoin か）、
+                                                       Pending の宛先が許可した 4 つか
     python3 -B src/sealer/verify.py targets [--rev R]  対象のファイルの sha256 の照合
+    python3 -B src/sealer/verify.py acquisition        acquisition の記録の ledger_head と drand の回
     python3 -B src/sealer/verify.py periods            区画の境目と deadline_status の照合
-    python3 -B src/sealer/verify.py adopted            期限と、採用される版
+    python3 -B src/sealer/verify.py adopted            採用される版（鎖の順番で決める）
     python3 -B src/sealer/verify.py all [--rev R]      上のすべて
 
-    どのコマンドにも --btc-header 高さ=ヘッダの16進（80 バイト）を何度でも付けられる。
-    sealed/bitcoin-header-<高さ>.hex のファイルも同じように読む。ヘッダは、.ots の中の
-    Bitcoin の証明（その高さ）に結び付いていなければ失敗になる。.ots の中に無い高さを
-    渡しても失敗になる。ヘッダの値を自由に入れて、確定時刻を作ることはできない。
+採用の規則（T-007）
+    最初の kind=acquisition の記録より seq が小さい記録のうち、その種類（periods、
+    periods-triggers）の最後のものを採用する。acquisition の記録が無いうちは保留。
+    時刻（Bitcoin の確定時刻、drand の回の公開時刻）と、Pending かどうかは使わない。
+
+どのコマンドにも付けられるもの（何度でも）
+    --btc-header 高さ=ヘッダの16進（80 バイト）
+        .ots の中の Bitcoin の証明（その高さ）と照合する。sealed/bitcoin-header-<高さ>.hex と
+        --ots-dir の中の同じ名前のファイルも読む。.ots の中に無い高さを渡すと失敗になる。
+    --ots-dir ディレクトリ
+        第三者が自分で upgrade した .ots（名前は ledger.jsonl.seqNNNNNN.ots か
+        ledger.jsonl.seqNNNNNN.bitcoin.ots）を置いたディレクトリ。sealed/ の .ots と同じ検査
+        （対象のハッシュ、Pending の宛先）をして読み足す。採用の判定は変わらない。
 
 この検査で確かめないこと
-    ヘッダが Bitcoin の本当の鎖の、その高さのブロックであること。出力するブロックの
-    ハッシュを、ots verify・自分の Bitcoin のノード・複数のブロックエクスプローラーで
-    確かめること。Pending の .ots については、カレンダーが受け付けたことしか示せない。
+    - ヘッダが Bitcoin の本当の鎖の、その高さのブロックであること。出力するブロックの
+      ハッシュを、ots verify・自分の Bitcoin のノード・複数のブロックエクスプローラーで確かめる。
+    - drand の署名（BLS）。drand の公開の API か drand の道具で確かめる。
 
 --rev
     working（既定）  作業ツリーのファイルと照合する。
@@ -46,8 +57,12 @@ import ledger  # noqa: E402
 
 LEDGER_REL = "sealed/ledger.jsonl"
 HEADER_FILE_RE = re.compile(r"\Abitcoin-header-(\d+)\.hex\Z")
-NOT_CHECKED = ("時刻証明が Bitcoin の本当の鎖に入っているかは、ots verify で確かめる。"
-               "この検査では確かめていない。")
+NOT_CHECKED = ("この検査で確かめていないこと：(1) .ots の Bitcoin の証明に照合したヘッダが、"
+               "Bitcoin の本当の鎖にあること（ots verify や自分のノードで確かめる）。"
+               "(2) " + ledger.DRAND_NOT_VERIFIED)
+ADOPT_CONDITION = ("条件：この記録の系列が公開されたものと同じであること。また、各 seq が確定時刻に"
+                   "存在したという時刻の主張は、照合したヘッダが Bitcoin の本当の鎖にある場合に"
+                   "限る。ヘッダが本当の鎖にあることは、この検査では確かめていない")
 
 
 class Repo:
@@ -89,22 +104,25 @@ class Repo:
 
 
 class State:
-    """記録・時刻証明・期限をまとめて読む。"""
+    """記録と時刻証明をまとめて読む。"""
 
-    def __init__(self, root, header_args):
+    def __init__(self, root, header_args, ots_dirs=()):
         self.root = root
         self.sealed = os.path.join(root, "sealed")
+        self.ots_dirs = [os.path.abspath(d) for d in ots_dirs or ()]
         self.data = ledger.read_ledger(os.path.join(root, LEDGER_REL))
         self.records = ledger.verify_chain(self.data)
         if not self.records:
             raise ledger.LedgerError("記録が空")
-        self.anchors = ledger.check_anchors(self.data, self.sealed)
+        self.anchors = ledger.check_anchors(self.data, self.sealed, self.ots_dirs)
         headers = {}
-        if os.path.isdir(self.sealed):
-            for name in sorted(os.listdir(self.sealed)):
+        for d in [self.sealed] + self.ots_dirs:
+            if not os.path.isdir(d):
+                continue
+            for name in sorted(os.listdir(d)):
                 m = HEADER_FILE_RE.match(name)
                 if m:
-                    with open(os.path.join(self.sealed, name), encoding="ascii") as f:
+                    with open(os.path.join(d, name), encoding="ascii") as f:
                         headers[int(m.group(1))] = _hex80(f.read().strip())
         for h, hx in header_args or []:
             headers[h] = hx
@@ -112,7 +130,7 @@ class State:
         if unused:
             raise ledger.LedgerError("高さ %s のヘッダが渡されたが、その高さの Bitcoin の証明は"
                                      ".ots の中に無い" % ", ".join(map(str, unused)))
-        self.deadline, self.deadline_src = self._deadline()
+        self.acq = ledger.first_acquisition(self.records)
 
     def file_json(self, record, role):
         t = ledger.output_target(record, role)
@@ -121,14 +139,14 @@ class State:
         if ledger.sha256_hex(raw) != t["sha256"]:
             raise ledger.LedgerError("seq %d の %s のファイルが記録と一致しない"
                                      % (record["seq"], role))
-        return json.loads(raw.decode("utf-8"))
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            raise ledger.LedgerError("seq %d の %s のファイルが JSON として読めない"
+                                     % (record["seq"], role)) from None
 
-    def _deadline(self):
-        acq = [r for r in self.records if r["kind"] == ledger.ACQUISITION_KIND]
-        if not acq:
-            return None, None
-        first = acq[0]
-        return ledger.deadline_from_acquisition(self.file_json(first, "acquisition")), first
+    def rel(self, path):
+        return os.path.relpath(path, self.root) if path.startswith(self.root + os.sep) else path
 
 
 def _hex80(text):
@@ -151,15 +169,6 @@ def _parse_header_arg(text):
         raise argparse.ArgumentTypeError(str(e)) from None
 
 
-def print_deadline(st):
-    if st.deadline is None:
-        print("期限：未確定（手順3の取得の記録 kind=acquisition が、まだ記録に無い）。"
-              "期限前かどうかの判定は保留する。")
-    else:
-        print("期限：%s（seq %d の取得の記録の drand の回の公開時刻）"
-              % (st.deadline.isoformat(), st.deadline_src["seq"]))
-
-
 def cmd_chain(st, _a):
     print("記録: %d 件。鎖は正しい。" % len(st.records))
     counts = {}
@@ -171,12 +180,13 @@ def cmd_chain(st, _a):
 
 
 def cmd_anchors(st, _a):
+    print("時刻証明（.ots）が示すのは「記録の先頭からその seq までが、確定した時刻に存在した」"
+          "ことだけ。採用の判定には使わない。")
     for seq, path, digest, atts in st.anchors:
-        print("  %s  対象 = 記録の先頭 %d 行の sha256 %s  一致"
-              % (os.path.relpath(path, st.root), seq, digest))
+        print("  %s  対象 = 記録の先頭 %d 行の sha256 %s  一致" % (st.rel(path), seq, digest))
         for at in atts:
             if at["type"] == "pending":
-                print("      Pending（Bitcoin で未確定）: %s" % at["uri"])
+                print("      Pending（Bitcoin で未確定）: %s（許可した宛先）" % at["uri"])
             elif at["type"] == "bitcoin":
                 print("      Bitcoin の証明: 高さ %d" % at["height"])
             else:
@@ -187,12 +197,13 @@ def cmd_anchors(st, _a):
               % (seq, height, when.isoformat(), block))
     for r in st.records:
         if r["seq"] in st.times:
-            print("  seq %d: Bitcoin で確定（%s）" % (r["seq"], st.times[r["seq"]].isoformat()))
+            print("  seq %d: Bitcoin で確定（ヘッダの時刻 %s。ヘッダが本当の鎖にあることは"
+                  "確かめていない）" % (r["seq"], st.times[r["seq"]].isoformat()))
         else:
-            print("  seq %d: Pending。この seq 自身の .ots は Bitcoin で確定していない"
+            print("  seq %d: Pending。この seq の .ots は Bitcoin で確定していない"
                   "（または照合したヘッダが無い）" % r["seq"])
-    print("すべての seq に、その seq 自身の時刻証明があり、対象は記録と一致する。")
-    print(NOT_CHECKED)
+    print("すべての seq に、その seq 自身の時刻証明があり、対象は記録と一致する。"
+          "Pending の宛先は、すべて許可した 4 つのカレンダーのどれか。")
 
 
 def cmd_targets(st, a):
@@ -217,11 +228,31 @@ def cmd_targets(st, a):
 
 
 def adopted_triggers(st):
-    rec, statuses = ledger.adopted_record(st.records, ledger.TRIGGERS_KIND, st.deadline, st.times)
+    rec, _cand, acq = ledger.adoption(st.records, ledger.TRIGGERS_KIND)
     values = None
     if rec is not None:
         values = ledger.triggers_values(st.file_json(rec, "triggers"))
-    return rec, statuses, values
+    return rec, values, acq is not None
+
+
+def cmd_acquisition(st, _a):
+    acqs = [r for r in st.records if r["kind"] == ledger.ACQUISITION_KIND]
+    if not acqs:
+        print("acquisition の記録：なし（照合するものが無い）")
+    for r in acqs:
+        doc = st.file_json(r, "acquisition")
+        own = st.times.get(r["seq"])
+        t3, state = ledger.check_acquisition(st.data, r, doc, own)
+        print("  acquisition seq %d: ledger_head は直前の記録（先頭 %d 行）のハッシュと一致"
+              % (r["seq"], r["seq"] - 1))
+        if state == "ok":
+            print("      drand の回の公開時刻 %s は、この記録自身の .ots の確定時刻 %s より前"
+                  "（取得の記録は、この二つの時刻の間に作られた。確定時刻の側は、ヘッダが本当の"
+                  "鎖にあることを確かめた場合に限る）" % (t3.isoformat(), own.isoformat()))
+        else:
+            print("      drand の回の公開時刻 %s。この記録自身の .ots が Pending のため、"
+                  "確定時刻との照合は保留" % t3.isoformat())
+    print(ledger.DRAND_NOT_VERIFIED)
 
 
 def cmd_periods(st, _a):
@@ -230,7 +261,7 @@ def cmd_periods(st, _a):
         raise ledger.LedgerError("periods の記録が無い")
     for _v, r in ledger.records_of_kind(st.records, ledger.TRIGGERS_KIND):
         ledger.triggers_values(st.file_json(r, "triggers"))
-    trig_rec, _s, trig_values = adopted_triggers(st)
+    trig_rec, trig_values, decided = adopted_triggers(st)
     first = st.file_json(versions[0][1], "output")
     problems, held = [], []
     if first.get("deadline_status") is not None:
@@ -239,7 +270,7 @@ def cmd_periods(st, _a):
         out = st.file_json(r, "output")
         for p in ledger.check_blocks(first, out):
             problems.append("%d 件目: %s" % (v, p))
-        expected, probs = ledger.judge_deadline_status(out, st.deadline is not None, trig_values)
+        expected, probs = ledger.judge_deadline_status(out, decided, trig_values)
         problems += ["%d 件目: %s" % (v, p) for p in probs]
         blocks = ledger.blocks_of(out)
         print("  periods の %d 件目（seq %d）: %s" % (v, r["seq"], ", ".join(
@@ -248,10 +279,10 @@ def cmd_periods(st, _a):
             print("      きっかけの値なし。deadline_status は null（正しい）")
         elif expected == "held":
             held.append(v)
-            print("      deadline_status の申告 %s：期限が未確定のため照合を保留"
-                  % out.get("deadline_status"))
+            print("      deadline_status の申告 %s：acquisition の記録が無く、採用が保留のため"
+                  "照合を保留" % out.get("deadline_status"))
         else:
-            print("      deadline_status の申告 %s、記録から決まる値 %s（照合に使った "
+            print("      deadline_status の申告 %s、記録から決まる値 %s（照合に使った、採用された "
                   "periods-triggers: %s）" % (out.get("deadline_status"), expected,
                                               "seq %d" % trig_rec["seq"] if trig_rec else "なし"))
     if problems:
@@ -262,36 +293,42 @@ def cmd_periods(st, _a):
 
 
 def cmd_adopted(st, _a):
-    print_deadline(st)
-    for kind in ("periods", ledger.TRIGGERS_KIND):
-        rec, statuses = ledger.adopted_record(st.records, kind, st.deadline, st.times)
-        if not statuses:
-            print("  %s: 記録なし" % kind)
-            continue
-        for seq, s in sorted(statuses.items()):
-            extra = ""
-            if s == ledger.HELD:
-                extra = ("。この seq 自身の .ots は Bitcoin で確定（%s）" % st.times[seq].isoformat()
-                         if seq in st.times else "。この seq 自身の .ots は Pending")
-            print("  %s seq %d（%d 件目）: %s%s" % (kind, seq, ledger.version_of(st.records, seq),
-                                                  ledger.STATUS_TEXT[s], extra))
-        if st.deadline is None:
-            print("  %s: 採用される版は保留（期限が未確定）" % kind)
+    print("採用の規則：最初の acquisition の記録より seq が小さい記録のうち、その種類の最後のもの。"
+          "時刻（Bitcoin の確定時刻、drand の回の公開時刻）と Pending かどうかは使わない。")
+    if st.acq is None:
+        print("採用は保留（acquisition の記録が無いため）。")
+    else:
+        print("区切り：最初の acquisition の記録 = seq %d" % st.acq["seq"])
+    for kind in ledger.ADOPTED_KINDS:
+        rec, cand, acq = ledger.adoption(st.records, kind)
+        if acq is None:
+            if cand is None:
+                print("  %s: 記録なし。採用は保留" % kind)
+            else:
+                print("  %s: 採用は保留。仮の候補 = seq %d（%d 件目。今ある最後の記録）"
+                      % (kind, cand["seq"], ledger.version_of(st.records, cand["seq"])))
         elif rec is None:
-            print("  %s: 期限前と示せる記録が無い。採用される版は無い" % kind)
+            print("  %s: seq %d より前に記録が無い。採用される版は無い" % (kind, acq["seq"]))
         else:
-            print("  %s: 採用 = seq %d（%d 件目、期限前の最後の追記）"
-                  % (kind, rec["seq"], ledger.version_of(st.records, rec["seq"])))
+            print("  %s: 採用 = seq %d（%d 件目。seq %d の acquisition より前の最後の記録）。%s"
+                  % (kind, rec["seq"], ledger.version_of(st.records, rec["seq"]), acq["seq"],
+                     ADOPT_CONDITION))
+            later = [r["seq"] for r in st.records
+                     if r["kind"] == kind and r["seq"] > acq["seq"]]
+            if later:
+                print("      seq %s は acquisition の記録より後なので、採用しない"
+                      % ", ".join(map(str, later)))
 
 
 def cmd_all(st, a):
     cmd_chain(st, a)
     cmd_anchors(st, a)
     cmd_targets(st, a)
+    cmd_acquisition(st, a)
     cmd_periods(st, a)
     cmd_adopted(st, a)
-    print("すべての検査に通った。" + ("期限が未確定のため、採用の判定は保留。"
-                                      if st.deadline is None else ""))
+    print("すべての検査に通った。" + ("採用は保留（acquisition の記録が無いため）。"
+                                      if st.acq is None else ""))
     print(NOT_CHECKED)
 
 
@@ -300,18 +337,21 @@ def main(argv=None):
     p.add_argument("--root", default=os.getcwd())
     sub = p.add_subparsers(dest="cmd", required=True)
     parsers = {}
-    for name in ("chain", "anchors", "targets", "periods", "adopted", "all"):
+    for name in ("chain", "anchors", "targets", "acquisition", "periods", "adopted", "all"):
         s = sub.add_parser(name, allow_abbrev=False)
         s.add_argument("--btc-header", type=_parse_header_arg, action="append",
                        help="高さ=80 バイトのヘッダの16進。.ots の中の Bitcoin の証明と照合する")
+        s.add_argument("--ots-dir", action="append", default=[],
+                       help="自分で upgrade した .ots を置いたディレクトリ（採用は変わらない）")
         parsers[name] = s
     for name in ("targets", "all"):
         parsers[name].add_argument("--rev", default="working")
     a = p.parse_args(argv)
     fn = {"chain": cmd_chain, "anchors": cmd_anchors, "targets": cmd_targets,
-          "periods": cmd_periods, "adopted": cmd_adopted, "all": cmd_all}[a.cmd]
+          "acquisition": cmd_acquisition, "periods": cmd_periods, "adopted": cmd_adopted,
+          "all": cmd_all}[a.cmd]
     try:
-        st = State(os.path.abspath(a.root), a.btc_header)
+        st = State(os.path.abspath(a.root), a.btc_header, a.ots_dir)
         fn(st, a)
     except ledger.LedgerError as e:
         print("失敗: %s" % e, file=sys.stderr)

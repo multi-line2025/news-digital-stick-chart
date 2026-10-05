@@ -15,8 +15,9 @@ docs/stats/periods.md 8章 (2) の「きっかけの値は期限より前に決�
     記録に 1 件追記して、その seq 自身の .ots を作る。
   - periods の記録が 1 件も無ければ止まる（作り直しの元になる版が無いため）。
 
-期限の前か後かは、この仕組みでは決めない。検証（verify.py periods / adopted）が、
-この記録の seq 自身の .ots の Bitcoin の確定時刻と、手順3の取得の記録の期限を比べて決める。
+この記録が採用されるかは、この仕組みでは決めない。検証（verify.py periods / adopted）が、
+鎖の順番で決める（最初の acquisition の記録より前にある、periods-triggers の最後の記録）。
+時刻証明の時刻は、採用の判定には使わない。
 """
 
 import argparse

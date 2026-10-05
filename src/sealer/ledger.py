@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""封印の記録（追記のみ）の中核。T-005。
+"""封印の記録（追記のみ）の中核。T-005、T-007。
 
 記録のファイル（既定は sealed/ledger.jsonl）は JSON Lines で、1 行が 1 件の記録。
 標準ライブラリだけを使う。ネットワークは使わない。
@@ -28,31 +28,37 @@
     sha256 は変わらない。Bitcoin への確定を加えた .ots は、元の .ots を書き換えずに
     ledger.jsonl.seqNNNNNN.bitcoin.ots として別に置く（stamp.py の upgrade）。
 
-時刻証明の欠け
+時刻証明（OpenTimestamps）の役割と欠け
     すべての seq に、その seq 自身の .ots が要る（check_anchors）。欠けていれば検証は失敗する。
+    .ots が示すのは「記録の先頭から seq 行目までが、Bitcoin で確定した時刻に存在した」
+    ことだけである。採用の判定には使わない。
+    Pending の証明の宛先は、stamp で使った 4 つのカレンダー（STAMP_CALENDARS の実体の側）に
+    限る。それ以外の宛先があれば、検証は失敗する。
 
-採用の規則（adopted_record）
-    同じ種類の記録が期限前に複数ある場合は、期限前の最後の追記（seq が最大のもの）だけを
-    有効とする。「期限前」は recorded_at（申告）では決めず、時刻証明で決める。
-    - 記録 k の存在の時刻の上限には、seq k 自身の .ots（と、その upgrade の .bitcoin.ots）で
-      Bitcoin に確定した時刻だけを使う。後の seq の .ots の時刻では代わりにしない。
-      代わりにすると、途中の .ots を出すか出さないかで、採用される版を選べてしまうため。
-    - 確定していない（Pending の）記録は「期限前とは示せない」として扱う。
-    - 確定時刻に安全の幅（既定 3 時間）を足しても期限より前なら、期限前とする。
-      3 時間の根拠：Bitcoin のブロックの時刻は、直前 11 ブロックの時刻の中央値より後で
-      あればよい（median time past の決まり）。中央値は 6 ブロック前、平均で約 1 時間前に
-      あたるので、ブロックの時刻は実際に掘られた時刻より 1 時間ほど早く書かれうる。
-      その 1 時間に、ブロックの間隔のばらつきの分の余裕を足して 3 時間とする。
-      大多数の掘り手が共謀して時刻をずらす場合は、この幅では足りない（前提として明記する）。
-    - 期限は、手順3の取得の記録（kind が acquisition の最初の記録）に入れた drand の回の
-      公開時刻とする（deadline_from_acquisition）。その記録が無いうちは、期限は未確定で、
-      採用の判定は保留する。
+採用の規則（adoption）。T-007 で、時刻ではなく鎖の順番で決める形に改めた。
+    採用するのは、最初の acquisition の記録より seq が小さい記録のうち、その種類
+    （periods、periods-triggers）の最後のもの。
+    - acquisition の記録がまだ無いうちは「採用は保留」。仮の候補として、今ある最後の記録を示す。
+    - 時刻（Bitcoin の確定時刻、drand の回の公開時刻）も、Pending かどうかも、recorded_at
+      （申告）も使わない。adoption の引数は記録の一覧と種類だけである。
+    - 鎖は行を消せず、順番も入れ替えられない（verify_chain）。そのため、.ots の upgrade を
+      出すか出さないか、Pending のままにするか、drand のどの回を書くかで、採用は変わらない。
+
+acquisition の記録（手順3の取得の記録）の照合（check_acquisition）
+    - 中身の ledger_head が、直前の記録までの先頭の sha256（seq N−1 の .ots の対象と同じ値）と
+      一致すること。
+    - drand の回の公開時刻が、その acquisition の記録自身の .ots の Bitcoin の確定時刻より
+      前であること。確定していなければ、この照合は保留する。
+    - drand の署名（BLS）は、オフラインでは検証しない。randomness が signature の sha256
+      であることだけを確かめる。
 
 きっかけの値（kind が periods-triggers）
     区切りを作り直すきっかけの値は、periods-triggers の記録として追記する。periods の
-    出力の rebuild_triggers が、期限前と示せる最後の periods-triggers の記録と完全に
-    一致すれば before_deadline、そうでなければ after_deadline が記録から決まる値で、
+    出力の rebuild_triggers が、採用された periods-triggers の記録と完全に一致すれば
+    before_deadline、そうでなければ after_deadline が記録から決まる値で、
     出力の deadline_status（申告）と照合する（judge_deadline_status）。
+    docs/stats/periods.md 8章 (2) の「期限前に追記した」は、この規則では「最初の
+    acquisition の記録より前に鎖に入った」ことに当たる。
 
 """
 
@@ -72,8 +78,15 @@ TIME_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
 KIND_RE = re.compile(r"\A[a-z][a-z0-9_-]{0,31}\Z")
 OTS_NAME_RE = re.compile(r"\Aledger\.jsonl\.seq(\d{6})(\.bitcoin)?\.ots\Z")
 
-# Bitcoin のブロックの時刻の揺れの分の安全の幅。根拠は先頭の説明（採用の規則）を参照。
-DEFAULT_BLOCK_TIME_MARGIN = datetime.timedelta(hours=3)
+# stamp で使う公開カレンダー（ots の既定と同じ 4 つ）と、その集約先が返す Pending の宛先
+# （実体のカレンダー）。stamp.py はこの左側に送る。.ots の Pending の宛先は右側に限る。
+STAMP_CALENDARS = (
+    ("https://a.pool.opentimestamps.org", "https://alice.btc.calendar.opentimestamps.org"),
+    ("https://b.pool.opentimestamps.org", "https://bob.btc.calendar.opentimestamps.org"),
+    ("https://a.pool.eternitywall.com", "https://finney.calendar.eternitywall.com"),
+    ("https://ots.btc.catallaxy.com", "https://btc.calendar.catallaxy.com"),
+)
+ALLOWED_PENDING_URIS = frozenset(uri for _submit, uri in STAMP_CALENDARS)
 
 class LedgerError(Exception):
     """記録の検証に失敗した。"""
@@ -244,58 +257,38 @@ def records_of_kind(records, kind):
     return out
 
 
-# 期限との比較での記録の状態
-BEFORE = "before"            # 時刻証明で期限前と示せる
-PENDING = "pending"          # その seq の .ots が Bitcoin で確定していない → 期限前とは示せない
-LATE = "late"                # 確定した時刻 + 安全の幅が期限以後 → 期限前とは示せない
-HELD = "held"                # 期限が未確定のため判定を保留
-
-STATUS_TEXT = {
-    BEFORE: "期限前と示せる",
-    PENDING: "期限前とは示せない（この seq の .ots が Bitcoin で確定していない）",
-    LATE: "期限前とは示せない（Bitcoin の確定時刻に安全の幅を足すと期限以後）",
-    HELD: "保留（期限が未確定）",
-}
-
-
-def status_of(seq, deadline, own_times, margin=DEFAULT_BLOCK_TIME_MARGIN):
-    """記録 seq の、期限との関係。
-
-    own_times: {seq: その seq 自身の .ots で、Bitcoin で確定した時刻}。
-    後の seq の .ots の時刻では代わりにしない（途中の .ots を出さないことで、採用される版を
-    選べてしまうため）。
-    """
-    if deadline is None:
-        return HELD
-    if deadline.tzinfo is None:
-        raise ValueError("期限にはタイムゾーンを付けること")
-    t = own_times.get(seq)
-    if t is None:
-        return PENDING
-    return BEFORE if t + margin < deadline else LATE
-
-
-def adopted_record(records, kind, deadline, own_times, margin=DEFAULT_BLOCK_TIME_MARGIN):
-    """期限前の最後の追記を返す。
-
-    返り値: (採用された記録または None, {seq: 状態})。期限が未確定なら、採用は None で、
-    すべての状態が HELD になる。recorded_at（申告）は使わない。
-    """
-    statuses = {}
-    best = None
-    for r in records:
-        if r["kind"] != kind:
-            continue
-        s = status_of(r["seq"], deadline, own_times, margin)
-        statuses[r["seq"]] = s
-        if s == BEFORE and (best is None or r["seq"] > best["seq"]):
-            best = r
-    return best, statuses
-
-
-# ---------------------------------------------------------------- 期限（手順3の取得の記録）
-
 ACQUISITION_KIND = "acquisition"
+ADOPTED_KINDS = ("periods", "periods-triggers")
+
+
+def first_acquisition(records):
+    """最初の kind=acquisition の記録。無ければ None。"""
+    for r in records:
+        if r["kind"] == ACQUISITION_KIND:
+            return r
+    return None
+
+
+def adoption(records, kind):
+    """採用の規則（鎖の順番だけで決める）。
+
+    返り値: (採用された記録, 仮の候補, 区切りに使った acquisition の記録)
+      - acquisition の記録がある: 採用 = その seq より小さい、その種類の最後の記録
+        （無ければ None）。仮の候補は None。
+      - acquisition の記録が無い: 採用は保留（None）。仮の候補 = 今ある、その種類の
+        最後の記録（無ければ None）。acquisition の記録は None。
+    時刻・Pending かどうか・recorded_at は、引数にも無く、使わない。
+    """
+    of_kind = [r for r in records if r["kind"] == kind]
+    acq = first_acquisition(records)
+    if acq is None:
+        return None, (of_kind[-1] if of_kind else None), None
+    before = [r for r in of_kind if r["seq"] < acq["seq"]]
+    return (before[-1] if before else None), None, acq
+
+
+# ---------------------------------------------------------------- acquisition の記録の照合
+
 # drand の鎖（公開されている値）。回 r の公開時刻は genesis_time + (r - 1) * period。
 DRAND_CHAINS = {
     # quicknet
@@ -303,6 +296,8 @@ DRAND_CHAINS = {
     # default（mainnet）
     "8990e7a9aaed2ffed73dbd7092123d6f289930540d7651336225dc172e51b2ce": (1595431050, 30),
 }
+DRAND_NOT_VERIFIED = ("drand の署名（BLS）は、オフラインでは検証していない（randomness が "
+                      "signature の sha256 であることだけを確かめた）。")
 
 
 def drand_round_time(chain_hash, round_no):
@@ -315,11 +310,11 @@ def drand_round_time(chain_hash, round_no):
                                            datetime.timezone.utc)
 
 
-def deadline_from_acquisition(doc):
-    """取得の記録の中身（JSON）から、期限を決める。
+def drand_time_of_acquisition(doc):
+    """取得の記録の中身（JSON）から、drand の回の公開時刻を出す。
 
-    期限 = 記録に入れた drand の回の公開時刻。randomness が signature の sha256 で
-    あることも確かめる（drand の決まり）。署名そのものの検証（BLS）はここではしない。
+    randomness が signature の sha256 であることも確かめる（drand の決まり）。
+    署名そのものの検証（BLS）はここではしない（DRAND_NOT_VERIFIED）。
     """
     try:
         d = doc["drand"]
@@ -337,6 +332,37 @@ def deadline_from_acquisition(doc):
     if sha256_hex(sig) != randomness:
         raise LedgerError("drand の randomness が signature の sha256 と一致しない")
     return drand_round_time(chain, rnd)
+
+
+def expected_ledger_head(data, seq):
+    """seq の記録に入れるべき ledger_head（直前の記録までの先頭の sha256）。"""
+    n = seq - 1
+    return {"seq": n, "sha256": prefix_digest(data, n) if n else sha256_hex(b"")}
+
+
+def check_acquisition(data, record, doc, own_time):
+    """acquisition の記録を照合する。
+
+    own_time: その記録自身の .ots で Bitcoin に確定した時刻（無ければ None）。
+    返り値: (drand の回の公開時刻, "ok" か "pending")。食い違えば LedgerError。
+    この照合は採用の判定に使わない。
+    """
+    seq = record["seq"]
+    head = doc.get("ledger_head") if isinstance(doc, dict) else None
+    want = expected_ledger_head(data, seq)
+    if not isinstance(head, dict) or sorted(head) != ["seq", "sha256"]:
+        raise LedgerError("seq %d の取得の記録に ledger_head（seq・sha256）が無い" % seq)
+    if head != want:
+        raise LedgerError("seq %d の取得の記録の ledger_head が、直前の記録のハッシュと一致しない"
+                          "（入れた値 seq %r、記録から決まる値 seq %d の %s）"
+                          % (seq, head.get("seq"), want["seq"], want["sha256"]))
+    t3 = drand_time_of_acquisition(doc)
+    if own_time is None:
+        return t3, "pending"
+    if not t3 < own_time:
+        raise LedgerError("seq %d の取得の記録の drand の回の公開時刻 %s が、その記録自身の .ots の"
+                          "確定時刻 %s より前でない" % (seq, t3.isoformat(), own_time.isoformat()))
+    return t3, "ok"
 
 
 # ---------------------------------------------------------------- periods の検査
@@ -389,15 +415,16 @@ def check_blocks(first_output, later_output):
     return problems
 
 
-def judge_deadline_status(output, deadline_known, adopted_triggers):
+def judge_deadline_status(output, decided, adopted_triggers):
     """出力の deadline_status（統計係の申告）を、記録から決まる値と照合する。
 
-    deadline_known: 期限が確定しているか。
-    adopted_triggers: 期限前と示せる最後の periods-triggers の記録の値（dict）、無ければ None。
+    decided: 採用が決まっているか（acquisition の記録があるか）。
+    adopted_triggers: 採用された periods-triggers の記録の値（dict）、無ければ None。
+      採用は adoption（鎖の順番）で決める。時刻は使わない。
 
     返り値: (記録から決まる値, 問題の一覧)。記録から決まる値は
       None（きっかけの値が無い。v1 の形）、"before_deadline"、"after_deadline"、"held"（保留）。
-    規則（docs/stats/periods.md 8章 (2)）：出力の rebuild_triggers が、期限前と示せる最後の
+    規則（docs/stats/periods.md 8章 (2)）：出力の rebuild_triggers が、採用された
     periods-triggers の記録と完全に一致すれば before_deadline、そうでなければ after_deadline。
     """
     status = output.get("deadline_status")
@@ -411,16 +438,17 @@ def judge_deadline_status(output, deadline_known, adopted_triggers):
         return None, []
     if status not in ("before_deadline", "after_deadline"):
         return None, ["きっかけの値があるのに deadline_status が %r" % (status,)]
-    if not deadline_known:
+    if not decided:
         return "held", []
     expected = ("before_deadline" if adopted_triggers is not None
                 and dict(triggers) == dict(adopted_triggers) else "after_deadline")
     if status == expected:
         return expected, []
     if status == "before_deadline":
-        return expected, ["before_deadline と申告しているが、きっかけの値が期限前と示せる"
-                          "記録と一致しない（または期限前と示せる記録が無い）"]
-    return expected, ["after_deadline と申告しているが、きっかけの値は期限前と示せる記録と一致する"]
+        return expected, ["before_deadline と申告しているが、きっかけの値が採用された "
+                          "periods-triggers の記録と一致しない（または採用された記録が無い）"]
+    return expected, ["after_deadline と申告しているが、きっかけの値は採用された "
+                      "periods-triggers の記録と一致する"]
 
 
 # ---------------------------------------------------------------- 時刻証明の照合
@@ -451,34 +479,54 @@ def list_anchors(sealed_dir):
     return out
 
 
-def check_anchors(data, sealed_dir):
+def _read_anchor(data, nlines, seq, path, label):
+    if seq > nlines:
+        raise LedgerError("%s は %d 行目までを対象にしているが、記録は %d 行しかない"
+                          "（末尾の行が削除された）" % (label, seq, nlines))
+    with open(path, "rb") as f:
+        try:
+            digest, atts = otsfile.parse(f.read())
+        except otsfile.OtsError as e:
+            raise LedgerError("%s: %s" % (label, e)) from None
+    if digest != prefix_digest(data, seq):
+        raise LedgerError("%s の対象のハッシュが、記録の先頭 %d 行と一致しない" % (label, seq))
+    bad = sorted({a["uri"] for a in atts
+                  if a["type"] == "pending" and a["uri"] not in ALLOWED_PENDING_URIS})
+    if bad:
+        raise LedgerError("%s に、許可していないカレンダーの Pending がある: %s"
+                          "（許可しているのは stamp で使った 4 つの宛先だけ）"
+                          % (label, ", ".join(bad)))
+    return digest, atts
+
+
+def check_anchors(data, sealed_dir, extra_dirs=()):
     """各 .ots の対象が記録の先頭 N 行の sha256 と一致し、すべての seq に自分の .ots
     （stamp で作った ledger.jsonl.seqNNNNNN.ots）があることを確かめる。
 
-    最後の行の書き換え、末尾の行の削除、途中の .ots の欠けは、ここで検出する。
+    - 最後の行の書き換え、末尾の行の削除、途中の .ots の欠けは、ここで検出する。
+    - Pending の宛先が ALLOWED_PENDING_URIS の外なら失敗する。
+    - extra_dirs: 第三者が自分で upgrade した .ots を置いたディレクトリ。名前が
+      ledger.jsonl.seqNNNNNN[.bitcoin].ots のものを、同じ検査をして読み足す。
+      必須の .ots（その seq 自身の stamp の .ots）は sealed_dir にあるものだけで数える。
     返り値: [(seq, .ots のパス, digest, 証明の一覧)]。
     """
     lines = split_lines(data)
     anchors = list_anchors(sealed_dir)
     result = []
     for seq, path in anchors:
-        if seq > len(lines):
-            raise LedgerError("%s は %d 行目までを対象にしているが、記録は %d 行しかない"
-                              "（末尾の行が削除された）" % (os.path.basename(path), seq, len(lines)))
-        with open(path, "rb") as f:
-            try:
-                digest, atts = otsfile.parse(f.read())
-            except otsfile.OtsError as e:
-                raise LedgerError("%s: %s" % (os.path.basename(path), e)) from None
-        if digest != prefix_digest(data, seq):
-            raise LedgerError("%s の対象のハッシュが、記録の先頭 %d 行と一致しない"
-                              % (os.path.basename(path), seq))
+        digest, atts = _read_anchor(data, len(lines), seq, path, os.path.basename(path))
         result.append((seq, path, digest, atts))
     have = {os.path.basename(p) for _s, p in anchors}
     missing = [s for s in range(1, len(lines) + 1) if ots_name(s) not in have]
     if missing:
         raise LedgerError("seq %s の記録に、その seq 自身の時刻証明（.ots）が無い"
                           % ", ".join(map(str, missing)))
+    for d in extra_dirs:
+        if not os.path.isdir(d):
+            raise LedgerError("外から指定した .ots のディレクトリが無い: %s" % d)
+        for seq, path in list_anchors(d):
+            digest, atts = _read_anchor(data, len(lines), seq, path, path)
+            result.append((seq, path, digest, atts))
     return result
 
 

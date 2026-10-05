@@ -1,16 +1,23 @@
-"""封印の記録（src/sealer/）のテスト。T-005。
+"""封印の記録（src/sealer/）のテスト。T-005、T-007。
 
 実行（プロジェクトのルートで）:
     PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/sealer -v
 
 ネットワークは使わない。OpenTimestamps のクライアントは呼ばず、偽の応答で置き換える。
 Bitcoin の証明は、テストの中で作った .ots と、易しい目標値で掘ったヘッダで試す。
-わざと壊した記録（書き換え・削除・入れ替え・欠番・末尾の削除・途中の .ots の欠け）で、
+わざと壊した記録（書き換え・削除・入れ替え・欠番・末尾の削除・途中の .ots の欠け・
+許可していないカレンダーの Pending・ledger_head の食い違い・drand の回と確定時刻の食い違い）で、
 検証が失敗することを確かめる。
+T-007：採用は鎖の順番で決まり、.ots を Pending のままにする・upgrade を出さない・drand の回を
+動かす、のどれでも採用が変わらないことを確かめる（監査 R-1・R-2 の再現）。
 """
 
+import contextlib
 import datetime
+import functools
 import hashlib
+import inspect
+import io
 import json
 import os
 import shutil
@@ -18,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT = os.path.dirname(os.path.dirname(HERE))
@@ -29,6 +37,7 @@ import otsfile  # noqa: E402
 import seal_periods  # noqa: E402
 import seal_triggers  # noqa: E402
 import stamp  # noqa: E402
+import verify  # noqa: E402
 
 UTC = datetime.timezone.utc
 T0 = datetime.datetime(2026, 10, 6, 12, 0, 0, tzinfo=UTC)
@@ -67,7 +76,11 @@ def tip_msg(prefix):
     return hashlib.sha256(hashlib.sha256(prefix).digest() + NONCE).digest()
 
 
-def build_ots(prefix, pending=("https://cal.example",), heights=()):
+ALLOWED_CAL = "https://alice.btc.calendar.opentimestamps.org"
+OWN_CAL = "https://my-own-calendar.example"
+
+
+def build_ots(prefix, pending=(ALLOWED_CAL,), heights=()):
     atts = [b"\x00" + otsfile.TAG_PENDING + varbytes(varbytes(u.encode())) for u in pending]
     atts += [b"\x00" + otsfile.TAG_BITCOIN + varbytes(varuint(h)) for h in heights]
     tree = b"".join(b"\xff" + a for a in atts[:-1]) + atts[-1]
@@ -398,82 +411,12 @@ class TestVersions(LedgerCase):
             ledger.version_of(recs, 5)
 
 
-class TestAdoption(LedgerCase):
-    """期限前の最後の追記。時刻は各 seq 自身の .ots の Bitcoin の確定だけから決める。"""
-
+class TestConfirmedTimes(LedgerCase):
     def setUp(self):
         super().setUp()
         self.recs = self.add(n=3)
         for s in (1, 2, 3):
             self.stamp(s)
-        self.deadline = T0 + 24 * H
-
-    def times(self, confirmed):
-        """confirmed: {seq: (高さ, 時刻)}。.bitcoin.ots とヘッダを作り、確定時刻を得る。"""
-        headers = {}
-        for seq, (height, when) in confirmed.items():
-            headers[height] = self.stamp_bitcoin(seq, height, when)
-        anchors = ledger.check_anchors(self.data(), self.tmp)
-        times, _d, unused = ledger.confirmed_times(anchors, headers, min_work_bits=1)
-        self.assertEqual(unused, [])
-        return times
-
-    def test_last_before_deadline_is_adopted(self):
-        times = self.times({1: (100, T0 + H), 2: (101, T0 + 3 * H), 3: (102, T0 + 30 * H)})
-        rec, st = ledger.adopted_record(self.recs, "periods", self.deadline, times)
-        self.assertEqual(rec["seq"], 2)
-        self.assertEqual(st, {1: ledger.BEFORE, 2: ledger.BEFORE, 3: ledger.LATE})
-
-    def test_audit_repro_1_3(self):
-        """監査の再現：記録 3 件で、.ots を {1,2,3} 出すか {1,3} だけ出すかで採用が変わった。
-
-        今は {1,3} だけでは検証が失敗する（seq 2 自身の .ots が要る）。
-        また、seq 2 の確定が無いときに seq 3 の時刻で代わりにしない。
-        """
-        os.rename(os.path.join(self.tmp, ledger.ots_name(2)), os.path.join(self.tmp, "x"))
-        with self.assertRaisesRegex(ledger.LedgerError, "seq 2 の記録に"):
-            ledger.check_anchors(self.data(), self.tmp)
-        os.rename(os.path.join(self.tmp, "x"), os.path.join(self.tmp, ledger.ots_name(2)))
-        # {1,2,3} の .ots があり、Bitcoin で確定したのが 1 と 3 だけの場合。
-        times = self.times({1: (100, T0 + H), 3: (102, T0 + 2 * H)})
-        self.assertEqual(sorted(times), [1, 3])
-        rec, st = ledger.adopted_record(self.recs, "periods", self.deadline, times)
-        self.assertEqual(st[2], ledger.PENDING)
-        self.assertEqual(rec["seq"], 3)
-        # seq 3 の時刻が期限後なら、seq 2 はその時刻を借りず Pending のまま。採用は seq 1。
-        rec, st = ledger.adopted_record(self.recs, "periods", self.deadline,
-                                        {1: T0 + H, 3: T0 + 30 * H})
-        self.assertEqual(rec["seq"], 1)
-        self.assertEqual(st, {1: ledger.BEFORE, 2: ledger.PENDING, 3: ledger.LATE})
-
-    def test_pending_middle_is_not_shown_before(self):
-        """途中の .ots が Pending なら、その記録は期限前とは示せない（S-1）。"""
-        times = self.times({1: (100, T0 + H)})
-        rec, st = ledger.adopted_record(self.recs, "periods", self.deadline, times)
-        self.assertEqual(rec["seq"], 1)
-        self.assertEqual(st[2], ledger.PENDING)
-        self.assertIn("期限前とは示せない", ledger.STATUS_TEXT[st[2]])
-
-    def test_recorded_at_is_not_used(self):
-        """recorded_at はすべて期限前だが、確定が無ければ採用しない。"""
-        rec, st = ledger.adopted_record(self.recs, "periods", self.deadline, {})
-        self.assertIsNone(rec)
-        self.assertEqual(set(st.values()), {ledger.PENDING})
-
-    def test_margin_applied(self):
-        times = {1: self.deadline - 2 * H}
-        rec, st = ledger.adopted_record(self.recs, "periods", self.deadline, times)
-        self.assertIsNone(rec)
-        self.assertEqual(st[1], ledger.LATE)
-
-    def test_deadline_unknown_is_held(self):
-        rec, st = ledger.adopted_record(self.recs, "periods", None, {1: T0})
-        self.assertIsNone(rec)
-        self.assertEqual(set(st.values()), {ledger.HELD})
-
-    def test_naive_deadline_refused(self):
-        with self.assertRaises(ValueError):
-            ledger.adopted_record(self.recs, "periods", self.deadline.replace(tzinfo=None), {})
 
     def test_header_for_unknown_height_reported(self):
         anchors = ledger.check_anchors(self.data(), self.tmp)
@@ -489,36 +432,201 @@ class TestAdoption(LedgerCase):
         with self.assertRaises(ledger.LedgerError):
             ledger.confirmed_times(anchors, {100: wrong}, min_work_bits=1)
 
-
-# ---------------------------------------------------------------- 期限
-
-
-def acquisition_doc(round_no=1000, chain=QUICKNET, signature="ab" * 48):
-    return {"step": 3, "drand": {"chain_hash": chain, "round": round_no,
-                                 "signature": signature,
-                                 "randomness": ledger.sha256_hex(bytes.fromhex(signature))}}
+    def test_own_seq_time_only(self):
+        """seq 2 の確定時刻を、後の seq 3 の時刻で代わりにしない（表示の時刻の取り方）。"""
+        headers = {101: self.stamp_bitcoin(1, 101, T0 + H), 103: self.stamp_bitcoin(3, 103, T0 + 2 * H)}
+        anchors = ledger.check_anchors(self.data(), self.tmp)
+        times, _d, _u = ledger.confirmed_times(anchors, headers, min_work_bits=1)
+        self.assertEqual(sorted(times), [1, 3])
 
 
-class TestDeadline(unittest.TestCase):
+class TestCalendars(LedgerCase):
+    def test_stamp_uses_the_four_calendars(self):
+        self.assertEqual(stamp.CALENDARS, tuple(c for c, _u in ledger.STAMP_CALENDARS))
+        self.assertEqual(len(ledger.ALLOWED_PENDING_URIS), 4)
+
+    def test_real_seq1_pending_uris_are_allowed(self):
+        p = os.path.join(PROJECT, "sealed", "ledger.jsonl.seq000001.ots")
+        if not os.path.exists(p):
+            self.skipTest("封印済みの .ots が無い")
+        with open(p, "rb") as f:
+            _d, atts = otsfile.parse(f.read())
+        self.assertEqual({a["uri"] for a in atts if a["type"] == "pending"},
+                         set(ledger.ALLOWED_PENDING_URIS))
+
+    def test_own_calendar_pending_rejected(self):
+        self.add(n=2)
+        self.stamp(1)
+        with open(os.path.join(self.tmp, ledger.ots_name(2)), "xb") as f:
+            f.write(build_ots(ledger.prefix_bytes(self.data(), 2), pending=(OWN_CAL,)))
+        with self.assertRaisesRegex(ledger.LedgerError, "許可していないカレンダー"):
+            ledger.check_anchors(self.data(), self.tmp)
+
+    def test_mixed_allowed_and_own_rejected(self):
+        self.add(n=1)
+        with open(os.path.join(self.tmp, ledger.ots_name(1)), "xb") as f:
+            f.write(build_ots(ledger.prefix_bytes(self.data(), 1), pending=(ALLOWED_CAL, OWN_CAL)))
+        with self.assertRaisesRegex(ledger.LedgerError, OWN_CAL):
+            ledger.check_anchors(self.data(), self.tmp)
+
+    def test_pool_submit_url_is_not_a_pending_uri(self):
+        """stamp で送る先（集約先）の URL が Pending の宛先として出ることはない。許可しない。"""
+        self.add(n=1)
+        with open(os.path.join(self.tmp, ledger.ots_name(1)), "xb") as f:
+            f.write(build_ots(ledger.prefix_bytes(self.data(), 1),
+                              pending=("https://a.pool.opentimestamps.org",)))
+        with self.assertRaises(ledger.LedgerError):
+            ledger.check_anchors(self.data(), self.tmp)
+
+    def test_extra_dir_checked_the_same_way(self):
+        self.add(n=1)
+        self.stamp(1)
+        ext = os.path.join(self.tmp, "ext")
+        os.mkdir(ext)
+        with open(os.path.join(ext, ledger.ots_name(1)), "xb") as f:
+            f.write(build_ots(ledger.prefix_bytes(self.data(), 1), pending=(OWN_CAL,)))
+        with self.assertRaisesRegex(ledger.LedgerError, "許可していないカレンダー"):
+            ledger.check_anchors(self.data(), self.tmp, [ext])
+
+    def test_extra_dir_does_not_replace_required_ots(self):
+        """外のディレクトリの .ots は、sealed/ の必須の .ots の代わりにならない。"""
+        self.add(n=2)
+        self.stamp(1)
+        ext = os.path.join(self.tmp, "ext")
+        os.mkdir(ext)
+        with open(os.path.join(ext, ledger.ots_name(2)), "xb") as f:
+            f.write(build_ots(ledger.prefix_bytes(self.data(), 2)))
+        with self.assertRaisesRegex(ledger.LedgerError, "seq 2 の記録に"):
+            ledger.check_anchors(self.data(), self.tmp, [ext])
+
+    def test_extra_dir_wrong_target_rejected(self):
+        self.add(n=2)
+        self.stamp(1)
+        self.stamp(2)
+        ext = os.path.join(self.tmp, "ext")
+        os.mkdir(ext)
+        with open(os.path.join(ext, ledger.ots_name(2)), "xb") as f:
+            f.write(build_ots(ledger.prefix_bytes(self.data(), 1)))
+        with self.assertRaisesRegex(ledger.LedgerError, "一致しない"):
+            ledger.check_anchors(self.data(), self.tmp, [ext])
+
+    def test_missing_extra_dir_rejected(self):
+        self.add(n=1)
+        self.stamp(1)
+        with self.assertRaises(ledger.LedgerError):
+            ledger.check_anchors(self.data(), self.tmp, [os.path.join(self.tmp, "none")])
+
+
+class TestAdoption(LedgerCase):
+    """採用は鎖の順番だけで決まる（T-007）。"""
+
+    def build(self, kinds):
+        recs = None
+        for i, k in enumerate(kinds):
+            recs = ledger.append_record(self.path, k, [target("a/%d" % i)], "", T0 + i * H)
+        return recs
+
+    def test_signature_has_no_time_inputs(self):
+        self.assertEqual(list(inspect.signature(ledger.adoption).parameters), ["records", "kind"])
+
+    def test_held_without_acquisition(self):
+        recs = self.build(["periods", "periods", "periods-triggers"])
+        rec, cand, acq = ledger.adoption(recs, "periods")
+        self.assertIsNone(rec)
+        self.assertIsNone(acq)
+        self.assertEqual(cand["seq"], 2)
+        rec, cand, _a = ledger.adoption(recs, "periods-triggers")
+        self.assertIsNone(rec)
+        self.assertEqual(cand["seq"], 3)
+
+    def test_last_before_first_acquisition(self):
+        recs = self.build(["periods", "periods", "periods-triggers", "acquisition",
+                           "periods", "periods-triggers", "acquisition", "periods"])
+        rec, cand, acq = ledger.adoption(recs, "periods")
+        self.assertEqual((rec["seq"], cand, acq["seq"]), (2, None, 4))
+        rec, _c, _a = ledger.adoption(recs, "periods-triggers")
+        self.assertEqual(rec["seq"], 3)
+
+    def test_nothing_before_acquisition(self):
+        recs = self.build(["periods", "acquisition", "periods-triggers"])
+        rec, cand, acq = ledger.adoption(recs, "periods-triggers")
+        self.assertIsNone(rec)
+        self.assertIsNone(cand)
+        self.assertEqual(acq["seq"], 2)
+
+    def test_recorded_at_is_not_used(self):
+        """recorded_at を変えても（鎖を作り直しても）採用は順番どおり。"""
+        recs = self.build(["periods", "periods", "acquisition"])
+        shifted = [dict(r, recorded_at="2030-01-01T00:00:00Z") if r["seq"] == 1 else r
+                   for r in recs]
+        self.assertEqual(ledger.adoption(shifted, "periods")[0]["seq"], 2)
+
+
+# ---------------------------------------------------------------- acquisition の記録
+
+
+def acquisition_doc(round_no=1000, chain=QUICKNET, signature="ab" * 48, head=None):
+    doc = {"step": 3, "drand": {"chain_hash": chain, "round": round_no,
+                                "signature": signature,
+                                "randomness": ledger.sha256_hex(bytes.fromhex(signature))}}
+    if head is not None:
+        doc["ledger_head"] = head
+    return doc
+
+
+class TestDrand(unittest.TestCase):
     def test_round_time(self):
-        d = ledger.deadline_from_acquisition(acquisition_doc(1))
+        d = ledger.drand_time_of_acquisition(acquisition_doc(1))
         self.assertEqual(int(d.timestamp()), 1692803367)
-        d = ledger.deadline_from_acquisition(acquisition_doc(101))
+        d = ledger.drand_time_of_acquisition(acquisition_doc(101))
         self.assertEqual(int(d.timestamp()), 1692803367 + 300)
 
     def test_bad_randomness(self):
         doc = acquisition_doc()
         doc["drand"]["randomness"] = "00" * 32
         with self.assertRaisesRegex(ledger.LedgerError, "randomness"):
-            ledger.deadline_from_acquisition(doc)
+            ledger.drand_time_of_acquisition(doc)
 
     def test_unknown_chain_and_missing_fields(self):
         with self.assertRaises(ledger.LedgerError):
-            ledger.deadline_from_acquisition(acquisition_doc(chain="00" * 32))
+            ledger.drand_time_of_acquisition(acquisition_doc(chain="00" * 32))
         with self.assertRaises(ledger.LedgerError):
-            ledger.deadline_from_acquisition({"step": 3})
+            ledger.drand_time_of_acquisition({"step": 3})
         with self.assertRaises(ledger.LedgerError):
-            ledger.deadline_from_acquisition(acquisition_doc(0))
+            ledger.drand_time_of_acquisition(acquisition_doc(0))
+
+
+class TestCheckAcquisition(LedgerCase):
+    def setUp(self):
+        super().setUp()
+        ledger.append_record(self.path, "periods", [target("p")], "", T0)
+        ledger.append_record(self.path, "periods-triggers", [target("t")], "", T0 + H)
+        self.recs = ledger.append_record(self.path, "acquisition", [target("a")], "", T0 + 2 * H)
+        self.rec = self.recs[-1]
+        self.head = {"seq": 2, "sha256": ledger.prefix_digest(self.data(), 2)}
+        self.t3 = ledger.drand_round_time(QUICKNET, 1000)
+
+    def check(self, head, own):
+        return ledger.check_acquisition(self.data(), self.rec, acquisition_doc(1000, head=head), own)
+
+    def test_ok_and_pending(self):
+        self.assertEqual(self.check(self.head, self.t3 + H), (self.t3, "ok"))
+        self.assertEqual(self.check(self.head, None), (self.t3, "pending"))
+
+    def test_ledger_head_mismatch_fails(self):
+        for bad in ({"seq": 1, "sha256": ledger.prefix_digest(self.data(), 1)},
+                    {"seq": 2, "sha256": "0" * 64},
+                    {"seq": 3, "sha256": ledger.prefix_digest(self.data(), 3)}):
+            with self.assertRaisesRegex(ledger.LedgerError, "ledger_head"):
+                self.check(bad, None)
+        with self.assertRaisesRegex(ledger.LedgerError, "ledger_head"):
+            self.check(None, None)
+
+    def test_round_not_before_own_time_fails(self):
+        with self.assertRaisesRegex(ledger.LedgerError, "より前でない"):
+            self.check(self.head, self.t3)
+        with self.assertRaisesRegex(ledger.LedgerError, "より前でない"):
+            self.check(self.head, self.t3 - H)
 
 
 # ---------------------------------------------------------------- 区画と deadline_status
@@ -626,7 +734,7 @@ def run_verify(root, *args):
                           capture_output=True)
 
 
-class TestSealPeriods(unittest.TestCase):
+class SealCase(unittest.TestCase):
     """仮のプロジェクトで封印の仕組みを動かす（本物の sealed/ には書かない）。"""
 
     def setUp(self):
@@ -654,6 +762,22 @@ class TestSealPeriods(unittest.TestCase):
         stamp.stamp_seq(self.ledger, rec["seq"], "ots", runner=FakeRun())
         return rec
 
+    def add_acquisition(self, now, round_no, head=None):
+        data = ledger.read_ledger(self.ledger)
+        seq = len(ledger.verify_chain(data)) + 1
+        if head is None:
+            head = ledger.expected_ledger_head(data, seq)
+        content = json.dumps(acquisition_doc(round_no, head=head), sort_keys=True).encode()
+        sha = ledger.sha256_hex(content)
+        rel = "sealed/acquisition-%s.json" % sha
+        ledger.write_once(os.path.join(self.root, rel), content)
+        ledger.append_record(self.ledger, ledger.ACQUISITION_KIND,
+                             [{"path": rel, "role": "acquisition", "sha256": sha}], "", now)
+        stamp.stamp_seq(self.ledger, seq, "ots", runner=FakeRun())
+        return seq
+
+
+class TestSealPeriods(SealCase):
     def test_seal_writes_record_output_and_anchor(self):
         rec = self.seal()
         self.assertEqual(rec["kind"], "periods")
@@ -664,10 +788,11 @@ class TestSealPeriods(unittest.TestCase):
         r = run_verify(self.root, "all")
         self.assertEqual(r.returncode, 0, r.stderr.decode())
         text = r.stdout.decode()
-        self.assertIn("期限：未確定", text)
-        self.assertIn("Pending", text)
-        self.assertIn("保留", text)
-        self.assertIn("ots verify で確かめる", text)
+        self.assertIn("採用は保留（acquisition の記録が無いため）", text)
+        self.assertIn("seq 1: Pending", text)
+        self.assertIn("仮の候補 = seq 1", text)
+        self.assertIn("ヘッダが、Bitcoin の本当の鎖にあること", text)
+        self.assertIn("drand の署名（BLS）は、オフラインでは検証していない", text)
 
     def test_wrong_expected_hash_writes_nothing(self):
         with self.assertRaises(ledger.LedgerError):
@@ -748,34 +873,58 @@ class TestSealPeriods(unittest.TestCase):
         with self.assertRaises(ledger.LedgerError):
             seal_triggers.seal(self.root, {}, T0 + H, None)
 
-    def add_acquisition(self, now, round_no):
-        content = json.dumps(acquisition_doc(round_no), sort_keys=True).encode()
-        sha = ledger.sha256_hex(content)
-        rel = "sealed/acquisition-%s.json" % sha
-        ledger.write_once(os.path.join(self.root, rel), content)
-        ledger.append_record(self.ledger, ledger.ACQUISITION_KIND,
-                             [{"path": rel, "role": "acquisition", "sha256": sha}], "", now)
-        rec = ledger.verify_chain(ledger.read_ledger(self.ledger))[-1]
-        stamp.stamp_seq(self.ledger, rec["seq"], "ots", runner=FakeRun())
-
-    def test_deadline_from_acquisition_record_and_pending(self):
-        """取得の記録があれば期限が決まる。Pending の記録は期限前とは示せない。"""
+    def test_acquisition_decides_adoption_and_status(self):
+        """acquisition の記録があれば採用が決まる。Pending でも採用は変わらない。"""
         self.seal()
         self.seal_triggers(T0 + H, last_read_offset_days=120)
         args = ["--j120", "before_deadline"]
         sha = ledger.sha256_hex(seal_periods.run_periods(self.root, args))
         self.seal(args=args, sha=sha, now=T0 + 2 * H)
         self.add_acquisition(T0 + 3 * H, 30_000_000)
-        r = run_verify(self.root, "adopted")
+        r = run_verify(self.root, "all")
         self.assertEqual(r.returncode, 0, r.stderr.decode())
         text = r.stdout.decode()
-        self.assertIn("期限：", text)
-        self.assertNotIn("未確定（手順3", text)
-        self.assertIn("期限前とは示せない（この seq の .ots が Bitcoin で確定していない）", text)
-        # before_deadline の申告は、期限前と示せる triggers の記録が無いので失敗になる。
+        self.assertIn("区切り：最初の acquisition の記録 = seq 4", text)
+        self.assertIn("periods: 採用 = seq 3（2 件目", text)
+        self.assertIn("periods-triggers: 採用 = seq 2（1 件目", text)
+        self.assertIn("ヘッダが本当の鎖にあることは、この検査では確かめていない", text)
+        self.assertIn("確定時刻との照合は保留", text)
+        self.assertIn("記録から決まる値 before_deadline", text)
+
+    def test_before_deadline_claim_after_acquisition_fails(self):
+        """acquisition の後に追記したきっかけの値に合わせて before_deadline と申告すると失敗。"""
+        self.seal()
+        self.add_acquisition(T0 + H, 30_000_000)
+        self.seal_triggers(T0 + 2 * H, last_read_offset_days=120)
+        args = ["--j120", "before_deadline"]
+        sha = ledger.sha256_hex(seal_periods.run_periods(self.root, args))
+        self.seal(args=args, sha=sha, now=T0 + 3 * H)
         r = run_verify(self.root, "periods")
         self.assertEqual(r.returncode, 1)
         self.assertIn("before_deadline と申告", r.stderr.decode())
+
+    def test_after_deadline_claim_after_acquisition_passes(self):
+        self.seal()
+        self.add_acquisition(T0 + H, 30_000_000)
+        self.seal_triggers(T0 + 2 * H, last_read_offset_days=120)
+        args = ["--j120", "after_deadline"]
+        sha = ledger.sha256_hex(seal_periods.run_periods(self.root, args))
+        self.seal(args=args, sha=sha, now=T0 + 3 * H)
+        r = run_verify(self.root, "all")
+        self.assertEqual(r.returncode, 0, r.stderr.decode())
+        self.assertIn("記録から決まる値 after_deadline", r.stdout.decode())
+        self.assertIn("periods-triggers: seq 2 より前に記録が無い", r.stdout.decode())
+
+    def test_ledger_head_mismatch_fails_in_verify(self):
+        self.seal()
+        self.seal_triggers(T0 + H, last_read_offset_days=120)
+        data = ledger.read_ledger(self.ledger)
+        self.add_acquisition(T0 + 2 * H, 30_000_000,
+                             head={"seq": 1, "sha256": ledger.prefix_digest(data, 1)})
+        for cmd in ("acquisition", "all"):
+            r = run_verify(self.root, cmd)
+            self.assertEqual(r.returncode, 1, cmd)
+            self.assertIn("ledger_head が、直前の記録のハッシュと一致しない", r.stderr.decode())
 
     def test_btc_header_for_height_not_in_ots_rejected(self):
         """.ots の中に無い高さのヘッダを渡すと、エラーで止まる（自由な入力を受け付けない）。"""
@@ -820,6 +969,183 @@ class TestSealPeriods(unittest.TestCase):
             f.write(data.replace("periods の 1 件目".encode(), "periods の 9 件目".encode()))
         git("commit", "-q", "-am", "tamper")
         self.assertEqual(run_verify(self.root, "targets", "--rev", "auto").returncode, 1)
+
+
+# ---------------------------------------------------------------- 監査 R-1・R-2 の再現（T-007）
+
+
+def run_verify_inproc(root, *args, ots_dirs=()):
+    """verify.main を同じプロセスで動かす。テストのヘッダは易しい目標値で掘るので、作業量の
+    下限だけを 1 に下げる（本番の検証のコードは変えない）。"""
+    out, err = io.StringIO(), io.StringIO()
+    easy = functools.partial(otsfile.check_header, min_work_bits=1)
+    argv = ["--root", root] + list(args)
+    for d in ots_dirs:
+        argv += ["--ots-dir", d]
+    with mock.patch.object(otsfile, "check_header", easy), \
+            contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = verify.main(argv)
+    return code, out.getvalue(), err.getvalue()
+
+
+def adoption_lines(text):
+    return [l for l in text.splitlines()
+            if l.startswith("  periods: ") or l.startswith("  periods-triggers: ")]
+
+
+class TestAuditRepro(SealCase):
+    """seq 1 periods、seq 2 periods、seq 3 periods-triggers、seq 4 acquisition、seq 5 periods。
+    どの操作でも、採用は periods = seq 2、periods-triggers = seq 3 のまま。"""
+
+    ACQ_ROUND = 30_000_000   # 公開時刻は 2026 年の夏。下の確定時刻（T0 以後）より前。
+
+    def build(self, round_no=ACQ_ROUND):
+        self.seal()
+        self.seal(now=T0 + H)
+        self.seal_triggers(T0 + 2 * H, last_read_offset_days=120)
+        self.add_acquisition(T0 + 3 * H, round_no)
+        args = ["--j120", "before_deadline"]
+        sha = ledger.sha256_hex(seal_periods.run_periods(self.root, args))
+        self.seal(args=args, sha=sha, now=T0 + 4 * H)
+        self.sealed = os.path.join(self.root, "sealed")
+
+    def confirm(self, seqs, directory=None, base=T0 + 6 * H):
+        """seqs の .bitcoin.ots とヘッダを作る（directory が無ければ sealed/）。ヘッダ引数を返す。"""
+        directory = directory or self.sealed
+        data = ledger.read_ledger(self.ledger)
+        args = []
+        for seq in seqs:
+            prefix = ledger.prefix_bytes(data, seq)
+            height = 900000 + seq
+            with open(os.path.join(directory, ledger.ots_name(seq, bitcoin=True)), "xb") as f:
+                f.write(build_ots(prefix, pending=(), heights=(height,)))
+            hdr = mine_header(tip_msg(prefix), base + seq * H)
+            args += ["--btc-header", "%d=%s" % (height, hdr.hex())]
+        return args
+
+    def verify_all(self, *args, ots_dirs=()):
+        code, out, err = run_verify_inproc(self.root, "all", *args, ots_dirs=ots_dirs)
+        self.assertEqual(code, 0, err)
+        return out
+
+    def assertAdoption(self, out):
+        lines = adoption_lines(out)
+        self.assertEqual(len(lines), 2, out)
+        self.assertTrue(lines[0].startswith("  periods: 採用 = seq 2（2 件目"), lines)
+        self.assertTrue(lines[1].startswith("  periods-triggers: 採用 = seq 3（1 件目"), lines)
+        return lines
+
+    def test_baseline_all_pending(self):
+        self.build()
+        out = self.verify_all()
+        self.assertAdoption(out)
+        self.assertIn("seq 5 は acquisition の記録より後なので、採用しない", out)
+        self.assertIn("確定時刻との照合は保留", out)
+
+    def test_withheld_upgrade_of_seq2_does_not_change_adoption(self):
+        """R-1：seq 2 の upgrade を出す場合と出さない場合で、採用が同じ。"""
+        self.build()
+        full = self.verify_all(*self.confirm([1, 2, 3, 4, 5]))
+        os.rename(os.path.join(self.sealed, ledger.ots_name(2, bitcoin=True)),
+                  os.path.join(self.root, "withheld.ots"))
+        withheld = self.verify_all(*self.headers_for([1, 3, 4, 5]))
+        self.assertIn("seq 2: Pending", withheld)
+        self.assertNotIn("seq 2: Pending", full)
+        self.assertEqual(self.assertAdoption(full), self.assertAdoption(withheld))
+        # 後の seq だけ確定、前の seq は Pending、の組み合わせでも同じ。
+        for name in os.listdir(self.sealed):
+            if name.endswith(".bitcoin.ots") and "seq000005" not in name:
+                os.rename(os.path.join(self.sealed, name), os.path.join(self.root, name))
+        only5 = self.verify_all(*self.headers_for([5]))
+        self.assertEqual(self.assertAdoption(full), self.assertAdoption(only5))
+
+    def headers_for(self, seqs):
+        data = ledger.read_ledger(self.ledger)
+        args = []
+        for seq in seqs:
+            hdr = mine_header(tip_msg(ledger.prefix_bytes(data, seq)), T0 + 6 * H + seq * H)
+            args += ["--btc-header", "%d=%s" % (900000 + seq, hdr.hex())]
+        return args
+
+    def test_own_calendar_pending_for_seq2_is_rejected(self):
+        """R-1：seq 2 の .ots を自前のカレンダーの Pending にしても、別の採用は出せない。
+        許可していない宛先なので検証が失敗し、許可した宛先の Pending なら採用は同じ。"""
+        self.build()
+        base = self.assertAdoption(self.verify_all())
+        p = os.path.join(self.sealed, ledger.ots_name(2))
+        with open(p, "wb") as f:   # テストの中の仮のプロジェクトだけを書き換える
+            f.write(build_ots(ledger.prefix_bytes(ledger.read_ledger(self.ledger), 2),
+                              pending=(OWN_CAL,)))
+        code, out, err = run_verify_inproc(self.root, "all")
+        self.assertEqual(code, 1)
+        self.assertIn("許可していないカレンダー", err)
+        self.assertEqual(adoption_lines(out), [])
+        # adopted だけを実行しても、同じ理由で止まる。
+        code, out, err = run_verify_inproc(self.root, "adopted")
+        self.assertEqual(code, 1)
+        self.assertEqual(adoption_lines(out), [])
+        # 自前のカレンダーの .ots を --ots-dir で読ませても止まる。
+        with open(p, "wb") as f:
+            f.write(build_ots(ledger.prefix_bytes(ledger.read_ledger(self.ledger), 2)))
+        ext = os.path.join(self.root, "ext")
+        os.mkdir(ext)
+        with open(os.path.join(ext, ledger.ots_name(2)), "xb") as f:
+            f.write(build_ots(ledger.prefix_bytes(ledger.read_ledger(self.ledger), 2),
+                              pending=(OWN_CAL,)))
+        code, _out, err = run_verify_inproc(self.root, "all", ots_dirs=[ext])
+        self.assertEqual(code, 1)
+        self.assertIn("許可していないカレンダー", err)
+        os.remove(os.path.join(ext, ledger.ots_name(2)))
+        self.assertEqual(self.assertAdoption(self.verify_all(ots_dirs=[ext])), base)
+
+    def test_moving_drand_round_does_not_change_adoption(self):
+        """R-2：drand の回を前後に動かしても、採用は同じ。"""
+        results = []
+        for rnd in (self.ACQ_ROUND - 1_000_000, self.ACQ_ROUND, self.ACQ_ROUND + 1_000_000):
+            self.tearDown()
+            self.setUp()
+            self.build(rnd)
+            pending = self.verify_all()
+            confirmed = self.verify_all(*self.confirm([1, 2, 3, 4, 5]))
+            self.assertIn("より前（取得の記録は、この二つの時刻の間に作られた", confirmed)
+            results.append(self.assertAdoption(pending))
+            results.append(self.assertAdoption(confirmed))
+        self.assertTrue(all(r == results[0] for r in results), results)
+
+    def test_drand_round_after_own_confirmation_fails(self):
+        """drand の回の公開時刻が acquisition の記録自身の確定時刻より後なら、失敗する。"""
+        late_round = 40_000_000   # 公開時刻は 2027 年。
+        self.build(late_round)
+        self.assertAdoption(self.verify_all())   # Pending のうちは照合を保留
+        args = self.confirm([4])
+        code, _out, err = run_verify_inproc(self.root, "all", *args)
+        self.assertEqual(code, 1)
+        self.assertIn("より前でない", err)
+
+    def test_third_party_upgrade_via_ots_dir(self):
+        """第三者が自分で upgrade した .ots を --ots-dir で読ませる。採用は変わらない。"""
+        self.build()
+        base = self.assertAdoption(self.verify_all())
+        ext = os.path.join(self.root, "my-upgrades")
+        os.mkdir(ext)
+        args = self.confirm([1, 4], directory=ext)
+        out = self.verify_all(*args, ots_dirs=[ext])
+        self.assertIn("seq 1: Bitcoin で確定", out)
+        self.assertIn("seq 4: Bitcoin で確定", out)
+        self.assertIn("my-upgrades", out)
+        self.assertEqual(self.assertAdoption(out), base)
+        # 読ませたディレクトリの .ots の対象が違えば失敗。
+        with open(os.path.join(ext, ledger.ots_name(2)), "xb") as f:
+            f.write(build_ots(b"other\n"))
+        code, _o, err = run_verify_inproc(self.root, "all", *args, ots_dirs=[ext])
+        self.assertEqual(code, 1)
+        self.assertIn("一致しない", err)
+
+    def test_ots_dir_option_on_cli(self):
+        self.build()
+        r = run_verify(self.root, "all", "--ots-dir", os.path.join(self.root, "none"))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("ディレクトリが無い", r.stderr.decode())
 
 
 if __name__ == "__main__":
