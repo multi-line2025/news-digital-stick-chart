@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""封印の記録（追記のみ）の中核。T-005、T-007、T-008。
+"""封印の記録（追記のみ）の中核。T-005、T-007、T-008、T-009。
 
 記録のファイル（既定は sealed/ledger.jsonl）は JSON Lines で、1 行が 1 件の記録。
 標準ライブラリだけを使う。ネットワークは使わない。
@@ -74,6 +74,13 @@ drand を持つ記録（threshold-access、acquisition-start）の照合（check
     - result の seq が、その start の seq より後であること。
     - 一つの start に result が一つだけであること（二つ以上なら失敗）。
     result の無い start は、取得の途中か失敗として表示する（失敗にはしない）。
+
+書く仕組みと関門（T-009）
+    threshold-access は seal_access.py、acquisition-start・acquisition-result は
+    seal_acquisition.py が書く（共通の手順は seal_records.py。追記の前に、この中の照合を
+    「今の記録 + 追記する行」に対して行う。build_next_record）。
+    閾値を決める期間の区画のデータに触れるコードは、最初に require_threshold_access を呼ぶ。
+    関門を飛ばしたかどうかは、記録からは検出できない（require_threshold_access の注記）。
 
 きっかけの値（kind が periods-triggers）
     区切りを作り直すきっかけの値は、periods-triggers の記録として追記する。periods の
@@ -336,16 +343,15 @@ DRAND_CHAINS = {
 DRAND_NOT_VERIFIED = ("drand の署名（BLS）は、オフラインでは検証していない（randomness が "
                       "signature の sha256 であることだけを確かめた）。")
 
-# drand の回の公開時刻と、Bitcoin のブロックのヘッダの時刻を比べるときの幅（T-008）。
+# drand の回の公開時刻と、Bitcoin のブロックのヘッダの時刻を比べるときの幅（T-008、T-009）。
 # 値：2 時間（7200 秒）。
-# 根拠：ヘッダの時刻は、掘った者が書く値で、実際に掘られた時刻とずれうる。Bitcoin の決まりが
-#   ヘッダの時刻に課す条件は、次の二つだけである。
-#   (1) 直前の 11 ブロックの時刻の中央値（median time past）より後であること。中央値は、
-#       平均 10 分ごとのブロックで、おおむね 6 ブロック前（約 1 時間前）に当たる。
-#   (2) 受け取ったノードの時計より 2 時間（MAX_FUTURE_BLOCK_TIME）を超えて先でないこと。
-#   このため、ヘッダの時刻は実際の時刻から 1〜2 時間ずれうる。正しく作った記録（drand の回を
-#   取ってから追記し、そのあとで Bitcoin に確定した記録）でも、ヘッダの時刻が drand の回の
-#   公開時刻より前に見えることがある。この幅の中の食い違いは失敗にしない。
+# 根拠（照合に効く向きだけ）：照合は「drand の回の公開時刻 T < ヘッダの時刻 Tq + 幅」である。
+#   正しく作った記録（drand の回を取ってから追記し、そのあとで Bitcoin に確定した記録）が
+#   この照合に落ちるのは、ヘッダの時刻が、実際に掘られた時刻より前に書かれた場合である。
+#   ヘッダの時刻をどこまで前に書けるかは、Bitcoin の決まりのうち「直前の 11 ブロックの時刻の
+#   中央値（median time past）より後であること」だけが決める。中央値は、平均 10 分ごとの
+#   ブロックで、おおむね 6 ブロック前（約 1 時間前）に当たる。ブロックの間隔はばらつくので、
+#   余裕を見て 2 時間とする。この幅の中の食い違いは失敗にしない。
 # 代償：「記録は、ヘッダの時刻 + 2 時間 より前に存在した」までしか言えない。幅を超えて
 #   drand の回の公開時刻が後なら、失敗にする。
 DRAND_HEADER_SLACK = datetime.timedelta(hours=2)
@@ -486,6 +492,20 @@ def check_acquisition_pairs(records, result_start_seqs):
     return pairs
 
 
+def acquisition_start_fields(doc):
+    """acquisition-start の中身の fetch（取得のコードのパスと sha256）を検査して返す。T-009。"""
+    fetch = doc.get("fetch") if isinstance(doc, dict) else None
+    if not isinstance(fetch, dict) or sorted(fetch) != ["code_path", "code_sha256"]:
+        raise LedgerError("acquisition-start の中身の fetch のキーが code_path・code_sha256 でない")
+    path, sha = fetch["code_path"], fetch["code_sha256"]
+    if (not isinstance(path, str) or path == "" or path.startswith("/") or "\\" in path
+            or any(part in ("", ".", "..") for part in path.split("/"))):
+        raise LedgerError("acquisition-start の fetch.code_path が相対パスの正規の形でない")
+    if not isinstance(sha, str) or not HEX64.match(sha):
+        raise LedgerError("acquisition-start の fetch.code_sha256 の形が違う")
+    return path, sha
+
+
 # ---------------------------------------------------------------- periods の検査
 
 TRIGGER_KEYS = ("last_read_offset_days", "naive_history_days", "network_window_days",
@@ -569,6 +589,35 @@ def judge_deadline_status(output, decided, adopted_triggers):
                           "periods-triggers の記録と一致しない（または採用された記録が無い）"]
     return expected, ["after_deadline と申告しているが、きっかけの値は採用された "
                       "periods-triggers の記録と一致する"]
+
+
+def read_target_json(root, record, role):
+    """記録の対象（role のもの）のファイルを読み、sha256 を照合して JSON として返す。"""
+    t = output_target(record, role)
+    try:
+        with open(os.path.join(root, t["path"]), "rb") as f:
+            raw = f.read()
+    except OSError:
+        raise LedgerError("seq %d の %s のファイルが無い: %s" % (record["seq"], role, t["path"])
+                          ) from None
+    if sha256_hex(raw) != t["sha256"]:
+        raise LedgerError("seq %d の %s のファイルが記録と一致しない" % (record["seq"], role))
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise LedgerError("seq %d の %s のファイルが JSON として読めない"
+                          % (record["seq"], role)) from None
+
+
+def first_threshold_block_start(root, records):
+    """periods の 1 件目（最初に封印した版）の出力の、閾値を決める期間（threshold）の始まり。"""
+    versions = records_of_kind(records, PERIODS_KIND)
+    if not versions:
+        raise LedgerError("periods の記録が無い")
+    blocks = blocks_of(read_target_json(root, versions[0][1], "output"))
+    if "threshold" not in blocks:
+        raise LedgerError("periods の 1 件目の出力に threshold の期間が無い")
+    return blocks["threshold"][0]
 
 
 # ---------------------------------------------------------------- 時刻証明の照合
@@ -678,12 +727,12 @@ def confirmed_times(anchor_results, headers, min_work_bits=None):
 # ---------------------------------------------------------------- 追記
 
 
-def append_record(ledger_path, kind, targets, note, now):
-    """記録を 1 件追記する。既存の行は書き換えない（追記のモードでだけ開く）。
+def build_next_record(data, kind, targets, note, now):
+    """data（今の記録のバイト列）の次に追記する記録と、その行（改行を含む）を作る。書かない。
 
-    追記の前に、既存の記録の鎖を検証する。追記した後の記録の一覧を返す。
+    返り値: (今の記録の一覧, 次の記録, 行のバイト列)。append_record と同じ形で作るので、
+    書く前に「追記した後の記録」を検査できる（T-009 の書き込みの仕組みが使う）。
     """
-    data = read_ledger(ledger_path)
     records = verify_chain(data)
     prev = sha256_hex(split_lines(data)[-1]) if records else GENESIS_PREV
     rec = {
@@ -697,7 +746,20 @@ def append_record(ledger_path, kind, targets, note, now):
     _check_record_shape(rec, rec["seq"])
     if records and parse_time(rec["recorded_at"]) < parse_time(records[-1]["recorded_at"]):
         raise LedgerError("時計が直前の記録より前を指している。追記しない")
-    line = canonical_line(rec) + b"\n"
+    return records, rec, canonical_line(rec) + b"\n"
+
+
+def append_record(ledger_path, kind, targets, note, now, expected_data=None):
+    """記録を 1 件追記する。既存の行は書き換えない（追記のモードでだけ開く）。
+
+    追記の前に、既存の記録の鎖を検証する。追記した後の記録の一覧を返す。
+    expected_data: 渡したときは、今の記録のバイト列がこれと同じでなければ追記しない。
+      中身（ledger_head など）を作ったあとで、別の記録が先に追記された場合に止めるため。
+    """
+    data = read_ledger(ledger_path)
+    if expected_data is not None and data != expected_data:
+        raise LedgerError("記録が、中身を作った時点から変わっている。追記しない")
+    _records, rec, line = build_next_record(data, kind, targets, note, now)
     with open(ledger_path, "ab") as f:
         f.write(line)
         f.flush()
@@ -721,3 +783,54 @@ def write_once(path, content):
             if f.read() != content:
                 raise LedgerError("%s が既にあり、中身が違う。上書きしない" % path) from None
         return False
+
+
+# ---------------------------------------------------------------- 関門（T-009）
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+class ThresholdAccessRequired(LedgerError):
+    """threshold-access の記録が鎖に無い（または検証に通らない）ので、先に進まない。"""
+
+
+def require_threshold_access(root=None):
+    """閾値を決める期間の区画（2020-12-15 以降）のデータに触れるコードが、最初に呼ぶ関門。
+
+    鎖に threshold-access の記録があり、検証に通るときだけ、その最初の記録を返す。
+    そうでなければ ThresholdAccessRequired で止める。確かめること：
+      - 記録の鎖が正しく、すべての seq に、その seq 自身の .ots があること
+      - 最初の threshold-access の記録の中身のファイルが、記録の sha256 と一致すること
+      - 中身の kind・ledger_head・drand（randomness が signature の sha256）が照合に通ること
+      - 中身の block_start が、periods の 1 件目の出力の閾値の期間の始まりと一致すること
+    記録が無ければ、先に src/sealer/seal_access.py で threshold-access を追記する。
+
+    限界：この関門を呼ばずにデータに触れるコードを書くこと、関門を飛ばして触れることは、
+    記録からは検出できない。記録に残るのは「threshold-access を追記した」ことだけで、
+    「それより前に触れなかった」ことは示せない（docs/verify/periods-seal.md 7章の
+    「示せないこと」の「記録に無い接触」）。関門は、正直な運用で手順を飛ばす誤りを防ぐ
+    ためのもので、証明ではない。
+    """
+    root = os.path.abspath(root or PROJECT_ROOT)
+    sealed = os.path.join(root, "sealed")
+    try:
+        data = read_ledger(os.path.join(sealed, "ledger.jsonl"))
+        records = verify_chain(data)
+        check_anchors(data, sealed)
+        rec = first_threshold_access(records)
+        if rec is None:
+            raise LedgerError("threshold-access の記録が鎖に無い。閾値を決める期間の区画"
+                              "（2020-12-15 以降）のデータには触れない。先に "
+                              "src/sealer/seal_access.py で追記する")
+        doc = read_target_json(root, rec, THRESHOLD_ACCESS_KIND)
+        check_drand_record(data, rec, doc, None)
+        got = threshold_access_block_start(doc)
+        want = first_threshold_block_start(root, records)
+        if got != want:
+            raise LedgerError("threshold-access（seq %d）の block_start %s が、periods の 1 件目の"
+                              "閾値の期間の始まり %s と一致しない" % (rec["seq"], got, want))
+    except ThresholdAccessRequired:
+        raise
+    except LedgerError as e:
+        raise ThresholdAccessRequired("関門：%s" % e) from None
+    return rec

@@ -141,17 +141,7 @@ class State:
         self.cut = ledger.first_threshold_access(self.records)
 
     def file_json(self, record, role):
-        t = ledger.output_target(record, role)
-        with open(os.path.join(self.root, t["path"]), "rb") as f:
-            raw = f.read()
-        if ledger.sha256_hex(raw) != t["sha256"]:
-            raise ledger.LedgerError("seq %d の %s のファイルが記録と一致しない"
-                                     % (record["seq"], role))
-        try:
-            return json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
-            raise ledger.LedgerError("seq %d の %s のファイルが JSON として読めない"
-                                     % (record["seq"], role)) from None
+        return ledger.read_target_json(self.root, record, role)
 
     def rel(self, path):
         return os.path.relpath(path, self.root) if path.startswith(self.root + os.sep) else path
@@ -255,13 +245,7 @@ def _print_drand(r, t, state, own):
 
 
 def first_threshold_block_start(st):
-    versions = ledger.records_of_kind(st.records, ledger.PERIODS_KIND)
-    if not versions:
-        raise ledger.LedgerError("periods の記録が無い")
-    blocks = ledger.blocks_of(st.file_json(versions[0][1], "output"))
-    if "threshold" not in blocks:
-        raise ledger.LedgerError("periods の 1 件目の出力に threshold の期間が無い")
-    return blocks["threshold"][0]
+    return ledger.first_threshold_block_start(st.root, st.records)
 
 
 def cmd_access(st, _a):
@@ -296,8 +280,9 @@ def cmd_acquisition(st, _a):
         doc = st.file_json(r, ledger.ACQ_START_KIND)
         own = st.times.get(r["seq"])
         t, state = ledger.check_drand_record(st.data, r, doc, own)
-        print("  acquisition-start seq %d: ledger_head は直前の記録（先頭 %d 行）のハッシュと一致"
-              % (r["seq"], r["seq"] - 1))
+        code_path, code_sha = ledger.acquisition_start_fields(doc)
+        print("  acquisition-start seq %d: ledger_head は直前の記録（先頭 %d 行）のハッシュと一致。"
+              "取得のコード %s の sha256 %s" % (r["seq"], r["seq"] - 1, code_path, code_sha))
         _print_drand(r, t, state, own)
     refs = {}
     for r in results:

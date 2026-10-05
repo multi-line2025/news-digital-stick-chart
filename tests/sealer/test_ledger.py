@@ -622,7 +622,7 @@ def drand_doc(kind="threshold-access", round_no=1000, chain=QUICKNET, signature=
         doc["block_start"] = "2020-12-15"
     else:
         doc["step"] = 3
-        doc["fetch"] = {"code_sha256": "c" * 64}
+        doc["fetch"] = {"code_path": "src/collector/fetch_list.py", "code_sha256": "c" * 64}
     if head is not None:
         doc["ledger_head"] = head
     return doc
