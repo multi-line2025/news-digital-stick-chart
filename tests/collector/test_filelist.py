@@ -12,6 +12,7 @@
 実行中に部品を組み立てて作る。
 """
 
+import builtins
 import datetime
 import hashlib
 import importlib.util
@@ -122,6 +123,16 @@ UNCLASSIFIABLE = [
 ]
 
 
+def extreme_rows(salt="x"):
+    """暦の最後に近い、極端な時刻の行（2020-12-15 以降。t + 15分 で日付を作れないものを含む）。"""
+    return [
+        row("99991231234500", "export", size=987654311, md5=md5_of(salt, "x1")),
+        row("99991231234501", "export", size=987654312, md5=md5_of(salt, "x2")),
+        row("99991231235959", "gkg", size=987654313, md5=md5_of(salt, "x3")),
+        "1 2 %s99991231235959.export.CSV.zip" % BASE,
+    ]
+
+
 def post_rows(n, salt="p"):
     """2020-12-15 以降の行。目印として、ほかに出てこない値を使う。"""
     out = [
@@ -134,7 +145,7 @@ def post_rows(n, salt="p"):
         # 2020-12-15 以降で形式の合わない行（数えてはいけない）
         "12x nothex %s20210101000000.export.CSV.zip" % BASE,
         "999 %s https://api.gdeltcloud.com/gdeltv2/20220101000000.gkg.csv.zip" % md5_of(salt, "c"),
-    ]
+    ] + extreme_rows(salt)
     start = datetime.datetime(2020, 12, 15, 0, 15)
     for i in range(n):
         t = start + datetime.timedelta(minutes=15 * i)
@@ -157,11 +168,14 @@ class FakeHeaders(dict):
 
 
 class FakeResponse:
-    def __init__(self, body=b"", status=200, headers=None, fail_after=None):
+    def __init__(self, body=b"", status=200, headers=None, fail_after=None, fail_at_eof=False,
+                 on_read=None):
         self._buf = io.BytesIO(body)
         self.status = status
         self.headers = FakeHeaders(headers or {})
         self._fail_after = fail_after
+        self._fail_at_eof = fail_at_eof
+        self._on_read = on_read
         self._reads = 0
         self.closed = False
 
@@ -169,7 +183,12 @@ class FakeResponse:
         self._reads += 1
         if self._fail_after is not None and self._reads > self._fail_after:
             raise ConnectionResetError("見本の失敗")
-        return self._buf.readline(limit)
+        if self._on_read is not None:
+            self._on_read()
+        line = self._buf.readline(limit)
+        if not line and self._fail_at_eof:
+            raise ConnectionResetError("見本の失敗（終わりの直前）")
+        return line
 
     def close(self):
         self.closed = True
@@ -224,6 +243,94 @@ class Recorder:
 FIXED_NOW = datetime.datetime(2026, 10, 7, 1, 2, 3, tzinfo=datetime.timezone.utc)
 
 
+class GuardViolation(BaseException):
+    """許していない書き込み。BaseException にして、取得のコードの except に捕まらないようにする。"""
+
+
+_WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_TRUNC
+
+
+class IOGuard:
+    """取得のあいだ、出力と書き込みを見張る。
+
+    - sys.stdout と sys.stderr を StringIO に差し替え、さらにファイル記述子 1 と 2 も
+      一時ファイルに付け替えて、中身を取り込む（os.write(2, ...) のような経路も拾う）。
+    - builtins.open、io.open、os.open を差し替え、書き込みのモードで開くのは allowed の
+      パスだけを許す。それ以外は GuardViolation にし、violations にも記録する。
+    - tempfile の関数は、呼ばれた時点で GuardViolation にする。
+    """
+
+    TEMPFILE_FUNCS = ("mkstemp", "mkdtemp", "NamedTemporaryFile", "TemporaryFile",
+                      "SpooledTemporaryFile", "TemporaryDirectory", "mktemp")
+
+    def __init__(self, allowed):
+        self.allowed = {os.path.realpath(p) for p in allowed}
+        self.violations = []
+        self.stdout = ""
+        self.stderr = ""
+        self.fd_output = b""
+
+    def _check(self, path, writing):
+        if not writing or isinstance(path, int):
+            return
+        rp = os.path.realpath(os.fspath(path))
+        if rp not in self.allowed:
+            self.violations.append(rp)
+            raise GuardViolation("許していない書き込み")
+
+    def __enter__(self):
+        self._sink = tempfile.TemporaryFile()  # 見張りを始める前に作る
+        sys.stdout.flush()
+        sys.stderr.flush()
+        self._saved_fds = (os.dup(1), os.dup(2))
+        os.dup2(self._sink.fileno(), 1)
+        os.dup2(self._sink.fileno(), 2)
+        self._out, self._err = io.StringIO(), io.StringIO()
+        self._saved_std = (sys.stdout, sys.stderr)
+        sys.stdout, sys.stderr = self._out, self._err
+
+        real_open, real_os_open = builtins.open, os.open
+        guard = self
+
+        def g_open(file, mode="r", *a, **k):
+            guard._check(file, any(c in mode for c in "wax+"))
+            return real_open(file, mode, *a, **k)
+
+        def g_os_open(path, flags, *a, **k):
+            guard._check(path, bool(flags & _WRITE_FLAGS))
+            return real_os_open(path, flags, *a, **k)
+
+        def g_temp(*a, **k):
+            guard.violations.append("tempfile")
+            raise GuardViolation("tempfile は使えない")
+
+        self._patches = [mock.patch.object(builtins, "open", g_open),
+                         mock.patch.object(io, "open", g_open),
+                         mock.patch.object(os, "open", g_os_open)]
+        self._patches += [mock.patch.object(tempfile, n, g_temp) for n in self.TEMPFILE_FUNCS]
+        for p in self._patches:
+            p.start()
+        return self
+
+    def __exit__(self, *exc):
+        for p in reversed(self._patches):
+            p.stop()
+        sys.stdout, sys.stderr = self._saved_std
+        os.dup2(self._saved_fds[0], 1)
+        os.dup2(self._saved_fds[1], 2)
+        for fd in self._saved_fds:
+            os.close(fd)
+        self.stdout, self.stderr = self._out.getvalue(), self._err.getvalue()
+        self._sink.seek(0)
+        self.fd_output = self._sink.read()
+        self._sink.close()
+        return False
+
+    def captured(self):
+        return {"stdout": self.stdout, "stderr": self.stderr, "fd": self.fd_output,
+                "violations": list(self.violations)}
+
+
 class RunCase(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp(prefix="filelist-")
@@ -241,13 +348,41 @@ class RunCase(unittest.TestCase):
         self.sleeps.append(s)
         self.clock.t += s
 
-    def run_acq(self, transport, rec=None, now=FIXED_NOW, url=filelist.MASTERFILELIST_URL):
+    def expected_path(self, t):
+        return os.path.join(self.processed, filelist.PROCESSED_SUBDIR,
+                            "masterfilelist-kept-%s.tsv" % t.strftime("%Y%m%dT%H%M%SZ"))
+
+    def run_acq(self, transport, rec=None, now=FIXED_NOW, url=filelist.MASTERFILELIST_URL,
+                guard=True):
+        """取得を1回動かす。now は datetime か、datetime の list（呼ばれるたびに順に返す）。
+
+        guard=True なら IOGuard の中で動かす。書いてよいのは、最初の now の時刻の名前の
+        保存先と、マニフェストだけ。見張りの結果は self.guard に残る。
+        """
         rec = rec or Recorder(self.events)
-        out = filelist.run_acquisition(
-            start_hook=rec.start, result_hook=rec.result, root=self.root,
-            processed_dir=self.processed, manifest_dir=self.manifest_dir, url=url,
-            transport=transport, sleep=self.sleep, clock=self.clock,
-            now=lambda: now, log=self.logs.append)
+        times = list(now) if isinstance(now, list) else None
+        first = times[0] if times else now
+        now_fn = (lambda: times.pop(0)) if times else (lambda: now)
+        allowed = [self.expected_path(first),
+                   os.path.join(self.manifest_dir, filelist.MANIFEST_NAME)]
+        self.guard = IOGuard(allowed) if guard else None
+
+        def call():
+            return filelist.run_acquisition(
+                start_hook=rec.start, result_hook=rec.result, root=self.root,
+                processed_dir=self.processed, manifest_dir=self.manifest_dir, url=url,
+                transport=transport, sleep=self.sleep, clock=self.clock,
+                now=now_fn, log=self.logs.append)
+
+        if self.guard is None:
+            return call(), rec
+        try:
+            with self.guard:
+                out = call()
+        finally:
+            # 例外で終わった場合も、許していない書き込みが無かったことを確かめる
+            if self.guard.violations:
+                raise AssertionError("許していない書き込み：%r" % self.guard.violations)
         return out, rec
 
     def all_written(self):
@@ -352,6 +487,22 @@ class TestRedirect(unittest.TestCase):
         proxies = [h for h in opener.handlers if isinstance(h, urllib.request.ProxyHandler)]
         for p in proxies:
             self.assertEqual(p.proxies, {})
+
+    def test_env_proxy_not_used(self):
+        """環境変数にプロキシがあっても使わない。"""
+        env = {k: "http://proxy.invalid:9" for k in
+               ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy",
+                "ALL_PROXY")}
+        with mock.patch.dict(os.environ, env):
+            self.assertTrue(urllib.request.getproxies())  # 前提：環境変数が読まれる状態
+            opener = filelist.build_opener()
+        # ProxyHandler({}) は処理する方式を持たないので、opener の一覧には入らない。
+        # 既定の ProxyHandler（環境変数を読む）が入っていれば、proxies が空でなくなる。
+        used = [h for h in opener.handlers
+                if isinstance(h, urllib.request.ProxyHandler) and h.proxies]
+        self.assertEqual(used, [])
+        self.assertFalse(any(hasattr(h, "https_open") and isinstance(
+            h, urllib.request.ProxyHandler) for h in opener.handlers))
 
 
 class TestFileDay(unittest.TestCase):
@@ -520,7 +671,8 @@ class TestPostCutoffInvisible(RunCase):
             out = dict(out)
             out["path"] = os.path.relpath(out["path"], self.root)
             return {"files": files, "logs": list(self.logs), "out": out,
-                    "start": rec.start_args, "result": rec.result_args}
+                    "start": rec.start_args, "result": rec.result_args,
+                    "captured": self.guard.captured()}
         finally:
             shutil.rmtree(self.root, ignore_errors=True)
             self.root = root_before
@@ -544,7 +696,8 @@ class TestPostCutoffInvisible(RunCase):
 
         捨てた行の件数が、どこにも（ログ・返り値・ファイル・フックの引数）出ていないことの検査。
         """
-        variants = [[], post_rows(0, "a"), post_rows(3, "b"), post_rows(5000, "c")]
+        variants = [[], extreme_rows("e"), post_rows(0, "a"), post_rows(3, "b"),
+                    post_rows(5000, "c")]
         observed = [self.observe(v) for v in variants]
         observed.append(self.observe(post_rows(50, "d"), order="sorted"))
         for o in observed[1:]:
@@ -558,10 +711,41 @@ class TestPostCutoffInvisible(RunCase):
                              for _ in range(filelist.MAX_ATTEMPTS)])
         with self.assertRaises(filelist.FilelistError) as cm:
             self.run_acq(tr)
-        text = (str(cm.exception) + "\n".join(self.logs)).encode()
+        cap = self.guard.captured()
+        text = (str(cm.exception) + "\n".join(self.logs) + cap["stdout"]
+                + cap["stderr"]).encode() + cap["fd"]
         for m in self.markers(post):
             self.assertNotIn(m, text)
         self.assertEqual(self.all_written(), {})
+
+    def observe_error(self, post):
+        """読みの途中で失敗する取得を動かし、外に出たもの（例外の文を含む）を返す。"""
+        self.logs = []
+        self.events = []
+        body = build_list(post, order="sorted")
+        # すべての行を読んだあと、終わりの直前で通信が切れる（3回とも）
+        tr = FakeTransport(*[FakeResponse(body, fail_at_eof=True)
+                             for _ in range(filelist.MAX_ATTEMPTS)])
+        self.sleeps = []
+        self.clock = FakeClock()
+        with self.assertRaises(filelist.FilelistError) as cm:
+            self.run_acq(tr)
+        return {"exc": str(cm.exception), "logs": list(self.logs), "events": list(self.events),
+                "sleeps": list(self.sleeps), "captured": self.guard.captured(),
+                "files": self.all_written()}
+
+    def test_error_outputs_independent_of_post_cutoff_rows(self):
+        """失敗した場合も、出るもの（例外の文を含む）は 2020-12-15 以降の行で変わらない。"""
+        obs = [self.observe_error(p) for p in
+               ([], extreme_rows("f"), post_rows(10, "g"), post_rows(300, "h"))]
+        for o in obs[1:]:
+            self.assertEqual(o, obs[0])
+
+    def test_extreme_rows_do_not_raise(self):
+        for r in extreme_rows("z"):
+            self.assertFalse(filelist._is_kept_line(r.encode()))
+        t = filelist.parse_file_time("99991231234501")
+        self.assertEqual(filelist.file_day(t), datetime.date.max)
 
 
 class TestHookOrder(RunCase):
@@ -621,6 +805,113 @@ class TestHookOrder(RunCase):
         self.assertEqual(self.events, [])  # start も呼ばない
         with open(out["path"], "rb") as f:
             self.assertEqual(f.read(), before)
+
+    def test_name_fixed_before_start(self):
+        """名前は start の前の時刻で一度だけ決める。fetched_at は取得の完了の時刻。"""
+        t1, t2 = FIXED_NOW, FIXED_NOW + datetime.timedelta(minutes=7)
+        out, _ = self.run_acq(FakeTransport(FakeResponse(build_list([]))), now=[t1, t2])
+        self.assertEqual(out["path"], self.expected_path(t1))
+        self.assertEqual(out["fetched_at"], "2026-10-07T01:09:03Z")
+
+    def test_existing_file_with_planned_name(self):
+        """前もっての確認と書き込みで同じ名前を使う（後の時刻の名前が既にあっても関係ない）。"""
+        t1, t2 = FIXED_NOW, FIXED_NOW + datetime.timedelta(minutes=7)
+        os.makedirs(os.path.dirname(self.expected_path(t1)))
+        with open(self.expected_path(t2), "wb") as f:
+            f.write(b"other\n")
+        out, _ = self.run_acq(FakeTransport(FakeResponse(build_list([]))), now=[t1, t2])
+        self.assertEqual(out["path"], self.expected_path(t1))
+        with open(self.expected_path(t1), "wb") as f:
+            pass
+        self.events.clear()
+        tr = FakeTransport(FakeResponse(build_list([])), events=self.events)
+        with self.assertRaises(filelist.FilelistError):
+            self.run_acq(tr, now=[t1, t2])
+        self.assertEqual(self.events, [])
+
+    def test_collision_at_write_is_filelist_error(self):
+        """書く直前に同じ名前ができていた場合も、FilelistError で止まり、上書きしない。"""
+        path = self.expected_path(FIXED_NOW)
+
+        def racing_transport(url, timeout):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(b"racer\n")
+            return FakeResponse(build_list([]))
+
+        with self.assertRaises(filelist.FilelistError):
+            self.run_acq(racing_transport, rec=Recorder(self.events))
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), b"racer\n")
+        self.assertNotIn("result", self.events)
+
+    def test_dirs_must_be_under_root(self):
+        outside = tempfile.mkdtemp(prefix="filelist-outside-")
+        try:
+            for attr in ("processed", "manifest_dir"):
+                with self.subTest(attr=attr):
+                    saved = getattr(self, attr)
+                    setattr(self, attr, outside)
+                    self.events.clear()
+                    tr = FakeTransport(FakeResponse(build_list([])), events=self.events)
+                    try:
+                        with self.assertRaises(filelist.FilelistError):
+                            self.run_acq(tr, guard=False)
+                    finally:
+                        setattr(self, attr, saved)
+                    self.assertEqual(self.events, [])
+            self.assertEqual(os.listdir(outside), [])
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+        # root を含む上の階層への抜け道（..）も拒む
+        self.processed = os.path.join(self.root, "..")
+        with self.assertRaises(filelist.FilelistError):
+            self.run_acq(FakeTransport(), guard=False)
+
+    def test_manifest_without_trailing_newline(self):
+        os.makedirs(self.manifest_dir)
+        mpath = os.path.join(self.manifest_dir, filelist.MANIFEST_NAME)
+        with open(mpath, "wb") as f:
+            f.write(b'{"a": 1}')
+        tr = FakeTransport(FakeResponse(build_list([])), events=self.events)
+        with self.assertRaises(filelist.FilelistError):
+            self.run_acq(tr)
+        self.assertEqual(self.events, [])
+        with open(mpath, "rb") as f:
+            self.assertEqual(f.read(), b'{"a": 1}')
+
+    def test_manifest_newline_checked_again_before_append(self):
+        """取得のあいだに改行の無い行が足された場合も、追記しない。"""
+        os.makedirs(self.manifest_dir)
+        mpath = os.path.join(self.manifest_dir, filelist.MANIFEST_NAME)
+
+        def transport(url, timeout):
+            with open(mpath, "ab") as f:
+                f.write(b'{"b": 2}')
+            return FakeResponse(build_list([]))
+
+        with self.assertRaises(filelist.FilelistError):
+            self.run_acq(transport)
+        with open(mpath, "rb") as f:
+            self.assertEqual(f.read(), b'{"b": 2}')
+        self.assertNotIn("result", self.events)
+
+    def test_result_hook_failure_leaves_file_and_manifest(self):
+        class FailingResult(Recorder):
+            def result(self, **kw):
+                super().result(**kw)
+                raise RuntimeError("封印の失敗")
+        rec = FailingResult(self.events, seq=11)
+        with self.assertRaises(RuntimeError):
+            self.run_acq(FakeTransport(FakeResponse(build_list([]))), rec=rec)
+        path = self.expected_path(FIXED_NOW)
+        with open(path, "rb") as f:
+            sha = hashlib.sha256(f.read()).hexdigest()
+        with open(os.path.join(self.manifest_dir, filelist.MANIFEST_NAME)) as f:
+            e = json.loads(f.readline())
+        self.assertEqual(e["acquisition_start_seq"], 11)
+        self.assertEqual(e["sha256"], sha)
+        self.assertEqual(rec.result_args, [{"start_seq": 11, "kept_rows_sha256": sha}])
 
     def test_manifest_is_append_only(self):
         self.run_acq(FakeTransport(FakeResponse(build_list([]))))
@@ -684,6 +975,33 @@ class TestRetry(RunCase):
                 self.run_acq(tr)
         self.assertEqual(self.sleeps, [])
 
+    def test_deadline_during_read(self):
+        """読みの途中で時間の上限を超えたら、読み終える前に打ち切る（再試行しない）。"""
+        def tick():
+            self.clock.t += 100
+        body = build_list(post_rows(0), order="sorted")
+        tr = FakeTransport(FakeResponse(body, on_read=tick), FakeResponse(build_list([])))
+        with self.assertRaises(filelist.FilelistError):
+            self.run_acq(tr)
+        self.assertEqual(len(tr.calls), 1)
+        self.assertEqual(self.all_written(), {})
+
+    def test_response_size_limit_short_lines(self):
+        """短い行だけの応答でも、全体の長さの上限で打ち切る（外側の検査）。"""
+        body = ("\n".join(PRE_ROWS * 3) + "\n").encode()
+        with mock.patch.object(filelist, "MAX_RESPONSE_BYTES", len(body) // 2):
+            with self.assertRaises(filelist.FilelistError):
+                self.run_acq(FakeTransport(FakeResponse(body)))
+        self.assertEqual(self.all_written(), {})
+
+    def test_response_size_limit_inside_long_line(self):
+        """長すぎる行を読み飛ばしている途中でも、全体の長さの上限で打ち切る（内側の検査）。"""
+        body = b"x" * 20000 + b"\n"
+        with mock.patch.object(filelist, "MAX_RESPONSE_BYTES", 6000):
+            with self.assertRaises(filelist.FilelistError):
+                self.run_acq(FakeTransport(FakeResponse(body)))
+        self.assertEqual(self.all_written(), {})
+
     def test_response_size_limit(self):
         with mock.patch.object(filelist, "MAX_RESPONSE_BYTES", 200):
             tr = FakeTransport(FakeResponse(build_list(post_rows(3))))
@@ -744,6 +1062,39 @@ class TestPrivacy(RunCase):
         for p in (os.path.join(SRC, "filelist.py"), os.path.abspath(__file__)):
             with open(p, "rb") as f:
                 self.assertEqual(privacy_scan.find_in_bytes(f.read()), {}, p)
+
+
+class TestIOGuard(unittest.TestCase):
+    """見張り（IOGuard）そのものが、許していない書き込みと出力を捕まえること。"""
+
+    def test_catches_writes_and_output(self):
+        d = tempfile.mkdtemp(prefix="filelist-guard-")
+        try:
+            ok = os.path.join(d, "ok")
+            bad = os.path.join(d, "bad")
+            g = IOGuard([ok])
+            with g:
+                with open(ok, "w") as f:
+                    f.write("x")
+                with open(ok, "r") as f:
+                    f.read()
+                for act in (lambda: open(bad, "a"),
+                            lambda: io.open(bad, "wb"),
+                            lambda: os.open(bad, os.O_WRONLY | os.O_CREAT),
+                            lambda: tempfile.NamedTemporaryFile(),
+                            lambda: tempfile.mkstemp()):
+                    with self.assertRaises(GuardViolation):
+                        act()
+                print("out-marker")
+                print("err-marker", file=sys.stderr)
+                os.write(2, b"fd-marker\n")
+            self.assertEqual(len(g.violations), 5)
+            self.assertFalse(os.path.exists(bad))
+            self.assertIn("out-marker", g.stdout)
+            self.assertIn("err-marker", g.stderr)
+            self.assertIn(b"fd-marker", g.fd_output)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 class TestNoNetworkGuard(unittest.TestCase):

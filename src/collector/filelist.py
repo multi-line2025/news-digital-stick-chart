@@ -50,6 +50,10 @@
     分かる。上限は一覧の大きさの見込み（数百 MB）より十分大きく取っているので、閾値を
     決める期間の量について意味のある情報にはならないと判断した。
 
+    時間の上限 TOTAL_DEADLINE_SECONDS（30分）で打ち切った場合も、分かるのは「取得が30分の
+    うちに終わらなかった」という1ビットだけである。打ち切りの文には、読んだ量も行の中身も
+    入れない。
+
 ------------------------------------------------------------------------
 3. 2020-12-15 以降の行を、ほかのどの処理よりも先に捨てる
 ------------------------------------------------------------------------
@@ -58,16 +62,24 @@
     _read_kept_lines() は応答を1行ずつ読み、各行について最初に次だけを行う。
 
       (a) 行を空白で分け、3つ目の欄のファイル名から14桁の時刻を取り出す
-      (b) 4章の規則でファイルの日を決める
-      (c) ファイルの日が CUTOFF_DAY（2020-12-15）以降なら、その行をその場で捨てる
+      (b) 時刻 t を LAST_KEPT_TIME（2020-12-14 23:45:00 UTC）と比べる。t がそれより後なら、
+          4章の規則でファイルの日が CUTOFF_DAY（2020-12-15）以降になるので、その行を
+          その場で捨てる。日付の計算（t + 15分）は、比べたあとの残す行にだけ行う。
+          そのため、9999年のような極端な時刻の行でも、例外を出さずに捨てられる。
 
     (a) で時刻を取り出せない行（欄の数が違う・14桁の時刻が無い・暦として正しくない・
     長すぎる）は、どの期間の行かを判定できないので、同じくその場で捨てる。
+    (a)(b) は、どんな中身の行でも例外を出さない（テストで極端な行を入れて確かめている）。
 
     捨てた行（(c) と、判定できなかった行）は、表示も集計もせず、ログにも例外の文にも
     出さない。件数も数えない。件数から一覧の全体の量が分かってしまうため。
-    応答全体のハッシュや長さ、取得にかかった時間も、記録しない・出力しない。
+    応答全体のハッシュや長さは、記録しない・出力しない。
     数えて出すのは、残した行（2020-12-14 以前と判定できた行）についての件数だけである。
+
+    取得にかかった時間は、このモジュールは記録も出力もしない。ただし、マニフェストの
+    fetched_at（取得の完了の時刻）と、acquisition-start の記録の drand の回の時刻との差から、
+    おおよその時間が分かる。そこから分かりうるのは、通信の速さで割った一覧の全体の長さ
+    （の大まかな見当）だけで、行の中身や、2020-12-15 以降の行だけの量は分からない。
 
     応答の本体は、ディスクにも一時ファイルにも書かない。
 
@@ -142,7 +154,9 @@
     ASCII。並べ替えるのは、GDELT の一覧の行の順番が変わっても、同じ中身なら同じ
     sha256 になるようにするため。まったく同じ行が二つあれば、二つとも残す。
 
-    保存先：data/processed/gdelt-filelist/masterfilelist-kept-<取得完了の UTC 時刻>.tsv
+    保存先：data/processed/gdelt-filelist/masterfilelist-kept-<取得を始める直前の UTC 時刻>.tsv
+      名前は start_hook を呼ぶ前に一度だけ決め、前もっての確認と実際の書き込みに同じ名前を
+      使う。マニフェストの fetched_at は取得の完了の時刻で、名前の時刻とは別である。
       data/processed/ を選んだ理由：
         - 保存するのは、GDELT の一覧を加工したもの（期間で切り、項目を絞ったもの）であり、
           CLAUDE.md の「data/processed/ 加工済みデータ」に当たる。
@@ -155,8 +169,11 @@
         マニフェストに載せる」に照らすと、Git に入れるかどうかは、取得の前にリードと
         オーナーが決める必要がある（未決事項4）。保存先のディレクトリは引数で渡す。
 
-    同じ名前のファイルがあれば上書きせずに止まる。マニフェストは追記だけで、既存の行は
-    書き換えない。ファイルを削除する処理は無い。
+    同じ名前のファイルがあれば上書きせずに止まる（取得の前に確かめ、書くときにも O_EXCL で
+    確かめる。書くときに重なった場合も FilelistError で止まる）。マニフェストは追記だけで、
+    既存の行は書き換えない。マニフェストの最後の行に改行が無い場合は、追記すると前の行と
+    つながってしまうので、取得の前とも追記の直前とも、止まる。ファイルを削除する処理は無い。
+    保存先（processed_dir と manifest_dir）が root の下に無い場合も、取得の前に止まる。
 
     書く前に、書く中身（一覧とマニフェストの行）を privacy_scan.find_in_bytes() で
     調べ、メールアドレスの形の文字列があれば書かずに止まる。
@@ -166,7 +183,8 @@
 ------------------------------------------------------------------------
     run_acquisition() の流れは次の順に固定している（docs/verify/periods-seal.md 7章）。
 
-      1. URL を許可リストで調べる。保存先に同じ名前のファイルがあれば止まる
+      1. URL を許可リストで調べる。保存先が root の下にあること、同じ名前のファイルが
+         無いこと、マニフェストの最後の行に改行があることを確かめる。どれかが違えば止まる
       2. start_hook(code_sha256=..., source_url=...) を呼ぶ。
          acquisition-start の記録を追記し、その seq（正の整数）を返すこと。
          例外が出るか、正の整数（bool を除く）が返らなければ、取得せずに止まる
@@ -176,7 +194,16 @@
       5. result_hook(start_seq=<2の seq>, kept_rows_sha256=<4の sha256>) を呼ぶ
 
     3 か 4 で失敗した場合、result_hook は呼ばない（result の無い start は、取得の途中か
-    失敗として verify に表示される）。start_hook と result_hook は封印係の T-009 の仕組みに
+    失敗として verify に表示される）。
+
+    5 の result_hook が失敗した場合（例外は呼び出し元にそのまま出る）は、次の状態で残る。
+      - 一覧のファイルとマニフェストの行は、書かれたまま残る（消さない）。
+      - 封印の記録は、result の無い acquisition-start になる。
+      - マニフェストの行の acquisition_start_seq が、その start の seq を指すので、どの start の
+        取得だったかは照合できる。マニフェストの sha256 を使って result を後から追記するか、
+        取得をやり直すかは、このモジュールでは決めない（リードに報告する）。
+
+    start_hook と result_hook は封印係の T-009 の仕組みに
     つなぐ。このモジュールには既定の値を置かない（呼び忘れて記録なしで取得できないように、
     必須の引数にしている）。
 
@@ -227,6 +254,11 @@ USER_AGENT = "news-digital-stick-chart-collector/0"
 CUTOFF_DAY = datetime.date(2020, 12, 15)
 FILE_SPAN = datetime.timedelta(minutes=15)
 TIME_RESOLUTION = datetime.timedelta(seconds=1)
+# 残す行の最後の時刻。t <= LAST_KEPT_TIME と file_day(t) < CUTOFF_DAY は同じ条件である
+# （ファイル名の時刻の分解能は1秒）。テストが両者の一致を確かめる。
+LAST_KEPT_TIME = (datetime.datetime.combine(CUTOFF_DAY, datetime.time(),
+                                            tzinfo=datetime.timezone.utc)
+                  - FILE_SPAN)
 
 # 保存する項目（5章）。この順に書く。
 FIELDS = ("file_time", "file_type", "size_bytes", "md5")
@@ -351,22 +383,35 @@ def parse_file_time(ts):
 
 
 def file_day(t):
-    """ファイル名の時刻 t（UTC の datetime）からファイルの日を決める（4章）。"""
-    return (t + FILE_SPAN - TIME_RESOLUTION).date()
+    """ファイル名の時刻 t（UTC の datetime）からファイルの日を決める（4章）。
+
+    暦の最後（9999-12-31 23:45:01 以降）で日付を作れない場合は date.max を返す
+    （含みうる最も遅い日なので、どの区画の境目よりも後になる）。
+    """
+    try:
+        return (t + FILE_SPAN - TIME_RESOLUTION).date()
+    except OverflowError:
+        return datetime.date.max
 
 
-def _cutoff_day_of_line(line):
-    """3章の (a)(b)。行のファイルの日を返す。判定できなければ None。"""
-    fields = line.split()
-    if len(fields) != 3:
-        return None
-    m = _TS_IN_NAME.search(fields[2])
-    if m is None:
-        return None
-    t = parse_file_time(m.group(1))
-    if t is None:
-        return None
-    return file_day(t)
+def _is_kept_line(line):
+    """3章の (a)(b)。2020-12-14 以前と判定できた行なら True、それ以外は False。
+
+    どんな中身の行でも例外を出さない。日付の計算より先に、時刻を LAST_KEPT_TIME と比べる。
+    """
+    try:
+        fields = line.split()
+        if len(fields) != 3:
+            return False
+        m = _TS_IN_NAME.search(fields[2])
+        if m is None:
+            return False
+        t = parse_file_time(m.group(1))
+        if t is None or t > LAST_KEPT_TIME:
+            return False
+        return file_day(t) < CUTOFF_DAY
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -398,8 +443,7 @@ def _read_kept_lines(resp, clock, deadline):
                 if total > MAX_RESPONSE_BYTES:
                     raise FilelistError("応答の長さの上限を超えたので打ち切った")
             continue
-        day = _cutoff_day_of_line(line)
-        if day is None or day >= CUTOFF_DAY:
+        if not _is_kept_line(line):
             continue  # 捨てる。数えない・出さない
         kept.append(line)
     return kept
@@ -537,7 +581,28 @@ def _write_exclusive(path, data):
         os.fsync(f.fileno())
 
 
+def _manifest_ends_with_newline(path):
+    """マニフェストが無いか空か、最後が改行で終わっていれば True。"""
+    try:
+        size = os.path.getsize(path)
+    except FileNotFoundError:
+        return True
+    if size == 0:
+        return True
+    with open(path, "rb") as f:
+        f.seek(-1, os.SEEK_END)
+        return f.read(1) == b"\n"
+
+
+def _is_under(path, root):
+    path = os.path.realpath(path)
+    root = os.path.realpath(root)
+    return os.path.commonpath([path, root]) == root and path != root
+
+
 def _append_line(path, data):
+    if not _manifest_ends_with_newline(path):
+        raise FilelistError("マニフェストの最後の行に改行が無いので追記しない")
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
     with os.fdopen(fd, "ab") as f:
         f.write(data)
@@ -556,10 +621,18 @@ def run_acquisition(*, start_hook, result_hook, root, processed_dir, manifest_di
     root: マニフェストに書く相対パスの基準（プロジェクトのルート）
     """
     validate_url(url)
+    for d in (processed_dir, manifest_dir):
+        if not _is_under(d, root):
+            raise FilelistError("保存先が root の下に無い")
     out_dir = os.path.join(processed_dir, PROCESSED_SUBDIR)
-    planned = now()
-    if os.path.exists(os.path.join(out_dir, "masterfilelist-kept-%s.tsv" % _stamp(planned))):
+    manifest_path = os.path.join(manifest_dir, MANIFEST_NAME)
+    # 名前は一度だけ決め、前もっての確認と実際の書き込みに同じものを使う
+    name = "masterfilelist-kept-%s.tsv" % _stamp(now())
+    out_path = os.path.join(out_dir, name)
+    if os.path.lexists(out_path):
         raise FilelistError("同じ名前のファイルが既にある（上書きしない）")
+    if not _manifest_ends_with_newline(manifest_path):
+        raise FilelistError("マニフェストの最後の行に改行が無いので取得しない")
 
     code_hash = code_sha256()
     seq = start_hook(code_sha256=code_hash, source_url=url)
@@ -582,8 +655,6 @@ def run_acquisition(*, start_hook, result_hook, root, processed_dir, manifest_di
     sha = hashlib.sha256(data).hexdigest()
 
     os.makedirs(out_dir, exist_ok=True)
-    name = "masterfilelist-kept-%s.tsv" % _stamp(fetched_at)
-    out_path = os.path.join(out_dir, name)
     rel = os.path.relpath(out_path, root).replace(os.sep, "/")
     entry = {
         "file": rel,
@@ -598,12 +669,15 @@ def run_acquisition(*, start_hook, result_hook, root, processed_dir, manifest_di
 
     _check_no_address(data, "一覧")
     _check_no_address(manifest_line, "マニフェストの行")
-    _write_exclusive(out_path, data)
+    try:
+        _write_exclusive(out_path, data)
+    except FileExistsError:
+        raise FilelistError("同じ名前のファイルが書く直前にできていた（上書きしない）") from None
     with open(out_path, "rb") as f:
         if hashlib.sha256(f.read()).hexdigest() != sha:
             raise FilelistError("書いたファイルの sha256 が一致しない")
     os.makedirs(manifest_dir, exist_ok=True)
-    _append_line(os.path.join(manifest_dir, MANIFEST_NAME), manifest_line)
+    _append_line(manifest_path, manifest_line)
 
     log("残した行：%d 件（2020-12-14 以前と判定できた行のうち、形式の合うもの）" % len(rows))
     log("形式の合わない行：%d 件（2020-12-14 以前と判定できた行のうち）" % rejected)
