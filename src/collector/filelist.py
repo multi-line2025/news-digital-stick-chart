@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GDELT 2.0 のファイル一覧（masterfilelist）の取得（T-010。試運転の手順3）。
+"""GDELT 2.0 のファイル一覧（masterfilelist）の取得（T-010、保存先は T-012。試運転の手順3）。
 
 データ出典
     Data: The GDELT Project (https://www.gdeltproject.org/). This project is not
@@ -154,26 +154,66 @@
     ASCII。並べ替えるのは、GDELT の一覧の行の順番が変わっても、同じ中身なら同じ
     sha256 になるようにするため。まったく同じ行が二つあれば、二つとも残す。
 
-    保存先：data/processed/gdelt-filelist/masterfilelist-kept-<取得を始める直前の UTC 時刻>.tsv
-      名前は start_hook を呼ぶ前に一度だけ決め、前もっての確認と実際の書き込みに同じ名前を
-      使う。マニフェストの fetched_at は取得の完了の時刻で、名前の時刻とは別である。
-      data/processed/ を選んだ理由：
-        - 保存するのは、GDELT の一覧を加工したもの（期間で切り、項目を絞ったもの）であり、
-          CLAUDE.md の「data/processed/ 加工済みデータ」に当たる。
-        - data/manifest/ は、このプロジェクトが保存したファイルのハッシュ値・取得日時・
-          取得元 URL を追記する記録の場所である。一覧そのものを置くと、記録と中身が混ざる。
-          そこで、data/manifest/gdelt-filelist.jsonl に、保存したファイルの sha256・
-          取得日時・取得元 URL を1行ずつ追記する（過去の行は書き換えない）。
-      大きさの見込み：2015-02 〜 2020-12-14 の行は約60万行、1行約70バイトで約40 MB。
-        CLAUDE.md の「data/processed/ は小さいもの。大きいものは Git の外に置き、
-        マニフェストに載せる」に照らすと、Git に入れるかどうかは、取得の前にリードと
-        オーナーが決める必要がある（未決事項4）。保存先のディレクトリは引数で渡す。
+    保存先（T-012。オーナーの決定「git に入れずハッシュのみ記録する」）
+      一覧の本体は Git の外に書く。リポジトリの中（data/manifest/）には、ハッシュの一覧
+      （マニフェスト）の行だけを追記する。
+
+      本体：<store_dir>/masterfilelist-kept-<取得を始める直前の UTC 時刻>.tsv
+        store_dir は、引数 store_dir、なければ環境変数 NDSC_GDELT_FILELIST_STORE、
+        なければ既定の ~/news-stick-data/gdelt-filelist（default_store_dir()。
+        コードの中で Path.home() / "news-stick-data" / "gdelt-filelist" として組み立てる。
+        2026-10-06 のオーナーの決定「ホームフォルダの下の news-stick-data」による。
+        記録は reviews/T-010.md の末尾）。どれもプロジェクトの外を想定している。
+        .gitignore の対象の data/raw/ は使わない（root の下は、下の確認で拒む）。
+        フォルダは前もって作っておくこと。このモジュールはフォルダを作らない
+        （os.mkdir を呼ばない。テストの見張りでも mkdir を許していない）。
+        名前は start_hook を呼ぶ前に一度だけ決め、前もっての確認と実際の書き込みに同じ名前を
+        使う。マニフェストの fetched_at は取得の完了の時刻で、名前の時刻とは別である。
+        本体は、Git の外の一時領域と同じ扱いになる（後で GitHub のリリースなどに置くかは、
+        別のタスクで決める）。大きさの見込みは約60万行、約40 MB。
+
+      マニフェスト：<manifest_dir>/gdelt-filelist.jsonl に、1回の取得につき1行を追記する。
+        過去の行は書き換えない。1行は次の項目だけの JSON（キーの順に並べ、ASCII）。
+          file_name              本体のファイル名（名前だけ。パスは入れない）
+          sha256                 本体のバイト列の sha256（書いたファイルから計算し直して照合）
+          kept_rows              本体のデータの行数（見出しの1行を除く）
+          fetched_at             取得の完了の時刻（UTC、ISO 8601）
+          source_url             取得元の URL（データ源の URL。記事の URL ではない）
+          acquisition_start_seq  start_hook が返した acquisition-start の seq
+          code_sha256            このファイル（filelist.py）の sha256
+        手元の絶対パス・ユーザー名・ホームのパスは入れない。追記の前に、行がそれらを
+        含まないこと、file_name が上の名前の形であることを確かめ、違えば書かずに止まる。
+
+    保存先の確認（T-010 の監査 B-3 への対応）
+      確かめること
+        - root、manifest_dir、store_dir を realpath にしてから比べる（途中のシンボリック
+          リンクを解いた実際の場所で比べる）。manifest_dir の実際の場所は root の実際の場所の
+          下（root そのものは不可）。store_dir の実際の場所は root の下でも root そのもの
+          でもなく、それ自身とその上のどのフォルダにも .git が無い（Git の作業ツリーの外）。
+          どちらも既にあるフォルダであること。
+        - この確認を、取得の前（start_hook より前）と、書く直前の2回行う。2回の結果
+          （realpath と、フォルダの装置番号・i ノード番号）が違えば、書かずに止まる。
+        - 本体は realpath にしたフォルダの下の名前を O_CREAT | O_EXCL | O_NOFOLLOW で開く。
+          同じ名前のもの（シンボリックリンクを含む）があれば開かずに止まる。開いたあと、
+          通常のファイルであること、リンクの数が1であること、フォルダの realpath と
+          i ノード番号が変わっていないことを確かめる。
+        - マニフェストは realpath にしたフォルダの下の名前を O_NOFOLLOW で開く（読むときも
+          追記のときも）。シンボリックリンクなら開けずに止まる。開いたあと、通常のファイル
+          であることを確かめる。最後の行に改行があるかは、追記に使う同じ記述子で確かめる。
+        - root に対する相対の位置は、realpath どうしで計算する（マニフェストの行には
+          パスを入れないので、相対パスは確認にだけ使う）。
+      確かめられないこと
+        - 確かめてから開くまでのあいだに、同じ利用者の別のプロセスが途中のフォルダを
+          差し替える競合は、開いたあとの照合で見つけて止まる。ただし、その時点で書いて
+          しまったものは消さない（ファイルを削除する処理は無い）。
+        - root が本当にプロジェクトのルートであるかは、呼び出し側の引数に頼る。
+        - .git の有無で Git の外かを判定するので、GIT_DIR などの環境変数で作業ツリーを
+          別の場所に指定している場合は見分けられない。
 
     同じ名前のファイルがあれば上書きせずに止まる（取得の前に確かめ、書くときにも O_EXCL で
-    確かめる。書くときに重なった場合も FilelistError で止まる）。マニフェストは追記だけで、
-    既存の行は書き換えない。マニフェストの最後の行に改行が無い場合は、追記すると前の行と
-    つながってしまうので、取得の前とも追記の直前とも、止まる。ファイルを削除する処理は無い。
-    保存先（processed_dir と manifest_dir）が root の下に無い場合も、取得の前に止まる。
+    確かめる。書くときに重なった場合も FilelistError で止まる）。マニフェストの最後の行に
+    改行が無い場合は、追記すると前の行とつながってしまうので、取得の前とも追記の直前とも、
+    止まる。ファイルを削除する処理は無い。
 
     書く前に、書く中身（一覧とマニフェストの行）を privacy_scan.find_in_bytes() で
     調べ、メールアドレスの形の文字列があれば書かずに止まる。
@@ -183,14 +223,14 @@
 ------------------------------------------------------------------------
     run_acquisition() の流れは次の順に固定している（docs/verify/periods-seal.md 7章）。
 
-      1. URL を許可リストで調べる。保存先が root の下にあること、同じ名前のファイルが
-         無いこと、マニフェストの最後の行に改行があることを確かめる。どれかが違えば止まる
+      1. URL を許可リストで調べる。5章の保存先の確認をし、同じ名前のファイルが無いこと、
+         マニフェストの最後の行に改行があることを確かめる。どれかが違えば止まる
       2. start_hook(code_sha256=..., source_url=...) を呼ぶ。
          acquisition-start の記録を追記し、その seq（正の整数）を返すこと。
          例外が出るか、正の整数（bool を除く）が返らなければ、取得せずに止まる
       3. 一覧を取得し、3章のとおり 2020-12-15 以降の行を捨て、項目を絞る
-      4. ファイルを書き、sha256 を書いたファイルから計算し直して照合する。
-         マニフェストに1行追記する
+      4. 保存先の確認をもう一度行い、本体を Git の外に書き、sha256 を書いたファイルから
+         計算し直して照合する。マニフェストに1行追記する
       5. result_hook(start_seq=<2の seq>, kept_rows_sha256=<4の sha256>) を呼ぶ
 
     3 か 4 で失敗した場合、result_hook は呼ばない（result の無い start は、取得の途中か
@@ -213,13 +253,16 @@
 """
 
 import datetime
+import getpass
 import hashlib
 import http.client
 import importlib.util
 import json
 import os
+import pathlib
 import re
 import socket
+import stat
 import sys
 import time
 import urllib.error
@@ -268,8 +311,13 @@ FILE_TYPES = {
     b"gkg.csv.zip": "gkg",
 }
 
-PROCESSED_SUBDIR = "gdelt-filelist"
 MANIFEST_NAME = "gdelt-filelist.jsonl"
+# 本体の保存先（5章）。プロジェクトの外。
+STORE_ENV = "NDSC_GDELT_FILELIST_STORE"
+DEFAULT_STORE_PARTS = ("news-stick-data", "gdelt-filelist")
+STORE_NAME_RE = re.compile(r"\Amasterfilelist-kept-\d{8}T\d{6}Z\.tsv\Z")
+MANIFEST_KEYS = ("acquisition_start_seq", "code_sha256", "fetched_at", "file_name",
+                 "kept_rows", "sha256", "source_url")
 
 _TS_IN_NAME = re.compile(rb"/(\d{14})\.[^/]*\Z")
 _SIZE = re.compile(rb"\A[0-9]{1,15}\Z")
@@ -573,44 +621,191 @@ def _check_no_address(data, what):
         raise FilelistError("%s にメールアドレスの形の文字列があるので書かずに止まる" % what)
 
 
-def _write_exclusive(path, data):
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-    with os.fdopen(fd, "wb") as f:
-        f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
+def default_store_dir(environ=None):
+    """本体の既定の保存先（5章）。環境変数 STORE_ENV があればそれ、なければホームの下。"""
+    environ = os.environ if environ is None else environ
+    v = environ.get(STORE_ENV)
+    if v:
+        return v
+    return str(pathlib.Path.home().joinpath(*DEFAULT_STORE_PARTS))
+
+
+def _is_strictly_under(path_real, root_real):
+    """realpath どうしで、path が root の下にあり root そのものでなければ True。"""
+    if os.path.commonpath([path_real, root_real]) != root_real or path_real == root_real:
+        return False
+    rel = os.path.relpath(path_real, root_real)
+    return rel != os.curdir and not rel.startswith(os.pardir)
+
+
+def _inside_git_worktree(path_real):
+    """path かその上のどれかのフォルダに .git があれば True。"""
+    d = path_real
+    while True:
+        if os.path.lexists(os.path.join(d, ".git")):
+            return True
+        parent = os.path.dirname(d)
+        if parent == d:
+            return False
+        d = parent
+
+
+def _dir_id(path_real):
+    st = os.stat(path_real, follow_symlinks=False)
+    if not stat.S_ISDIR(st.st_mode):
+        raise FilelistError("保存先がフォルダでない")
+    return (st.st_dev, st.st_ino)
+
+
+def _resolve_paths(root, manifest_dir, store_dir):
+    """5章の保存先の確認。realpath にした場所と、フォルダの識別子を返す。"""
+    root_real = os.path.realpath(root)
+    manifest_real = os.path.realpath(manifest_dir)
+    store_real = os.path.realpath(store_dir)
+    for d in (root_real, manifest_real, store_real):
+        if not os.path.isdir(d):
+            raise FilelistError("root・マニフェスト・本体の保存先のどれかが既にあるフォルダでない")
+    if not _is_strictly_under(manifest_real, root_real):
+        raise FilelistError("マニフェストの保存先が root の下に無い")
+    if store_real == root_real or _is_strictly_under(store_real, root_real):
+        raise FilelistError("本体の保存先が root の下にある（Git の外に置く）")
+    if _inside_git_worktree(store_real):
+        raise FilelistError("本体の保存先が Git の作業ツリーの中にある（Git の外に置く）")
+    manifest_path = os.path.join(manifest_real, MANIFEST_NAME)
+    if not _is_strictly_under(manifest_path, root_real):
+        raise FilelistError("マニフェストが root の下に無い")
+    return {
+        "root": root_real,
+        "manifest_dir": manifest_real,
+        "manifest_path": manifest_path,
+        "store_dir": store_real,
+        "ids": (_dir_id(root_real), _dir_id(manifest_real), _dir_id(store_real)),
+    }
+
+
+def _open_manifest(path, flags):
+    """マニフェストを O_NOFOLLOW で開き、通常のファイルであることを確かめた fd を返す。"""
+    try:
+        fd = os.open(path, flags | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
+    except FileNotFoundError:
+        raise
+    except OSError:
+        raise FilelistError("マニフェストを開けない（シンボリックリンクか、開けないもの）") from None
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise FilelistError("マニフェストが通常のファイルでない")
+    return fd
+
+
+def _fd_ends_with_newline(fd):
+    size = os.fstat(fd).st_size
+    if size == 0:
+        return True
+    return os.pread(fd, 1, size - 1) == b"\n"
 
 
 def _manifest_ends_with_newline(path):
     """マニフェストが無いか空か、最後が改行で終わっていれば True。"""
     try:
-        size = os.path.getsize(path)
+        fd = _open_manifest(path, os.O_RDONLY)
     except FileNotFoundError:
         return True
-    if size == 0:
-        return True
-    with open(path, "rb") as f:
-        f.seek(-1, os.SEEK_END)
-        return f.read(1) == b"\n"
+    try:
+        return _fd_ends_with_newline(fd)
+    finally:
+        os.close(fd)
 
 
-def _is_under(path, root):
-    path = os.path.realpath(path)
-    root = os.path.realpath(root)
-    return os.path.commonpath([path, root]) == root and path != root
+def _write_all(fd, data):
+    view = memoryview(data)
+    while view:
+        n = os.write(fd, view)
+        view = view[n:]
 
 
-def _append_line(path, data):
-    if not _manifest_ends_with_newline(path):
-        raise FilelistError("マニフェストの最後の行に改行が無いので追記しない")
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-    with os.fdopen(fd, "ab") as f:
-        f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
+def _write_store(paths, name, data, sha):
+    """本体を Git の外の保存先に書き、書いたものの sha256 を照合する（5章）。"""
+    out_path = os.path.join(paths["store_dir"], name)
+    try:
+        fd = os.open(out_path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                     | os.O_CLOEXEC, 0o644)
+    except FileExistsError:
+        raise FilelistError("同じ名前のファイルが書く直前にできていた（上書きしない）") from None
+    except OSError:
+        raise FilelistError("本体の保存先に書けない") from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            raise FilelistError("本体が通常のファイルでない")
+        if (os.path.realpath(os.path.dirname(out_path)) != paths["store_dir"]
+                or _dir_id(paths["store_dir"]) != paths["ids"][2]):
+            raise FilelistError("本体の保存先が書くあいだに変わった")
+        _write_all(fd, data)
+        os.fsync(fd)
+        os.lseek(fd, 0, os.SEEK_SET)
+        h = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            h.update(chunk)
+        if h.hexdigest() != sha:
+            raise FilelistError("書いたファイルの sha256 が一致しない")
+    finally:
+        os.close(fd)
+    return out_path
 
 
-def run_acquisition(*, start_hook, result_hook, root, processed_dir, manifest_dir,
+def _append_manifest(paths, data):
+    try:
+        fd = _open_manifest(paths["manifest_path"], os.O_RDWR | os.O_APPEND | os.O_CREAT)
+    except FileNotFoundError:
+        raise FilelistError("マニフェストの保存先が追記のあいだに無くなった") from None
+    try:
+        if (os.path.realpath(paths["manifest_path"]) != paths["manifest_path"]
+                or _dir_id(paths["manifest_dir"]) != paths["ids"][1]):
+            raise FilelistError("マニフェストの保存先が追記のあいだに変わった")
+        if not _fd_ends_with_newline(fd):
+            raise FilelistError("マニフェストの最後の行に改行が無いので追記しない")
+        _write_all(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _local_markers(paths):
+    """マニフェストに入ってはいけない、手元のパスとユーザー名。"""
+    paths_out = {paths["root"], paths["store_dir"], paths["manifest_dir"],
+                 os.path.realpath(os.path.expanduser("~")), os.path.expanduser("~")}
+    users = set()
+    try:
+        users.add(getpass.getuser())
+    except Exception:
+        pass
+    users.add(os.path.basename(os.path.expanduser("~")))
+    return {p for p in paths_out if len(p) > 1}, {u for u in users if u}
+
+
+def _check_manifest_entry(entry, line, paths):
+    """マニフェストの行に、パス・ユーザー名・決めていない項目が無いことを確かめる。"""
+    if tuple(sorted(entry)) != MANIFEST_KEYS:
+        raise FilelistError("マニフェストの項目が決めた一覧と違う")
+    if not STORE_NAME_RE.match(entry["file_name"]):
+        raise FilelistError("マニフェストの file_name が決めた形でない")
+    validate_url(entry["source_url"])
+    text = line.decode("ascii")
+    local_paths, users = _local_markers(paths)
+    for p in local_paths:
+        if p in text:
+            raise FilelistError("マニフェストの行に手元のパスがあるので書かない")
+    # ユーザー名は、16進の値（sha256 など）と偶然に重なりうるので、文字列の項目だけで調べる
+    for key in ("file_name", "fetched_at", "source_url"):
+        for u in users:
+            if u in entry[key]:
+                raise FilelistError("マニフェストの行にユーザー名があるので書かない")
+
+
+def run_acquisition(*, start_hook, result_hook, root, manifest_dir, store_dir=None,
                     url=MASTERFILELIST_URL, transport=urllib_transport,
                     sleep=time.sleep, clock=time.monotonic, now=_utc_now,
                     log=_stderr_log):
@@ -618,20 +813,19 @@ def run_acquisition(*, start_hook, result_hook, root, processed_dir, manifest_di
 
     start_hook(code_sha256=str, source_url=str) -> int（acquisition-start の seq）
     result_hook(start_seq=int, kept_rows_sha256=str) -> 何でもよい
-    root: マニフェストに書く相対パスの基準（プロジェクトのルート）
+    root: プロジェクトのルート。manifest_dir はこの下、store_dir はこの外（5章）
+    store_dir: 本体の保存先（Git の外）。None なら default_store_dir()
+    返り値の "path" は本体の絶対パス（呼び出し側に返すだけで、どこにも書かない）。
     """
     validate_url(url)
-    for d in (processed_dir, manifest_dir):
-        if not _is_under(d, root):
-            raise FilelistError("保存先が root の下に無い")
-    out_dir = os.path.join(processed_dir, PROCESSED_SUBDIR)
-    manifest_path = os.path.join(manifest_dir, MANIFEST_NAME)
+    if store_dir is None:
+        store_dir = default_store_dir()
+    paths = _resolve_paths(root, manifest_dir, store_dir)
     # 名前は一度だけ決め、前もっての確認と実際の書き込みに同じものを使う
     name = "masterfilelist-kept-%s.tsv" % _stamp(now())
-    out_path = os.path.join(out_dir, name)
-    if os.path.lexists(out_path):
+    if os.path.lexists(os.path.join(paths["store_dir"], name)):
         raise FilelistError("同じ名前のファイルが既にある（上書きしない）")
-    if not _manifest_ends_with_newline(manifest_path):
+    if not _manifest_ends_with_newline(paths["manifest_path"]):
         raise FilelistError("マニフェストの最後の行に改行が無いので取得しない")
 
     code_hash = code_sha256()
@@ -654,38 +848,34 @@ def run_acquisition(*, start_hook, result_hook, root, processed_dir, manifest_di
     data = serialize_rows(rows)
     sha = hashlib.sha256(data).hexdigest()
 
-    os.makedirs(out_dir, exist_ok=True)
-    rel = os.path.relpath(out_path, root).replace(os.sep, "/")
     entry = {
-        "file": rel,
+        "file_name": name,
         "sha256": sha,
+        "kept_rows": len(rows),
         "fetched_at": _iso(fetched_at),
         "source_url": url,
-        "kept_rows": len(rows),
-        "code_sha256": code_hash,
         "acquisition_start_seq": seq,
+        "code_sha256": code_hash,
     }
     manifest_line = (json.dumps(entry, sort_keys=True, ensure_ascii=True) + "\n").encode("ascii")
 
     _check_no_address(data, "一覧")
     _check_no_address(manifest_line, "マニフェストの行")
-    try:
-        _write_exclusive(out_path, data)
-    except FileExistsError:
-        raise FilelistError("同じ名前のファイルが書く直前にできていた（上書きしない）") from None
-    with open(out_path, "rb") as f:
-        if hashlib.sha256(f.read()).hexdigest() != sha:
-            raise FilelistError("書いたファイルの sha256 が一致しない")
-    os.makedirs(manifest_dir, exist_ok=True)
-    _append_line(manifest_path, manifest_line)
+    # 書く直前にもう一度確かめる。取得の前と違えば書かない
+    if _resolve_paths(root, manifest_dir, store_dir) != paths:
+        raise FilelistError("保存先が取得のあいだに変わったので書かない")
+    _check_manifest_entry(entry, manifest_line, paths)
+    out_path = _write_store(paths, name, data, sha)
+    _append_manifest(paths, manifest_line)
 
     log("残した行：%d 件（2020-12-14 以前と判定できた行のうち、形式の合うもの）" % len(rows))
     log("形式の合わない行：%d 件（2020-12-14 以前と判定できた行のうち）" % rejected)
-    log("保存：%s sha256=%s" % (rel, sha))
+    log("保存：%s sha256=%s（本体は Git の外）" % (name, sha))
 
     result_hook(start_seq=seq, kept_rows_sha256=sha)
     return {
         "path": out_path,
+        "file_name": name,
         "kept_rows_sha256": sha,
         "kept_rows": len(rows),
         "rejected_rows": rejected,

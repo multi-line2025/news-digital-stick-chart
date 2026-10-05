@@ -1,7 +1,19 @@
-"""GDELT のファイル一覧の取得（src/collector/filelist.py）のテスト。T-010。
+"""GDELT のファイル一覧の取得（src/collector/filelist.py）のテスト。T-010、T-012。
 
 実行（プロジェクトのルートで。__pycache__ を作らないよう、必ず次の形で）:
     PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/collector -v
+
+書き込みと出力の見張りは二段ある。
+  - 子プロセスの見張り（ChildRun、filelist_child.py）：取得の本体を子プロセスで動かし、
+    sys.addaudithook で書き込みのモードの open・os.mkdir・os.symlink・os.rename・
+    subprocess.Popen・os.system・os.posix_spawn・sqlite3.connect・ctypes.dlopen ほか
+    （filelist_child.BLOCKED_EVENTS）を止める。許すのは本体の保存先のファイルとマニフェストへの
+    書き込みだけ。stdout・stderr（記述子 1・2）は親がパイプで受け取って比べる。
+    2020-12-15 以降の行が出ないことの検査（TestPostCutoffInvisible）と、監査 B-2 の変異の検査
+    （TestChildGuard）は、この形で動かす。
+  - 同じプロセスの見張り（IOGuard）：それ以外のテスト（再試行・フックの順番・保存先の確認など）
+    で使う補助。builtins.open・io.open・os.open と tempfile の関数だけを差し替えるので、
+    _io.FileIO・os.makedirs・os.symlink・subprocess・sqlite3 などの経路は見ていない。
 
 ネットワークは使わない。モジュールの読み込みの時点で socket の接続を塞ぎ、
 通信を試みたら失敗するようにしている。通信の部分は、作った見本の一覧を返す
@@ -34,6 +46,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT = os.path.dirname(os.path.dirname(HERE))
 SRC = os.path.join(PROJECT, "src", "collector")
 PRIVACY_SCRIPT = os.path.join(SRC, "privacy_scan.py")
+CHILD_SCRIPT = os.path.join(HERE, "filelist_child.py")
 
 
 def _load(name, path):
@@ -258,6 +271,9 @@ class IOGuard:
     - builtins.open、io.open、os.open を差し替え、書き込みのモードで開くのは allowed の
       パスだけを許す。それ以外は GuardViolation にし、violations にも記録する。
     - tempfile の関数は、呼ばれた時点で GuardViolation にする。
+
+    見ていない経路：_io.FileIO、os.makedirs・os.mkdir、os.symlink、os.rename、subprocess、
+    sqlite3、ctypes など。これらは子プロセスの見張り（ChildRun）で止める。
     """
 
     TEMPFILE_FUNCS = ("mkstemp", "mkdtemp", "NamedTemporaryFile", "TemporaryFile",
@@ -331,11 +347,29 @@ class IOGuard:
                 "violations": list(self.violations)}
 
 
+def written_files(**dirs):
+    found = {}
+    for label, top in dirs.items():
+        for d, subdirs, files in os.walk(top):
+            for f in files + [x for x in subdirs if os.path.islink(os.path.join(d, x))]:
+                p = os.path.join(d, f)
+                key = "%s/%s" % (label, os.path.relpath(p, top).replace(os.sep, "/"))
+                if os.path.islink(p):
+                    found[key] = ("link", os.readlink(p))
+                else:
+                    with open(p, "rb") as fh:
+                        found[key] = fh.read()
+    return found
+
+
 class RunCase(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp(prefix="filelist-")
-        self.processed = os.path.join(self.root, "data", "processed")
         self.manifest_dir = os.path.join(self.root, "data", "manifest")
+        os.makedirs(self.manifest_dir)
+        # 本体の保存先は root の外（Git の外）
+        self.store = tempfile.mkdtemp(prefix="filelist-store-")
+        self._store_tmp = self.store  # テストが self.store を差し替えても、これを片付ける
         self.logs = []
         self.sleeps = []
         self.events = []
@@ -343,14 +377,18 @@ class RunCase(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.root, ignore_errors=True)
+        shutil.rmtree(self._store_tmp, ignore_errors=True)
 
     def sleep(self, s):
         self.sleeps.append(s)
         self.clock.t += s
 
     def expected_path(self, t):
-        return os.path.join(self.processed, filelist.PROCESSED_SUBDIR,
+        return os.path.join(os.path.realpath(self.store),
                             "masterfilelist-kept-%s.tsv" % t.strftime("%Y%m%dT%H%M%SZ"))
+
+    def manifest_path(self):
+        return os.path.join(self.manifest_dir, filelist.MANIFEST_NAME)
 
     def run_acq(self, transport, rec=None, now=FIXED_NOW, url=filelist.MASTERFILELIST_URL,
                 guard=True):
@@ -363,14 +401,13 @@ class RunCase(unittest.TestCase):
         times = list(now) if isinstance(now, list) else None
         first = times[0] if times else now
         now_fn = (lambda: times.pop(0)) if times else (lambda: now)
-        allowed = [self.expected_path(first),
-                   os.path.join(self.manifest_dir, filelist.MANIFEST_NAME)]
+        allowed = [self.expected_path(first), self.manifest_path()]
         self.guard = IOGuard(allowed) if guard else None
 
         def call():
             return filelist.run_acquisition(
                 start_hook=rec.start, result_hook=rec.result, root=self.root,
-                processed_dir=self.processed, manifest_dir=self.manifest_dir, url=url,
+                manifest_dir=self.manifest_dir, store_dir=self.store, url=url,
                 transport=transport, sleep=self.sleep, clock=self.clock,
                 now=now_fn, log=self.logs.append)
 
@@ -386,14 +423,11 @@ class RunCase(unittest.TestCase):
         return out, rec
 
     def all_written(self):
-        """root の下に書かれたすべてのファイル（相対パス → 中身）。"""
-        found = {}
-        for d, _, files in os.walk(self.root):
-            for f in files:
-                p = os.path.join(d, f)
-                with open(p, "rb") as fh:
-                    found[os.path.relpath(p, self.root)] = fh.read()
-        return found
+        """root と本体の保存先の下のすべてのファイル（"root/…"・"store/…" → 中身）。
+
+        シンボリックリンクは辿らず、リンクとして記録する。
+        """
+        return written_files(root=self.root, store=self.store)
 
 
 # --- テスト本体 ---------------------------------------------------------------
@@ -606,24 +640,28 @@ class TestAcquisition(RunCase):
             sha = hashlib.sha256(f.read()).hexdigest()
         self.assertEqual(out["kept_rows_sha256"], sha)
         self.assertEqual(rec.result_args, [{"start_seq": 7, "kept_rows_sha256": sha}])
-        with open(os.path.join(self.manifest_dir, filelist.MANIFEST_NAME), "rb") as f:
+        with open(self.manifest_path(), "rb") as f:
             entries = [json.loads(l) for l in f.read().splitlines()]
         self.assertEqual(len(entries), 1)
         e = entries[0]
         self.assertEqual(e["sha256"], sha)
+        self.assertEqual(e["kept_rows"], len(PRE_ROWS))
         self.assertEqual(e["source_url"], filelist.MASTERFILELIST_URL)
         self.assertEqual(e["fetched_at"], "2026-10-07T01:02:03Z")
         self.assertEqual(e["acquisition_start_seq"], 7)
         self.assertEqual(e["code_sha256"], filelist.code_sha256())
-        self.assertEqual(os.path.join(self.root, *e["file"].split("/")), out["path"])
-        self.assertTrue(e["file"].startswith("data/processed/gdelt-filelist/"))
+        self.assertEqual(e["file_name"], os.path.basename(out["path"]))
+        self.assertEqual(out["path"], self.expected_path(FIXED_NOW))
+        with open(out["path"], "rb") as f:
+            self.assertEqual(len(f.read().splitlines()), e["kept_rows"] + 1)  # 見出しの1行
 
     def test_saved_items_are_allowlist_only(self):
         out, _ = self.run_acq(FakeTransport(FakeResponse(build_list(post_rows(5)))))
         written = self.all_written()
-        self.assertEqual(len(written), 2)
+        self.assertEqual(sorted(written), ["root/data/manifest/" + filelist.MANIFEST_NAME,
+                                           "store/" + os.path.basename(out["path"])])
         for rel, data in written.items():
-            if rel.startswith(os.path.join("data", "manifest")):
+            if rel.startswith("root/"):
                 # マニフェストに入る URL は、取得元（データ源）の URL の1件だけ
                 self.assertEqual(data.count(b"http"), 1, rel)
                 self.assertIn(filelist.MASTERFILELIST_URL.encode(), data)
@@ -639,14 +677,78 @@ class TestAcquisition(RunCase):
             self.assertRegex(size, r"\A\d+\Z")
             self.assertRegex(md5, r"\A[0-9a-f]{32}\Z")
         # マニフェストの URL は取得元（データ源）の URL だけ
-        with open(os.path.join(self.manifest_dir, filelist.MANIFEST_NAME)) as f:
+        with open(self.manifest_path()) as f:
             e = json.loads(f.readline())
-        self.assertEqual(set(e), {"file", "sha256", "fetched_at", "source_url", "kept_rows",
-                                  "code_sha256", "acquisition_start_seq"})
+        self.assertEqual(set(e), {"file_name", "sha256", "fetched_at", "source_url",
+                                  "kept_rows", "code_sha256", "acquisition_start_seq"})
+        self.assertEqual(tuple(sorted(e)), filelist.MANIFEST_KEYS)
 
 
-class TestPostCutoffInvisible(RunCase):
-    """2020-12-15 以降の行が、ディスク・出力・ログ・フックの引数のどこにも出ないこと。"""
+class ChildRun:
+    """取得の本体を子プロセス（filelist_child.py）で、audit hook の見張りの下で1回動かす。
+
+    root（data/manifest を持つ）と本体の保存先 store と、変異の書き込み先 outside を、
+    それぞれ新しい一時フォルダに作る。返り値の "files" は root・store・outside の下の全ファイル。
+    """
+
+    def __init__(self, testcase):
+        self.tc = testcase
+
+    def __call__(self, responses, now=(FIXED_NOW,), mutation=None, seq=7,
+                 url=filelist.MASTERFILELIST_URL):
+        tops = {k: tempfile.mkdtemp(prefix="filelist-child-%s-" % k)
+                for k in ("root", "store", "outside")}
+        try:
+            manifest_dir = os.path.join(tops["root"], "data", "manifest")
+            os.makedirs(manifest_dir)
+            name = "masterfilelist-kept-%s.tsv" % now[0].strftime("%Y%m%dT%H%M%SZ")
+            report = tempfile.TemporaryFile()
+            try:
+                cfg = {
+                    "report_fd": report.fileno(),
+                    "filelist_path": os.path.join(SRC, "filelist.py"),
+                    "root": tops["root"], "manifest_dir": manifest_dir,
+                    "store_dir": tops["store"], "outside": tops["outside"], "url": url,
+                    "allowed": [os.path.join(tops["store"], name),
+                                os.path.join(manifest_dir, filelist.MANIFEST_NAME)],
+                    "responses": [self._spec(r) for r in responses],
+                    "now": [t.isoformat() for t in now], "mutation": mutation, "seq": seq,
+                }
+                env = {k: v for k, v in os.environ.items() if k != filelist.STORE_ENV}
+                env["PYTHONDONTWRITEBYTECODE"] = "1"
+                proc = subprocess.run([sys.executable, "-B", CHILD_SCRIPT],
+                                      input=json.dumps(cfg).encode(), stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE, pass_fds=(report.fileno(),),
+                                      env=env, timeout=120)
+                report.seek(0)
+                raw = report.read()
+            finally:
+                report.close()
+            self.tc.assertEqual(proc.returncode, 0, proc.stderr.decode(errors="replace"))
+            rep = json.loads(raw)
+            return {"report": rep, "stdout": proc.stdout, "stderr": proc.stderr,
+                    "files": written_files(**tops)}
+        finally:
+            for t in tops.values():
+                shutil.rmtree(t, ignore_errors=True)
+
+    @staticmethod
+    def _spec(r):
+        if isinstance(r, BaseException):
+            return {"exc": type(r).__name__}
+        return {"body": __import__("base64").b64encode(r._buf.getvalue()).decode("ascii"),
+                "status": r.status, "headers": dict(r.headers),
+                "fail_after": r._fail_after, "fail_at_eof": r._fail_at_eof}
+
+
+class TestPostCutoffInvisible(unittest.TestCase):
+    """2020-12-15 以降の行が、ディスク・出力・ログ・フックの引数のどこにも出ないこと。
+
+    取得は子プロセス（ChildRun）で、audit hook の見張りの下で動かす。
+    """
+
+    def setUp(self):
+        self.child = ChildRun(self)
 
     def markers(self, post):
         out = []
@@ -659,30 +761,17 @@ class TestPostCutoffInvisible(RunCase):
         return [m for m in out if len(m) >= 8]
 
     def observe(self, post, order="mixed"):
-        root_before = self.root
-        self.root = tempfile.mkdtemp(prefix="filelist-")
-        self.processed = os.path.join(self.root, "data", "processed")
-        self.manifest_dir = os.path.join(self.root, "data", "manifest")
-        self.logs = []
-        self.events = []
-        try:
-            out, rec = self.run_acq(FakeTransport(FakeResponse(build_list(post, order))))
-            files = self.all_written()
-            out = dict(out)
-            out["path"] = os.path.relpath(out["path"], self.root)
-            return {"files": files, "logs": list(self.logs), "out": out,
-                    "start": rec.start_args, "result": rec.result_args,
-                    "captured": self.guard.captured()}
-        finally:
-            shutil.rmtree(self.root, ignore_errors=True)
-            self.root = root_before
+        obs = self.child([FakeResponse(build_list(post, order))])
+        self.assertEqual(obs["report"]["violations"], [])
+        self.assertIsNone(obs["report"]["error"])
+        return obs
 
     def test_markers_absent(self):
         post = post_rows(200, salt="mark")
         obs = self.observe(post)
-        blob = b"\n".join(obs["files"].values())
-        text = ("\n".join(obs["logs"]) + repr(obs["out"]) + repr(obs["start"])
-                + repr(obs["result"])).encode()
+        blob = b"\n".join(v for v in obs["files"].values() if isinstance(v, bytes))
+        r = obs["report"]
+        text = (json.dumps(r, ensure_ascii=False).encode() + obs["stdout"] + obs["stderr"])
         for m in self.markers(post):
             with self.subTest(m=m):
                 self.assertNotIn(m, blob)
@@ -694,7 +783,12 @@ class TestPostCutoffInvisible(RunCase):
     def test_outputs_independent_of_post_cutoff_rows(self):
         """2020-12-15 以降の行の数や中身を変えても、出るものは1バイトも変わらない。
 
-        捨てた行の件数が、どこにも（ログ・返り値・ファイル・フックの引数）出ていないことの検査。
+        比べるもの：root・本体の保存先・変異の書き込み先の下の全ファイル（名前と中身）、
+        ログ、返り値、フックの引数、子プロセスの stdout・stderr（記述子 1・2 に書かれた
+        すべて）、audit hook の見張りの記録（許していない書き込みや操作の試み）。
+        子プロセスの記述子は 0・1・2 と結果を返す記述子だけで、ほかの記述子への出力の
+        経路は無い（filelist_child.py の「見張りの範囲」）。
+        捨てた行の件数が、これらのどこにも出ていないことの検査。
         """
         variants = [[], extreme_rows("e"), post_rows(0, "a"), post_rows(3, "b"),
                     post_rows(5000, "c")]
@@ -702,40 +796,35 @@ class TestPostCutoffInvisible(RunCase):
         observed.append(self.observe(post_rows(50, "d"), order="sorted"))
         for o in observed[1:]:
             self.assertEqual(o, observed[0])
+        self.assertEqual(observed[0]["stdout"], b"")
+        self.assertEqual(observed[0]["stderr"], b"")
 
     def test_errors_do_not_reveal(self):
         """失敗したときの例外の文とログにも、2020-12-15 以降の行が出ない。"""
         post = post_rows(20, salt="err")
         body = build_list(post, order="sorted")
-        tr = FakeTransport(*[FakeResponse(body, fail_after=len(body.splitlines()) - 3)
-                             for _ in range(filelist.MAX_ATTEMPTS)])
-        with self.assertRaises(filelist.FilelistError) as cm:
-            self.run_acq(tr)
-        cap = self.guard.captured()
-        text = (str(cm.exception) + "\n".join(self.logs) + cap["stdout"]
-                + cap["stderr"]).encode() + cap["fd"]
+        obs = self.child([FakeResponse(body, fail_after=len(body.splitlines()) - 3)
+                          for _ in range(filelist.MAX_ATTEMPTS)])
+        r = obs["report"]
+        self.assertEqual(r["error"][0], "FilelistError")
+        self.assertEqual(r["violations"], [])
+        text = json.dumps(r, ensure_ascii=False).encode() + obs["stdout"] + obs["stderr"]
         for m in self.markers(post):
             self.assertNotIn(m, text)
-        self.assertEqual(self.all_written(), {})
+        self.assertEqual(obs["files"], {})
 
     def observe_error(self, post):
         """読みの途中で失敗する取得を動かし、外に出たもの（例外の文を含む）を返す。"""
-        self.logs = []
-        self.events = []
         body = build_list(post, order="sorted")
         # すべての行を読んだあと、終わりの直前で通信が切れる（3回とも）
-        tr = FakeTransport(*[FakeResponse(body, fail_at_eof=True)
-                             for _ in range(filelist.MAX_ATTEMPTS)])
-        self.sleeps = []
-        self.clock = FakeClock()
-        with self.assertRaises(filelist.FilelistError) as cm:
-            self.run_acq(tr)
-        return {"exc": str(cm.exception), "logs": list(self.logs), "events": list(self.events),
-                "sleeps": list(self.sleeps), "captured": self.guard.captured(),
-                "files": self.all_written()}
+        obs = self.child([FakeResponse(body, fail_at_eof=True)
+                          for _ in range(filelist.MAX_ATTEMPTS)])
+        self.assertEqual(obs["report"]["error"][0], "FilelistError")
+        return obs
 
     def test_error_outputs_independent_of_post_cutoff_rows(self):
-        """失敗した場合も、出るもの（例外の文を含む）は 2020-12-15 以降の行で変わらない。"""
+        """失敗した場合も、出るもの（例外の文、stdout・stderr を含む）は 2020-12-15 以降の行で
+        変わらない。"""
         obs = [self.observe_error(p) for p in
                ([], extreme_rows("f"), post_rows(10, "g"), post_rows(300, "h"))]
         for o in obs[1:]:
@@ -746,6 +835,307 @@ class TestPostCutoffInvisible(RunCase):
             self.assertFalse(filelist._is_kept_line(r.encode()))
         t = filelist.parse_file_time("99991231234501")
         self.assertEqual(filelist.file_day(t), datetime.date.max)
+
+
+class TestChildGuard(unittest.TestCase):
+    """子プロセスの見張りが、監査 B-2 の変異を捕まえること。"""
+
+    def setUp(self):
+        self.child = ChildRun(self)
+
+    def test_clean_run_has_no_violation(self):
+        obs = self.child([FakeResponse(build_list(post_rows(3)))])
+        r = obs["report"]
+        self.assertIsNone(r["error"])
+        self.assertEqual(r["violations"], [])
+        self.assertEqual(sorted(obs["files"]),
+                         ["root/data/manifest/" + filelist.MANIFEST_NAME,
+                          "store/" + r["out"]["file_name"]])
+        self.assertEqual((obs["stdout"], obs["stderr"]), (b"", b""))
+
+    def test_write_mutations_are_caught(self):
+        expected = {
+            "fileio": "open", "makedirs": "os.mkdir", "symlink": "os.symlink",
+            "rename": "os.rename", "subprocess": "subprocess.Popen", "system": "os.system",
+            "posix_spawn": "os.posix_spawn", "sqlite3": "sqlite3.connect",
+            "ctypes": "ctypes.dlopen", "open_append": "open", "os_open": "open",
+        }
+        for mutation, event in expected.items():
+            with self.subTest(mutation=mutation):
+                obs = self.child([FakeResponse(build_list(post_rows(2)))], mutation=mutation)
+                events = [v[0] for v in obs["report"]["violations"]]
+                self.assertIn(event, events)
+                # 変異の書き込み先には何もできていない
+                self.assertEqual([k for k in obs["files"] if k.startswith("outside/")], [])
+
+    def test_output_mutations_are_visible(self):
+        """stdout・記述子 2 への出力は、親が受け取るので、比べる検査で必ず差になる。"""
+        obs = self.child([FakeResponse(build_list([]))], mutation="print")
+        self.assertIn(b"MUTATION-STDOUT", obs["stdout"])
+        obs = self.child([FakeResponse(build_list([]))], mutation="stderr_fd")
+        self.assertIn(b"MUTATION-FD2", obs["stderr"])
+
+
+class TestStorageLocation(RunCase):
+    """本体は Git の外、リポジトリの中にはマニフェストだけ（T-012）。監査 B-3 の再現を拒む。"""
+
+    def outside_dir(self):
+        d = tempfile.mkdtemp(prefix="filelist-outside-")
+        self.addCleanup(shutil.rmtree, d, True)
+        return d
+
+    def refuse(self, before_start=True, **kw):
+        self.events.clear()
+        tr = kw.pop("transport", None) or FakeTransport(FakeResponse(build_list([])),
+                                                        events=self.events)
+        with self.assertRaises(filelist.FilelistError):
+            self.run_acq(tr, guard=False, **kw)
+        if before_start:
+            self.assertEqual(self.events, [])
+        self.assertNotIn("result", self.events)
+
+    def test_body_outside_git_only_manifest_inside(self):
+        os.makedirs(os.path.join(self.root, ".git"))  # root を Git の作業ツリーに見立てる
+        before = written_files(root=self.root)
+        out, _ = self.run_acq(FakeTransport(FakeResponse(build_list(post_rows(4)))))
+        after = written_files(root=self.root)
+        self.assertEqual(sorted(set(after) - set(before)),
+                         ["root/data/manifest/" + filelist.MANIFEST_NAME])
+        store = written_files(store=self.store)
+        self.assertEqual(sorted(store), ["store/" + out["file_name"]])
+        self.assertFalse(filelist._is_strictly_under(os.path.realpath(out["path"]),
+                                                     os.path.realpath(self.root)))
+        with open(self.manifest_path()) as f:
+            lines = f.read().splitlines()
+        self.assertEqual(len(lines), 1)
+        e = json.loads(lines[0])
+        self.assertEqual(e["file_name"], out["file_name"])
+        self.assertEqual(e["sha256"], hashlib.sha256(store["store/" + out["file_name"]])
+                         .hexdigest())
+
+    def test_default_store_dir_is_outside_project(self):
+        """既定は Path.home() / "news-stick-data" / "gdelt-filelist"（オーナーの決定）。
+
+        実際のホームには触れない。Path.home を一時フォルダに差し替えて確かめる。
+        """
+        fake_home = self.outside_dir()
+        with mock.patch.object(filelist.pathlib.Path, "home",
+                               classmethod(lambda cls: cls(fake_home))):
+            d = filelist.default_store_dir({})
+        self.assertEqual(d, os.path.join(fake_home, "news-stick-data", "gdelt-filelist"))
+        with open(os.path.join(SRC, "filelist.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn('DEFAULT_STORE_PARTS = ("news-stick-data", "gdelt-filelist")', src)
+        self.assertIn("pathlib.Path.home().joinpath(*DEFAULT_STORE_PARTS)", src)
+        # 実際の既定（書かずに場所だけ計算する）も、プロジェクトの外
+        d = filelist.default_store_dir({})
+        real_project = os.path.realpath(PROJECT)
+        self.assertFalse(filelist._is_strictly_under(os.path.realpath(d), real_project))
+        self.assertNotEqual(os.path.realpath(d), real_project)
+        self.assertNotIn(os.path.join("data", "raw"), d)
+        self.assertEqual(filelist.default_store_dir({filelist.STORE_ENV: "/x/y"}), "/x/y")
+
+    def test_default_store_dir_used_when_none(self):
+        """store_dir も環境変数も無いときは既定の場所に書く（Path.home を一時フォルダに差し替え）。"""
+        fake_home = self.outside_dir()
+        default = os.path.join(fake_home, "news-stick-data", "gdelt-filelist")
+        os.makedirs(default)
+        self.store = None
+        rec = Recorder(self.events)
+        env = {k: v for k, v in os.environ.items() if k != filelist.STORE_ENV}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(filelist.pathlib.Path, "home",
+                                  classmethod(lambda cls: cls(fake_home))):
+            out = filelist.run_acquisition(
+                start_hook=rec.start, result_hook=rec.result, root=self.root,
+                manifest_dir=self.manifest_dir,
+                transport=FakeTransport(FakeResponse(build_list([]))), sleep=self.sleep,
+                clock=self.clock, now=lambda: FIXED_NOW, log=self.logs.append)
+        self.assertEqual(os.path.dirname(out["path"]), os.path.realpath(default))
+        self.assertEqual(os.listdir(default), [out["file_name"]])
+
+    def test_store_dir_from_env(self):
+        rec = Recorder(self.events)
+        with mock.patch.dict(os.environ, {filelist.STORE_ENV: self.store}):
+            out = filelist.run_acquisition(
+                start_hook=rec.start, result_hook=rec.result, root=self.root,
+                manifest_dir=self.manifest_dir,
+                transport=FakeTransport(FakeResponse(build_list([]))), sleep=self.sleep,
+                clock=self.clock, now=lambda: FIXED_NOW, log=self.logs.append)
+        self.assertEqual(out["path"], self.expected_path(FIXED_NOW))
+
+    def test_store_under_root_refused(self):
+        raw = os.path.join(self.root, "data", "raw")
+        os.makedirs(raw)
+        for store in (raw, self.root, os.path.join(self.root, "data")):
+            with self.subTest(store=store):
+                self.store = store
+                self.refuse()
+        self.assertEqual(written_files(root=self.root), {})
+
+    def test_store_symlink_into_root_refused(self):
+        """保存先をリンクで root の中に向けても、realpath で比べるので拒む。"""
+        raw = os.path.join(self.root, "data", "raw")
+        os.makedirs(raw)
+        link = os.path.join(self.outside_dir(), "store-link")
+        os.symlink(raw, link)
+        self.store = link
+        self.refuse()
+        self.assertEqual(os.listdir(raw), [])
+
+    def test_store_inside_git_worktree_refused(self):
+        other = self.outside_dir()
+        for git in ("dir", "file"):
+            with self.subTest(git=git):
+                repo = tempfile.mkdtemp(prefix="filelist-repo-", dir=other)
+                g = os.path.join(repo, ".git")
+                if git == "dir":
+                    os.makedirs(g)
+                else:
+                    with open(g, "w") as f:
+                        f.write("gitdir: elsewhere\n")
+                self.store = os.path.join(repo, "a", "b")
+                os.makedirs(self.store)
+                self.refuse()
+
+    def test_missing_store_dir_refused(self):
+        """保存先のフォルダは作らない（無ければ取得の前に止まる）。"""
+        self.store = os.path.join(self.outside_dir(), "missing")
+        self.refuse()
+        self.assertFalse(os.path.lexists(self.store))
+
+    def test_manifest_dir_outside_root_refused(self):
+        outside = self.outside_dir()
+        self.manifest_dir = outside
+        self.refuse()
+        self.assertEqual(os.listdir(outside), [])
+
+    def test_manifest_dir_symlink_to_outside_refused(self):
+        """監査 B-3 の再現：root の中のリンクで、マニフェストのフォルダを root の外に向ける。"""
+        outside = self.outside_dir()
+        link = os.path.join(self.root, "data", "manifest-link")
+        os.symlink(outside, link)
+        self.manifest_dir = link
+        self.refuse()
+        self.assertEqual(os.listdir(outside), [])
+
+    def test_manifest_file_symlink_refused(self):
+        """監査 B-3 の再現：マニフェストのファイルを root の外へのリンクにする。"""
+        target = os.path.join(self.outside_dir(), "victim.jsonl")
+        with open(target, "wb") as f:
+            f.write(b'{"old": 1}\n')
+        os.symlink(target, self.manifest_path())
+        self.refuse()
+        with open(target, "rb") as f:
+            self.assertEqual(f.read(), b'{"old": 1}\n')
+        self.assertEqual(os.listdir(self.store), [])
+
+    def test_manifest_file_swapped_to_symlink_during_fetch(self):
+        """取得のあいだにマニフェストがリンクになっても、O_NOFOLLOW で追記しない。"""
+        target = os.path.join(self.outside_dir(), "victim.jsonl")
+        with open(target, "wb") as f:
+            f.write(b'{"old": 1}\n')
+
+        def transport(url, timeout):
+            os.symlink(target, self.manifest_path())
+            return FakeResponse(build_list([]))
+
+        self.refuse(before_start=False, transport=transport)
+        with open(target, "rb") as f:
+            self.assertEqual(f.read(), b'{"old": 1}\n')
+        self.assertTrue(os.path.islink(self.manifest_path()))
+
+    def test_store_link_repointed_during_fetch(self):
+        """取得のあいだに保存先のリンクを root の中に向け直しても、書く直前の確認で止まる。"""
+        real_store = self.store
+        raw = os.path.join(self.root, "data", "raw")
+        os.makedirs(raw)
+        link = os.path.join(self.outside_dir(), "store-link")
+        os.symlink(real_store, link)
+        self.store = link
+
+        def transport(url, timeout):
+            tmp = link + ".new"
+            os.symlink(raw, tmp)
+            os.replace(tmp, link)
+            return FakeResponse(build_list([]))
+
+        self.refuse(before_start=False, transport=transport)
+        self.assertEqual(os.listdir(raw), [])
+        self.assertEqual(os.listdir(real_store), [])
+        self.assertFalse(os.path.exists(self.manifest_path()))
+
+    def test_planned_name_is_symlink_refused(self):
+        """本体の名前に、保存先の外へのリンクが置かれていたら、辿らずに止まる。"""
+        target = os.path.join(self.outside_dir(), "victim.tsv")
+        with open(target, "wb") as f:
+            f.write(b"victim\n")
+        os.symlink(target, self.expected_path(FIXED_NOW))
+        self.refuse()
+
+        def transport(url, timeout):  # 書く直前にリンクが置かれる場合
+            return FakeResponse(build_list([]))
+        os.replace(self.expected_path(FIXED_NOW), os.path.join(self.store, "moved-link"))
+
+        def racing(url, timeout):
+            os.symlink(target, self.expected_path(FIXED_NOW))
+            return transport(url, timeout)
+
+        self.refuse(before_start=False, transport=racing)
+        with open(target, "rb") as f:
+            self.assertEqual(f.read(), b"victim\n")
+        self.assertFalse(os.path.exists(self.manifest_path()))
+
+    def test_manifest_has_no_abs_path_or_username(self):
+        out, _ = self.run_acq(FakeTransport(FakeResponse(build_list(post_rows(2)))))
+        with open(self.manifest_path(), "rb") as f:
+            line = f.read().decode("ascii")
+        e = json.loads(line)
+        home = os.path.expanduser("~")
+        for p in (self.root, os.path.realpath(self.root), self.store,
+                  os.path.realpath(self.store), home, os.path.realpath(home), out["path"]):
+            self.assertNotIn(p, line)
+        users = {os.path.basename(home)}
+        try:
+            users.add(__import__("getpass").getuser())
+        except Exception:
+            pass
+        for key in ("file_name", "fetched_at", "source_url"):
+            for u in users:
+                self.assertNotIn(u, e[key])
+        # パスの区切りが出るのは、取得元の URL の中だけ
+        self.assertNotIn("/", e["file_name"])
+        self.assertNotIn(os.sep, json.dumps({k: v for k, v in e.items() if k != "source_url"}))
+        self.assertRegex(e["file_name"], filelist.STORE_NAME_RE)
+
+    def test_manifest_check_refuses_local_info(self):
+        paths = filelist._resolve_paths(self.root, self.manifest_dir, self.store)
+        good = {"file_name": "masterfilelist-kept-20261007T010203Z.tsv", "sha256": "0" * 64,
+                "kept_rows": 1, "fetched_at": "2026-10-07T01:02:03Z",
+                "source_url": filelist.MASTERFILELIST_URL, "acquisition_start_seq": 1,
+                "code_sha256": "0" * 64}
+
+        def line(e):
+            return (json.dumps(e, sort_keys=True) + "\n").encode("ascii")
+
+        filelist._check_manifest_entry(good, line(good), paths)
+        bad_entries = [
+            dict(good, file_name=os.path.join(paths["store_dir"], good["file_name"])),
+            dict(good, file_name="../" + good["file_name"]),
+            dict(good, extra=paths["store_dir"]),
+            dict(good, source_url="https://gdeltcloud.com/gdeltv2/masterfilelist.txt"),
+        ]
+        for e in bad_entries:
+            with self.subTest(e=e):
+                with self.assertRaises(filelist.FilelistError):
+                    filelist._check_manifest_entry(e, line(e), paths)
+        # 決めた項目の中に手元のパスが紛れた場合（行の文字列で調べる）
+        with self.assertRaises(filelist.FilelistError):
+            filelist._check_manifest_entry(good, line(good)[:-1] + paths["root"].encode()
+                                           + b"\n", paths)
+        with mock.patch.object(filelist.getpass, "getuser", lambda: "kept"):
+            with self.assertRaises(filelist.FilelistError):
+                filelist._check_manifest_entry(good, line(good), paths)
 
 
 class TestHookOrder(RunCase):
@@ -790,7 +1180,7 @@ class TestHookOrder(RunCase):
 
     def test_hooks_are_required(self):
         with self.assertRaises(TypeError):
-            filelist.run_acquisition(root=self.root, processed_dir=self.processed,
+            filelist.run_acquisition(root=self.root, store_dir=self.store,
                                      manifest_dir=self.manifest_dir,
                                      transport=FakeTransport())
 
@@ -816,7 +1206,6 @@ class TestHookOrder(RunCase):
     def test_existing_file_with_planned_name(self):
         """前もっての確認と書き込みで同じ名前を使う（後の時刻の名前が既にあっても関係ない）。"""
         t1, t2 = FIXED_NOW, FIXED_NOW + datetime.timedelta(minutes=7)
-        os.makedirs(os.path.dirname(self.expected_path(t1)))
         with open(self.expected_path(t2), "wb") as f:
             f.write(b"other\n")
         out, _ = self.run_acq(FakeTransport(FakeResponse(build_list([]))), now=[t1, t2])
@@ -834,7 +1223,6 @@ class TestHookOrder(RunCase):
         path = self.expected_path(FIXED_NOW)
 
         def racing_transport(url, timeout):
-            os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "wb") as f:
                 f.write(b"racer\n")
             return FakeResponse(build_list([]))
@@ -845,32 +1233,8 @@ class TestHookOrder(RunCase):
             self.assertEqual(f.read(), b"racer\n")
         self.assertNotIn("result", self.events)
 
-    def test_dirs_must_be_under_root(self):
-        outside = tempfile.mkdtemp(prefix="filelist-outside-")
-        try:
-            for attr in ("processed", "manifest_dir"):
-                with self.subTest(attr=attr):
-                    saved = getattr(self, attr)
-                    setattr(self, attr, outside)
-                    self.events.clear()
-                    tr = FakeTransport(FakeResponse(build_list([])), events=self.events)
-                    try:
-                        with self.assertRaises(filelist.FilelistError):
-                            self.run_acq(tr, guard=False)
-                    finally:
-                        setattr(self, attr, saved)
-                    self.assertEqual(self.events, [])
-            self.assertEqual(os.listdir(outside), [])
-        finally:
-            shutil.rmtree(outside, ignore_errors=True)
-        # root を含む上の階層への抜け道（..）も拒む
-        self.processed = os.path.join(self.root, "..")
-        with self.assertRaises(filelist.FilelistError):
-            self.run_acq(FakeTransport(), guard=False)
-
     def test_manifest_without_trailing_newline(self):
-        os.makedirs(self.manifest_dir)
-        mpath = os.path.join(self.manifest_dir, filelist.MANIFEST_NAME)
+        mpath = self.manifest_path()
         with open(mpath, "wb") as f:
             f.write(b'{"a": 1}')
         tr = FakeTransport(FakeResponse(build_list([])), events=self.events)
@@ -882,8 +1246,7 @@ class TestHookOrder(RunCase):
 
     def test_manifest_newline_checked_again_before_append(self):
         """取得のあいだに改行の無い行が足された場合も、追記しない。"""
-        os.makedirs(self.manifest_dir)
-        mpath = os.path.join(self.manifest_dir, filelist.MANIFEST_NAME)
+        mpath = self.manifest_path()
 
         def transport(url, timeout):
             with open(mpath, "ab") as f:
@@ -907,7 +1270,7 @@ class TestHookOrder(RunCase):
         path = self.expected_path(FIXED_NOW)
         with open(path, "rb") as f:
             sha = hashlib.sha256(f.read()).hexdigest()
-        with open(os.path.join(self.manifest_dir, filelist.MANIFEST_NAME)) as f:
+        with open(self.manifest_path()) as f:
             e = json.loads(f.readline())
         self.assertEqual(e["acquisition_start_seq"], 11)
         self.assertEqual(e["sha256"], sha)
@@ -915,7 +1278,7 @@ class TestHookOrder(RunCase):
 
     def test_manifest_is_append_only(self):
         self.run_acq(FakeTransport(FakeResponse(build_list([]))))
-        mpath = os.path.join(self.manifest_dir, filelist.MANIFEST_NAME)
+        mpath = self.manifest_path()
         with open(mpath, "rb") as f:
             first = f.read()
         later = FIXED_NOW + datetime.timedelta(hours=1)
@@ -1046,9 +1409,10 @@ class TestPrivacy(RunCase):
         self.run_acq(FakeTransport(FakeResponse(build_list(post_rows(10)))))
         with open(os.path.join(self.root, "run.log"), "w", encoding="utf-8") as f:
             f.write("\n".join(self.logs) + "\n")
-        proc = subprocess.run([sys.executable, "-B", PRIVACY_SCRIPT, "--root", self.root],
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        for top in (self.root, self.store):
+            proc = subprocess.run([sys.executable, "-B", PRIVACY_SCRIPT, "--root", top],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
     def test_refuses_to_write_address(self):
         a = self.make_address()
@@ -1059,7 +1423,7 @@ class TestPrivacy(RunCase):
         self.assertEqual(self.all_written(), {})
 
     def test_source_has_no_address(self):
-        for p in (os.path.join(SRC, "filelist.py"), os.path.abspath(__file__)):
+        for p in (os.path.join(SRC, "filelist.py"), os.path.abspath(__file__), CHILD_SCRIPT):
             with open(p, "rb") as f:
                 self.assertEqual(privacy_scan.find_in_bytes(f.read()), {}, p)
 
