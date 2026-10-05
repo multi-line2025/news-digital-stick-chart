@@ -10,8 +10,9 @@
   2. src/stats/periods.py を実行し、出力（標準出力の JSON）のバイト列を得る。
   3. 出力の sha256 が --expect-output-sha256 と一致することを確かめる。
   4. 封印の時機の検査
-     - periods の最初の版：データの取得が始まっていないこと（下の DATA_DIRS に .gitkeep
-       以外のファイルが無く、data/raw が無いこと）。試運転の手順3より前に封印するため。
+     - periods の最初の版：data/ の下（.gitignore の対象の data/raw も含む、すべての
+       サブフォルダ）に .gitkeep 以外のファイルが無いこと。試運転の手順3より前に封印するため。
+       調べるのはこのリポジトリの data/ の下だけで、Git の外の置き場は調べられない。
      - 後の版：区画の境目（block_start・block_end）が、最初の版の出力と一致すること。
   5. 出力を sealed/periods-output-<sha256>.json として書く（新しいファイル。上書きしない）。
   6. 4 つの対象の sha256 を記録に 1 件追記する。
@@ -42,9 +43,8 @@ SOURCES = (
     ("src/stats/periods.py", "code"),
     ("tests/stats/test_periods.py", "test"),
 )
-# データの取得が始まると、ここにファイルが入る（収集係の置き場）。
-DATA_DIRS = ("data/manifest", "data/processed", "data/archives")
-RAW_DIR = "data/raw"
+# データの取得が始まると、この下にファイルが入る（収集係の置き場と、Git の外の data/raw）。
+DATA_ROOT = "data"
 
 
 def run_periods(project, extra_args):
@@ -57,18 +57,18 @@ def run_periods(project, extra_args):
 
 
 def data_started(project):
-    """データの取得が始まった跡があれば、その場所の一覧を返す。"""
+    """data/ の下に .gitkeep 以外のファイル（またはそれ以外の項目）があれば、その一覧を返す。"""
     found = []
-    if os.path.exists(os.path.join(project, RAW_DIR)):
-        found.append(RAW_DIR)
-    for d in DATA_DIRS:
-        full = os.path.join(project, d)
-        if not os.path.isdir(full):
-            continue
-        for root, _dirs, files in os.walk(full):
-            for name in files:
-                if name != ".gitkeep":
-                    found.append(os.path.relpath(os.path.join(root, name), project))
+    full = os.path.join(project, DATA_ROOT)
+    if not os.path.isdir(full):
+        return found
+    for root, dirs, files in os.walk(full, followlinks=False):
+        for name in files:
+            if name != ".gitkeep":
+                found.append(os.path.relpath(os.path.join(root, name), project))
+        for name in dirs:
+            if os.path.islink(os.path.join(root, name)):
+                found.append(os.path.relpath(os.path.join(root, name), project))
     return found
 
 
@@ -80,7 +80,7 @@ def seal(project, expect_sha, extra_args, now, ots_cmd, runner=subprocess.run):
     data = ledger.read_ledger(ledger_path)
     records = ledger.verify_chain(data)
     if records:
-        ledger.check_anchors(data, sealed_dir, require_last=True)
+        ledger.check_anchors(data, sealed_dir)
     if ots_cmd is not None:
         stamp.check_ots(ots_cmd)
 

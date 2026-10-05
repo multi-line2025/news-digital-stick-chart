@@ -8,6 +8,8 @@
 - 壊さない複製では、すべての塊が終了コード 0 で終わり、記録の値が出力に現れること。
 - わざと壊した複製（記録の書き換え・記録の削除・.ots の削除・履歴の書き換え）では、
   同じ手順が失敗すること。
+- 検証のコード（src/sealer/）と手順書（docs/verify/）は、作業ツリーのものを複製に重ねる。
+  記録・時刻証明・対象のファイルは、コミットされたものだけを使う。
 - コミットがまだ無いときは、複製できないので飛ばす（理由を表示する）。
 """
 
@@ -51,6 +53,12 @@ class TestDocProcedure(unittest.TestCase):
         self.clone = os.path.join(self.tmp, "stick-chart-check")
         subprocess.run(["git", "clone", "-q", "--no-hardlinks", PROJECT, self.clone],
                        check=True, capture_output=True)
+        # 作業中の検証のコードと手順書を、複製に重ねる（コミットの前でも、今のコードと
+        # 今の手順書で試すため。コミットの後は同じ中身なので何も変わらない）。
+        for rel in ("src/sealer", "docs/verify"):
+            shutil.rmtree(os.path.join(self.clone, rel), ignore_errors=True)
+            shutil.copytree(os.path.join(PROJECT, rel), os.path.join(self.clone, rel),
+                            ignore=shutil.ignore_patterns("__pycache__"))
 
     def tearDown(self):
         if hasattr(self, "tmp"):
@@ -84,8 +92,13 @@ class TestDocProcedure(unittest.TestCase):
             for t in r["targets"]:
                 self.assertIn(t["sha256"], joined)
         # 時刻証明の対象のハッシュが、標準の道具で出した値と一致する。
-        for seq, path, digest in ledger.check_anchors(data, os.path.join(self.clone, "sealed")):
+        for _seq, _path, digest, _atts in ledger.check_anchors(
+                data, os.path.join(self.clone, "sealed")):
             self.assertIn(digest, joined)
+        # 期限が未確定のうちは、そのことと Pending の状態が出力に出る。
+        if not any(r["kind"] == ledger.ACQUISITION_KIND for r in records):
+            self.assertIn("期限：未確定", results[0][1])
+        self.assertIn("ots verify で確かめる", results[0][1])
 
     def assertProcedureFails(self):
         codes = [c for c, _out in self.run_blocks()]
