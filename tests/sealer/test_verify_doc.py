@@ -1,4 +1,4 @@
-"""docs/verify/periods-seal.md の手順を、第三者の立場で実行するテスト。T-005、T-007。
+"""docs/verify/periods-seal.md の手順を、第三者の立場で実行するテスト。T-005、T-007、T-008。
 
 実行（プロジェクトのルートで）:
     PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/sealer -v
@@ -13,7 +13,7 @@
   （元のリポジトリには何も書かない）。この結果は、コミットされた版の検証にはならない。
 - 壊さない複製では、すべての塊が終了コード 0 で終わり、記録の値が出力に現れること。
 - わざと壊した複製（記録の書き換え・記録の削除・.ots の削除・履歴の書き換え・
-  許可していないカレンダーの Pending）では、同じ手順が失敗すること。
+  許可していないカレンダーの Pending・許可リストに無い kind の記録）では、同じ手順が失敗すること。
 - コミットがまだ無いときは、複製できないので飛ばす（理由を表示する）。
 """
 
@@ -116,9 +116,9 @@ class TestDocProcedure(unittest.TestCase):
                 data, os.path.join(self.clone, "sealed")):
             self.assertIn(digest, joined)
         out = results[0][1]
-        # acquisition の記録が無いうちは、採用は保留。各 seq の Pending の状態も出る。
-        if not any(r["kind"] == ledger.ACQUISITION_KIND for r in records):
-            self.assertIn("採用は保留（acquisition の記録が無いため）", out)
+        # threshold-access の記録が無いうちは、採用は保留。各 seq の Pending の状態も出る。
+        if not any(r["kind"] == ledger.THRESHOLD_ACCESS_KIND for r in records):
+            self.assertIn("採用は保留（threshold-access の記録が無いため）", out)
         for r in records:
             self.assertRegex(out, r"seq %d: (Pending|Bitcoin で確定)" % r["seq"])
         # 確かめていないこと（ヘッダが本当の鎖にあること、drand の署名）が出る。
@@ -163,6 +163,22 @@ class TestDocProcedure(unittest.TestCase):
         with open(ots, "wb") as f:
             f.write(raw)
         self.assertEqual(ledger.ots_file_digest(raw), ledger.prefix_digest(data, 1))
+        self.assertProcedureFails()
+
+    def test_unknown_kind_record_fails(self):
+        """許可リストに無い kind（T-007 の acquisition）の記録を、.ots 付きで足すと失敗する。"""
+        sealed = os.path.join(self.clone, "sealed")
+        p = os.path.join(sealed, "ledger.jsonl")
+        data = ledger.read_ledger(p)
+        lines = ledger.split_lines(data)
+        rec = {"seq": len(lines) + 1, "prev_hash": ledger.sha256_hex(lines[-1]),
+               "kind": "acquisition", "targets": [{"path": "sealed/ledger.jsonl", "role": "x",
+                                                   "sha256": "0" * 64}],
+               "recorded_at": "2026-10-06T23:00:00Z", "note": ""}
+        with open(p, "ab") as f:
+            f.write(ledger.canonical_line(rec) + b"\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "unknown kind")
         self.assertProcedureFails()
 
     def test_rewritten_history_fails(self):

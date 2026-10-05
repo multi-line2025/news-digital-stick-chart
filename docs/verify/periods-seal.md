@@ -1,12 +1,12 @@
-# 期間の区切りの封印を検証する手順（T-005、T-007）
+# 期間の区切りの封印を検証する手順（T-005、T-007、T-008）
 
 この文書は、第三者が次のことを自分で確かめるための手順である。
 
 1. 封印の記録（`sealed/ledger.jsonl`）の鎖が正しいこと
 2. 封印した対象のファイルのハッシュが、記録と一致すること
 3. 時刻証明（OpenTimestamps）の対象が記録と一致し、Pending の宛先が許可した4つのカレンダーであること
-4. 採用される版。採用は鎖の順番で決まる（T-007。1章）
-5. 試運転の手順3の取得の記録（`acquisition`）の照合。何が示せて、何が示せないか（7章）
+4. 採用される版。採用は鎖の順番で決まり、区切りは最初の `threshold-access` の記録である（T-007、T-008。1章）
+5. 閾値を決める期間に触れる記録（`threshold-access`）と、試運転の手順3の取得の記録（`acquisition-start`・`acquisition-result`）の照合。何が示せて、何が示せないか（7章）
 
 封印したことは、現時点では公開していない（オーナーの決定）。公開するかどうかは、試運転のあとでオーナーが判断する。
 
@@ -30,7 +30,7 @@
 |---|---|
 | `seq` | 通し番号。1 から始まり、行の順に 1 ずつ増える |
 | `prev_hash` | 直前の行のバイト列（末尾の改行を含めない）の sha256。1 行目は 0 が 64 個 |
-| `kind` | 種類。下の表 |
+| `kind` | 種類。下の表の5つだけ（許可リスト）。それ以外の `kind` があれば、鎖の検証（`chain`）で失敗になる |
 | `targets` | 対象のファイル。各要素は `path`（ルートからの相対パス）、`role`、`sha256` |
 | `recorded_at` | 記録した日時（UTC）。記録した機械の時計による申告で、証明ではない |
 | `note` | 注記 |
@@ -39,7 +39,12 @@
 |---|---|---|---|
 | `periods` | 期間の区切り | doc / code / test / output | `src/sealer/seal_periods.py` |
 | `periods-triggers` | 区切りを作り直すきっかけの値（docs/stats/periods.md 8章 (2)） | triggers | `src/sealer/seal_triggers.py` |
-| `acquisition` | 試運転の手順3の取得の記録（形式は 7章。まだ無い） | acquisition | 後のタスク |
+| `threshold-access` | 閾値を決める期間の区画（2020-12-15 以降）の情報を初めて「扱う」直前の記録。採用の区切り（形式は 7章。まだ無い） | threshold-access | 後のタスク |
+| `acquisition-start` | 試運転の手順3の取得を始める前の記録（形式は 7章。まだ無い） | acquisition-start | 後のタスク |
+| `acquisition-result` | 試運転の手順3の取得の後の記録。対応する `acquisition-start` の seq を参照する（形式は 7章。まだ無い） | acquisition-result | 後のタスク |
+
+- T-007 の案にあった `acquisition` は、二つ（`acquisition-start` と `acquisition-result`）に分けたので、許可リストに無い。今の記録にも無い。
+- 許可リストに限る理由：決めていない名前の `kind` を受け付けると、正式な取得や閾値の期間への接触を別の名前で記録して、規則の区切りから外せてしまうため。
 
 行は正規の形（キーを並べ替え、区切りに空白を入れず、UTF-8）で書く。同じ中身を別の書き方で書いた行は、検証で失敗になる。
 
@@ -50,9 +55,12 @@
   - 出力の JSON・きっかけの値の JSON・`.ots` は、新しいファイルとしてだけ作る。既にあれば上書きしない。
   - 誤りの訂正は、新しい番号の記録として出す。
 - **版の番号は記録に書かない。** その種類の記録の何件目かで決まる（`version_of`）。`periods` の1件目が v1 である。
-- **採用の規則（T-007 で改めた。`adoption`）。**
-  - 採用するのは、**最初の `kind=acquisition` の記録より `seq` が小さい記録のうち、その種類（`periods`、`periods-triggers`）の最後のもの**である。
-  - `acquisition` の記録がまだ無いうちは、「採用は保留」とする。仮の候補として、今ある最後の記録を示す。
+- **採用の規則（T-007 で鎖の順番で決める形にし、T-008 で区切りを改めた。`adoption`）。**
+  - 採用するのは、**最初の `kind=threshold-access` の記録より `seq` が小さい記録のうち、その種類（`periods`、`periods-triggers`）の最後のもの**である。
+  - `threshold-access` は、閾値を決める期間の区画（2020-12-15 以降）の情報を初めて「扱う」直前に、鎖へ追記する記録である。「扱う」の定義は docs/stats/periods.md 8章 (2) に従う。ディスクに書く（プロジェクトと Git の外の一時的な置き場を含む）、画面に表示する、集計する、ログに出すことを指す。メモリの上で受け取り、ディスクに書く前に捨てることは含めない。
+  - `acquisition-start`・`acquisition-result`（試運転の手順3の取得）は、区切りに使わない。8章 (2) は、手順3でファイル一覧の 2020-12-15 以降の行をメモリの上で捨てるなら、手順3は期限に当たらないとしている。また、きっかけの値の一部（共起の網の期間など）は、手順3の後に手法を作る期間のデータを見て決めてよいとしている。そのため、手順3の後に追記したきっかけの値も、最初の `threshold-access` より前なら採用される。
+  - `threshold-access` の記録がまだ無いうちは、「採用は保留」とする。仮の候補として、今ある最後の記録を示す。
+  - 区切りの後に `periods`・`periods-triggers` を追記することは、封印の仕組みでは拒まない（関門は設けない。監査の所見による）。期限の後の作り直しは、追記したうえで、検証が「採用しない」と表示するだけである。
   - 時刻（Bitcoin で確定した時刻、drand の回の公開時刻）は、採用の判定に使わない。Pending かどうかも使わない。`recorded_at`（申告）も使わない。`adoption` の引数は、記録の一覧と種類の二つだけである。
   - 理由：鎖は行を消せず、順番も入れ替えられない（3章の `chain`）。そのため、`.ots` を Pending のままにする、upgrade を出さない、drand のどの回を書く、のどれを選んでも、採用は変わらない。T-005 の監査の R-1 と、R-2 のうち採用を選べる部分は、この規則で無くなる。
 - **すべての seq に、その seq 自身の時刻証明が要る。**
@@ -67,14 +75,15 @@
     | `https://a.pool.eternitywall.com` | `https://finney.calendar.eternitywall.com` |
     | `https://ots.btc.catallaxy.com` | `https://btc.calendar.catallaxy.com` |
   - 理由：運営側が自前のカレンダーの Pending を入れると、第三者がその証明を upgrade できない。許可した4つなら、第三者は自分で upgrade できる（5章）。
+  - 集約先（表の左側）が、返す実体のカレンダー（表の右側）を変えた場合は、新しい宛先が `.ots` に入ると検証が失敗するので、許可リスト（`ledger.STAMP_CALENDARS`）を更新する。更新はコードの変更としてコミットする。前の宛先はリストから消さずに残す（既にある `.ots` が通らなくなるため）。
 - **きっかけの値と deadline_status の照合**（`judge_deadline_status`）。
   - `periods` の出力の `rebuild_triggers` を、**採用された** `periods-triggers` の記録と比べる。完全に一致すれば `before_deadline`、そうでなければ `after_deadline` が、記録から決まる値である。
-  - docs/stats/periods.md 8章 (2) の「期限前に追記した」は、この規則では「最初の `acquisition` の記録より前に鎖に入った」ことに当たる。
+  - docs/stats/periods.md 8章 (2) の「期限前に追記した」とは、「最初の `threshold-access` の記録より前に鎖に入った」ことである。
   - 出力の `deadline_status`（統計係の申告）がこれと違えば、失敗になる。次の二つの誤りを、どちらも検出する。
     - `before_deadline` と申告したが、きっかけの値が採用された記録と一致しない（または採用された記録が無い）場合
     - `after_deadline` と申告したが、採用された記録と一致する場合
   - きっかけの値が無い出力（v1 の形）では、`deadline_status` は null でなければならない。
-  - `acquisition` の記録が無いうちは、この照合を保留し、そのことを出力に出す。
+  - `threshold-access` の記録が無いうちは、この照合を保留し、そのことを出力に出す。
 - **区画の一致。**
   - `periods` の2件目以降の出力の `block_start` と `block_end` は、1件目（最初に封印した版）の出力と一致しなければならない（`check_blocks`）。
   - 封印の仕組みは、一致しない版を追記しない。仕組みを通さずに追記された場合も、3章の検証（`periods`）で見つかる。
@@ -110,10 +119,11 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py all --rev auto
   - 各記録について、その記録を最初に含んだコミットを Git の履歴から探す。そのコミットの中の対象のファイルの sha256 が、記録と一致することを確かめる。
   - 対象のファイルが後で書き換えられても、封印した時点の中身で確かめられる。
   - 履歴の中で記録そのものが書き換えられていれば失敗する。
-- `acquisition`：`acquisition` の記録ごとに、7章の二つの照合をする。記録が無ければ、そう表示する。
+- `access`：`threshold-access` の記録ごとに、7章の照合（`ledger_head`、drand の回、`block_start`）をする。記録が無ければ、そう表示する。
+- `acquisition`：`acquisition-start` の記録ごとに 7章の照合（`ledger_head`、drand の回）をし、`acquisition-result` との対応を照合する。記録が無ければ、そう表示する。
 - `periods`：
   - すべての版の区画の境目が、1件目と一致することを確かめる。
-  - `deadline_status` を記録と照合する。`acquisition` の記録が無いうちは保留する。
+  - `deadline_status` を記録と照合する。`threshold-access` の記録が無いうちは保留する。
 - `adopted`：採用の規則と、種類ごとの採用される版を表示する。
   - 採用が決まっているときは、「採用 = seq N」に条件を付けて出す。条件は二つある。この記録の系列が公開されたものと同じであること。時刻の主張は、照合したヘッダが Bitcoin の本当の鎖にある場合に限ること（この検査では確かめていない）。
 
@@ -122,14 +132,15 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py all --rev auto
 - ヘッダが Bitcoin の本当の鎖にあること。5章の `ots verify` か、自分の Bitcoin のノードで確かめる。
 - drand の署名（BLS）。7章の方法で確かめる。
 
-現在の記録（seq 1 だけ、`.ots` は Pending、`acquisition` の記録は無い）では、次のように出る。
+現在の記録（seq 1 だけ、`.ots` は Pending、`threshold-access` と取得の記録は無い）では、次のように出る。
 
 - `anchors`：「seq 1: Pending」。Pending の宛先は1章の4つ。
-- `acquisition`：「acquisition の記録：なし」。
-- `adopted`：「採用は保留（acquisition の記録が無いため）」。`periods` の仮の候補は seq 1。
+- `access`：「threshold-access の記録：なし」。
+- `acquisition`：「acquisition-start・acquisition-result の記録：なし」。
+- `adopted`：「採用は保留（threshold-access の記録が無いため）」。`periods` の仮の候補は seq 1。
 - 最後：「この検査で確かめていないこと：(1) … ヘッダが、Bitcoin の本当の鎖にあること … (2) drand の署名（BLS）は、オフラインでは検証していない …」。
 
-`all` の代わりに `chain`、`anchors`、`targets`、`acquisition`、`periods`、`adopted` を一つずつ実行してもよい。
+`all` の代わりに `chain`、`anchors`、`targets`、`access`、`acquisition`、`periods`、`adopted` を一つずつ実行してもよい。
 
 ## 4. 検証のコードを使わずに確かめる
 
@@ -151,12 +162,14 @@ head -n 1 sealed/ledger.jsonl | shasum -a 256
 
 - N 行目の `prev_hash` が、N−1 行目の末尾の改行を除いたバイト列の sha256 と一致すること。
 - 先頭 N 行の sha256 が、`sealed/ledger.jsonl.seq00000N.ots` の対象と一致すること。
-- 採用：`kind` が `acquisition` の最初の行を探し、それより上の行のうち、種類ごとに一番下の行が採用である。
+- 各行の `kind` が1章の5つのどれかであること。
+- 採用：`kind` が `threshold-access` の最初の行を探し、それより上の行のうち、種類ごとに一番下の行が採用である。
 
 ```sh
-sed -n 1p sealed/ledger.jsonl | tr -d '\n' | shasum -a 256      # 2 行目の prev_hash と比べる
-head -n 2 sealed/ledger.jsonl | shasum -a 256                    # seq000002.ots の対象と比べる
-grep -n '"kind":"acquisition"' sealed/ledger.jsonl | head -n 1   # 最初の acquisition の行
+sed -n 1p sealed/ledger.jsonl | tr -d '\n' | shasum -a 256           # 2 行目の prev_hash と比べる
+head -n 2 sealed/ledger.jsonl | shasum -a 256                         # seq000002.ots の対象と比べる
+grep -n '"kind":"threshold-access"' sealed/ledger.jsonl | head -n 1   # 最初の threshold-access の行（区切り）
+grep -o '"kind":"[^"]*"' sealed/ledger.jsonl | sort | uniq -c         # kind の一覧（5つの外があれば失敗）
 ```
 
 対象のファイルが後で書き換えられている場合は、その記録を含んだ最初のコミットに戻してから確かめる。
@@ -197,7 +210,7 @@ git show <そのコミット>:docs/stats/periods.md | shasum -a 256
   3. その目標値が、下限（2^77 回分のハッシュ）より難しいこと
 - `.ots` の中に無い高さのヘッダを渡すと、エラーで止まる。
 - ヘッダが本当の鎖の、その高さのブロックかどうかは確かめない。出力されるブロックのハッシュを、自分のノードやエクスプローラーで見比べること。
-- 確定時刻を使うのは、7章の acquisition の照合と、表示だけである。採用は変わらない。
+- 確定時刻を使うのは、7章の drand の照合（`threshold-access`、`acquisition-start`）と、表示だけである。採用は変わらない。
 
 ```sh
 # 自分の Bitcoin のノードからヘッダを取る例
@@ -262,23 +275,27 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py all --rev auto --ots-d
 PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py adopted
 ```
 
-- 採用は、記録の中の最初の `acquisition` の記録の位置だけで決まる。コマンドの引数（`--btc-header`、`--ots-dir`）で採用は変わらない。期限や時刻を引数で渡すこともできない。
+- 採用は、記録の中の最初の `threshold-access` の記録の位置だけで決まる。`acquisition-start`・`acquisition-result` の位置は使わない。コマンドの引数（`--btc-header`、`--ots-dir`）で採用は変わらない。期限や時刻を引数で渡すこともできない。
 - 出力の形。
-  - `acquisition` の記録が無い：「採用は保留（acquisition の記録が無いため）」。種類ごとに「仮の候補 = seq N」。
-  - `acquisition` の記録がある：種類ごとに「採用 = seq N（…）。条件：…」。その種類の記録が `acquisition` より前に無ければ、「採用される版は無い」。`acquisition` より後の記録は「採用しない」と表示する。
+  - `threshold-access` の記録が無い：「採用は保留（threshold-access の記録が無いため）」。種類ごとに「仮の候補 = seq N」。
+  - `threshold-access` の記録がある：種類ごとに「採用 = seq N（…）。条件：…」。その種類の記録が `threshold-access` より前に無ければ、「採用される版は無い」。`threshold-access` より後の記録は「採用しない」と表示する。
 
-## 7. 取得の記録（acquisition）と、何が示せて何が示せないか
+## 7. 閾値の期間に触れる記録と取得の記録、何が示せて何が示せないか
 
-### 取得の記録の形式（後のタスクで作る仕組みの案）
+### 記録の形式（後のタスクで作る仕組みの案）
 
-手順3でファイル一覧を取得する仕組みは、次の順で動く。**取得の記録は、データを扱う前に鎖へ追記する。**
+記録は三つの種類に分ける。中身の JSON は `sealed/<kind>-<sha256>.json` として新しく書き、記録の `targets` に `role` = `kind` で1件だけ載せる。中身の `kind` は、記録の `kind` と同じでなければならない（別の種類の中身を流用できないようにするため）。
+
+**手順3の取得（ファイル一覧）は、次の順で動く。**
 
 1. drand の最新の回（回の番号・randomness・signature）を取る。
-2. 下の JSON を `sealed/acquisition-<sha256>.json` として書き、記録に `kind: "acquisition"` の行を 1 件追記する。その seq 自身の `.ots` を作る。
-3. そのあとで、ファイル一覧を取得する。
+2. `acquisition-start` の中身を書き、記録に1件追記する。その seq 自身の `.ots` を作る。この中身には、取得の前に決まる値だけを入れる。
+3. ファイル一覧を取得する。2020-12-15 以降の行は、メモリの上で捨ててからディスクに書く（docs/stats/periods.md 8章 (2)）。
+4. `acquisition-result` の中身を書き、記録に1件追記する。その seq 自身の `.ots` を作る。この中身には、取得の後でなければ作れない値（捨てたあとの一覧の sha256 など）を入れ、2 の seq を `start_seq` で参照する。
 
 ```json
 {
+  "kind": "acquisition-start",
   "step": 3,
   "drand": {
     "chain_hash": "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971",
@@ -287,34 +304,70 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py adopted
     "signature": "<16進>"
   },
   "ledger_head": {"seq": 3, "sha256": "<この行を足す前の、記録の先頭 seq 行の sha256>"},
-  "fetch": {"code_sha256": "<取得のコードの sha256>", "kept_rows_sha256": "<捨てたあとの一覧の sha256>"}
+  "fetch": {"code_sha256": "<取得のコードの sha256>"}
 }
 ```
 
-### 検証のコードが照合すること（`check_acquisition`）
+```json
+{
+  "kind": "acquisition-result",
+  "start_seq": 4,
+  "kept_rows_sha256": "<2020-12-15 以降の行を捨てたあとの一覧の sha256>"
+}
+```
 
-- **ledger_head が、直前の記録のハッシュと一致すること。** acquisition の記録が seq N なら、`ledger_head` は `{"seq": N−1, "sha256": 先頭 N−1 行の sha256}` でなければならない。この値は seq N−1 の `.ots` の対象と同じである。一致しなければ失敗になる。
+**閾値を決める期間の区画の情報を初めて扱う直前に、次の順で動く。**
+
+1. drand の最新の回を取る。
+2. `threshold-access` の中身を書き、記録に1件追記する。その seq 自身の `.ots` を作る。
+3. そのあとで、2020-12-15 以降の情報を扱う（ディスクに書く・表示する・集計する・ログに出す）。
+
+```json
+{
+  "kind": "threshold-access",
+  "block_start": "2020-12-15",
+  "drand": {"chain_hash": "...", "round": 12345999, "randomness": "...", "signature": "..."},
+  "ledger_head": {"seq": 6, "sha256": "<この行を足す前の、記録の先頭 seq 行の sha256>"}
+}
+```
+
+### 検証のコードが照合すること
+
+**drand を持つ記録（`threshold-access`、`acquisition-start`。`check_drand_record`）**
+
+- **ledger_head が、直前の記録のハッシュと一致すること。** 記録が seq N なら、`ledger_head` は `{"seq": N−1, "sha256": 先頭 N−1 行の sha256}` でなければならない。この値は seq N−1 の `.ots` の対象と同じである。一致しなければ失敗になる。
   ```sh
-  head -n <N−1> sealed/ledger.jsonl | shasum -a 256   # acquisition の JSON の ledger_head.sha256 と比べる
+  head -n <N−1> sealed/ledger.jsonl | shasum -a 256   # 中身の ledger_head.sha256 と比べる
   ```
-- **drand の回の公開時刻が、その acquisition の記録自身の `.ots` の確定時刻より前であること。**
+- **drand の回の公開時刻 T が、その記録自身の `.ots` の確定時刻 Tq に、幅 2 時間を足した時刻より前であること**（T < Tq ＋ 2 時間）。
   - 回の公開時刻は、genesis の時刻 ＋（回の番号 − 1）× 間隔（quicknet：3 秒、default：30 秒）。
-  - その記録自身の `.ots` が Bitcoin で確定していれば比べる。前でなければ失敗になる。
+  - Tq は、照合したブロックのヘッダに書かれた時刻である。その記録自身の `.ots` が Bitcoin で確定していれば比べる。幅を超えて T が後なら（T ≥ Tq ＋ 2 時間）失敗になる。
   - Pending のうちは、この照合を保留し、そのことを出力に出す。
-  - 比べるのは、ブロックのヘッダに書かれた時刻である。Bitcoin の決まりでは、ブロックの時刻は実際に掘られた時刻から 1〜2 時間ずれうる。この照合は、その幅の精度しか持たない。
-- `step` が 3 であること、`randomness` が `signature` の sha256 であること、`chain_hash` が知っている鎖であること。
+  - **幅の値は 2 時間（`ledger.DRAND_HEADER_SLACK`）。** 根拠：ヘッダの時刻は掘った者が書く値で、Bitcoin の決まりが課す条件は二つだけである。(1) 直前の 11 ブロックの時刻の中央値より後であること。この中央値は、おおむね 6 ブロック前（約 1 時間前）に当たる。(2) 受け取ったノードの時計より 2 時間を超えて先でないこと。このため、ヘッダの時刻は実際の時刻から 1〜2 時間ずれうる。正しく作った記録でも、ヘッダの時刻が drand の回の公開時刻より前に見えることがあり、幅が無いと失敗してしまう。
+  - 代償：この照合から言えるのは、「記録は T より後に作られ、Tq ＋ 2 時間 より前に存在した」ことまでである。
+- `threshold-access` では、中身の `block_start` が、`periods` の1件目（最初に封印した版）の出力の閾値の期間（threshold）の `block_start` と一致すること。`acquisition-start` では、`step` が 3 であること。
+- `randomness` が `signature` の sha256 であること、`chain_hash` が知っている鎖であること。
 - **drand の署名（BLS）は、オフラインでは検証していない。** 出力にもそう表示する。署名が正しいかは、drand の公開の API（`https://api.drand.sh/<chain_hash>/public/<round>`）の値と見比べるか、drand の検証の道具で確かめる。
+
+**取得の前と後の対応（`check_acquisition_pairs`）**
+
+- `acquisition-result` が参照する `start_seq` が、`kind=acquisition-start` の記録として実在すること。
+- `acquisition-result` の seq が、参照する `acquisition-start` の seq より後であること。
+- 一つの `acquisition-start` に、`acquisition-result` が一つだけであること。
+- どれかが成り立たなければ失敗になる。`acquisition-result` の無い `acquisition-start` は、取得の途中か失敗として表示する（失敗にはしない）。
+- `start_seq` は正の整数、`kept_rows_sha256` は 64 桁の16進でなければならない。
 
 ### 何が示せて、何が示せないか
 
-採用された記録を seq a、最初の acquisition の記録を seq q（a < q）とする。drand の回の公開時刻を T3 とする。
+採用された記録を seq a、最初の `threshold-access` の記録を seq q（a < q）とする。その drand の回の公開時刻を T とする。
 
 示せること。
 
 1. **この系列の記録では、seq a は seq q より前に鎖に入った。** 鎖は行を消せず、順番も入れ替えられない。採用はこの順番だけで決まる。
-2. **seq q の取得の記録は、T3 より後に作られた。** drand の値は T3 より前には誰にも分からないからである（署名が正しいことは、上の方法で別に確かめる）。
-3. seq q の `.ots` が Bitcoin で確定し、その時刻を Tq とする。**先頭 q 行（採用された記録と、取得の記録を含む）は、Tq の時点で存在した。** 3 から、取得の記録は T3 と Tq の間に作られたことになる。この区間の幅は、出力に出る二つの時刻で確かめられる。
-4. seq a 自身の `.ots` が確定し、その時刻 Ta が T3 より前なら、**採用された記録は、取得の記録より前の時刻に存在した**ことも示せる。これは時刻の主張の上乗せで、採用には影響しない。
+2. **seq q の記録は、T より後に作られた。** drand の値は T より前には誰にも分からないからである（署名が正しいことは、上の方法で別に確かめる）。
+3. seq q の `.ots` が Bitcoin で確定し、そのヘッダの時刻を Tq とする。**先頭 q 行（採用された記録と、threshold-access の記録を含む）は、Tq ＋ 2 時間 の時点で存在した。** 2 と合わせて、threshold-access の記録は T と Tq ＋ 2 時間 の間に作られたことになる。この区間の幅は、出力に出る二つの時刻で確かめられる。
+4. seq a 自身の `.ots` が確定し、その時刻 Ta ＋ 2 時間 が T より前なら、**採用された記録は、threshold-access の記録より前の時刻に存在した**ことも示せる。これは時刻の主張の上乗せで、採用には影響しない。
+5. `acquisition-start` と `acquisition-result` についても、2 と 3 と同じ形で、取得を始めた記録の時刻の区間が示せる。`acquisition-result` の `kept_rows_sha256` は、取得の後で、記録に結び付いた一覧の中身を示す。
 
 次のことは、この照合では示せない。
 
@@ -322,11 +375,11 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py adopted
   - 封印を公開していないので、運営側は、別の区切りを封印した別の記録をいくつか作っておき、後から一つを選んで出すことができる。それを外から見分ける方法は無い。
   - 示すには、封印した時点で、記録の先頭のハッシュ（または `.ots`）を公開しておく必要がある。
   - 公開するかどうかは、オーナーの判断を待っている。
-- **記録に無い取得が、先にあったこと。**
-  - 取得の記録より前に、記録を残さずにファイル一覧を取得していたとしても、この照合では分からない。
-  - 示せるのは「記録に結び付いた正式な取得が T3 より後だった」ことまでである。
-- **drand の回が、取得の直前の回であること。** 運営側は、古い回を書くことができる。古い回を書いても採用は変わらない。ただし、3 の区間（T3 から Tq まで）が広がり、取得の時刻の主張が弱くなる。区間の幅は出力で確かめる。
-- 4 の Ta が T3 以後、または seq a が Pending の場合は、採用された記録が取得より前の時刻に存在したことを、時刻では示せない。示せるのは 1 の順番だけである。
+- **記録に無い接触が、先にあったこと。**
+  - `threshold-access` の記録より前に、記録を残さずに閾値を決める期間の情報を扱っていたとしても、この照合では分からない。取得についても同じである。
+  - 示せるのは「記録に結び付いた正式な接触が T より後だった」ことまでである。
+- **drand の回が、記録の直前の回であること。** 運営側は、古い回を書くことができる。古い回を書いても採用は変わらない。ただし、3 の区間が広がり、時刻の主張が弱くなる。区間の幅は出力で確かめる。
+- 4 の Ta ＋ 2 時間 が T 以後、または seq a が Pending の場合は、採用された記録が threshold-access より前の時刻に存在したことを、時刻では示せない。示せるのは 1 の順番だけである。
 
 ### データの手元の跡
 

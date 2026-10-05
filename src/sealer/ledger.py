@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""封印の記録（追記のみ）の中核。T-005、T-007。
+"""封印の記録（追記のみ）の中核。T-005、T-007、T-008。
 
 記録のファイル（既定は sealed/ledger.jsonl）は JSON Lines で、1 行が 1 件の記録。
 標準ライブラリだけを使う。ネットワークは使わない。
@@ -7,7 +7,9 @@
 1 行の形（キーはこの 6 つだけ。ほかのキーがあれば検証で失敗にする）
     seq          通し番号。1 から始まり、行の順に 1 ずつ増える。
     prev_hash    直前の行のバイト列（末尾の改行を含めない）の sha256。1 行目は 0 が 64 個。
-    kind         種類（例: "periods"）。
+    kind         種類。許可リスト（ALLOWED_KINDS）の 5 つだけ。それ以外は検証で失敗にする。
+                 periods / periods-triggers / threshold-access / acquisition-start /
+                 acquisition-result
     targets      対象のファイルの一覧。各要素は {"path", "role", "sha256"}。
                  path はリポジトリのルートからの相対パス（区切りは /）。
     recorded_at  記録した日時（UTC、"YYYY-MM-DDTHH:MM:SSZ"）。記録した機械の時計による
@@ -35,22 +37,43 @@
     Pending の証明の宛先は、stamp で使った 4 つのカレンダー（STAMP_CALENDARS の実体の側）に
     限る。それ以外の宛先があれば、検証は失敗する。
 
-採用の規則（adoption）。T-007 で、時刻ではなく鎖の順番で決める形に改めた。
-    採用するのは、最初の acquisition の記録より seq が小さい記録のうち、その種類
+採用の規則（adoption）。T-007 で鎖の順番で決める形にし、T-008 で区切りを改めた。
+    区切りは、最初の threshold-access の記録である。threshold-access は、閾値を決める期間の
+    区画（2020-12-15 以降）の情報を初めて「扱う」直前に、鎖へ追記する記録である。「扱う」の
+    定義は docs/stats/periods.md 8章 (2) に従う（ディスクに書く・画面に表示する・集計する・
+    ログに出す。メモリの上で受け取り、ディスクに書く前に捨てることは含めない）。
+    採用するのは、最初の threshold-access の記録より seq が小さい記録のうち、その種類
     （periods、periods-triggers）の最後のもの。
-    - acquisition の記録がまだ無いうちは「採用は保留」。仮の候補として、今ある最後の記録を示す。
+    - acquisition-start・acquisition-result（試運転の手順3の取得）は区切りに使わない。
+      8章 (2) は、手順3で 2020-12-15 以降の行をメモリの上で捨てるなら、手順3は期限に
+      当たらないとしている。そのため、手順3の後に追記したきっかけの値も、最初の
+      threshold-access より前なら採用される。
+    - threshold-access の記録がまだ無いうちは「採用は保留」。仮の候補として、今ある最後の
+      記録を示す。
+    - 区切りの後に追記した periods・periods-triggers を、追記の時点で拒む関門は設けない
+      （設けない方がよい、という監査の所見による）。検証が「採用しない」と表示するだけである。
     - 時刻（Bitcoin の確定時刻、drand の回の公開時刻）も、Pending かどうかも、recorded_at
       （申告）も使わない。adoption の引数は記録の一覧と種類だけである。
     - 鎖は行を消せず、順番も入れ替えられない（verify_chain）。そのため、.ots の upgrade を
       出すか出さないか、Pending のままにするか、drand のどの回を書くかで、採用は変わらない。
 
-acquisition の記録（手順3の取得の記録）の照合（check_acquisition）
+drand を持つ記録（threshold-access、acquisition-start）の照合（check_drand_record）
+    - 中身の kind が記録の kind と同じであること。
     - 中身の ledger_head が、直前の記録までの先頭の sha256（seq N−1 の .ots の対象と同じ値）と
       一致すること。
-    - drand の回の公開時刻が、その acquisition の記録自身の .ots の Bitcoin の確定時刻より
-      前であること。確定していなければ、この照合は保留する。
+    - drand の回の公開時刻 T が、その記録自身の .ots の Bitcoin の確定時刻（ヘッダの時刻）Tq に
+      対して、T < Tq + DRAND_HEADER_SLACK であること。幅を超えて T が後なら失敗にする。
+      確定していなければ、この照合は保留する。幅の値と根拠は DRAND_HEADER_SLACK の注記。
     - drand の署名（BLS）は、オフラインでは検証しない。randomness が signature の sha256
       であることだけを確かめる。
+    - threshold-access では、中身の block_start が、periods の 1 件目の出力の閾値の期間
+      （threshold）の block_start と一致すること（verify.py で照合する）。
+
+取得の記録（acquisition-start と acquisition-result）の対応の照合（check_acquisition_pairs）
+    - result が参照する start（中身の start_seq）が、kind=acquisition-start の記録として実在すること。
+    - result の seq が、その start の seq より後であること。
+    - 一つの start に result が一つだけであること（二つ以上なら失敗）。
+    result の無い start は、取得の途中か失敗として表示する（失敗にはしない）。
 
 きっかけの値（kind が periods-triggers）
     区切りを作り直すきっかけの値は、periods-triggers の記録として追記する。periods の
@@ -58,7 +81,7 @@ acquisition の記録（手順3の取得の記録）の照合（check_acquisitio
     before_deadline、そうでなければ after_deadline が記録から決まる値で、
     出力の deadline_status（申告）と照合する（judge_deadline_status）。
     docs/stats/periods.md 8章 (2) の「期限前に追記した」は、この規則では「最初の
-    acquisition の記録より前に鎖に入った」ことに当たる。
+    threshold-access の記録より前に鎖に入った」ことである。
 
 """
 
@@ -77,6 +100,17 @@ HEX64 = re.compile(r"\A[0-9a-f]{64}\Z")
 TIME_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
 KIND_RE = re.compile(r"\A[a-z][a-z0-9_-]{0,31}\Z")
 OTS_NAME_RE = re.compile(r"\Aledger\.jsonl\.seq(\d{6})(\.bitcoin)?\.ots\Z")
+
+# 記録の種類（kind）の許可リスト（T-008）。これ以外の kind は verify_chain で失敗にする。
+# 決めていない名前の kind で正式な取得や閾値の期間への接触を記録して、区切りから外すことを
+# 許さないため。T-007 の "acquisition" は、今の記録に無く、二つに分けたので外した。
+PERIODS_KIND = "periods"
+TRIGGERS_KIND = "periods-triggers"
+THRESHOLD_ACCESS_KIND = "threshold-access"
+ACQ_START_KIND = "acquisition-start"
+ACQ_RESULT_KIND = "acquisition-result"
+ALLOWED_KINDS = (PERIODS_KIND, TRIGGERS_KIND, THRESHOLD_ACCESS_KIND, ACQ_START_KIND,
+                 ACQ_RESULT_KIND)
 
 # stamp で使う公開カレンダー（ots の既定と同じ 4 つ）と、その集約先が返す Pending の宛先
 # （実体のカレンダー）。stamp.py はこの左側に送る。.ots の Pending の宛先は右側に限る。
@@ -153,6 +187,9 @@ def _check_record_shape(rec, lineno):
         raise LedgerError("%d 行目: prev_hash の形が違う" % lineno)
     if not isinstance(rec["kind"], str) or not KIND_RE.match(rec["kind"]):
         raise LedgerError("%d 行目: kind の形が違う" % lineno)
+    if rec["kind"] not in ALLOWED_KINDS:
+        raise LedgerError("%d 行目: kind %r は許可リストに無い（許可するのは %s）"
+                          % (lineno, rec["kind"], "、".join(ALLOWED_KINDS)))
     if not isinstance(rec["note"], str):
         raise LedgerError("%d 行目: note が文字列でない" % lineno)
     if not isinstance(rec["recorded_at"], str):
@@ -185,7 +222,7 @@ def verify_chain(data):
     """記録のファイルのバイト列を検証し、記録の一覧を返す。
 
     検出するもの: 行の書き換え（最後の行を除く）、行の削除・挿入・入れ替え、
-    欠番、正規でない書き方、形の違い、recorded_at の逆行。
+    欠番、正規でない書き方、形の違い、許可リストに無い kind、recorded_at の逆行。
     最後の行の書き換えと、末尾の行の削除は、鎖だけでは検出できない。
     これは check_anchors（時刻証明の対象のハッシュとの照合）と Git の履歴で検出する。
     """
@@ -257,37 +294,37 @@ def records_of_kind(records, kind):
     return out
 
 
-ACQUISITION_KIND = "acquisition"
-ADOPTED_KINDS = ("periods", "periods-triggers")
+ADOPTED_KINDS = (PERIODS_KIND, TRIGGERS_KIND)
 
 
-def first_acquisition(records):
-    """最初の kind=acquisition の記録。無ければ None。"""
+def first_threshold_access(records):
+    """最初の kind=threshold-access の記録（採用の区切り）。無ければ None。"""
     for r in records:
-        if r["kind"] == ACQUISITION_KIND:
+        if r["kind"] == THRESHOLD_ACCESS_KIND:
             return r
     return None
 
 
 def adoption(records, kind):
-    """採用の規則（鎖の順番だけで決める）。
+    """採用の規則（鎖の順番だけで決める）。T-008。
 
-    返り値: (採用された記録, 仮の候補, 区切りに使った acquisition の記録)
-      - acquisition の記録がある: 採用 = その seq より小さい、その種類の最後の記録
+    返り値: (採用された記録, 仮の候補, 区切りに使った threshold-access の記録)
+      - threshold-access の記録がある: 採用 = その seq より小さい、その種類の最後の記録
         （無ければ None）。仮の候補は None。
-      - acquisition の記録が無い: 採用は保留（None）。仮の候補 = 今ある、その種類の
-        最後の記録（無ければ None）。acquisition の記録は None。
+      - threshold-access の記録が無い: 採用は保留（None）。仮の候補 = 今ある、その種類の
+        最後の記録（無ければ None）。区切りの記録は None。
+    acquisition-start・acquisition-result は区切りに使わない。
     時刻・Pending かどうか・recorded_at は、引数にも無く、使わない。
     """
     of_kind = [r for r in records if r["kind"] == kind]
-    acq = first_acquisition(records)
-    if acq is None:
+    cut = first_threshold_access(records)
+    if cut is None:
         return None, (of_kind[-1] if of_kind else None), None
-    before = [r for r in of_kind if r["seq"] < acq["seq"]]
-    return (before[-1] if before else None), None, acq
+    before = [r for r in of_kind if r["seq"] < cut["seq"]]
+    return (before[-1] if before else None), None, cut
 
 
-# ---------------------------------------------------------------- acquisition の記録の照合
+# ---------------------------------------------------------------- drand を持つ記録の照合
 
 # drand の鎖（公開されている値）。回 r の公開時刻は genesis_time + (r - 1) * period。
 DRAND_CHAINS = {
@@ -298,6 +335,22 @@ DRAND_CHAINS = {
 }
 DRAND_NOT_VERIFIED = ("drand の署名（BLS）は、オフラインでは検証していない（randomness が "
                       "signature の sha256 であることだけを確かめた）。")
+
+# drand の回の公開時刻と、Bitcoin のブロックのヘッダの時刻を比べるときの幅（T-008）。
+# 値：2 時間（7200 秒）。
+# 根拠：ヘッダの時刻は、掘った者が書く値で、実際に掘られた時刻とずれうる。Bitcoin の決まりが
+#   ヘッダの時刻に課す条件は、次の二つだけである。
+#   (1) 直前の 11 ブロックの時刻の中央値（median time past）より後であること。中央値は、
+#       平均 10 分ごとのブロックで、おおむね 6 ブロック前（約 1 時間前）に当たる。
+#   (2) 受け取ったノードの時計より 2 時間（MAX_FUTURE_BLOCK_TIME）を超えて先でないこと。
+#   このため、ヘッダの時刻は実際の時刻から 1〜2 時間ずれうる。正しく作った記録（drand の回を
+#   取ってから追記し、そのあとで Bitcoin に確定した記録）でも、ヘッダの時刻が drand の回の
+#   公開時刻より前に見えることがある。この幅の中の食い違いは失敗にしない。
+# 代償：「記録は、ヘッダの時刻 + 2 時間 より前に存在した」までしか言えない。幅を超えて
+#   drand の回の公開時刻が後なら、失敗にする。
+DRAND_HEADER_SLACK = datetime.timedelta(hours=2)
+
+DRAND_RECORD_KINDS = (THRESHOLD_ACCESS_KIND, ACQ_START_KIND)
 
 
 def drand_round_time(chain_hash, round_no):
@@ -310,8 +363,8 @@ def drand_round_time(chain_hash, round_no):
                                            datetime.timezone.utc)
 
 
-def drand_time_of_acquisition(doc):
-    """取得の記録の中身（JSON）から、drand の回の公開時刻を出す。
+def drand_time_of(doc):
+    """記録の中身（JSON）の drand から、回の公開時刻を出す。
 
     randomness が signature の sha256 であることも確かめる（drand の決まり）。
     署名そのものの検証（BLS）はここではしない（DRAND_NOT_VERIFIED）。
@@ -320,11 +373,9 @@ def drand_time_of_acquisition(doc):
         d = doc["drand"]
         chain, rnd = d["chain_hash"], d["round"]
         randomness, signature = d["randomness"], d["signature"]
-        if doc["step"] != 3:
-            raise LedgerError("取得の記録の step が 3 でない")
     except (KeyError, TypeError):
-        raise LedgerError("取得の記録に step か drand（chain_hash・round・randomness・"
-                          "signature）が無い") from None
+        raise LedgerError("記録の中身に drand（chain_hash・round・randomness・signature）が無い"
+                          ) from None
     try:
         sig = bytes.fromhex(signature)
     except (TypeError, ValueError):
@@ -340,34 +391,103 @@ def expected_ledger_head(data, seq):
     return {"seq": n, "sha256": prefix_digest(data, n) if n else sha256_hex(b"")}
 
 
-def check_acquisition(data, record, doc, own_time):
-    """acquisition の記録を照合する。
+def _check_doc_kind(record, doc):
+    if not isinstance(doc, dict) or doc.get("kind") != record["kind"]:
+        raise LedgerError("seq %d の記録の中身の kind が、記録の kind（%s）と一致しない"
+                          % (record["seq"], record["kind"]))
 
-    own_time: その記録自身の .ots で Bitcoin に確定した時刻（無ければ None）。
+
+def check_drand_record(data, record, doc, own_time):
+    """drand を持つ記録（threshold-access、acquisition-start）を照合する。
+
+    own_time: その記録自身の .ots で Bitcoin に確定した時刻（ヘッダの時刻。無ければ None）。
     返り値: (drand の回の公開時刻, "ok" か "pending")。食い違えば LedgerError。
+    比べ方：drand の回の公開時刻 T が、own_time + DRAND_HEADER_SLACK より前なら通す。
     この照合は採用の判定に使わない。
     """
     seq = record["seq"]
-    head = doc.get("ledger_head") if isinstance(doc, dict) else None
+    if record["kind"] not in DRAND_RECORD_KINDS:
+        raise LedgerError("seq %d: kind %s は drand を持つ記録ではない" % (seq, record["kind"]))
+    _check_doc_kind(record, doc)
+    if record["kind"] == ACQ_START_KIND and doc.get("step") != 3:
+        raise LedgerError("seq %d の acquisition-start の step が 3 でない" % seq)
+    head = doc.get("ledger_head")
     want = expected_ledger_head(data, seq)
     if not isinstance(head, dict) or sorted(head) != ["seq", "sha256"]:
-        raise LedgerError("seq %d の取得の記録に ledger_head（seq・sha256）が無い" % seq)
+        raise LedgerError("seq %d の記録の中身に ledger_head（seq・sha256）が無い" % seq)
     if head != want:
-        raise LedgerError("seq %d の取得の記録の ledger_head が、直前の記録のハッシュと一致しない"
+        raise LedgerError("seq %d の記録の中身の ledger_head が、直前の記録のハッシュと一致しない"
                           "（入れた値 seq %r、記録から決まる値 seq %d の %s）"
                           % (seq, head.get("seq"), want["seq"], want["sha256"]))
-    t3 = drand_time_of_acquisition(doc)
+    t = drand_time_of(doc)
     if own_time is None:
-        return t3, "pending"
-    if not t3 < own_time:
-        raise LedgerError("seq %d の取得の記録の drand の回の公開時刻 %s が、その記録自身の .ots の"
-                          "確定時刻 %s より前でない" % (seq, t3.isoformat(), own_time.isoformat()))
-    return t3, "ok"
+        return t, "pending"
+    if not t < own_time + DRAND_HEADER_SLACK:
+        raise LedgerError("seq %d の drand の回の公開時刻 %s が、その記録自身の .ots の確定時刻"
+                          "（ヘッダの時刻）%s に幅 %s を足した時刻より前でない"
+                          % (seq, t.isoformat(), own_time.isoformat(), DRAND_HEADER_SLACK))
+    return t, "ok"
+
+
+def threshold_access_block_start(doc):
+    """threshold-access の中身の block_start（閾値を決める期間の区画の始まり）。"""
+    v = doc.get("block_start") if isinstance(doc, dict) else None
+    if not isinstance(v, str):
+        raise LedgerError("threshold-access の記録の中身に block_start が無い")
+    return v
+
+
+# ---------------------------------------------------------------- 取得の記録（start と result）
+
+
+def acquisition_result_fields(record, doc):
+    """acquisition-result の中身を検査し、(start_seq, kept_rows_sha256) を返す。"""
+    _check_doc_kind(record, doc)
+    start_seq = doc.get("start_seq")
+    kept = doc.get("kept_rows_sha256")
+    if type(start_seq) is not int or start_seq < 1:
+        raise LedgerError("seq %d の acquisition-result の start_seq が正の整数でない"
+                          % record["seq"])
+    if not isinstance(kept, str) or not HEX64.match(kept):
+        raise LedgerError("seq %d の acquisition-result の kept_rows_sha256 の形が違う"
+                          % record["seq"])
+    return start_seq, kept
+
+
+def check_acquisition_pairs(records, result_start_seqs):
+    """acquisition-start と acquisition-result の対応を照合する。
+
+    result_start_seqs: {result の seq: その中身の start_seq}。
+    照合すること：
+      - result が参照する start が、kind=acquisition-start の記録として実在すること
+      - result の seq が、その start の seq より後であること
+      - 一つの start に result が一つだけであること
+    返り値: {start の seq: result の seq か None}。食い違えば LedgerError。
+    """
+    by_seq = {r["seq"]: r for r in records}
+    starts = [r["seq"] for r in records if r["kind"] == ACQ_START_KIND]
+    results = [r["seq"] for r in records if r["kind"] == ACQ_RESULT_KIND]
+    if sorted(result_start_seqs) != sorted(results):
+        raise LedgerError("acquisition-result の記録と、照合に渡した中身の一覧が一致しない")
+    pairs = {s: None for s in starts}
+    for rseq in results:
+        sseq = result_start_seqs[rseq]
+        start = by_seq.get(sseq)
+        if start is None or start["kind"] != ACQ_START_KIND:
+            raise LedgerError("seq %d の acquisition-result が参照する seq %d は、"
+                              "acquisition-start の記録ではない（実在しない）" % (rseq, sseq))
+        if not rseq > sseq:
+            raise LedgerError("seq %d の acquisition-result が、参照する acquisition-start "
+                              "（seq %d）より前にある" % (rseq, sseq))
+        if pairs[sseq] is not None:
+            raise LedgerError("seq %d の acquisition-start に、acquisition-result が二つ以上ある"
+                              "（seq %d と seq %d）" % (sseq, pairs[sseq], rseq))
+        pairs[sseq] = rseq
+    return pairs
 
 
 # ---------------------------------------------------------------- periods の検査
 
-TRIGGERS_KIND = "periods-triggers"
 TRIGGER_KEYS = ("last_read_offset_days", "naive_history_days", "network_window_days",
                 "same_week_years")
 
@@ -418,7 +538,7 @@ def check_blocks(first_output, later_output):
 def judge_deadline_status(output, decided, adopted_triggers):
     """出力の deadline_status（統計係の申告）を、記録から決まる値と照合する。
 
-    decided: 採用が決まっているか（acquisition の記録があるか）。
+    decided: 採用が決まっているか（threshold-access の記録があるか）。
     adopted_triggers: 採用された periods-triggers の記録の値（dict）、無ければ None。
       採用は adoption（鎖の順番）で決める。時刻は使わない。
 

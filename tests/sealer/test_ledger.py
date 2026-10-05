@@ -1,4 +1,4 @@
-"""封印の記録（src/sealer/）のテスト。T-005、T-007。
+"""封印の記録（src/sealer/）のテスト。T-005、T-007、T-008。
 
 実行（プロジェクトのルートで）:
     PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/sealer -v
@@ -10,6 +10,10 @@ Bitcoin の証明は、テストの中で作った .ots と、易しい目標値
 検証が失敗することを確かめる。
 T-007：採用は鎖の順番で決まり、.ots を Pending のままにする・upgrade を出さない・drand の回を
 動かす、のどれでも採用が変わらないことを確かめる（監査 R-1・R-2 の再現）。
+T-008：区切りは最初の threshold-access の記録。acquisition-start の後・threshold-access の前に
+追記したきっかけの値は採用され、threshold-access の後のものは採用されない。acquisition-start と
+acquisition-result の対応、drand の照合の幅（幅の中は通り、外は失敗）、許可リストに無い kind を
+拒むことを確かめる。
 """
 
 import contextlib
@@ -262,6 +266,34 @@ class TestChain(LedgerCase):
         self.add(n=1, start=2)
         self.assertTrue(self.data().startswith(before))
 
+    def test_unknown_kind_rejected_by_verify_chain(self):
+        """許可リストに無い kind は、鎖が正しくても verify_chain で失敗する（T-008）。"""
+        for bad in ("acquisition", "other", "threshold_access", "periods-trigger"):
+            self.tearDown()
+            self.setUp()
+            self.add(n=1)
+            rec = {"seq": 2, "prev_hash": ledger.sha256_hex(self.lines()[0]), "kind": bad,
+                   "targets": [target("b")], "recorded_at": "2026-10-06T13:00:00Z", "note": ""}
+            self.write_lines(self.lines() + [ledger.canonical_line(rec)])
+            with self.assertRaisesRegex(ledger.LedgerError, "2 行目: kind .*は許可リストに無い"):
+                ledger.verify_chain(self.data())
+
+    def test_unknown_kind_not_appended(self):
+        self.add(n=1)
+        with self.assertRaisesRegex(ledger.LedgerError, "許可リスト"):
+            ledger.append_record(self.path, "acquisition", [target("b")], "", T0 + H)
+        self.assertEqual(len(self.lines()), 1)
+
+    def test_allowed_kinds_are_the_five(self):
+        self.assertEqual(set(ledger.ALLOWED_KINDS),
+                         {"periods", "periods-triggers", "threshold-access",
+                          "acquisition-start", "acquisition-result"})
+        self.assertNotIn("acquisition", ledger.ALLOWED_KINDS)
+        self.add(n=1)
+        for i, k in enumerate(ledger.ALLOWED_KINDS):
+            ledger.append_record(self.path, k, [target("k/%d" % i)], "", T0 + (i + 1) * H)
+        self.assertEqual(len(ledger.verify_chain(self.data())), 1 + len(ledger.ALLOWED_KINDS))
+
     def test_write_once_does_not_overwrite(self):
         p = os.path.join(self.tmp, "o.json")
         self.assertTrue(ledger.write_once(p, b"a"))
@@ -398,7 +430,7 @@ class TestAnchors(LedgerCase):
 class TestVersions(LedgerCase):
     def test_version_from_count(self):
         ledger.append_record(self.path, "periods", [target("p")], "", T0)
-        ledger.append_record(self.path, "other", [target("o")], "", T0 + H)
+        ledger.append_record(self.path, "periods-triggers", [target("o")], "", T0 + H)
         recs = ledger.append_record(self.path, "periods", [target("p")], "", T0 + 2 * H)
         self.assertEqual(ledger.version_of(recs, 1), 1)
         self.assertEqual(ledger.version_of(recs, 2), 1)
@@ -518,7 +550,7 @@ class TestCalendars(LedgerCase):
 
 
 class TestAdoption(LedgerCase):
-    """採用は鎖の順番だけで決まる（T-007）。"""
+    """採用は鎖の順番だけで決まる（T-007）。区切りは最初の threshold-access（T-008）。"""
 
     def build(self, kinds):
         recs = None
@@ -529,46 +561,68 @@ class TestAdoption(LedgerCase):
     def test_signature_has_no_time_inputs(self):
         self.assertEqual(list(inspect.signature(ledger.adoption).parameters), ["records", "kind"])
 
-    def test_held_without_acquisition(self):
+    def test_held_without_threshold_access(self):
         recs = self.build(["periods", "periods", "periods-triggers"])
-        rec, cand, acq = ledger.adoption(recs, "periods")
+        rec, cand, cut = ledger.adoption(recs, "periods")
         self.assertIsNone(rec)
-        self.assertIsNone(acq)
+        self.assertIsNone(cut)
         self.assertEqual(cand["seq"], 2)
-        rec, cand, _a = ledger.adoption(recs, "periods-triggers")
+        rec, cand, _c = ledger.adoption(recs, "periods-triggers")
         self.assertIsNone(rec)
         self.assertEqual(cand["seq"], 3)
 
-    def test_last_before_first_acquisition(self):
-        recs = self.build(["periods", "periods", "periods-triggers", "acquisition",
-                           "periods", "periods-triggers", "acquisition", "periods"])
-        rec, cand, acq = ledger.adoption(recs, "periods")
-        self.assertEqual((rec["seq"], cand, acq["seq"]), (2, None, 4))
+    def test_acquisition_records_do_not_cut(self):
+        """acquisition-start・acquisition-result があっても、threshold-access が無ければ保留。"""
+        recs = self.build(["periods", "acquisition-start", "acquisition-result",
+                           "periods-triggers"])
+        rec, cand, cut = ledger.adoption(recs, "periods-triggers")
+        self.assertEqual((rec, cut, cand["seq"]), (None, None, 4))
+
+    def test_last_before_first_threshold_access(self):
+        recs = self.build(["periods", "periods", "periods-triggers", "threshold-access",
+                           "periods", "periods-triggers", "threshold-access", "periods"])
+        rec, cand, cut = ledger.adoption(recs, "periods")
+        self.assertEqual((rec["seq"], cand, cut["seq"]), (2, None, 4))
         rec, _c, _a = ledger.adoption(recs, "periods-triggers")
         self.assertEqual(rec["seq"], 3)
 
-    def test_nothing_before_acquisition(self):
-        recs = self.build(["periods", "acquisition", "periods-triggers"])
-        rec, cand, acq = ledger.adoption(recs, "periods-triggers")
+    def test_triggers_after_step3_before_access_adopted(self):
+        """手順3（acquisition-start・result）の後、threshold-access の前の triggers は採用される。"""
+        recs = self.build(["periods", "periods-triggers", "acquisition-start",
+                           "acquisition-result", "periods-triggers", "periods",
+                           "threshold-access", "periods-triggers", "periods"])
+        self.assertEqual(ledger.adoption(recs, "periods-triggers")[0]["seq"], 5)
+        self.assertEqual(ledger.adoption(recs, "periods")[0]["seq"], 6)
+
+    def test_nothing_before_threshold_access(self):
+        recs = self.build(["periods", "threshold-access", "periods-triggers"])
+        rec, cand, cut = ledger.adoption(recs, "periods-triggers")
         self.assertIsNone(rec)
         self.assertIsNone(cand)
-        self.assertEqual(acq["seq"], 2)
+        self.assertEqual(cut["seq"], 2)
 
     def test_recorded_at_is_not_used(self):
         """recorded_at を変えても（鎖を作り直しても）採用は順番どおり。"""
-        recs = self.build(["periods", "periods", "acquisition"])
+        recs = self.build(["periods", "periods", "threshold-access"])
         shifted = [dict(r, recorded_at="2030-01-01T00:00:00Z") if r["seq"] == 1 else r
                    for r in recs]
         self.assertEqual(ledger.adoption(shifted, "periods")[0]["seq"], 2)
 
 
-# ---------------------------------------------------------------- acquisition の記録
+# ---------------------------------------------------------------- drand を持つ記録
 
 
-def acquisition_doc(round_no=1000, chain=QUICKNET, signature="ab" * 48, head=None):
-    doc = {"step": 3, "drand": {"chain_hash": chain, "round": round_no,
-                                "signature": signature,
-                                "randomness": ledger.sha256_hex(bytes.fromhex(signature))}}
+def drand_doc(kind="threshold-access", round_no=1000, chain=QUICKNET, signature="ab" * 48,
+              head=None):
+    """threshold-access か acquisition-start の中身（docs/verify/periods-seal.md 7章の形）。"""
+    doc = {"kind": kind,
+           "drand": {"chain_hash": chain, "round": round_no, "signature": signature,
+                     "randomness": ledger.sha256_hex(bytes.fromhex(signature))}}
+    if kind == "threshold-access":
+        doc["block_start"] = "2020-12-15"
+    else:
+        doc["step"] = 3
+        doc["fetch"] = {"code_sha256": "c" * 64}
     if head is not None:
         doc["ledger_head"] = head
     return doc
@@ -576,38 +630,47 @@ def acquisition_doc(round_no=1000, chain=QUICKNET, signature="ab" * 48, head=Non
 
 class TestDrand(unittest.TestCase):
     def test_round_time(self):
-        d = ledger.drand_time_of_acquisition(acquisition_doc(1))
+        d = ledger.drand_time_of(drand_doc(round_no=1))
         self.assertEqual(int(d.timestamp()), 1692803367)
-        d = ledger.drand_time_of_acquisition(acquisition_doc(101))
+        d = ledger.drand_time_of(drand_doc(round_no=101))
         self.assertEqual(int(d.timestamp()), 1692803367 + 300)
 
     def test_bad_randomness(self):
-        doc = acquisition_doc()
+        doc = drand_doc()
         doc["drand"]["randomness"] = "00" * 32
         with self.assertRaisesRegex(ledger.LedgerError, "randomness"):
-            ledger.drand_time_of_acquisition(doc)
+            ledger.drand_time_of(doc)
 
     def test_unknown_chain_and_missing_fields(self):
         with self.assertRaises(ledger.LedgerError):
-            ledger.drand_time_of_acquisition(acquisition_doc(chain="00" * 32))
+            ledger.drand_time_of(drand_doc(chain="00" * 32))
         with self.assertRaises(ledger.LedgerError):
-            ledger.drand_time_of_acquisition({"step": 3})
+            ledger.drand_time_of({"kind": "threshold-access"})
         with self.assertRaises(ledger.LedgerError):
-            ledger.drand_time_of_acquisition(acquisition_doc(0))
+            ledger.drand_time_of(drand_doc(round_no=0))
+
+    def test_slack_value(self):
+        self.assertEqual(ledger.DRAND_HEADER_SLACK, datetime.timedelta(hours=2))
 
 
-class TestCheckAcquisition(LedgerCase):
+class TestCheckDrandRecord(LedgerCase):
+    """threshold-access と acquisition-start の照合（ledger_head と drand の回）。"""
+
+    KIND = "threshold-access"
+
     def setUp(self):
         super().setUp()
         ledger.append_record(self.path, "periods", [target("p")], "", T0)
         ledger.append_record(self.path, "periods-triggers", [target("t")], "", T0 + H)
-        self.recs = ledger.append_record(self.path, "acquisition", [target("a")], "", T0 + 2 * H)
+        self.recs = ledger.append_record(self.path, self.KIND, [target("a")], "", T0 + 2 * H)
         self.rec = self.recs[-1]
         self.head = {"seq": 2, "sha256": ledger.prefix_digest(self.data(), 2)}
         self.t3 = ledger.drand_round_time(QUICKNET, 1000)
 
-    def check(self, head, own):
-        return ledger.check_acquisition(self.data(), self.rec, acquisition_doc(1000, head=head), own)
+    def check(self, head, own, **kw):
+        doc = drand_doc(self.KIND, 1000, head=head)
+        doc.update(kw)
+        return ledger.check_drand_record(self.data(), self.rec, doc, own)
 
     def test_ok_and_pending(self):
         self.assertEqual(self.check(self.head, self.t3 + H), (self.t3, "ok"))
@@ -622,11 +685,76 @@ class TestCheckAcquisition(LedgerCase):
         with self.assertRaisesRegex(ledger.LedgerError, "ledger_head"):
             self.check(None, None)
 
-    def test_round_not_before_own_time_fails(self):
-        with self.assertRaisesRegex(ledger.LedgerError, "より前でない"):
-            self.check(self.head, self.t3)
-        with self.assertRaisesRegex(ledger.LedgerError, "より前でない"):
-            self.check(self.head, self.t3 - H)
+    def test_within_slack_passes(self):
+        """ヘッダの時刻が drand の回の公開時刻より前でも、幅（2 時間）の中なら通る。"""
+        for lag in (datetime.timedelta(0), H, 2 * H - datetime.timedelta(seconds=1)):
+            self.assertEqual(self.check(self.head, self.t3 - lag), (self.t3, "ok"), lag)
+
+    def test_beyond_slack_fails(self):
+        """幅を超えて drand の回の公開時刻が後なら失敗する（境目の 2 時間ちょうども失敗）。"""
+        for lag in (2 * H, 2 * H + datetime.timedelta(seconds=1), 3 * H, 48 * H):
+            with self.assertRaisesRegex(ledger.LedgerError, "より前でない"):
+                self.check(self.head, self.t3 - lag)
+
+    def test_doc_kind_must_match_record(self):
+        with self.assertRaisesRegex(ledger.LedgerError, "中身の kind"):
+            other = [k for k in ledger.DRAND_RECORD_KINDS if k != self.KIND][0]
+            self.check(self.head, None, kind=other)
+
+    def test_non_drand_kind_rejected(self):
+        rec = dict(self.rec, kind="periods")
+        with self.assertRaises(ledger.LedgerError):
+            ledger.check_drand_record(self.data(), rec, drand_doc(head=self.head), None)
+
+
+class TestCheckDrandStart(TestCheckDrandRecord):
+    KIND = "acquisition-start"
+
+    def test_step_must_be_3(self):
+        with self.assertRaisesRegex(ledger.LedgerError, "step"):
+            self.check(self.head, None, step=4)
+
+
+class TestAcquisitionPairs(LedgerCase):
+    """acquisition-start と acquisition-result の対応（T-008）。"""
+
+    def build(self, kinds):
+        recs = None
+        for i, k in enumerate(kinds):
+            recs = ledger.append_record(self.path, k, [target("a/%d" % i)], "", T0 + i * H)
+        return recs
+
+    def test_pair_ok_and_open_start(self):
+        recs = self.build(["periods", "acquisition-start", "acquisition-result",
+                           "acquisition-start"])
+        self.assertEqual(ledger.check_acquisition_pairs(recs, {3: 2}), {2: 3, 4: None})
+
+    def test_start_must_exist(self):
+        recs = self.build(["periods", "acquisition-start", "acquisition-result"])
+        for bad in (9, 1):   # 無い seq / acquisition-start でない seq
+            with self.assertRaisesRegex(ledger.LedgerError, "acquisition-start の記録ではない"):
+                ledger.check_acquisition_pairs(recs, {3: bad})
+
+    def test_result_must_come_after_start(self):
+        recs = self.build(["periods", "acquisition-result", "acquisition-start"])
+        with self.assertRaisesRegex(ledger.LedgerError, "より前にある"):
+            ledger.check_acquisition_pairs(recs, {2: 3})
+
+    def test_one_result_per_start(self):
+        recs = self.build(["periods", "acquisition-start", "acquisition-result",
+                           "acquisition-result"])
+        with self.assertRaisesRegex(ledger.LedgerError, "二つ以上"):
+            ledger.check_acquisition_pairs(recs, {3: 2, 4: 2})
+
+    def test_result_fields(self):
+        recs = self.build(["periods", "acquisition-start", "acquisition-result"])
+        good = {"kind": "acquisition-result", "start_seq": 2, "kept_rows_sha256": "d" * 64}
+        self.assertEqual(ledger.acquisition_result_fields(recs[2], good), (2, "d" * 64))
+        for bad in (dict(good, start_seq="2"), dict(good, start_seq=0),
+                    dict(good, kept_rows_sha256="x"), dict(good, kind="acquisition-start"),
+                    {k: v for k, v in good.items() if k != "start_seq"}):
+            with self.assertRaises(ledger.LedgerError):
+                ledger.acquisition_result_fields(recs[2], bad)
 
 
 # ---------------------------------------------------------------- 区画と deadline_status
@@ -762,19 +890,42 @@ class SealCase(unittest.TestCase):
         stamp.stamp_seq(self.ledger, rec["seq"], "ots", runner=FakeRun())
         return rec
 
-    def add_acquisition(self, now, round_no, head=None):
+    def _append_doc(self, kind, doc, now):
+        """中身の JSON を sealed/<kind>-<sha256>.json に書き、記録に追記して .ots を作る。
+        テストの中だけの道具（本番の仕組みは後のタスク）。"""
+        data = ledger.read_ledger(self.ledger)
+        seq = len(ledger.verify_chain(data)) + 1
+        content = ledger.canonical_line(doc) + b"\n"
+        sha = ledger.sha256_hex(content)
+        rel = "sealed/%s-%s.json" % (kind, sha)
+        ledger.write_once(os.path.join(self.root, rel), content)
+        ledger.append_record(self.ledger, kind, [{"path": rel, "role": kind, "sha256": sha}],
+                             "", now)
+        stamp.stamp_seq(self.ledger, seq, "ots", runner=FakeRun())
+        return seq
+
+    def _drand_doc(self, kind, round_no, head, **kw):
         data = ledger.read_ledger(self.ledger)
         seq = len(ledger.verify_chain(data)) + 1
         if head is None:
             head = ledger.expected_ledger_head(data, seq)
-        content = json.dumps(acquisition_doc(round_no, head=head), sort_keys=True).encode()
-        sha = ledger.sha256_hex(content)
-        rel = "sealed/acquisition-%s.json" % sha
-        ledger.write_once(os.path.join(self.root, rel), content)
-        ledger.append_record(self.ledger, ledger.ACQUISITION_KIND,
-                             [{"path": rel, "role": "acquisition", "sha256": sha}], "", now)
-        stamp.stamp_seq(self.ledger, seq, "ots", runner=FakeRun())
-        return seq
+        doc = drand_doc(kind, round_no, head=head)
+        doc.update(kw)
+        return doc
+
+    def add_access(self, now, round_no, head=None, **kw):
+        return self._append_doc(ledger.THRESHOLD_ACCESS_KIND,
+                                self._drand_doc(ledger.THRESHOLD_ACCESS_KIND, round_no, head, **kw),
+                                now)
+
+    def add_start(self, now, round_no, head=None):
+        return self._append_doc(ledger.ACQ_START_KIND,
+                                self._drand_doc(ledger.ACQ_START_KIND, round_no, head), now)
+
+    def add_result(self, now, start_seq):
+        return self._append_doc(ledger.ACQ_RESULT_KIND,
+                                {"kind": ledger.ACQ_RESULT_KIND, "start_seq": start_seq,
+                                 "kept_rows_sha256": "e" * 64}, now)
 
 
 class TestSealPeriods(SealCase):
@@ -788,7 +939,7 @@ class TestSealPeriods(SealCase):
         r = run_verify(self.root, "all")
         self.assertEqual(r.returncode, 0, r.stderr.decode())
         text = r.stdout.decode()
-        self.assertIn("採用は保留（acquisition の記録が無いため）", text)
+        self.assertIn("採用は保留（threshold-access の記録が無いため）", text)
         self.assertIn("seq 1: Pending", text)
         self.assertIn("仮の候補 = seq 1", text)
         self.assertIn("ヘッダが、Bitcoin の本当の鎖にあること", text)
@@ -873,28 +1024,64 @@ class TestSealPeriods(SealCase):
         with self.assertRaises(ledger.LedgerError):
             seal_triggers.seal(self.root, {}, T0 + H, None)
 
-    def test_acquisition_decides_adoption_and_status(self):
-        """acquisition の記録があれば採用が決まる。Pending でも採用は変わらない。"""
+    def test_threshold_access_decides_adoption_and_status(self):
+        """threshold-access の記録があれば採用が決まる。Pending でも採用は変わらない。"""
         self.seal()
         self.seal_triggers(T0 + H, last_read_offset_days=120)
         args = ["--j120", "before_deadline"]
         sha = ledger.sha256_hex(seal_periods.run_periods(self.root, args))
         self.seal(args=args, sha=sha, now=T0 + 2 * H)
-        self.add_acquisition(T0 + 3 * H, 30_000_000)
+        self.add_access(T0 + 3 * H, 30_000_000)
         r = run_verify(self.root, "all")
         self.assertEqual(r.returncode, 0, r.stderr.decode())
         text = r.stdout.decode()
-        self.assertIn("区切り：最初の acquisition の記録 = seq 4", text)
+        self.assertIn("区切り：最初の threshold-access の記録 = seq 4", text)
         self.assertIn("periods: 採用 = seq 3（2 件目", text)
         self.assertIn("periods-triggers: 採用 = seq 2（1 件目", text)
         self.assertIn("ヘッダが本当の鎖にあることは、この検査では確かめていない", text)
         self.assertIn("確定時刻との照合は保留", text)
         self.assertIn("記録から決まる値 before_deadline", text)
 
-    def test_before_deadline_claim_after_acquisition_fails(self):
-        """acquisition の後に追記したきっかけの値に合わせて before_deadline と申告すると失敗。"""
+    def test_acquisition_alone_keeps_adoption_held(self):
+        """acquisition-start・result だけでは区切りにならず、採用は保留のまま。"""
         self.seal()
-        self.add_acquisition(T0 + H, 30_000_000)
+        start = self.add_start(T0 + H, 30_000_000)
+        self.add_result(T0 + 2 * H, start)
+        r = run_verify(self.root, "all")
+        self.assertEqual(r.returncode, 0, r.stderr.decode())
+        text = r.stdout.decode()
+        self.assertIn("採用は保留（threshold-access の記録が無いため）", text)
+        self.assertIn("acquisition-start seq 2 ← acquisition-result seq 3", text)
+
+    def test_triggers_after_step3_adopted_and_after_access_not(self):
+        """手順3（start の後）・threshold-access の前の triggers は採用され、before_deadline が通る。
+        threshold-access の後に追記した triggers と periods は採用されない（追記は拒まない）。"""
+        self.seal()
+        start = self.add_start(T0 + H, 30_000_000)
+        self.add_result(T0 + 2 * H, start)
+        trec = self.seal_triggers(T0 + 3 * H, last_read_offset_days=120)
+        args = ["--j120", "before_deadline"]
+        sha = ledger.sha256_hex(seal_periods.run_periods(self.root, args))
+        prec = self.seal(args=args, sha=sha, now=T0 + 4 * H)
+        access = self.add_access(T0 + 5 * H, 30_000_000)
+        late_t = self.seal_triggers(T0 + 6 * H, last_read_offset_days=150)   # 関門は無い
+        late_p = self.seal(now=T0 + 7 * H)
+        r = run_verify(self.root, "all")
+        self.assertEqual(r.returncode, 0, r.stderr.decode())
+        text = r.stdout.decode()
+        self.assertIn("区切り：最初の threshold-access の記録 = seq %d" % access, text)
+        self.assertIn("periods-triggers: 採用 = seq %d" % trec["seq"], text)
+        self.assertIn("periods: 採用 = seq %d" % prec["seq"], text)
+        self.assertIn("seq %d は threshold-access の記録より後なので、採用しない" % late_t["seq"],
+                      text)
+        self.assertIn("seq %d は threshold-access の記録より後なので、採用しない" % late_p["seq"],
+                      text)
+        self.assertIn("記録から決まる値 before_deadline", text)
+
+    def test_before_deadline_claim_after_access_fails(self):
+        """threshold-access の後に追記したきっかけの値に合わせて before_deadline と申告すると失敗。"""
+        self.seal()
+        self.add_access(T0 + H, 30_000_000)
         self.seal_triggers(T0 + 2 * H, last_read_offset_days=120)
         args = ["--j120", "before_deadline"]
         sha = ledger.sha256_hex(seal_periods.run_periods(self.root, args))
@@ -903,9 +1090,9 @@ class TestSealPeriods(SealCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("before_deadline と申告", r.stderr.decode())
 
-    def test_after_deadline_claim_after_acquisition_passes(self):
+    def test_after_deadline_claim_after_access_passes(self):
         self.seal()
-        self.add_acquisition(T0 + H, 30_000_000)
+        self.add_access(T0 + H, 30_000_000)
         self.seal_triggers(T0 + 2 * H, last_read_offset_days=120)
         args = ["--j120", "after_deadline"]
         sha = ledger.sha256_hex(seal_periods.run_periods(self.root, args))
@@ -916,15 +1103,57 @@ class TestSealPeriods(SealCase):
         self.assertIn("periods-triggers: seq 2 より前に記録が無い", r.stdout.decode())
 
     def test_ledger_head_mismatch_fails_in_verify(self):
+        for add, cmd in ((self.add_access, "access"), (self.add_start, "acquisition")):
+            self.tearDown()
+            self.setUp()
+            self.seal()
+            self.seal_triggers(T0 + H, last_read_offset_days=120)
+            data = ledger.read_ledger(self.ledger)
+            add(T0 + 2 * H, 30_000_000, head={"seq": 1, "sha256": ledger.prefix_digest(data, 1)})
+            for c in (cmd, "all"):
+                r = run_verify(self.root, c)
+                self.assertEqual(r.returncode, 1, c)
+                self.assertIn("ledger_head が、直前の記録のハッシュと一致しない", r.stderr.decode())
+
+    def test_access_block_start_must_match_first_periods(self):
         self.seal()
-        self.seal_triggers(T0 + H, last_read_offset_days=120)
+        self.add_access(T0 + H, 30_000_000, block_start="2021-01-01")
+        r = run_verify(self.root, "all")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("block_start 2021-01-01", r.stderr.decode())
+
+    def test_result_pairing_broken_fails_in_verify(self):
+        """result の参照先が無い・start より前・一つの start に二つ、のどれも verify で失敗。"""
+        cases = {
+            "missing": lambda: self.add_result(T0 + H, 7),
+            "before": lambda: (self.add_result(T0 + H, 3), self.add_start(T0 + 2 * H, 30_000_000)),
+            "twice": lambda: (self.add_start(T0 + H, 30_000_000), self.add_result(T0 + 2 * H, 2),
+                              self.add_result(T0 + 3 * H, 2)),
+        }
+        msgs = {"missing": "実在しない", "before": "より前にある", "twice": "二つ以上"}
+        for name, build in cases.items():
+            self.tearDown()
+            self.setUp()
+            self.seal()
+            build()
+            for c in ("acquisition", "all"):
+                r = run_verify(self.root, c)
+                self.assertEqual(r.returncode, 1, (name, c))
+                self.assertIn(msgs[name], r.stderr.decode(), name)
+
+    def test_unknown_kind_fails_in_verify(self):
+        """仕組みを通さずに許可リストに無い kind（T-007 の acquisition）を足すと、verify が失敗。"""
+        self.seal()
         data = ledger.read_ledger(self.ledger)
-        self.add_acquisition(T0 + 2 * H, 30_000_000,
-                             head={"seq": 1, "sha256": ledger.prefix_digest(data, 1)})
-        for cmd in ("acquisition", "all"):
-            r = run_verify(self.root, cmd)
-            self.assertEqual(r.returncode, 1, cmd)
-            self.assertIn("ledger_head が、直前の記録のハッシュと一致しない", r.stderr.decode())
+        rec = {"seq": 2, "prev_hash": ledger.sha256_hex(ledger.split_lines(data)[-1]),
+               "kind": "acquisition", "targets": [target("x")],
+               "recorded_at": "2026-10-06T13:00:00Z", "note": ""}
+        with open(self.ledger, "ab") as f:
+            f.write(ledger.canonical_line(rec) + b"\n")
+        for c in ("chain", "all", "adopted"):
+            r = run_verify(self.root, c)
+            self.assertEqual(r.returncode, 1, c)
+            self.assertIn("許可リストに無い", r.stderr.decode())
 
     def test_btc_header_for_height_not_in_ots_rejected(self):
         """.ots の中に無い高さのヘッダを渡すと、エラーで止まる（自由な入力を受け付けない）。"""
@@ -994,7 +1223,7 @@ def adoption_lines(text):
 
 
 class TestAuditRepro(SealCase):
-    """seq 1 periods、seq 2 periods、seq 3 periods-triggers、seq 4 acquisition、seq 5 periods。
+    """seq 1 periods、seq 2 periods、seq 3 periods-triggers、seq 4 threshold-access、seq 5 periods。
     どの操作でも、採用は periods = seq 2、periods-triggers = seq 3 のまま。"""
 
     ACQ_ROUND = 30_000_000   # 公開時刻は 2026 年の夏。下の確定時刻（T0 以後）より前。
@@ -1003,7 +1232,7 @@ class TestAuditRepro(SealCase):
         self.seal()
         self.seal(now=T0 + H)
         self.seal_triggers(T0 + 2 * H, last_read_offset_days=120)
-        self.add_acquisition(T0 + 3 * H, round_no)
+        self.add_access(T0 + 3 * H, round_no)
         args = ["--j120", "before_deadline"]
         sha = ledger.sha256_hex(seal_periods.run_periods(self.root, args))
         self.seal(args=args, sha=sha, now=T0 + 4 * H)
@@ -1039,7 +1268,7 @@ class TestAuditRepro(SealCase):
         self.build()
         out = self.verify_all()
         self.assertAdoption(out)
-        self.assertIn("seq 5 は acquisition の記録より後なので、採用しない", out)
+        self.assertIn("seq 5 は threshold-access の記録より後なので、採用しない", out)
         self.assertIn("確定時刻との照合は保留", out)
 
     def test_withheld_upgrade_of_seq2_does_not_change_adoption(self):
@@ -1107,13 +1336,13 @@ class TestAuditRepro(SealCase):
             self.build(rnd)
             pending = self.verify_all()
             confirmed = self.verify_all(*self.confirm([1, 2, 3, 4, 5]))
-            self.assertIn("より前（取得の記録は、この二つの時刻の間に作られた", confirmed)
+            self.assertIn("この記録は、drand の回の公開時刻より後に作られ", confirmed)
             results.append(self.assertAdoption(pending))
             results.append(self.assertAdoption(confirmed))
         self.assertTrue(all(r == results[0] for r in results), results)
 
     def test_drand_round_after_own_confirmation_fails(self):
-        """drand の回の公開時刻が acquisition の記録自身の確定時刻より後なら、失敗する。"""
+        """drand の回の公開時刻が threshold-access の記録自身の確定時刻 + 幅 より後なら、失敗する。"""
         late_round = 40_000_000   # 公開時刻は 2027 年。
         self.build(late_round)
         self.assertAdoption(self.verify_all())   # Pending のうちは照合を保留
@@ -1121,6 +1350,24 @@ class TestAuditRepro(SealCase):
         code, _out, err = run_verify_inproc(self.root, "all", *args)
         self.assertEqual(code, 1)
         self.assertIn("より前でない", err)
+
+    def test_drand_slack_end_to_end(self):
+        """seq 4 の確定時刻（ヘッダの時刻）T0 + 10H に対し、回の公開時刻が 1 時間後なら通り、
+        3 時間後なら失敗する。"""
+        own = T0 + 6 * H + 4 * H
+        genesis, period = ledger.DRAND_CHAINS[QUICKNET]
+        for delta, ok in ((H, True), (3 * H, False)):
+            self.tearDown()
+            self.setUp()
+            rnd = int((own + delta).timestamp() - genesis) // period + 1
+            self.build(rnd)
+            code, out, err = run_verify_inproc(self.root, "all", *self.confirm([4]))
+            if ok:
+                self.assertEqual(code, 0, err)
+                self.assertAdoption(out)
+            else:
+                self.assertEqual(code, 1)
+                self.assertIn("より前でない", err)
 
     def test_third_party_upgrade_via_ots_dir(self):
         """第三者が自分で upgrade した .ots を --ots-dir で読ませる。採用は変わらない。"""

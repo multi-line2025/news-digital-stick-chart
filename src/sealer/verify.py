@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""封印の記録の検証（第三者向け）。T-005、T-007。
+"""封印の記録の検証（第三者向け）。T-005、T-007、T-008。
 
 標準ライブラリと git だけを使う。ネットワークは使わない。手順は docs/verify/periods-seal.md。
 
@@ -9,15 +9,23 @@
                                                        証明の状態（Pending か Bitcoin か）、
                                                        Pending の宛先が許可した 4 つか
     python3 -B src/sealer/verify.py targets [--rev R]  対象のファイルの sha256 の照合
-    python3 -B src/sealer/verify.py acquisition        acquisition の記録の ledger_head と drand の回
+    python3 -B src/sealer/verify.py access             threshold-access の記録の ledger_head・drand の回・
+                                                       block_start
+    python3 -B src/sealer/verify.py acquisition        acquisition-start の ledger_head と drand の回、
+                                                       acquisition-result との対応
     python3 -B src/sealer/verify.py periods            区画の境目と deadline_status の照合
     python3 -B src/sealer/verify.py adopted            採用される版（鎖の順番で決める）
     python3 -B src/sealer/verify.py all [--rev R]      上のすべて
 
-採用の規則（T-007）
-    最初の kind=acquisition の記録より seq が小さい記録のうち、その種類（periods、
-    periods-triggers）の最後のものを採用する。acquisition の記録が無いうちは保留。
+採用の規則（T-007、T-008）
+    最初の kind=threshold-access の記録より seq が小さい記録のうち、その種類（periods、
+    periods-triggers）の最後のものを採用する。threshold-access の記録が無いうちは保留。
+    acquisition-start・acquisition-result は区切りに使わない。
     時刻（Bitcoin の確定時刻、drand の回の公開時刻）と、Pending かどうかは使わない。
+
+drand の照合の幅（T-008）
+    drand の回の公開時刻 T と、その記録自身の .ots の確定時刻（ヘッダの時刻）Tq を比べ、
+    T < Tq + 2 時間（ledger.DRAND_HEADER_SLACK）なら通す。根拠は ledger.py の注記。
 
 どのコマンドにも付けられるもの（何度でも）
     --btc-header 高さ=ヘッダの16進（80 バイト）
@@ -130,7 +138,7 @@ class State:
         if unused:
             raise ledger.LedgerError("高さ %s のヘッダが渡されたが、その高さの Bitcoin の証明は"
                                      ".ots の中に無い" % ", ".join(map(str, unused)))
-        self.acq = ledger.first_acquisition(self.records)
+        self.cut = ledger.first_threshold_access(self.records)
 
     def file_json(self, record, role):
         t = ledger.output_target(record, role)
@@ -228,35 +236,88 @@ def cmd_targets(st, a):
 
 
 def adopted_triggers(st):
-    rec, _cand, acq = ledger.adoption(st.records, ledger.TRIGGERS_KIND)
+    rec, _cand, cut = ledger.adoption(st.records, ledger.TRIGGERS_KIND)
     values = None
     if rec is not None:
         values = ledger.triggers_values(st.file_json(rec, "triggers"))
-    return rec, values, acq is not None
+    return rec, values, cut is not None
+
+
+def _print_drand(r, t, state, own):
+    if state == "ok":
+        print("      drand の回の公開時刻 %s は、この記録自身の .ots の確定時刻（ヘッダの時刻）%s に"
+              "幅 %s を足した時刻より前（この記録は、drand の回の公開時刻より後に作られ、ヘッダの"
+              "時刻 + 幅 より前に存在した。確定時刻の側は、ヘッダが本当の鎖にあることを確かめた"
+              "場合に限る）" % (t.isoformat(), own.isoformat(), ledger.DRAND_HEADER_SLACK))
+    else:
+        print("      drand の回の公開時刻 %s。この記録自身の .ots が Pending のため、"
+              "確定時刻との照合は保留" % t.isoformat())
+
+
+def first_threshold_block_start(st):
+    versions = ledger.records_of_kind(st.records, ledger.PERIODS_KIND)
+    if not versions:
+        raise ledger.LedgerError("periods の記録が無い")
+    blocks = ledger.blocks_of(st.file_json(versions[0][1], "output"))
+    if "threshold" not in blocks:
+        raise ledger.LedgerError("periods の 1 件目の出力に threshold の期間が無い")
+    return blocks["threshold"][0]
+
+
+def cmd_access(st, _a):
+    recs = [r for r in st.records if r["kind"] == ledger.THRESHOLD_ACCESS_KIND]
+    if not recs:
+        print("threshold-access の記録：なし（照合するものが無い）")
+    else:
+        want_start = first_threshold_block_start(st)
+    for r in recs:
+        doc = st.file_json(r, ledger.THRESHOLD_ACCESS_KIND)
+        own = st.times.get(r["seq"])
+        t, state = ledger.check_drand_record(st.data, r, doc, own)
+        got = ledger.threshold_access_block_start(doc)
+        if got != want_start:
+            raise ledger.LedgerError("seq %d の threshold-access の block_start %s が、periods の"
+                                     " 1 件目の閾値の期間の始まり %s と一致しない"
+                                     % (r["seq"], got, want_start))
+        print("  threshold-access seq %d: ledger_head は直前の記録（先頭 %d 行）のハッシュと一致。"
+              "block_start %s は periods の 1 件目の閾値の期間の始まりと一致"
+              % (r["seq"], r["seq"] - 1, got))
+        _print_drand(r, t, state, own)
+    if recs:
+        print(ledger.DRAND_NOT_VERIFIED)
 
 
 def cmd_acquisition(st, _a):
-    acqs = [r for r in st.records if r["kind"] == ledger.ACQUISITION_KIND]
-    if not acqs:
-        print("acquisition の記録：なし（照合するものが無い）")
-    for r in acqs:
-        doc = st.file_json(r, "acquisition")
+    starts = [r for r in st.records if r["kind"] == ledger.ACQ_START_KIND]
+    results = [r for r in st.records if r["kind"] == ledger.ACQ_RESULT_KIND]
+    if not starts and not results:
+        print("acquisition-start・acquisition-result の記録：なし（照合するものが無い）")
+    for r in starts:
+        doc = st.file_json(r, ledger.ACQ_START_KIND)
         own = st.times.get(r["seq"])
-        t3, state = ledger.check_acquisition(st.data, r, doc, own)
-        print("  acquisition seq %d: ledger_head は直前の記録（先頭 %d 行）のハッシュと一致"
+        t, state = ledger.check_drand_record(st.data, r, doc, own)
+        print("  acquisition-start seq %d: ledger_head は直前の記録（先頭 %d 行）のハッシュと一致"
               % (r["seq"], r["seq"] - 1))
-        if state == "ok":
-            print("      drand の回の公開時刻 %s は、この記録自身の .ots の確定時刻 %s より前"
-                  "（取得の記録は、この二つの時刻の間に作られた。確定時刻の側は、ヘッダが本当の"
-                  "鎖にあることを確かめた場合に限る）" % (t3.isoformat(), own.isoformat()))
+        _print_drand(r, t, state, own)
+    refs = {}
+    for r in results:
+        start_seq, kept = ledger.acquisition_result_fields(
+            r, st.file_json(r, ledger.ACQ_RESULT_KIND))
+        refs[r["seq"]] = start_seq
+    pairs = ledger.check_acquisition_pairs(st.records, refs)
+    for sseq, rseq in sorted(pairs.items()):
+        if rseq is None:
+            print("  acquisition-start seq %d: 対応する acquisition-result は無い"
+                  "（取得の途中か、失敗した）" % sseq)
         else:
-            print("      drand の回の公開時刻 %s。この記録自身の .ots が Pending のため、"
-                  "確定時刻との照合は保留" % t3.isoformat())
-    print(ledger.DRAND_NOT_VERIFIED)
+            print("  acquisition-start seq %d ← acquisition-result seq %d（start が実在し、"
+                  "result が後にあり、result は一つだけ）" % (sseq, rseq))
+    if starts:
+        print(ledger.DRAND_NOT_VERIFIED)
 
 
 def cmd_periods(st, _a):
-    versions = ledger.records_of_kind(st.records, "periods")
+    versions = ledger.records_of_kind(st.records, ledger.PERIODS_KIND)
     if not versions:
         raise ledger.LedgerError("periods の記録が無い")
     for _v, r in ledger.records_of_kind(st.records, ledger.TRIGGERS_KIND):
@@ -279,7 +340,7 @@ def cmd_periods(st, _a):
             print("      きっかけの値なし。deadline_status は null（正しい）")
         elif expected == "held":
             held.append(v)
-            print("      deadline_status の申告 %s：acquisition の記録が無く、採用が保留のため"
+            print("      deadline_status の申告 %s：threshold-access の記録が無く、採用が保留のため"
                   "照合を保留" % out.get("deadline_status"))
         else:
             print("      deadline_status の申告 %s、記録から決まる値 %s（照合に使った、採用された "
@@ -293,42 +354,44 @@ def cmd_periods(st, _a):
 
 
 def cmd_adopted(st, _a):
-    print("採用の規則：最初の acquisition の記録より seq が小さい記録のうち、その種類の最後のもの。"
-          "時刻（Bitcoin の確定時刻、drand の回の公開時刻）と Pending かどうかは使わない。")
-    if st.acq is None:
-        print("採用は保留（acquisition の記録が無いため）。")
+    print("採用の規則：最初の threshold-access の記録より seq が小さい記録のうち、その種類の最後の"
+          "もの。acquisition-start・acquisition-result は区切りに使わない。時刻（Bitcoin の確定"
+          "時刻、drand の回の公開時刻）と Pending かどうかは使わない。")
+    if st.cut is None:
+        print("採用は保留（threshold-access の記録が無いため）。")
     else:
-        print("区切り：最初の acquisition の記録 = seq %d" % st.acq["seq"])
+        print("区切り：最初の threshold-access の記録 = seq %d" % st.cut["seq"])
     for kind in ledger.ADOPTED_KINDS:
-        rec, cand, acq = ledger.adoption(st.records, kind)
-        if acq is None:
+        rec, cand, cut = ledger.adoption(st.records, kind)
+        if cut is None:
             if cand is None:
                 print("  %s: 記録なし。採用は保留" % kind)
             else:
                 print("  %s: 採用は保留。仮の候補 = seq %d（%d 件目。今ある最後の記録）"
                       % (kind, cand["seq"], ledger.version_of(st.records, cand["seq"])))
-        elif rec is None:
-            print("  %s: seq %d より前に記録が無い。採用される版は無い" % (kind, acq["seq"]))
+            continue
+        if rec is None:
+            print("  %s: seq %d より前に記録が無い。採用される版は無い" % (kind, cut["seq"]))
         else:
-            print("  %s: 採用 = seq %d（%d 件目。seq %d の acquisition より前の最後の記録）。%s"
-                  % (kind, rec["seq"], ledger.version_of(st.records, rec["seq"]), acq["seq"],
+            print("  %s: 採用 = seq %d（%d 件目。seq %d の threshold-access より前の最後の記録）。%s"
+                  % (kind, rec["seq"], ledger.version_of(st.records, rec["seq"]), cut["seq"],
                      ADOPT_CONDITION))
-            later = [r["seq"] for r in st.records
-                     if r["kind"] == kind and r["seq"] > acq["seq"]]
-            if later:
-                print("      seq %s は acquisition の記録より後なので、採用しない"
-                      % ", ".join(map(str, later)))
+        later = [r["seq"] for r in st.records if r["kind"] == kind and r["seq"] > cut["seq"]]
+        if later:
+            print("      seq %s は threshold-access の記録より後なので、採用しない"
+                  % ", ".join(map(str, later)))
 
 
 def cmd_all(st, a):
     cmd_chain(st, a)
     cmd_anchors(st, a)
     cmd_targets(st, a)
+    cmd_access(st, a)
     cmd_acquisition(st, a)
     cmd_periods(st, a)
     cmd_adopted(st, a)
-    print("すべての検査に通った。" + ("採用は保留（acquisition の記録が無いため）。"
-                                      if st.acq is None else ""))
+    print("すべての検査に通った。" + ("採用は保留（threshold-access の記録が無いため）。"
+                                      if st.cut is None else ""))
     print(NOT_CHECKED)
 
 
@@ -337,7 +400,8 @@ def main(argv=None):
     p.add_argument("--root", default=os.getcwd())
     sub = p.add_subparsers(dest="cmd", required=True)
     parsers = {}
-    for name in ("chain", "anchors", "targets", "acquisition", "periods", "adopted", "all"):
+    for name in ("chain", "anchors", "targets", "access", "acquisition", "periods", "adopted",
+                 "all"):
         s = sub.add_parser(name, allow_abbrev=False)
         s.add_argument("--btc-header", type=_parse_header_arg, action="append",
                        help="高さ=80 バイトのヘッダの16進。.ots の中の Bitcoin の証明と照合する")
@@ -348,7 +412,7 @@ def main(argv=None):
         parsers[name].add_argument("--rev", default="working")
     a = p.parse_args(argv)
     fn = {"chain": cmd_chain, "anchors": cmd_anchors, "targets": cmd_targets,
-          "acquisition": cmd_acquisition, "periods": cmd_periods, "adopted": cmd_adopted,
+          "access": cmd_access, "acquisition": cmd_acquisition, "periods": cmd_periods, "adopted": cmd_adopted,
           "all": cmd_all}[a.cmd]
     try:
         st = State(os.path.abspath(a.root), a.btc_header, a.ots_dir)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""区切りを作り直すきっかけの値の封印（kind: periods-triggers）。T-005。
+"""区切りを作り直すきっかけの値の封印（kind: periods-triggers）。T-005、T-008。
 
 docs/stats/periods.md 8章 (2) の「きっかけの値は期限より前に決め、封印の記録に追記する」
 を行う仕組み。値は統計係が決める。この仕組みは値を記録して時刻証明を付けるだけで、
@@ -16,8 +16,10 @@ docs/stats/periods.md 8章 (2) の「きっかけの値は期限より前に決�
   - periods の記録が 1 件も無ければ止まる（作り直しの元になる版が無いため）。
 
 この記録が採用されるかは、この仕組みでは決めない。検証（verify.py periods / adopted）が、
-鎖の順番で決める（最初の acquisition の記録より前にある、periods-triggers の最後の記録）。
+鎖の順番で決める（最初の threshold-access の記録より前にある、periods-triggers の最後の記録）。
 時刻証明の時刻は、採用の判定には使わない。
+threshold-access の記録の後でも、追記は拒まない（関門は設けない。T-008）。その場合、
+検証が「採用しない」と表示する。
 """
 
 import argparse
