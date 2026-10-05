@@ -1,0 +1,18 @@
+# APIキーなどの秘密情報
+.env
+.env.*
+*.key
+
+# 生データの本体（Gitの外に置き、ハッシュの一覧だけを data/manifest/ に入れる）
+data/raw/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# OS・エディタ
+.DS_Store
+.vscode/

@@ -1,0 +1,32 @@
+# 公開前のメールアドレス検査（T-003）
+# push と pull_request のたびに src/collector/privacy_scan.py を実行する。
+# 1 件でも見つかれば失敗にする。一致した文字列は出力しない。
+# 外部の Action は actions/checkout だけ。版はコミットのハッシュで固定する。
+# このワークフローの手順は、ネットワークを使わない（checkout の取得を除く）。
+name: privacy-scan
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          # 全履歴を取る（検査は --all-history で全履歴を対象にするため）。
+          # checkout は `checkout -B <branch> refs/remotes/origin/<branch>` で上流を設定するので、
+          # --all-history を付けないと、push 済みのコミットが除外されて履歴を検査しない。
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan for address-shaped strings
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python3 -B src/collector/privacy_scan.py --root "$GITHUB_WORKSPACE" --all-history

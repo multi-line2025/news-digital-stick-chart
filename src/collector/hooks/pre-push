@@ -1,0 +1,70 @@
+#!/bin/sh
+# pre-push フック（T-003）：push の前に、公開前のメールアドレス検査を実行する。
+#
+# 導入の手順（どちらか一つ。git init の後に、リポジトリのルートで実行する）
+#   A. フックのディレクトリをこのフォルダに向ける
+#        chmod +x src/collector/hooks/pre-push
+#        git config core.hooksPath src/collector/hooks
+#   B. フックを .git/hooks にコピーする（どのブランチを checkout していても動く）
+#        cp src/collector/hooks/pre-push .git/hooks/pre-push
+#        chmod +x .git/hooks/pre-push
+#
+# 導入できたかの確かめ方
+#   git config --get core.hooksPath   （A の場合。src/collector/hooks と出る）
+#   ls -l .git/hooks/pre-push         （B の場合。実行権限 x が付いている）
+#
+# 動き
+#   - src/collector/privacy_scan.py --pre-push を実行し、
+#     Git から渡された push 対象（標準入力）をそのまま渡す。
+#   - 除外するのは、標準入力の remote sha（push 先が今持っていると答えたコミット）
+#     から辿れるものだけ。新しいブランチ（remote sha が全 0）や、remote sha が手元に
+#     無い場合は全履歴を検査する。追跡参照（refs/remotes）は除外に使わない
+#     （remote set-url・rename・fetch の行き先の書き換えで、中身と食い違うため）。
+#   - 検査が 0 以外で終わったら、push を止める。
+#   - python3 や検査のスクリプトが見つからない場合も、push を止める（安全側に倒す）。
+#   - フックの引数（リモートの名前と URL）は、検査のスクリプトに渡さない。
+#
+# このフックで防げないこと（必ず読むこと）
+#   1. git push --no-verify は、このフックを飛ばす。
+#   2. フックが無いと、Git は何も言わずに push する。たとえば次の場合。
+#      - フックを導入していないクローン（フックはクローンでは引き継がれない。
+#        core.hooksPath もリポジトリごとの設定で、クローンには入らない）
+#      - A の導入で、src/collector/hooks が無いコミットを checkout している場合
+#        （orphan のブランチ、T-003 より前のコミットなど）。A のフックは作業ツリーの
+#        ファイルなので、checkout した内容に無ければ消える
+#      - B の導入でも、検査のスクリプトは作業ツリーから探すので、無い場合は
+#        このフックが push を止める（黙って通すことはしない）
+#   3. 検査のスクリプト自体も作業ツリーにあるので、同じ push の中で書き換えられる。
+#
+# 運用の案（公開側へは、CI で全履歴の検査が通ったものだけを移す）
+#   1. 作業は非公開のリポジトリ（GitHub の private リポジトリ）に push する。
+#      そこで .github/workflows/privacy-scan.yml が --all-history で全履歴を検査する。
+#   2. 公開側のリポジトリへは、非公開側の CI が緑になったコミットのハッシュだけを、
+#      同じハッシュのまま push する（例: git push public <緑のハッシュ>:refs/heads/main）。
+#      push の前に、そのハッシュで CI が通ったことを GitHub の画面か gh で確かめる。
+#   3. 公開側への push でも、このフックが走る（公開側に無いコミットを検査する）。
+#   4. 公開側でも同じワークフローが走る。ここで失敗した場合は、すでに公開されている。
+#      その場合は作業を止めてリードに報告する。
+
+top=$(git rev-parse --show-toplevel 2>/dev/null) || {
+    echo "pre-push: リポジトリのルートを特定できない。push を止める。" >&2
+    exit 1
+}
+script="$top/src/collector/privacy_scan.py"
+
+if [ ! -f "$script" ]; then
+    echo "pre-push: 検査のスクリプトが見つからない。push を止める。" >&2
+    exit 1
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "pre-push: python3 が見つからない。push を止める。" >&2
+    exit 1
+fi
+
+PYTHONDONTWRITEBYTECODE=1 python3 -B "$script" --root "$top" --pre-push
+status=$?
+if [ "$status" -ne 0 ]; then
+    echo "pre-push: 公開前の検査が通らなかった（終了コード $status）。push を止める。" >&2
+    exit 1
+fi
+exit 0
