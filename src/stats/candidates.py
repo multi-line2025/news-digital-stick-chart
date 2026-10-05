@@ -56,6 +56,13 @@ SMOOTHING_DAYS = 7
 
 # 普段の水準：7日の平均を直近何日分とるか（CLAUDE.md）。読む過去分は 365 + 6 = 371 日。
 BASELINE_WINDOW_DAYS = 365
+# B(t) を計算するのに要る、使える7日のまとまりの最低数。365個の半分以上（183個）。
+# これより少なければ B(t) は None（その週の対象にならない）。
+MIN_BASELINE_BLOCKS = (BASELINE_WINDOW_DAYS + 1) // 2
+
+# 予言の時点の報道量：終わりの日が t-1 から t-CURRENT_SEARCH_DAYS の7日のまとまりのうち、
+# 欠けた日を含まない最も新しいもの。読む日は t-13 から t-1。
+CURRENT_SEARCH_DAYS = 7
 
 # 欠けた日の規則（固定）。GDELT 2.0 の15分ファイルは1日に96本。
 SLOTS_PER_DAY = 96
@@ -66,7 +73,7 @@ MIN_PRESENT_SLOTS = 72
 MIN_LEVEL_RULE = (
     "V = the tag inclusion threshold A (mean daily ratio over the method block), "
     "determined only from method-block data and sealed together with the tag list, "
-    "before any of the 42 models is sealed and before the first threshold-access record"
+    "before the models (owner decision 2026-10-06, CLAUDE.md)"
 )
 
 # ---------------------------------------------------------------------------
@@ -143,7 +150,8 @@ def _cached(ratio_of_day, first, last):
 def baseline_level(ratio_of_day, t):
     """普段の水準 B(t)。7日の平均（終わりの日が t-365 から t-1）の中央値。
 
-    欠けた日を含む7日のまとまりは使わない。使えるまとまりが無ければ None。
+    欠けた日を含む7日のまとまりは使わない。使えるまとまりが MIN_BASELINE_BLOCKS
+    （183）個より少なければ None。
     読むのは t-371 から t-1 までの日だけ（予言日 t 以降の日は読まない）。
     個数が偶数のときは、真ん中の二つの平均。
     """
@@ -154,7 +162,7 @@ def baseline_level(ratio_of_day, t):
         m = _block_mean(get, t - datetime.timedelta(days=k))
         if m is not None:
             means.append(m)
-    if not means:
+    if len(means) < MIN_BASELINE_BLOCKS:
         return None
     means.sort()
     n = len(means)
@@ -164,9 +172,32 @@ def baseline_level(ratio_of_day, t):
 
 
 def current_level(ratio_of_day, t):
-    """予言の時点の報道量。t-7 から t-1 の7日の平均。欠けた日があれば None。"""
-    get = _cached(ratio_of_day, t - datetime.timedelta(days=SMOOTHING_DAYS), t - ONE_DAY)
-    return _block_mean(get, t - ONE_DAY)
+    """予言の時点の報道量。
+
+    終わりの日が t-1, t-2, ..., t-7 の順に7日のまとまりを見て、欠けた日を含まない
+    最初のまとまりの平均を返す。どれも使えなければ None。読む日は t-13 から t-1。
+    """
+    first = t - datetime.timedelta(days=CURRENT_SEARCH_DAYS + SMOOTHING_DAYS - 1)
+    get = _cached(ratio_of_day, first, t - ONE_DAY)
+    for k in range(1, CURRENT_SEARCH_DAYS + 1):
+        m = _block_mean(get, t - datetime.timedelta(days=k))
+        if m is not None:
+            return m
+    return None
+
+
+def is_target(ratio_of_day, t):
+    """予言の対象かどうか（一度跳ねたタグの扱いを除く。それは採点計画で決める）。
+
+    B(t) と予言の時点の報道量がどちらも決まり、報道量 <= B(t) のとき True。
+    どちらかが None なら False（その週は対象にならない）。B(t) = 0 でも対象になりうる。
+    読む日は t-371 から t-1 だけ。
+    """
+    b = baseline_level(ratio_of_day, t)
+    c = current_level(ratio_of_day, t)
+    if b is None or c is None:
+        return False
+    return c <= b
 
 
 def day_is_missing(present_slots, total_volume):
@@ -330,7 +361,9 @@ def as_record():
             "comparison": "mean > m * B(t) and mean > V (both strict)",
             "baseline": "B(t) = median of 7-day means ending t-365 .. t-1 (complete blocks only); not recomputed",
             "baseline_window_days": BASELINE_WINDOW_DAYS,
-            "current_level": "7-day mean of t-7 .. t-1",
+            "current_level": "latest complete 7-day mean ending t-1 .. t-7 (reads t-13 .. t-1); none -> null",
+            "min_baseline_blocks": MIN_BASELINE_BLOCKS,
+            "target": "B(t) and current level both defined and current level <= B(t); otherwise not a target that week",
             "missing_day": "fewer than %d of %d 15-minute files acquired, or total volume 0" % (MIN_PRESENT_SLOTS, SLOTS_PER_DAY),
             "missing_block": "a 7-day block with any missing day is not used",
             "no_usable_block": "undeterminable (null)",
@@ -353,6 +386,18 @@ def as_record():
         "rate_table_checks": [
             "same target count for every multiplier within a horizon",
             "hit count non-increasing in multiplier within a horizon",
+        ],
+        "sealed_before_models": [
+            "tag list and V",
+            "missing-day list of the method block",
+        ],
+        "sealed_before_threshold_access": [
+            "these candidates and J = 56",
+            "tag list, V, missing-day list of the method block",
+            "the 42 models",
+            "target rule (this file: is_target, current_level, baseline_level)",
+            "rule for tags that already jumped (scoring plan); without it, do not proceed",
+            "naive-model lookback (counted including 7-day blocks) as a periods trigger",
         ],
         "threshold_period_order": [
             "seal missing-day list for the threshold block (before any label)",

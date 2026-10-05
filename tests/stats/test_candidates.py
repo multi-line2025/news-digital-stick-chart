@@ -12,6 +12,7 @@ import fractions
 import inspect
 import json
 import os
+import statistics
 import subprocess
 import sys
 import unittest
@@ -263,26 +264,82 @@ class TestLevels(unittest.TestCase):
         vals = {self.T - k * DAY: 0.0 for k in range(1, 372)}
         self.assertEqual(candidates.baseline_level(self.guarded(vals), self.T), 0.0)
 
-    def test_baseline_even_count_and_missing(self):
-        # 欠けた日のまとまりは使わない。全部欠ければ None。
+    def missing_recent(self, k, value_of_day=None):
+        """t-1 から t-k を欠けた日にする。使える7日のまとまりは 365 - k 個になる。"""
+        vals = {}
+        for j in range(1, 372):
+            d = self.T - j * DAY
+            vals[d] = None if j <= k else (value_of_day(j) if value_of_day else 1.0)
+        return vals
+
+    def test_baseline_min_blocks(self):
+        self.assertEqual(candidates.MIN_BASELINE_BLOCKS, 183)
+        self.assertGreaterEqual(2 * candidates.MIN_BASELINE_BLOCKS, candidates.BASELINE_WINDOW_DAYS)
+        # 使えるまとまり 183 個なら計算する、182 個なら None。
+        self.assertEqual(candidates.baseline_level(self.guarded(self.missing_recent(182)), self.T), 1.0)
+        self.assertIsNone(candidates.baseline_level(self.guarded(self.missing_recent(183)), self.T))
         vals = {self.T - k * DAY: None for k in range(1, 372)}
         self.assertIsNone(candidates.baseline_level(self.guarded(vals), self.T))
-        # 使えるまとまりが 2 個だけ（t-371..t-365 と t-370..t-364）→ 平均
-        vals = {self.T - k * DAY: None for k in range(1, 364)}
-        vals.update({self.T - k * DAY: 1.0 for k in range(365, 372)})
-        vals[self.T - 364 * DAY] = 8.0
-        # まとまり A = t-371..t-365 = 1.0、B = t-370..t-364 = (6 + 8)/7 = 2.0
-        self.assertAlmostEqual(candidates.baseline_level(self.guarded(vals), self.T), 1.5)
+
+    def test_baseline_matches_independent_median(self):
+        # 値をばらつかせ、テストの側で独立に計算した中央値と照合する（奇数個と偶数個）。
+        val = lambda j: ((j * 37) % 11) / 10.0  # noqa: E731
+        for k in (0, 181, 182):
+            vals = self.missing_recent(k, val)
+            means = []
+            for e in range(1, 366):
+                xs = [vals[self.T - (e + i) * DAY] for i in range(7)]
+                if None not in xs:
+                    means.append(sum(xs) / 7)
+            self.assertEqual(len(means), 365 - k)
+            got = candidates.baseline_level(self.guarded(vals), self.T)
+            self.assertAlmostEqual(got, statistics.median(means))
+
+    def cur(self, values):
+        return GuardedRatios(self.T - 13 * DAY, self.T - DAY, values, self, 1.0)
 
     def test_current_level(self):
-        g = GuardedRatios(self.T - 7 * DAY, self.T - DAY, {self.T - DAY: 8.0}, self, 1.0)
-        self.assertAlmostEqual(candidates.current_level(g, self.T), 14.0 / 7)
-        g = GuardedRatios(self.T - 7 * DAY, self.T - DAY, {self.T - 2 * DAY: None}, self, 1.0)
-        self.assertIsNone(candidates.current_level(g, self.T))
+        self.assertAlmostEqual(candidates.current_level(self.cur({self.T - DAY: 8.0}), self.T), 2.0)
+        # t-1 が欠けたら、t-2 で終わるまとまり（t-8..t-2）を使う。
+        vals = {self.T - DAY: None, self.T - 8 * DAY: 8.0}
+        self.assertAlmostEqual(candidates.current_level(self.cur(vals), self.T), 2.0)
+        # t-7 が欠けると、終わりが t-1..t-7 のまとまりはどれも使えない。
+        self.assertIsNone(candidates.current_level(self.cur({self.T - 7 * DAY: None}), self.T))
+
+    def test_current_level_reads_only_t13_to_t1(self):
+        g = self.cur({self.T - 7 * DAY: None})
+        candidates.current_level(g, self.T)
+        self.assertEqual(min(g.read), self.T - 13 * DAY)
+        self.assertEqual(max(g.read), self.T - DAY)
+
+    def test_is_target(self):
+        # 普段どおり（報道量 = B）なら対象。
+        self.assertTrue(candidates.is_target(self.guarded({}), self.T))
+        # 直近が普段より多ければ対象でない。
+        vals = {self.T - k * DAY: 3.0 for k in range(1, 8)}
+        self.assertFalse(candidates.is_target(self.guarded(vals), self.T))
+        # B = 0 で直近も 0 なら対象（外さない）。
+        zero = {self.T - k * DAY: 0.0 for k in range(1, 372)}
+        self.assertTrue(candidates.is_target(self.guarded(zero), self.T))
+        # B が None なら対象でない。
+        self.assertFalse(candidates.is_target(self.guarded(self.missing_recent(183)), self.T))
+        # 予言の時点の報道量が None なら対象でない。
+        self.assertFalse(candidates.is_target(self.guarded({self.T - 7 * DAY: None}), self.T))
 
     def test_baseline_fits_periods_lookback(self):
         self.assertEqual(candidates.BASELINE_WINDOW_DAYS + candidates.SMOOTHING_DAYS - 1, 371)
         self.assertLessEqual(371, periods.LOOKBACK_DAYS)
+
+    def test_naive_seasonal_lookback_exceeds_periods(self):
+        # 素朴な予測が去年の同じ時期を7日の平均で見ると 365 + 35 + 6 = 406 日で、400 を超える。
+        # 区画の境目は変わらず、手法を作る期間の予言日の範囲の始まりだけが遅れる。
+        need = periods.MEDIAN_WINDOW_DAYS + periods.SEASONAL_MARGIN_DAYS + candidates.SMOOTHING_DAYS - 1
+        self.assertEqual(need, 406)
+        self.assertGreater(need, periods.LOOKBACK_DAYS)
+        ps = periods.rebuild_periods(naive_history_days=need)
+        self.assertEqual(tuple((p["name"], p["block_start"], p["block_end"]) for p in ps), V1_BLOCKS)
+        v1 = periods.rebuild_periods()
+        self.assertEqual(ps[0]["prediction_first"], v1[0]["prediction_first"] + 6 * DAY)
 
 
 class TestMissingDay(unittest.TestCase):
