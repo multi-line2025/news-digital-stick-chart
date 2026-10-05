@@ -8,21 +8,23 @@
 
 用語（docs/stats/periods.md と同じ）
   t     予言日。予言の入力は日付 t-1 以前のデータだけ。
-  r(d)  タグの日次の比率（そのタグの報道量 / 同じ日の全体の報道量）。
-        全体の報道量が 0 か取得できなかった日は「欠けた日」で、値を持たない。
-        全体があってタグが 0 の日は r(d) = 0（欠けた日ではない）。
-  B(t)  普段の水準。予言日 t の時点で計算した値（直近365日の中央値。CLAUDE.md）。
-        判定でも、予言日 t の時点の B(t) を使い、判定期間のデータで計算し直さない。
+  r(d)  タグの日次の比率（そのタグの報道量 / 同じ日の全体の報道量。どちらもその日に
+        取得できた15分ファイルだけから数える）。欠けた日（day_is_missing）は値を持たない。
+        欠けた日でなく、タグが 0 の日は r(d) = 0。
+  B(t)  普段の水準。7日の平均（終わりの日が t-365 から t-1）の中央値（CLAUDE.md、
+        2026-10-06 オーナー決定）。判定でも予言日 t の時点の B(t) を使う。
   H     判定期間の日数（候補）。判定期間は日付 t+1 から t+H まで（両端を含む）。
   m     閾値の倍率（候補）。
+  V     最低の報道量。手法を作る期間のデータで決め、threshold-access より前に封印する。
   J     判定が読む最後の日のずれ。判定は t+H までしか読まないので J = H。
 
 判定（固定。候補にしない）
-  判定期間の中に完全に収まる、連続した7日の平均（7日の終わりの日 d は t+7 から t+H）
-  のうち、一つでも m × B(t) を超えたら（厳密に大きい）島とする。
+  判定期間の中に完全に収まる連続7日の平均（7日の終わりの日 d は t+7 から t+H）の
+  うち、一つでも「m × B(t) より大きく、かつ V より大きい」ものがあれば島とする。
   - 7日のまとまりに欠けた日が1日でもあれば、そのまとまりは使わない。
   - 使えるまとまりが一つも無ければ「判定不能」（None）。
-  - B(t) が 0 のタグは予言の対象にしない（倍率が意味を持たないため）。judge() は止まる。
+  - B(t) = 0 のタグも予言の対象に入る。V の条件で、B がごく小さいときに倍率が
+    意味を失う問題を防ぐ。
 
 使い方
   python3 -B src/stats/candidates.py
@@ -49,7 +51,23 @@ THRESHOLD_MULTIPLIERS = (2, 3, 4, 6, 8, 12, 16)
 HORIZON_DAYS = (14, 28, 56)
 
 # 判定の数字の平滑化（固定）。判定期間の中に完全に収まる、連続した7日の平均。
+# 普段の水準と予言の時点の報道量も、同じ7日の平均で測る。
 SMOOTHING_DAYS = 7
+
+# 普段の水準：7日の平均を直近何日分とるか（CLAUDE.md）。読む過去分は 365 + 6 = 371 日。
+BASELINE_WINDOW_DAYS = 365
+
+# 欠けた日の規則（固定）。GDELT 2.0 の15分ファイルは1日に96本。
+SLOTS_PER_DAY = 96
+# 72本（4分の3）以上あれば、その日は欠けた日としない。
+MIN_PRESENT_SLOTS = 72
+
+# 最低の報道量 V の決め方（値は決めない。決め方の規則だけを固定する）。
+MIN_LEVEL_RULE = (
+    "V = the tag inclusion threshold A (mean daily ratio over the method block), "
+    "determined only from method-block data and sealed together with the tag list, "
+    "before any of the 42 models is sealed and before the first threshold-access record"
+)
 
 # ---------------------------------------------------------------------------
 # 選ぶ規則の定数（二段の基準値。CLAUDE.md「基準値：二段」）
@@ -98,34 +116,101 @@ def smoothing_window_ends(t, horizon_days):
     return out
 
 
-def judge(ratio_of_day, t, horizon_days, multiplier, baseline):
-    """判定の参照実装。True（島）・False（島でない）・None（判定不能）を返す。
+def _block_mean(values_of_day, end):
+    """end で終わる連続7日の平均。欠けた日が1日でもあれば None。"""
+    xs = [values_of_day(end - datetime.timedelta(days=k)) for k in range(SMOOTHING_DAYS)]
+    if any(x is None for x in xs):
+        return None
+    return sum(xs) / SMOOTHING_DAYS
 
-    ratio_of_day(d) は日付 d の比率を返す関数。欠けた日は None を返す。
-    この関数が呼ぶのは、判定期間（t+1 から t+H）の日だけである。
-    baseline は予言日 t の時点の B(t)。
-    """
-    if horizon_days not in HORIZON_DAYS:
-        raise ValueError("判定期間が候補に無い")
-    if multiplier not in THRESHOLD_MULTIPLIERS:
-        raise ValueError("倍率が候補に無い")
-    if not baseline > 0:
-        raise ValueError("B(t) が 0 以下のタグは予言の対象にしない")
-    first, last = judgment_window(t, horizon_days)
+
+def _cached(ratio_of_day, first, last):
+    """first から last までの日だけを読み、ほかの日を求められたら止める関数を返す。"""
     values = {}
     d = first
     while d <= last:
         values[d] = ratio_of_day(d)
         d += ONE_DAY
-    limit = multiplier * baseline
+
+    def get(day):
+        if day not in values:
+            raise RuntimeError("読んではいけない日を読もうとした")
+        return values[day]
+
+    return get
+
+
+def baseline_level(ratio_of_day, t):
+    """普段の水準 B(t)。7日の平均（終わりの日が t-365 から t-1）の中央値。
+
+    欠けた日を含む7日のまとまりは使わない。使えるまとまりが無ければ None。
+    読むのは t-371 から t-1 までの日だけ（予言日 t 以降の日は読まない）。
+    個数が偶数のときは、真ん中の二つの平均。
+    """
+    first = t - datetime.timedelta(days=BASELINE_WINDOW_DAYS + SMOOTHING_DAYS - 1)
+    get = _cached(ratio_of_day, first, t - ONE_DAY)
+    means = []
+    for k in range(1, BASELINE_WINDOW_DAYS + 1):
+        m = _block_mean(get, t - datetime.timedelta(days=k))
+        if m is not None:
+            means.append(m)
+    if not means:
+        return None
+    means.sort()
+    n = len(means)
+    if n % 2 == 1:
+        return means[n // 2]
+    return (means[n // 2 - 1] + means[n // 2]) / 2
+
+
+def current_level(ratio_of_day, t):
+    """予言の時点の報道量。t-7 から t-1 の7日の平均。欠けた日があれば None。"""
+    get = _cached(ratio_of_day, t - datetime.timedelta(days=SMOOTHING_DAYS), t - ONE_DAY)
+    return _block_mean(get, t - ONE_DAY)
+
+
+def day_is_missing(present_slots, total_volume):
+    """欠けた日の規則。
+
+    present_slots: その日（収集係の規則で決まる UTC の日）の15分ファイルのうち、
+        ファイル一覧に載り、かつ取得の記録で取得とハッシュの照合に成功したものの数。
+    total_volume: その present_slots から数えた全体の報道量。
+    present_slots が MIN_PRESENT_SLOTS 未満、または total_volume が 0 なら欠けた日。
+    """
+    if not (isinstance(present_slots, int) and 0 <= present_slots <= SLOTS_PER_DAY):
+        raise ValueError("ファイルの数が不正")
+    if total_volume < 0:
+        raise ValueError("全体の報道量が負")
+    return present_slots < MIN_PRESENT_SLOTS or total_volume == 0
+
+
+def judge(ratio_of_day, t, horizon_days, multiplier, baseline, min_level):
+    """判定の参照実装。True（島）・False（島でない）・None（判定不能）を返す。
+
+    ratio_of_day(d) は日付 d の比率を返す関数。欠けた日は None を返す。
+    この関数が読むのは、判定期間（t+1 から t+H）の日だけである。
+    baseline は予言日 t の時点の B(t)（0 でもよい）。
+    min_level は最低の報道量（手法を作る期間のデータで決めて封印する値。0 より大きい）。
+    島：7日の平均 > multiplier × baseline、かつ 7日の平均 > min_level（どちらも厳密）。
+    """
+    if horizon_days not in HORIZON_DAYS:
+        raise ValueError("判定期間が候補に無い")
+    if multiplier not in THRESHOLD_MULTIPLIERS:
+        raise ValueError("倍率が候補に無い")
+    if baseline is None or baseline < 0:
+        raise ValueError("B(t) が無い、または負")
+    if min_level is None or not min_level > 0:
+        raise ValueError("最低の報道量は 0 より大きい値が要る")
+    first, last = judgment_window(t, horizon_days)
+    get = _cached(ratio_of_day, first, last)
+    limit = max(multiplier * baseline, min_level)
     usable = 0
     for end in smoothing_window_ends(t, horizon_days):
-        days = [end - datetime.timedelta(days=k) for k in range(SMOOTHING_DAYS)]
-        xs = [values[x] for x in days]
-        if any(x is None for x in xs):
+        mean = _block_mean(get, end)
+        if mean is None:
             continue
         usable += 1
-        if sum(xs) / SMOOTHING_DAYS > limit:
+        if mean > limit:
             return True
     if usable == 0:
         return None
@@ -147,6 +232,13 @@ def select(rate_table):
 
     rate_table: {(倍率, 日数): (島になった件数, 対象の件数)}。すべての組み合わせが
     ちょうど一つずつ必要。モデルの成績は受け取らない（受け取る引数が無い）。
+
+    整合性の検査（どれかに反したら止まる。表を作る計算に誤りがあるとみなす）
+      - 同じ判定期間では、対象の件数がどの倍率でも同じ。
+        （対象は予言の時点の報道量と B(t) だけで決まり、倍率に依らない。判定不能も
+        欠けた日と判定期間だけで決まり、倍率に依らない。）
+      - 同じ判定期間では、倍率が大きいほど島の件数が増えない（割合が上がらない）。
+        （倍率が大きい島は、小さい倍率でも島になる。）
 
     規則
       1. 判定期間を短い順に見る。
@@ -170,6 +262,13 @@ def select(rate_table):
         if n < 0 or hits < 0 or hits > n:
             raise ValueError("件数が不正")
         rates[key] = F(hits, n) if n > 0 else None
+    for h in HORIZON_DAYS:
+        ns = {rate_table[(m, h)][1] for m in THRESHOLD_MULTIPLIERS}
+        if len(ns) != 1:
+            raise ValueError("同じ判定期間で、対象の件数が倍率によって違う: H=%d" % h)
+        hs = [rate_table[(m, h)][0] for m in THRESHOLD_MULTIPLIERS]
+        if any(b > a for a, b in zip(hs, hs[1:])):
+            raise ValueError("同じ判定期間で、倍率が大きいのに島の件数が増えている: H=%d" % h)
     (_, c_low, lo_low, hi_low), (_, c_high, lo_high, hi_high) = TIERS
     for h in sorted(HORIZON_DAYS):
         r = {m: rates[(m, h)] for m in THRESHOLD_MULTIPLIERS}
@@ -191,6 +290,9 @@ def select(rate_table):
 def check_against_periods():
     """候補が periods.py の区切りと矛盾しないことを確かめ、使った値を返す。"""
     j_max = max_last_read_offset_days()
+    need = BASELINE_WINDOW_DAYS + SMOOTHING_DAYS - 1
+    if need > periods.LOOKBACK_DAYS:
+        raise RuntimeError("普段の水準に要る過去分が periods の過去分を超える")
     for h in HORIZON_DAYS:
         if not periods.horizon_is_valid(last_read_offset_days(h)):
             raise RuntimeError("J がエンバーゴを超える候補がある")
@@ -204,6 +306,8 @@ def check_against_periods():
         "max_last_read_offset_days": j_max,
         "embargo_days": periods.required_embargo(j_max),
         "periods_rebuild_needed": False,
+        "baseline_lookback_days": need,
+        "periods_lookback_days": periods.LOOKBACK_DAYS,
     }
 
 
@@ -223,12 +327,18 @@ def as_record():
             "window": "t+1 .. t+H (inclusive)",
             "statistic": "max over 7-day means fully inside the window",
             "smoothing_days": SMOOTHING_DAYS,
-            "comparison": "mean > m * B(t) (strict)",
-            "baseline_from": "B(t) at prediction time; not recomputed",
-            "missing_day": "a 7-day block with any missing day is not used",
+            "comparison": "mean > m * B(t) and mean > V (both strict)",
+            "baseline": "B(t) = median of 7-day means ending t-365 .. t-1 (complete blocks only); not recomputed",
+            "baseline_window_days": BASELINE_WINDOW_DAYS,
+            "current_level": "7-day mean of t-7 .. t-1",
+            "missing_day": "fewer than %d of %d 15-minute files acquired, or total volume 0" % (MIN_PRESENT_SLOTS, SLOTS_PER_DAY),
+            "missing_block": "a 7-day block with any missing day is not used",
             "no_usable_block": "undeterminable (null)",
-            "zero_baseline": "tag with B(t) = 0 is not a prediction target",
+            "zero_baseline": "tag with B(t) = 0 stays a prediction target",
+            "min_level_rule": MIN_LEVEL_RULE,
         },
+        "slots_per_day": SLOTS_PER_DAY,
+        "min_present_slots": MIN_PRESENT_SLOTS,
         "tiers": [
             {"name": n, "center": _frac(c), "low": _frac(lo), "high": _frac(hi)}
             for n, c, lo, hi in TIERS
@@ -238,7 +348,17 @@ def as_record():
             "low tier: multiplier with rate in [low, high], closest to center on log scale; tie -> larger multiplier",
             "high tier: multiplier smaller than the low-tier one, rate in range, closest to center; tie -> larger multiplier",
             "first horizon where both tiers are found",
-            "none found -> stop and report to owner",
+            "none found -> stop and report to owner; owner sees only the rate table",
+        ],
+        "rate_table_checks": [
+            "same target count for every multiplier within a horizon",
+            "hit count non-increasing in multiplier within a horizon",
+        ],
+        "threshold_period_order": [
+            "seal missing-day list for the threshold block (before any label)",
+            "compute labels and the rate table for all 21 combinations",
+            "seal the rate table and the select() result",
+            "model / stick-chart / naive outputs are not computed on the threshold period",
         ],
         "periods_check": check_against_periods(),
     }
