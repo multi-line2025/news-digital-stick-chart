@@ -1,4 +1,4 @@
-"""封印の記録（src/sealer/）のテスト。T-005、T-007、T-008。
+"""封印の記録（src/sealer/）のテスト。T-005、T-007、T-008、T-014。
 
 実行（プロジェクトのルートで）:
     PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/sealer -v
@@ -14,6 +14,8 @@ T-008：区切りは最初の threshold-access の記録。acquisition-start の
 追記したきっかけの値は採用され、threshold-access の後のものは採用されない。acquisition-start と
 acquisition-result の対応、drand の照合の幅（幅の中は通り、外は失敗）、許可リストに無い kind を
 拒むことを確かめる。
+T-014：acquisition-start の前に candidates が要ること（SealCase.add_cand で足す）、kind の許可リストが
+method-access を含む 7 つであること。
 """
 
 import contextlib
@@ -284,10 +286,11 @@ class TestChain(LedgerCase):
             ledger.append_record(self.path, "acquisition", [target("b")], "", T0 + H)
         self.assertEqual(len(self.lines()), 1)
 
-    def test_allowed_kinds_are_the_six(self):
+    def test_allowed_kinds_are_the_seven(self):
         self.assertEqual(set(ledger.ALLOWED_KINDS),
                          {"periods", "periods-triggers", "threshold-access",
-                          "acquisition-start", "acquisition-result", "candidates"})
+                          "acquisition-start", "acquisition-result", "candidates",
+                          "method-access"})
         self.assertNotIn("acquisition", ledger.ALLOWED_KINDS)
         self.add(n=1)
         for i, k in enumerate(ledger.ALLOWED_KINDS):
@@ -614,12 +617,16 @@ class TestAdoption(LedgerCase):
 
 def drand_doc(kind="threshold-access", round_no=1000, chain=QUICKNET, signature="ab" * 48,
               head=None):
-    """threshold-access か acquisition-start の中身（docs/verify/periods-seal.md 7章の形）。"""
+    """threshold-access・acquisition-start・method-access の中身（docs/verify/periods-seal.md
+    7章・10章の形）。"""
     doc = {"kind": kind,
            "drand": {"chain_hash": chain, "round": round_no, "signature": signature,
                      "randomness": ledger.sha256_hex(bytes.fromhex(signature))}}
     if kind == "threshold-access":
         doc["block_start"] = "2020-12-15"
+    elif kind == "method-access":
+        doc["step"] = 4
+        doc["block_start"], doc["block_end"] = "2015-03-02", "2020-12-14"
     else:
         doc["step"] = 3
         doc["fetch"] = {"code_path": "src/collector/fetch_list.py", "code_sha256": "c" * 64}
@@ -857,6 +864,10 @@ print(json.dumps({"deadline_status": status, "rebuild_triggers": trig,
 """ % ([list(b) for b in V1],)
 
 
+CAND_OUTPUT = {"threshold_multipliers": [2, 3], "horizon_days": [14, 28],
+               "combinations": [[2, 14], [2, 28], [3, 14], [3, 28]], "combination_count": 4}
+
+
 def run_verify(root, *args):
     return subprocess.run([sys.executable, "-B", VERIFY, "--root", root] + list(args),
                           capture_output=True)
@@ -926,6 +937,32 @@ class SealCase(unittest.TestCase):
         return self._append_doc(ledger.ACQ_RESULT_KIND,
                                 {"kind": ledger.ACQ_RESULT_KIND, "start_seq": start_seq,
                                  "kept_rows_sha256": "e" * 64}, now)
+
+    def add_method(self, now, round_no, head=None, **kw):
+        return self._append_doc(ledger.METHOD_ACCESS_KIND,
+                                self._drand_doc(ledger.METHOD_ACCESS_KIND, round_no, head, **kw),
+                                now)
+
+    def add_cand(self, now):
+        """candidates の記録を、書く仕組みを通さずに足す（T-014。acquisition-start の前提）。
+        対象の 4 つのファイルが無ければ仮のものを作り、形の照合に通る出力を書く。"""
+        for rel, _role in ledger.CANDIDATES_SOURCES:
+            full = os.path.join(self.root, rel)
+            if not os.path.exists(full):
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                with open(full, "w") as f:
+                    f.write("# %s\n" % rel)
+        out = (json.dumps(CAND_OUTPUT, sort_keys=True, indent=2) + "\n").encode()
+        sha = ledger.sha256_hex(out)
+        rel = ledger.candidates_output_rel(sha)
+        ledger.write_once(os.path.join(self.root, rel), out)
+        targets = [{"path": p, "role": r, "sha256": ledger.sha256_file(os.path.join(self.root, p))}
+                   for p, r in ledger.CANDIDATES_SOURCES]
+        targets.append({"path": rel, "role": "output", "sha256": sha})
+        ledger.append_record(self.ledger, ledger.CANDIDATES_KIND, targets, "", now)
+        seq = len(ledger.verify_chain(ledger.read_ledger(self.ledger)))
+        stamp.stamp_seq(self.ledger, seq, "ots", runner=FakeRun())
+        return seq
 
 
 class TestSealPeriods(SealCase):
@@ -1045,18 +1082,20 @@ class TestSealPeriods(SealCase):
     def test_acquisition_alone_keeps_adoption_held(self):
         """acquisition-start・result だけでは区切りにならず、採用は保留のまま。"""
         self.seal()
+        self.add_cand(T0 + H / 2)
         start = self.add_start(T0 + H, 30_000_000)
         self.add_result(T0 + 2 * H, start)
         r = run_verify(self.root, "all")
         self.assertEqual(r.returncode, 0, r.stderr.decode())
         text = r.stdout.decode()
         self.assertIn("採用は保留（threshold-access の記録が無いため）", text)
-        self.assertIn("acquisition-start seq 2 ← acquisition-result seq 3", text)
+        self.assertIn("acquisition-start seq 3 ← acquisition-result seq 4", text)
 
     def test_triggers_after_step3_adopted_and_after_access_not(self):
         """手順3（start の後）・threshold-access の前の triggers は採用され、before_deadline が通る。
         threshold-access の後に追記した triggers と periods は採用されない（追記は拒まない）。"""
         self.seal()
+        self.add_cand(T0 + H / 2)
         start = self.add_start(T0 + H, 30_000_000)
         self.add_result(T0 + 2 * H, start)
         trec = self.seal_triggers(T0 + 3 * H, last_read_offset_days=120)

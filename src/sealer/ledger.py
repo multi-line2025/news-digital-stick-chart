@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""封印の記録（追記のみ）の中核。T-005、T-007、T-008、T-009。
+"""封印の記録（追記のみ）の中核。T-005、T-007、T-008、T-009、T-013、T-014。
 
 記録のファイル（既定は sealed/ledger.jsonl）は JSON Lines で、1 行が 1 件の記録。
 標準ライブラリだけを使う。ネットワークは使わない。
@@ -7,9 +7,9 @@
 1 行の形（キーはこの 6 つだけ。ほかのキーがあれば検証で失敗にする）
     seq          通し番号。1 から始まり、行の順に 1 ずつ増える。
     prev_hash    直前の行のバイト列（末尾の改行を含めない）の sha256。1 行目は 0 が 64 個。
-    kind         種類。許可リスト（ALLOWED_KINDS）の 6 つだけ。それ以外は検証で失敗にする。
+    kind         種類。許可リスト（ALLOWED_KINDS）の 7 つだけ。それ以外は検証で失敗にする。
                  periods / periods-triggers / threshold-access / acquisition-start /
-                 acquisition-result / candidates（T-013）
+                 acquisition-result / candidates（T-013）/ method-access（T-014）
     targets      対象のファイルの一覧。各要素は {"path", "role", "sha256"}。
                  path はリポジトリのルートからの相対パス（区切りは /）。
     recorded_at  記録した日時（UTC、"YYYY-MM-DDTHH:MM:SSZ"）。記録した機械の時計による
@@ -44,7 +44,8 @@
     ログに出す。メモリの上で受け取り、ディスクに書く前に捨てることは含めない）。
     採用するのは、最初の threshold-access の記録より seq が小さい記録のうち、その種類
     （periods、periods-triggers、candidates）の最後のもの。
-    - acquisition-start・acquisition-result（試運転の手順3の取得）は区切りに使わない。
+    - acquisition-start・acquisition-result（試運転の手順3の取得）と method-access（手順4の
+      開始）は区切りに使わない（T-014 のリードの指示。区切りは threshold-access のまま）。
       8章 (2) は、手順3で 2020-12-15 以降の行をメモリの上で捨てるなら、手順3は期限に
       当たらないとしている。そのため、手順3の後に追記したきっかけの値も、最初の
       threshold-access より前なら採用される。
@@ -57,7 +58,7 @@
     - 鎖は行を消せず、順番も入れ替えられない（verify_chain）。そのため、.ots の upgrade を
       出すか出さないか、Pending のままにするか、drand のどの回を書くかで、採用は変わらない。
 
-drand を持つ記録（threshold-access、acquisition-start）の照合（check_drand_record）
+drand を持つ記録（threshold-access、acquisition-start、method-access）の照合（check_drand_record）
     - 中身の kind が記録の kind と同じであること。
     - 中身の ledger_head が、直前の記録までの先頭の sha256（seq N−1 の .ots の対象と同じ値）と
       一致すること。
@@ -92,7 +93,17 @@ drand を持つ記録（threshold-access、acquisition-start）の照合（check
     これに加えて、candidates の記録は、すべて最初の acquisition-start の記録より前になければ
     ならない（check_candidates_order）。CLAUDE.md は候補を「手法を作る期間のデータに触れる
     前に」封印すると決めており、区切りの threshold-access より強い条件になるため。後ろに
-    あれば検証は失敗する。
+    あれば検証は失敗する。acquisition-start があるなら、その前に candidates の記録が 1 件以上
+    なければならない（T-014。T-013 の監査 B-1）。
+
+手順4の開始（kind が method-access。T-014）
+    手法を作る期間の区画のデータそのもの（試運転の手順4）に初めて触れる直前に追記する記録。
+    中身は {"kind", "step": 4, "block_start", "block_end", "drand", "ledger_head"}。
+    block_start・block_end は periods の 1 件目の出力の method の区画と一致しなければならない。
+    前提（check_method_access_order）：その記録より前に candidates の記録と
+    acquisition-result の記録が、それぞれ 1 件以上あること。
+    手法を作る期間のデータに触れるコードは、最初に require_method_access() を呼ぶ。
+    採用の区切りには使わない。
 
 きっかけの値（kind が periods-triggers）
     区切りを作り直すきっかけの値は、periods-triggers の記録として追記する。periods の
@@ -129,8 +140,9 @@ THRESHOLD_ACCESS_KIND = "threshold-access"
 ACQ_START_KIND = "acquisition-start"
 ACQ_RESULT_KIND = "acquisition-result"
 CANDIDATES_KIND = "candidates"
+METHOD_ACCESS_KIND = "method-access"
 ALLOWED_KINDS = (PERIODS_KIND, TRIGGERS_KIND, THRESHOLD_ACCESS_KIND, ACQ_START_KIND,
-                 ACQ_RESULT_KIND, CANDIDATES_KIND)
+                 ACQ_RESULT_KIND, CANDIDATES_KIND, METHOD_ACCESS_KIND)
 
 # stamp で使う公開カレンダー（ots の既定と同じ 4 つ）と、その集約先が返す Pending の宛先
 # （実体のカレンダー）。stamp.py はこの左側に送る。.ots の Pending の宛先は右側に限る。
@@ -333,7 +345,7 @@ def adoption(records, kind):
         （無ければ None）。仮の候補は None。
       - threshold-access の記録が無い: 採用は保留（None）。仮の候補 = 今ある、その種類の
         最後の記録（無ければ None）。区切りの記録は None。
-    acquisition-start・acquisition-result は区切りに使わない。
+    acquisition-start・acquisition-result・method-access は区切りに使わない。
     時刻・Pending かどうか・recorded_at は、引数にも無く、使わない。
     """
     of_kind = [r for r in records if r["kind"] == kind]
@@ -369,7 +381,9 @@ DRAND_NOT_VERIFIED = ("drand の署名（BLS）は、オフラインでは検証
 #   drand の回の公開時刻が後なら、失敗にする。
 DRAND_HEADER_SLACK = datetime.timedelta(hours=2)
 
-DRAND_RECORD_KINDS = (THRESHOLD_ACCESS_KIND, ACQ_START_KIND)
+DRAND_RECORD_KINDS = (THRESHOLD_ACCESS_KIND, ACQ_START_KIND, METHOD_ACCESS_KIND)
+# drand を持つ記録のうち、中身に step を持つものと、その値。
+DRAND_RECORD_STEP = {ACQ_START_KIND: 3, METHOD_ACCESS_KIND: 4}
 
 
 def drand_round_time(chain_hash, round_no):
@@ -417,7 +431,7 @@ def _check_doc_kind(record, doc):
 
 
 def check_drand_record(data, record, doc, own_time):
-    """drand を持つ記録（threshold-access、acquisition-start）を照合する。
+    """drand を持つ記録（threshold-access、acquisition-start、method-access）を照合する。
 
     own_time: その記録自身の .ots で Bitcoin に確定した時刻（ヘッダの時刻。無ければ None）。
     返り値: (drand の回の公開時刻, "ok" か "pending")。食い違えば LedgerError。
@@ -428,8 +442,9 @@ def check_drand_record(data, record, doc, own_time):
     if record["kind"] not in DRAND_RECORD_KINDS:
         raise LedgerError("seq %d: kind %s は drand を持つ記録ではない" % (seq, record["kind"]))
     _check_doc_kind(record, doc)
-    if record["kind"] == ACQ_START_KIND and doc.get("step") != 3:
-        raise LedgerError("seq %d の acquisition-start の step が 3 でない" % seq)
+    step = DRAND_RECORD_STEP.get(record["kind"])
+    if step is not None and (type(doc.get("step")) is not int or doc.get("step") != step):
+        raise LedgerError("seq %d の %s の step が %d でない" % (seq, record["kind"], step))
     head = doc.get("ledger_head")
     want = expected_ledger_head(data, seq)
     if not isinstance(head, dict) or sorted(head) != ["seq", "sha256"]:
@@ -618,22 +633,86 @@ def first_acquisition_start(records):
 
 
 def check_candidates_order(records):
-    """candidates の記録が、すべて最初の acquisition-start の記録より前にあるか。T-013。
+    """candidates の記録が、すべて最初の acquisition-start の記録より前にあるか。T-013、T-014。
 
     CLAUDE.md は、閾値と判定期間の候補を「手法を作る期間のデータに触れる前に」封印すると
     決めている。採用の区切り（threshold-access）より強い条件なので、別に照合する。
-    後ろにある candidates の記録が一つでもあれば LedgerError。
+    次のどちらかなら LedgerError。
+      - 後ろにある candidates の記録が一つでもある（T-013）
+      - acquisition-start があるのに、その前に candidates の記録が 1 件も無い（T-014。
+        T-013 の監査 B-1。候補を封印しないまま取得を始めた状態を通さないため）
     返り値: 最初の acquisition-start の記録（無ければ None）。
     """
     cut = first_acquisition_start(records)
     if cut is None:
         return None
+    if not any(r["kind"] == CANDIDATES_KIND and r["seq"] < cut["seq"] for r in records):
+        raise LedgerError("acquisition-start の記録（seq %d）より前に、candidates の記録が無い。"
+                          "候補は、手法を作る期間のデータに触れる前に封印する決まり" % cut["seq"])
     late = [r["seq"] for r in records if r["kind"] == CANDIDATES_KIND and r["seq"] > cut["seq"]]
     if late:
         raise LedgerError("candidates の記録（seq %s）が、最初の acquisition-start の記録（seq %d）"
                           "より後にある。候補は、手法を作る期間のデータに触れる前に封印する決まり"
                           % (", ".join(map(str, late)), cut["seq"]))
     return cut
+
+
+# ---------------------------------------------------------------- 手順4の開始（method-access。T-014）
+
+METHOD_BLOCK = "method"
+METHOD_DOC_KEYS = ("block_end", "block_start", "drand", "kind", "ledger_head", "step")
+
+
+def check_method_access_order(records):
+    """各 method-access の記録より前に、candidates と acquisition-result の記録があるか。T-014。
+
+    手順4（手法を作る期間のデータそのものの取得）は、候補の封印（candidates）と手順3の
+    取得の完了（acquisition-result）の後に行う決まり。どれかの method-access の前に、
+    どちらかが 1 件も無ければ LedgerError。
+    返り値: method-access の記録の一覧（無ければ空）。
+    """
+    out = []
+    for m in records:
+        if m["kind"] != METHOD_ACCESS_KIND:
+            continue
+        before = [r["kind"] for r in records if r["seq"] < m["seq"]]
+        for need in (CANDIDATES_KIND, ACQ_RESULT_KIND):
+            if need not in before:
+                raise LedgerError("method-access の記録（seq %d）より前に、%s の記録が無い。"
+                                  "手順4は、候補の封印と手順3の取得の記録の後に行う決まり"
+                                  % (m["seq"], need))
+        out.append(m)
+    return out
+
+
+def method_block_of(root, records):
+    """periods の 1 件目（最初に封印した版）の出力の、手法を作る期間（method）の区画。"""
+    versions = records_of_kind(records, PERIODS_KIND)
+    if not versions:
+        raise LedgerError("periods の記録が無い")
+    blocks = blocks_of(read_target_json(root, versions[0][1], "output"))
+    if METHOD_BLOCK not in blocks:
+        raise LedgerError("periods の 1 件目の出力に method の期間が無い")
+    return blocks[METHOD_BLOCK]
+
+
+def check_method_access_doc(root, records, record, doc):
+    """method-access の中身のキーと区画を照合する（drand と ledger_head は check_drand_record）。
+
+    キーは METHOD_DOC_KEYS の 6 つだけ。block_start・block_end は、periods の 1 件目の出力の
+    method の区画と一致しなければならない。返り値: (block_start, block_end)。
+    """
+    _check_doc_kind(record, doc)
+    if tuple(sorted(doc)) != METHOD_DOC_KEYS:
+        raise LedgerError("seq %d の method-access の中身のキーが、決まった 6 つ（%s）と一致しない"
+                          % (record["seq"], "、".join(METHOD_DOC_KEYS)))
+    want = method_block_of(root, records)
+    got = (doc["block_start"], doc["block_end"])
+    if got != tuple(want):
+        raise LedgerError("seq %d の method-access の区画 %s〜%s が、periods の 1 件目の method の"
+                          "区画 %s〜%s と一致しない" % (record["seq"], got[0], got[1], want[0],
+                                                     want[1]))
+    return got
 
 
 # ---------------------------------------------------------------- periods の検査
@@ -915,8 +994,10 @@ def write_once(path, content):
         return False
 
 
-# ---------------------------------------------------------------- 関門（T-009）
+# ---------------------------------------------------------------- 関門（T-009、T-014）
 
+# 関門が読むプロジェクトのルート。このファイルの場所から決まり、外からは変えられない
+# （T-014。T-009 の監査 軽2：偽の記録を置いた別のフォルダを指せば関門が通ってしまうため）。
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -924,15 +1005,62 @@ class ThresholdAccessRequired(LedgerError):
     """threshold-access の記録が鎖に無い（または検証に通らない）ので、先に進まない。"""
 
 
-def require_threshold_access(root=None):
+class MethodAccessRequired(LedgerError):
+    """method-access の記録が鎖に無い（または検証に通らない）ので、先に進まない。T-014。"""
+
+
+def _gate_root(test_root):
+    """関門が読むルート。test_root はテスト用で、一時的なディレクトリの中だけを受け付ける。
+
+    関門の root は PROJECT_ROOT に固定する。test_root を渡せるのはテストだけで、システムの
+    一時的なディレクトリ（tempfile.gettempdir()）の下でなければ止める。本番のコードは
+    引数を渡さない。
+    """
+    if test_root is None:
+        return PROJECT_ROOT
+    import tempfile
+    tmp = os.path.realpath(tempfile.gettempdir())
+    real = os.path.realpath(test_root)
+    if os.path.commonpath([tmp, real]) != tmp or real == tmp:
+        raise LedgerError("関門の _test_root はテスト用で、一時的なディレクトリ（%s）の下だけを"
+                          "受け付ける: %s" % (tmp, test_root))
+    return real
+
+
+def _load_for_gate(root):
+    """関門の共通の手順：鎖とすべての seq の .ots を検証する。(記録のバイト列, 記録の一覧)。"""
+    sealed = os.path.join(root, "sealed")
+    data = read_ledger(os.path.join(sealed, "ledger.jsonl"))
+    records = verify_chain(data)
+    check_anchors(data, sealed)
+    return data, records
+
+
+def check_candidates_ready(root, records, before_seq):
+    """候補の順序の検査（T-014）。candidates の記録が before_seq より前に 1 件以上あり、
+    すべて最初の acquisition-start より前にあり、形の照合に通ること。"""
+    check_candidates_order(records)
+    cands = [r for r in records if r["kind"] == CANDIDATES_KIND]
+    if not any(r["seq"] < before_seq for r in cands):
+        raise LedgerError("seq %d より前に candidates の記録が無い。閾値と判定期間の候補は、"
+                          "先に封印する決まり" % before_seq)
+    for r in cands:
+        check_candidates_record(r)
+        check_candidates_output(read_target_json(root, r, "output"))
+
+
+def require_threshold_access(*, _test_root=None):
     """閾値を決める期間の区画（2020-12-15 以降）のデータに触れるコードが、最初に呼ぶ関門。
 
+    引数は渡さない（root はプロジェクトのルートに固定。_test_root はテスト用だけ）。
     鎖に threshold-access の記録があり、検証に通るときだけ、その最初の記録を返す。
     そうでなければ ThresholdAccessRequired で止める。確かめること：
       - 記録の鎖が正しく、すべての seq に、その seq 自身の .ots があること
       - 最初の threshold-access の記録の中身のファイルが、記録の sha256 と一致すること
       - 中身の kind・ledger_head・drand（randomness が signature の sha256）が照合に通ること
       - 中身の block_start が、periods の 1 件目の出力の閾値の期間の始まりと一致すること
+      - 候補の順序（T-014）：最初の threshold-access より前に candidates の記録が 1 件以上
+        あり、すべての candidates が最初の acquisition-start より前にあり、形の照合に通ること
     記録が無ければ、先に src/sealer/seal_access.py で threshold-access を追記する。
 
     限界：この関門を呼ばずにデータに触れるコードを書くこと、関門を飛ばして触れることは、
@@ -941,12 +1069,9 @@ def require_threshold_access(root=None):
     「示せないこと」の「記録に無い接触」）。関門は、正直な運用で手順を飛ばす誤りを防ぐ
     ためのもので、証明ではない。
     """
-    root = os.path.abspath(root or PROJECT_ROOT)
-    sealed = os.path.join(root, "sealed")
     try:
-        data = read_ledger(os.path.join(sealed, "ledger.jsonl"))
-        records = verify_chain(data)
-        check_anchors(data, sealed)
+        root = _gate_root(_test_root)
+        data, records = _load_for_gate(root)
         rec = first_threshold_access(records)
         if rec is None:
             raise LedgerError("threshold-access の記録が鎖に無い。閾値を決める期間の区画"
@@ -959,8 +1084,58 @@ def require_threshold_access(root=None):
         if got != want:
             raise LedgerError("threshold-access（seq %d）の block_start %s が、periods の 1 件目の"
                               "閾値の期間の始まり %s と一致しない" % (rec["seq"], got, want))
+        check_candidates_ready(root, records, rec["seq"])
     except ThresholdAccessRequired:
         raise
     except LedgerError as e:
         raise ThresholdAccessRequired("関門：%s" % e) from None
+    return rec
+
+
+def require_method_access(*, _test_root=None):
+    """手法を作る期間の区画のデータそのもの（試運転の手順4）に触れるコードが、最初に呼ぶ関門。T-014。
+
+    引数は渡さない（root はプロジェクトのルートに固定。_test_root はテスト用だけ）。
+    鎖に method-access の記録があり、検証に通るときだけ、その最初の記録を返す。
+    そうでなければ MethodAccessRequired で止める。確かめること：
+      - 記録の鎖が正しく、すべての seq に、その seq 自身の .ots があること
+      - 最初の method-access の記録の中身のファイルが、記録の sha256 と一致すること
+      - 中身の kind・step（4）・ledger_head・drand・区画（periods の 1 件目の method の区画）
+      - 前提：その記録より前に candidates と acquisition-result の記録があること
+        （check_method_access_order）。acquisition-start と result の対応が正しいこと
+      - 候補の順序：candidates が最初の acquisition-start より前にあり、形の照合に通ること
+    記録が無ければ、先に src/sealer/seal_method.py で method-access を追記する。
+
+    限界：require_threshold_access と同じ。この関門を呼ばずにデータに触れること、関門の前に
+    触れることは、記録からは検出できない。記録に残るのは「method-access を追記した」ことだけで、
+    「それより前に触れなかった」ことは示せない。関門は、正直な運用で手順を飛ばす誤りを防ぐ
+    ためのもので、証明ではない。
+    """
+    try:
+        root = _gate_root(_test_root)
+        data, records = _load_for_gate(root)
+        check_method_access_order(records)
+        rec = None
+        for r in records:
+            if r["kind"] == METHOD_ACCESS_KIND:
+                rec = r
+                break
+        if rec is None:
+            raise LedgerError("method-access の記録が鎖に無い。手法を作る期間の区画のデータ"
+                              "（試運転の手順4）には触れない。先に src/sealer/seal_method.py で"
+                              "追記する")
+        doc = read_target_json(root, rec, METHOD_ACCESS_KIND)
+        check_drand_record(data, rec, doc, None)
+        check_method_access_doc(root, records, rec, doc)
+        refs = {}
+        for r in records:
+            if r["kind"] == ACQ_RESULT_KIND:
+                refs[r["seq"]] = acquisition_result_fields(
+                    r, read_target_json(root, r, ACQ_RESULT_KIND))[0]
+        check_acquisition_pairs(records, refs)
+        check_candidates_ready(root, records, rec["seq"])
+    except MethodAccessRequired:
+        raise
+    except LedgerError as e:
+        raise MethodAccessRequired("関門：%s" % e) from None
     return rec

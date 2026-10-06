@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""threshold-access・acquisition-start・acquisition-result を書く共通の手順。T-009。
+"""threshold-access・acquisition-start・acquisition-result・method-access を書く共通の手順。
+T-009、T-014。
 
-使うのは seal_access.py と seal_acquisition.py。中身の形と照合は
+使うのは seal_access.py、seal_acquisition.py、seal_method.py。中身の形と照合は
 docs/verify/periods-seal.md 7章、ledger.py の check_drand_record・acquisition_result_fields・
 check_acquisition_pairs と同じ。
 
@@ -12,8 +13,12 @@ check_acquisition_pairs と同じ。
   3. 追記する行を作り、「今の記録 + その行」に対して、検証（verify.py）と同じ照合をする。
        - 鎖（kind が許可リストにあること、正規の形、seq、prev_hash）
        - 中身の kind が記録の kind と同じこと
-       - threshold-access：ledger_head、drand、block_start（periods の 1 件目の閾値の期間の始まり）
-       - acquisition-start：ledger_head、drand、step = 3、fetch（取得のコードのパスと sha256）
+       - threshold-access：ledger_head、drand、block_start（periods の 1 件目の閾値の期間の始まり）、
+         その前に candidates の記録があり、候補の順序の照合に通ること（T-014）
+       - acquisition-start：ledger_head、drand、step = 3、fetch（取得のコードのパスと sha256）、
+         その前に candidates の記録があること（T-014。check_candidates_order）
+       - method-access：ledger_head、drand、step = 4、区画（periods の 1 件目の method の区画）、
+         その前に candidates と acquisition-result の記録があること（T-014）
        - acquisition-result：start_seq・kept_rows_sha256 の形、start が実在し、result が後にあり、
          一つの start に result が一つだけであること
      どれかが通らなければ、何も書かずに止める。
@@ -22,6 +27,8 @@ check_acquisition_pairs と同じ。
   6. その seq 自身の .ots を作る（ots stamp。ネットワークを使う）。
      6 が失敗したときは、記録はあるが .ots が無い状態になる。この状態では、次の追記と検証が
      止まる。`stamp.py stamp --seq N` で .ots を作ってから進める（記録は書き換えない）。
+     6 が失敗しても、5 で追記した記録は鎖に残り、取り消せない。threshold-access なら、
+     その時点で採用の区切りが決まる（docs/verify/periods-seal.md 7章。T-009 の監査 軽3）。
 
 通信を差し替えられるところ
   drand_fetch：netfetch.http_get の代わり（URL → 応答のバイト列）
@@ -38,6 +45,10 @@ sys.path.insert(0, HERE)
 import ledger  # noqa: E402
 import netfetch  # noqa: E402
 import stamp  # noqa: E402
+
+
+WRITTEN_KINDS = (ledger.THRESHOLD_ACCESS_KIND, ledger.ACQ_START_KIND, ledger.ACQ_RESULT_KIND,
+                 ledger.METHOD_ACCESS_KIND)
 
 
 def _paths(project):
@@ -80,7 +91,7 @@ def result_refs(project, records, extra=None):
 def check_new(project, data_after, records_after, rec, doc):
     """手順 3。追記した後の記録に対して、新しい記録の照合をする。"""
     kind = rec["kind"]
-    if kind not in (ledger.THRESHOLD_ACCESS_KIND, ledger.ACQ_START_KIND, ledger.ACQ_RESULT_KIND):
+    if kind not in WRITTEN_KINDS:
         raise ledger.LedgerError("この仕組みが書く種類ではない: %s" % kind)
     if not isinstance(doc, dict) or doc.get("kind") != kind:
         raise ledger.LedgerError("中身の kind が記録の kind と一致しない")
@@ -90,8 +101,14 @@ def check_new(project, data_after, records_after, rec, doc):
         want = ledger.first_threshold_block_start(project, records_after)
         if ledger.threshold_access_block_start(doc) != want:
             raise ledger.LedgerError("block_start が periods の 1 件目の閾値の期間の始まりと一致しない")
+        ledger.check_candidates_ready(project, records_after, rec["seq"])
     elif kind == ledger.ACQ_START_KIND:
         ledger.acquisition_start_fields(doc)
+        ledger.check_candidates_order(records_after)
+    elif kind == ledger.METHOD_ACCESS_KIND:
+        ledger.check_method_access_doc(project, records_after, rec, doc)
+        ledger.check_method_access_order(records_after)
+        ledger.check_acquisition_pairs(records_after, result_refs(project, records_after))
     else:
         ledger.check_acquisition_pairs(records_after,
                                        result_refs(project, records_after, extra=(rec, doc)))

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""封印の記録の検証（第三者向け）。T-005、T-007、T-008。
+"""封印の記録の検証（第三者向け）。T-005、T-007、T-008、T-013、T-014。
 
 標準ライブラリと git だけを使う。ネットワークは使わない。手順は docs/verify/periods-seal.md。
 
@@ -12,7 +12,11 @@
     python3 -B src/sealer/verify.py access             threshold-access の記録の ledger_head・drand の回・
                                                        block_start
     python3 -B src/sealer/verify.py acquisition        acquisition-start の ledger_head と drand の回、
-                                                       acquisition-result との対応
+                                                       acquisition-result との対応、
+                                                       start の前に candidates があること（T-014）
+    python3 -B src/sealer/verify.py method             method-access（手順4の開始）の ledger_head・
+                                                       drand の回・区画、その前に candidates と
+                                                       acquisition-result があること（T-014）
     python3 -B src/sealer/verify.py periods            区画の境目と deadline_status の照合
     python3 -B src/sealer/verify.py candidates         閾値と判定期間の候補の記録の形・出力の形、
                                                        最初の acquisition-start より前にあること（T-013）
@@ -22,7 +26,7 @@
 採用の規則（T-007、T-008）
     最初の kind=threshold-access の記録より seq が小さい記録のうち、その種類（periods、
     periods-triggers、candidates）の最後のものを採用する。threshold-access の記録が無いうちは保留。
-    acquisition-start・acquisition-result は区切りに使わない。
+    acquisition-start・acquisition-result・method-access は区切りに使わない。
     時刻（Bitcoin の確定時刻、drand の回の公開時刻）と、Pending かどうかは使わない。
 
 drand の照合の幅（T-008）
@@ -299,8 +303,29 @@ def cmd_acquisition(st, _a):
         else:
             print("  acquisition-start seq %d ← acquisition-result seq %d（start が実在し、"
                   "result が後にあり、result は一つだけ）" % (sseq, rseq))
+    cut = ledger.check_candidates_order(st.records)
+    if cut is not None:
+        print("  最初の acquisition-start（seq %d）より前に candidates の記録がある" % cut["seq"])
     if starts:
         print(ledger.DRAND_NOT_VERIFIED)
+
+
+def cmd_method(st, _a):
+    """手順4の開始（kind が method-access）の照合。T-014。"""
+    recs = ledger.check_method_access_order(st.records)
+    if not recs:
+        print("method-access の記録：なし（照合するものが無い）")
+        return
+    for r in recs:
+        doc = st.file_json(r, ledger.METHOD_ACCESS_KIND)
+        own = st.times.get(r["seq"])
+        t, state = ledger.check_drand_record(st.data, r, doc, own)
+        start, end = ledger.check_method_access_doc(st.root, st.records, r, doc)
+        print("  method-access seq %d: ledger_head は直前の記録（先頭 %d 行）のハッシュと一致。"
+              "区画 %s〜%s は periods の 1 件目の method の区画と一致。前に candidates と "
+              "acquisition-result の記録がある" % (r["seq"], r["seq"] - 1, start, end))
+        _print_drand(r, t, state, own)
+    print(ledger.DRAND_NOT_VERIFIED)
 
 
 def cmd_periods(st, _a):
@@ -367,7 +392,7 @@ def cmd_candidates(st, _a):
 
 def cmd_adopted(st, _a):
     print("採用の規則：最初の threshold-access の記録より seq が小さい記録のうち、その種類の最後の"
-          "もの。acquisition-start・acquisition-result は区切りに使わない。時刻（Bitcoin の確定"
+          "もの。acquisition-start・acquisition-result・method-access は区切りに使わない。時刻（Bitcoin の確定"
           "時刻、drand の回の公開時刻）と Pending かどうかは使わない。")
     print("candidates は、これに加えて、すべての記録が最初の acquisition-start より前に"
           "なければならない（candidates の検査。後ろにあれば検証は失敗する）。")
@@ -402,6 +427,7 @@ def cmd_all(st, a):
     cmd_targets(st, a)
     cmd_access(st, a)
     cmd_acquisition(st, a)
+    cmd_method(st, a)
     cmd_periods(st, a)
     cmd_candidates(st, a)
     cmd_adopted(st, a)
@@ -415,8 +441,8 @@ def main(argv=None):
     p.add_argument("--root", default=os.getcwd())
     sub = p.add_subparsers(dest="cmd", required=True)
     parsers = {}
-    for name in ("chain", "anchors", "targets", "access", "acquisition", "periods", "candidates",
-                 "adopted", "all"):
+    for name in ("chain", "anchors", "targets", "access", "acquisition", "method", "periods",
+                 "candidates", "adopted", "all"):
         s = sub.add_parser(name, allow_abbrev=False)
         s.add_argument("--btc-header", type=_parse_header_arg, action="append",
                        help="高さ=80 バイトのヘッダの16進。.ots の中の Bitcoin の証明と照合する")
@@ -427,7 +453,8 @@ def main(argv=None):
         parsers[name].add_argument("--rev", default="working")
     a = p.parse_args(argv)
     fn = {"chain": cmd_chain, "anchors": cmd_anchors, "targets": cmd_targets,
-          "access": cmd_access, "acquisition": cmd_acquisition, "periods": cmd_periods,
+          "access": cmd_access, "acquisition": cmd_acquisition, "method": cmd_method,
+          "periods": cmd_periods,
           "candidates": cmd_candidates, "adopted": cmd_adopted,
           "all": cmd_all}[a.cmd]
     try:

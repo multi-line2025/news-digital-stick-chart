@@ -105,6 +105,18 @@ def tip_for_digest(digest):
     return hashlib.sha256(digest + tl.NONCE).digest()
 
 
+def copy_sealer(root):
+    """src/sealer の .py を仮のプロジェクトに写す（その写しの PROJECT_ROOT は root になる）。"""
+    dst = os.path.join(root, "src", "sealer")
+    os.makedirs(dst, exist_ok=True)
+    for name in os.listdir(tl.SRC):
+        if name.endswith(".py"):
+            with open(os.path.join(tl.SRC, name), "rb") as f:
+                data = f.read()
+            with open(os.path.join(dst, name), "wb") as f:
+                f.write(data)
+
+
 class WriterCase(tl.SealCase):
     def setUp(self):
         super().setUp()
@@ -118,6 +130,14 @@ class WriterCase(tl.SealCase):
     def git(self, *args):
         return subprocess.run(["git", "-C", self.root] + list(AUTHOR) + list(args),
                               check=True, capture_output=True).stdout
+
+    def seal(self, *args, with_cand=True, **kw):
+        """periods を封印し、続けて candidates の記録を足す（T-014。取得と threshold-access の
+        前提）。with_cand=False なら periods だけ。"""
+        rec = super().seal(*args, **kw)
+        if with_cand:
+            self.cand_seq = self.add_cand(kw.get("now", T0) + datetime.timedelta(minutes=1))
+        return rec
 
     def commit(self, msg):
         self.git("add", "-A")
@@ -159,7 +179,7 @@ class TestWriteThreeKinds(WriterCase):
     def test_threshold_access_written_and_verified(self):
         self.seal()
         rec, rel, ots_path = self.access(T0 + H)
-        self.assertEqual(rec["seq"], 2)
+        self.assertEqual(rec["seq"], 3)
         self.assertEqual(rec["kind"], ledger.THRESHOLD_ACCESS_KIND)
         self.assertEqual(rec["targets"], [{"path": rel, "role": "threshold-access",
                                            "sha256": ledger.sha256_file(
@@ -167,13 +187,13 @@ class TestWriteThreeKinds(WriterCase):
         doc = self.doc_of(rel)
         self.assertEqual(doc["block_start"], "2020-12-15")
         data = ledger.read_ledger(self.ledger)
-        self.assertEqual(doc["ledger_head"], {"seq": 1, "sha256": ledger.prefix_digest(data, 1)})
+        self.assertEqual(doc["ledger_head"], {"seq": 2, "sha256": ledger.prefix_digest(data, 2)})
         self.assertEqual(doc["drand"]["chain_hash"], netfetch.QUICKNET)
         self.assertTrue(os.path.exists(ots_path))
-        self.assertEqual(os.path.basename(ots_path), ledger.ots_name(2))
+        self.assertEqual(os.path.basename(ots_path), ledger.ots_name(3))
         out = self.verify_ok("all")
-        self.assertIn("区切り：最初の threshold-access の記録 = seq 2", out)
-        self.assertIn("threshold-access seq 2: ledger_head は直前の記録", out)
+        self.assertIn("区切り：最初の threshold-access の記録 = seq 3", out)
+        self.assertIn("threshold-access seq 3: ledger_head は直前の記録", out)
 
     def test_start_and_result_written_and_verified(self):
         self.seal()
@@ -184,10 +204,10 @@ class TestWriteThreeKinds(WriterCase):
             self.assertEqual(sdoc["fetch"], {"code_path": CODE_REL,
                                              "code_sha256": ledger.sha256_hex(f.read())})
         rrec, rrel, _ = self.result(T0 + 2 * H, srec["seq"], "d" * 64)
-        self.assertEqual(self.doc_of(rrel), {"kind": "acquisition-result", "start_seq": 2,
+        self.assertEqual(self.doc_of(rrel), {"kind": "acquisition-result", "start_seq": 3,
                                              "kept_rows_sha256": "d" * 64})
         out = self.verify_ok("all")
-        self.assertIn("acquisition-start seq 2 ← acquisition-result seq 3", out)
+        self.assertIn("acquisition-start seq 3 ← acquisition-result seq 4", out)
         self.assertIn(CODE_REL, out)
         self.assertIn("採用は保留（threshold-access の記録が無いため）", out)
 
@@ -201,7 +221,7 @@ class TestWriteThreeKinds(WriterCase):
         self.commit("記録")
         out = self.verify_ok("all", "--rev", "auto")
         self.assertIn("すべての検査に通った。", out)
-        self.assertIn("periods-triggers: 採用 = seq 4", out)
+        self.assertIn("periods-triggers: 採用 = seq 5", out)
 
     def test_drand_is_fetched_from_allowed_urls_only(self):
         self.seal()
@@ -242,13 +262,13 @@ class TestRefusals(WriterCase):
         self.seal()
         self.start(T0 + H)
         before = self.snapshot()
-        for bad in (1, 99):   # seq 1 は periods、seq 99 は無い
+        for bad in (1, 2, 99):   # seq 1 は periods、seq 2 は candidates、seq 99 は無い
             with self.assertRaisesRegex(ledger.LedgerError, "acquisition-start の記録ではない"):
                 self.result(T0 + 2 * H, bad)
         with self.assertRaisesRegex(ledger.LedgerError, "start_seq が正の整数でない"):
-            self.result(T0 + 2 * H, "2")
+            self.result(T0 + 2 * H, "3")
         with self.assertRaisesRegex(ledger.LedgerError, "kept_rows_sha256 の形"):
-            self.result(T0 + 2 * H, 2, "E" * 64)
+            self.result(T0 + 2 * H, 3, "E" * 64)
         self.assertEqual(self.snapshot(), before)
 
     def test_start_refuses_uncommitted_or_changed_code(self):
@@ -314,7 +334,7 @@ class TestRefusals(WriterCase):
             seal_records.write_doc_record(self.root, ledger.THRESHOLD_ACCESS_KIND, doc, data, "",
                                           T0 + H, "ots", runner=FakeOts())
         doc = tl.drand_doc(ledger.THRESHOLD_ACCESS_KIND, 30_000_000,
-                           head=ledger.expected_ledger_head(data, 2))
+                           head=ledger.expected_ledger_head(data, 3))
         doc["block_start"] = "2020-12-20"
         with self.assertRaisesRegex(ledger.LedgerError, "block_start"):
             seal_records.write_doc_record(self.root, ledger.THRESHOLD_ACCESS_KIND, doc, data, "",
@@ -345,18 +365,18 @@ class TestGate(WriterCase):
     def test_gate_stops_without_record_and_passes_with_it(self):
         self.seal()
         with self.assertRaisesRegex(ledger.ThresholdAccessRequired, "threshold-access の記録が鎖に無い"):
-            ledger.require_threshold_access(self.root)
+            ledger.require_threshold_access(_test_root=self.root)
         # 取得の記録（start・result）は関門を開けない。
         s, _r, _o = self.start(T0 + H)
         self.result(T0 + 2 * H, s["seq"])
         with self.assertRaises(ledger.ThresholdAccessRequired):
-            ledger.require_threshold_access(self.root)
+            ledger.require_threshold_access(_test_root=self.root)
         rec, _rel, _o = self.access(T0 + 3 * H)
-        self.assertEqual(ledger.require_threshold_access(self.root), rec)
+        self.assertEqual(ledger.require_threshold_access(_test_root=self.root), rec)
 
     def test_gate_stops_on_empty_ledger(self):
         with self.assertRaises(ledger.ThresholdAccessRequired):
-            ledger.require_threshold_access(self.root)
+            ledger.require_threshold_access(_test_root=self.root)
 
     def test_gate_is_a_ledger_error(self):
         self.assertTrue(issubclass(ledger.ThresholdAccessRequired, ledger.LedgerError))
@@ -367,21 +387,21 @@ class TestGate(WriterCase):
         with open(os.path.join(self.root, rel), "ab") as f:
             f.write(b" ")
         with self.assertRaisesRegex(ledger.ThresholdAccessRequired, "一致しない"):
-            ledger.require_threshold_access(self.root)
+            ledger.require_threshold_access(_test_root=self.root)
 
     def test_gate_stops_when_access_ots_missing(self):
         self.seal()
         rec, _rel, ots_path = self.access(T0 + H)
         os.rename(ots_path, os.path.join(self.root, "moved.ots"))
         with self.assertRaisesRegex(ledger.ThresholdAccessRequired, "時刻証明"):
-            ledger.require_threshold_access(self.root)
+            ledger.require_threshold_access(_test_root=self.root)
 
     def test_gate_stops_on_record_not_written_by_mechanism(self):
         """仕組みを通さずに、block_start の違う threshold-access を足しても関門は開かない。"""
         self.seal()
         self.add_access(T0 + H, 30_000_000, block_start="2021-01-01")
         with self.assertRaisesRegex(ledger.ThresholdAccessRequired, "block_start"):
-            ledger.require_threshold_access(self.root)
+            ledger.require_threshold_access(_test_root=self.root)
 
     def test_gate_stops_on_broken_chain(self):
         self.seal()
@@ -392,12 +412,17 @@ class TestGate(WriterCase):
         with open(self.ledger, "wb") as f:
             f.write(b"\n".join(lines))
         with self.assertRaises(ledger.ThresholdAccessRequired):
-            ledger.require_threshold_access(self.root)
+            ledger.require_threshold_access(_test_root=self.root)
 
     def test_gate_cli(self):
+        """gate の CLI は --root を受け付けず、コードの置き場のプロジェクトを読む（T-014）。
+        仮のプロジェクトに封印のコードを写して、その写しの gate を実行する。"""
         self.seal()
-        cmd = [sys.executable, "-B", os.path.join(tl.SRC, "seal_access.py"), "gate",
-               "--root", self.root]
+        copy_sealer(self.root)
+        cmd = [sys.executable, "-B", os.path.join(self.root, "src", "sealer", "seal_access.py"),
+               "gate"]
+        r = subprocess.run(cmd + ["--root", self.root], capture_output=True)
+        self.assertEqual(r.returncode, 2)
         r = subprocess.run(cmd, capture_output=True)
         self.assertEqual(r.returncode, 1)
         self.assertIn("threshold-access の記録が鎖に無い", r.stderr.decode())
@@ -418,8 +443,8 @@ class TestBitcoin(WriterCase):
 
     def setUp(self):
         super().setUp()
-        self.seal()
-        self.access(T0 + H)
+        self.seal()                 # seq 1 periods、seq 2 candidates
+        self.access(T0 + H)         # seq 3 threshold-access
         self.ledger_bytes = ledger.read_ledger(self.ledger)
 
     def original(self, seq):
@@ -431,34 +456,34 @@ class TestBitcoin(WriterCase):
         return tl.mine_header(tip_for_digest(digest), when)
 
     def test_upgrade_keeps_original_ots(self):
-        orig = self.original(2)
+        orig = self.original(3)
         up = FakeUpgrade(height=self.HEIGHT)
-        path = stamp.upgrade_seq(self.ledger, 2, "ots", runner=up)
-        self.assertEqual(os.path.basename(path), ledger.ots_name(2, bitcoin=True))
-        self.assertEqual(self.original(2), orig)
+        path = stamp.upgrade_seq(self.ledger, 3, "ots", runner=up)
+        self.assertEqual(os.path.basename(path), ledger.ots_name(3, bitcoin=True))
+        self.assertEqual(self.original(3), orig)
         self.assertEqual(stamp.bitcoin_heights(path), [self.HEIGHT])
         # ots upgrade は写しに対して実行し、sealed/ の .ots は渡さない。
         self.assertNotIn(self.sealed, up.calls[0][2])
         self.assertFalse(any(n.endswith(".bak") for n in os.listdir(self.sealed)))
         with self.assertRaisesRegex(ledger.LedgerError, "上書きしない"):
-            stamp.upgrade_seq(self.ledger, 2, "ots", runner=up)
+            stamp.upgrade_seq(self.ledger, 3, "ots", runner=up)
 
     def test_upgrade_not_confirmed_writes_nothing(self):
         before = self.snapshot()
-        self.assertIsNone(stamp.upgrade_seq(self.ledger, 2, "ots",
+        self.assertIsNone(stamp.upgrade_seq(self.ledger, 3, "ots",
                                             runner=FakeUpgrade(confirmed=False)))
         self.assertEqual(self.snapshot(), before)
 
     def test_upgrade_with_foreign_pending_refused(self):
         before = self.snapshot()
         with self.assertRaisesRegex(ledger.LedgerError, "許可していないカレンダー"):
-            stamp.upgrade_seq(self.ledger, 2, "ots",
+            stamp.upgrade_seq(self.ledger, 3, "ots",
                               runner=FakeUpgrade(extra_pending=(tl.OWN_CAL,)))
         self.assertEqual(self.snapshot(), before)
 
     def test_write_header_and_verify(self):
-        stamp.upgrade_seq(self.ledger, 2, "ots", runner=FakeUpgrade(height=self.HEIGHT))
-        hdr = self.header_for(2, T0 + 3 * H)
+        stamp.upgrade_seq(self.ledger, 3, "ots", runner=FakeUpgrade(height=self.HEIGHT))
+        hdr = self.header_for(3, T0 + 3 * H)
         path, when, block = seal_bitcoin.write_header(self.root, self.HEIGHT, lambda h: hdr,
                                                       min_work_bits=1)
         self.assertEqual(os.path.basename(path), "bitcoin-header-%d.hex" % self.HEIGHT)
@@ -468,11 +493,11 @@ class TestBitcoin(WriterCase):
         self.assertEqual(block, netfetch.block_hash_of(hdr))
         code, out, err = tl.run_verify_inproc(self.root, "all")
         self.assertEqual(code, 0, err)
-        self.assertIn("seq 2: Bitcoin で確定", out)
+        self.assertIn("seq 3: Bitcoin で確定", out)
         self.assertIn("この記録自身の .ots の確定時刻（ヘッダの時刻）", out)
 
     def test_header_refused_when_not_matching_or_unknown_height(self):
-        stamp.upgrade_seq(self.ledger, 2, "ots", runner=FakeUpgrade(height=self.HEIGHT))
+        stamp.upgrade_seq(self.ledger, 3, "ots", runner=FakeUpgrade(height=self.HEIGHT))
         before = self.snapshot()
         wrong = self.header_for(1, T0 + 3 * H)   # seq 1 の値で掘ったヘッダ
         with self.assertRaisesRegex(ledger.LedgerError, "照合に通らない"):
@@ -481,7 +506,7 @@ class TestBitcoin(WriterCase):
             seal_bitcoin.write_header(self.root, self.HEIGHT + 1, lambda h: wrong,
                                       min_work_bits=1)
         # 本番の作業量の下限では、易しく掘ったヘッダは通らない。
-        easy = self.header_for(2, T0 + 3 * H)
+        easy = self.header_for(3, T0 + 3 * H)
         with self.assertRaisesRegex(ledger.LedgerError, "作業量の下限"):
             seal_bitcoin.write_header(self.root, self.HEIGHT, lambda h: easy)
 
@@ -492,16 +517,16 @@ class TestBitcoin(WriterCase):
         self.assertEqual(self.snapshot(), before)
 
     def test_confirm_does_upgrade_and_header(self):
-        orig = self.original(2)
-        hdr = self.header_for(2, T0 + 3 * H)
-        path, written = seal_bitcoin.confirm(self.root, 2, "ots", lambda h: hdr,
+        orig = self.original(3)
+        hdr = self.header_for(3, T0 + 3 * H)
+        path, written = seal_bitcoin.confirm(self.root, 3, "ots", lambda h: hdr,
                                              runner=FakeUpgrade(height=self.HEIGHT),
                                              min_work_bits=1)
-        self.assertEqual(self.original(2), orig)
+        self.assertEqual(self.original(3), orig)
         self.assertEqual([os.path.basename(w) for w in written],
                          ["bitcoin-header-%d.hex" % self.HEIGHT])
         # もう一度実行しても、何も書き換えない。
-        self.assertEqual(seal_bitcoin.confirm(self.root, 2, "ots", lambda h: hdr,
+        self.assertEqual(seal_bitcoin.confirm(self.root, 3, "ots", lambda h: hdr,
                                               runner=FakeUpgrade(), min_work_bits=1),
                          (path, []))
         self.assertIsNone(seal_bitcoin.confirm(self.root, 1, "ots", lambda h: hdr,

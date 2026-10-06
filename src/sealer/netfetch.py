@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""封印の仕組みが通信する部分（drand の最新の回、Bitcoin のブロックのヘッダ）。T-009。
+"""封印の仕組みが通信する部分（drand の最新の回、Bitcoin のブロックのヘッダ）。T-009、T-014。
 
 通信はすべて、この中の http_get を通る。呼ぶ側は fetch 引数で差し替えられる
 （テストは差し替えたものを使い、ネットワークを使わない）。OpenTimestamps のカレンダーとの
@@ -7,6 +7,9 @@
 
 通信の決まり（コードに固定する）
     - 宛先は、下の ALLOWED_URL_PREFIXES で始まる https の URL だけ。それ以外は送る前に止める。
+    - リダイレクト（3xx）にはついていかない（T-014。T-009 の監査 軽1）。リダイレクトの応答を
+      受けたら、転送先には何も送らずに RedirectRefused で止める。再試行もしない。応答の URL が
+      要求した URL と違う場合も同じく止める（念のための二重の確認）。
     - 1 回の待ち時間の上限 TIMEOUT_SECONDS、再試行の上限 MAX_TRIES、再試行の間の待ち WAIT_SECONDS。
     - 応答の大きさの上限 MAX_BYTES。
     - 送るのは GET の要求だけで、本文は送らない。要求の URL には、回の番号・ブロックの高さ・
@@ -69,7 +72,32 @@ class FetchError(Exception):
     """通信に失敗した、または応答が検査に通らない。"""
 
 
-def http_get(url, sleep=time.sleep, opener=urllib.request.urlopen):
+class RedirectRefused(FetchError):
+    """リダイレクトの応答を受けた。転送先には送らない。T-014。"""
+
+
+class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
+    """リダイレクトの応答を受けたら、転送先への要求を作らずに止める。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise RedirectRefused("リダイレクト（%d）にはついていかない: %s → %s"
+                              % (code, req.full_url, newurl))
+
+
+def build_no_redirect_opener(*handlers):
+    """リダイレクトを拒む opener。handlers はテストで通信の部分を差し替えるときだけ渡す。"""
+    return urllib.request.build_opener(_RefuseRedirect, *handlers)
+
+
+_OPENER = build_no_redirect_opener()
+
+
+def no_redirect_urlopen(req, timeout):
+    """リダイレクトを拒む urlopen。http_get の既定の opener。"""
+    return _OPENER.open(req, timeout=timeout)
+
+
+def http_get(url, sleep=time.sleep, opener=no_redirect_urlopen):
     """url に GET を送り、応答の本文（バイト列）を返す。決まりは先頭の注記のとおり。"""
     if not url.startswith(ALLOWED_URL_PREFIXES):
         raise FetchError("許可していない宛先には送らない: %s" % url)
@@ -80,6 +108,10 @@ def http_get(url, sleep=time.sleep, opener=urllib.request.urlopen):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "stick-chart-sealer"})
             with opener(req, timeout=TIMEOUT_SECONDS) as r:
+                final = r.geturl() if hasattr(r, "geturl") else url
+                if final != url:
+                    raise RedirectRefused("応答の URL が要求した URL と違う（リダイレクト）: %s → %s"
+                                          % (url, final))
                 body = r.read(MAX_BYTES + 1)
             if len(body) > MAX_BYTES:
                 raise FetchError("応答が大きすぎる: %s" % url)

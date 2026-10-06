@@ -14,7 +14,8 @@
 - 壊さない複製では、すべての塊が終了コード 0 で終わり、記録の値が出力に現れること。
 - わざと壊した複製（記録の書き換え・記録の削除・.ots の削除・履歴の書き換え・
   許可していないカレンダーの Pending・許可リストに無い kind の記録・candidates の出力の
-  書き換え・acquisition-start の後の candidates の記録（T-013））では、同じ手順が失敗すること。
+  書き換え・acquisition-start の後の candidates の記録（T-013）・acquisition-result の無いまま
+  足した method-access（T-014））では、同じ手順が失敗すること。
 - コミットがまだ無いときは、複製できないので飛ばす（理由を表示する）。
 """
 
@@ -239,6 +240,46 @@ class TestDocProcedure(unittest.TestCase):
         self.git("add", "-A")
         self.git("commit", "-q", "-m", "late candidates")
         self.assertProcedureFails()
+
+    def _append_doc(self, kind, doc_fn):
+        """中身を書いて記録に足し、.ots を付ける。doc_fn(data, seq) が中身を返す。"""
+        sealed = os.path.join(self.clone, "sealed")
+        data = ledger.read_ledger(os.path.join(sealed, "ledger.jsonl"))
+        seq = len(ledger.split_lines(data)) + 1
+        content = ledger.canonical_line(doc_fn(data, seq)) + b"\n"
+        sha = ledger.sha256_hex(content)
+        rel = "sealed/%s-%s.json" % (kind, sha)
+        with open(os.path.join(self.clone, rel), "wb") as f:
+            f.write(content)
+        return self._append_with_ots(kind, [{"path": rel, "role": kind, "sha256": sha}])
+
+    def _drand(self, kind):
+        return lambda data, seq: tl.drand_doc(kind, 30_000_000,
+                                              head=ledger.expected_ledger_head(data, seq))
+
+    def test_method_access_needs_result_before_it(self):
+        """T-014：method-access は、前に acquisition-result があれば手順が通り、無ければ失敗する。"""
+        start = self._append_doc("acquisition-start", self._drand("acquisition-start"))
+        base = os.path.join(self.tmp, "base")
+        shutil.copytree(self.clone, base)
+        # acquisition-result の無いまま method-access を足す → 失敗
+        self._append_doc("method-access", self._drand("method-access"))
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "method without result")
+        self.assertProcedureFails()
+        # 作り直す：result を足してから method-access → 通る
+        shutil.rmtree(self.clone)
+        shutil.copytree(base, self.clone)
+        self._append_doc("acquisition-result", lambda d, s: {
+            "kind": "acquisition-result", "start_seq": start, "kept_rows_sha256": "e" * 64})
+        m = self._append_doc("method-access", self._drand("method-access"))
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "step 3 and method")
+        results = self.run_blocks()
+        for code, out in results:
+            self.assertEqual(code, 0, out)
+        joined = "".join(out for _c, out in results)
+        self.assertIn("method-access seq %d: ledger_head は直前の記録" % m, joined)
 
     def test_rewritten_history_fails(self):
         """封印した対象を書き換えた履歴を作り直しても（seq 1 を含む最初のコミットごと）見つかる。"""

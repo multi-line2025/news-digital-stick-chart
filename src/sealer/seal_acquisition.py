@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""試運転の手順3の取得の記録（acquisition-start、acquisition-result）を書く仕組み。T-009。
+"""試運転の手順3の取得の記録（acquisition-start、acquisition-result）を書く仕組み。T-009、T-014。
 
 取得のコード（収集係）は、次の順で呼ぶ（docs/verify/periods-seal.md 7章）。
   1. start：取得を始める前。drand の最新の回、ledger_head、取得のコードのパスと sha256 を
@@ -16,6 +16,8 @@
 
 拒むもの（何も書かずに止める）
   - periods の記録が無い。記録の鎖か .ots の検証に通らない。
+  - start：candidates の記録が 1 件も無い（T-014。T-013 の監査 B-1。候補は、手法を作る期間の
+    データに触れる前に封印する決まり。drand を取りにいく前に止める）。
   - start：取得のコードが、このリポジトリの HEAD のコミットの中身と同じでない（コミットして
     いない、または作業ツリーで変えている）。第三者が、記録の sha256 をコミットの中の
     コードと照らせるようにするため。
@@ -64,6 +66,9 @@ def committed_code_sha256(project, code_rel):
 def start(project, code_rel, now, ots_cmd, drand_fetch=None, runner=subprocess.run):
     """acquisition-start を 1 件追記する。返り値: (記録, 中身のパス, .ots のパス)。"""
     data, records = seal_records.load_checked(project, ots_cmd, runner=runner)
+    if not ledger.records_of_kind(records, ledger.CANDIDATES_KIND):
+        raise ledger.LedgerError("candidates の記録が無い。候補は、手法を作る期間のデータに触れる"
+                                 "前に封印する決まり。追記しない")
     code_path, code_sha = committed_code_sha256(project, code_rel)
     doc = {
         "kind": ledger.ACQ_START_KIND,
