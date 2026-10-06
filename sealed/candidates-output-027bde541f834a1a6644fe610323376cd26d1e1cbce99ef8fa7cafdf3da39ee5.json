@@ -1,0 +1,177 @@
+{
+  "combination_count": 21,
+  "combinations": [
+    [
+      2,
+      14
+    ],
+    [
+      3,
+      14
+    ],
+    [
+      4,
+      14
+    ],
+    [
+      6,
+      14
+    ],
+    [
+      8,
+      14
+    ],
+    [
+      12,
+      14
+    ],
+    [
+      16,
+      14
+    ],
+    [
+      2,
+      28
+    ],
+    [
+      3,
+      28
+    ],
+    [
+      4,
+      28
+    ],
+    [
+      6,
+      28
+    ],
+    [
+      8,
+      28
+    ],
+    [
+      12,
+      28
+    ],
+    [
+      16,
+      28
+    ],
+    [
+      2,
+      56
+    ],
+    [
+      3,
+      56
+    ],
+    [
+      4,
+      56
+    ],
+    [
+      6,
+      56
+    ],
+    [
+      8,
+      56
+    ],
+    [
+      12,
+      56
+    ],
+    [
+      16,
+      56
+    ]
+  ],
+  "horizon_days": [
+    14,
+    28,
+    56
+  ],
+  "judgment": {
+    "baseline": "B(t) = median of 7-day means ending t-365 .. t-1 (complete blocks only); not recomputed",
+    "baseline_window_days": 365,
+    "comparison": "mean > m * B(t) and mean > V (both strict)",
+    "current_level": "latest complete 7-day mean ending t-1 .. t-7 (reads t-13 .. t-1); none -> null",
+    "min_baseline_blocks": 183,
+    "min_level_rule": "V = the tag inclusion threshold A (mean daily ratio over the method block), determined only from method-block data and sealed together with the tag list, before the models (owner decision 2026-10-06, CLAUDE.md)",
+    "missing_block": "a 7-day block with any missing day is not used",
+    "missing_day": "fewer than 72 of 96 15-minute files acquired, or total volume 0",
+    "no_usable_block": "undeterminable (null)",
+    "smoothing_days": 7,
+    "statistic": "max over 7-day means fully inside the window",
+    "target": "B(t) and current level both defined and current level <= B(t); otherwise not a target that week",
+    "window": "t+1 .. t+H (inclusive)",
+    "zero_baseline": "tag with B(t) = 0 stays a prediction target"
+  },
+  "last_read_offset_days": {
+    "14": 14,
+    "28": 28,
+    "56": 56
+  },
+  "min_present_slots": 72,
+  "periods_check": {
+    "baseline_lookback_days": 371,
+    "embargo_days": 90,
+    "max_last_read_offset_days": 56,
+    "periods_lookback_days": 400,
+    "periods_rebuild_needed": false
+  },
+  "proposed_label": "candidates-v1",
+  "rate_table_checks": [
+    "same target count for every multiplier within a horizon",
+    "hit count non-increasing in multiplier within a horizon"
+  ],
+  "sealed_before_models": [
+    "tag list and V",
+    "missing-day list of the method block"
+  ],
+  "sealed_before_threshold_access": [
+    "these candidates and J = 56",
+    "tag list, V, missing-day list of the method block",
+    "the 42 models",
+    "target rule (this file: is_target, current_level, baseline_level)",
+    "rule for tags that already jumped (scoring plan); without it, do not proceed",
+    "naive-model lookback (counted including 7-day blocks) as a periods trigger"
+  ],
+  "selection_rule": [
+    "horizons in ascending order",
+    "low tier: multiplier with rate in [low, high], closest to center on log scale; tie -> larger multiplier",
+    "high tier: multiplier smaller than the low-tier one, rate in range, closest to center; tie -> larger multiplier",
+    "first horizon where both tiers are found",
+    "none found -> stop and report to owner; owner sees only the rate table"
+  ],
+  "slots_per_day": 96,
+  "threshold_multipliers": [
+    2,
+    3,
+    4,
+    6,
+    8,
+    12,
+    16
+  ],
+  "threshold_period_order": [
+    "seal missing-day list for the threshold block (before any label)",
+    "compute labels and the rate table for all 21 combinations",
+    "seal the rate table and the select() result",
+    "model / stick-chart / naive outputs are not computed on the threshold period"
+  ],
+  "tiers": [
+    {
+      "center": "1/50",
+      "high": "1/25",
+      "low": "1/100",
+      "name": "low"
+    },
+    {
+      "center": "1/8",
+      "high": "3/20",
+      "low": "1/10",
+      "name": "high"
+    }
+  ]
+}
