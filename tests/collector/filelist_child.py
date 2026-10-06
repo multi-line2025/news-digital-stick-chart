@@ -1,29 +1,60 @@
-"""test_filelist.py が子プロセスとして動かす、取得の本体の見張り（T-012。T-010 の監査 B-2）。
+"""test_filelist.py が子プロセスとして動かす、取得の本体の見張り（T-012、T-015。T-010 の監査 B-2、
+T-012 の監査 軽1）。
 
 単独では使わない。unittest の対象にもならない（名前が test で始まらない）。
 
 動き
-    1. 標準入力から設定（JSON）を読み、filelist.py を読み込み、見本の通信・時計・フックを作る。
+    1. 標準入力から設定（JSON）を読む。見張りの部品と、変異で使うモジュールを読み込む。
     2. sys.addaudithook で見張りを入れる。入れたあとは外せない（子プロセスにした理由）。
-    3. filelist.run_acquisition() を1回だけ動かす。
-    4. 結果を、親が渡したファイル記述子（report_fd）に os.write で書く。os.write は
-       audit のイベントを出さないので、見張りに掛からない。
+       **filelist.py を読み込むのは、見張りを入れた後である**（T-012 の監査 軽1）。そのため、
+       filelist.py の読み込みの時点で動くコード（書き込みのモードで開く、sys.addaudithook を
+       置き換える、など）も見張りの下にある。
+    3. filelist.py を読み込み、見本の通信・時計・フックを作り、filelist.run_acquisition() を
+       1回だけ動かす。
+    4. 結果を、親が渡したファイル記述子（report_fd）に os.write で書く。
 
-見張りが止めるもの（BLOCKED_EVENTS と、書き込みのモードの open）
-    - "open" のイベントのうち、書き込みのモード（mode に w・a・x・+ のどれか、または flags に
-      O_WRONLY・O_RDWR・O_CREAT・O_APPEND・O_TRUNC のどれか）のもの。builtins.open、io.open、
-      os.open、_io.FileIO、os.fdopen（記述子の番号での open）がこのイベントを出す。
-      許すのは、allowed（本体の保存先のファイルと、マニフェスト）の realpath に一致するパス
-      だけ。記述子の番号での書き込みの open は、常に止める。
-    - BLOCKED_EVENTS のイベントは、引数にかかわらず止める。
-    止めるときは、violations に記録し、BaseException の子の Blocked を投げる。取得のコードが
-    例外を握りつぶしても、violations は親に届く。
+見張りが止めるもの
+    - **許すイベントの一覧（ALLOWED_EVENTS）に無いイベントは、すべて止める。** 一覧は、
+      見張りの下で filelist.py を読み込んで run_acquisition() を動かしたときに、実際に出る
+      イベントだけにした。一覧に無いイベントの例：sys._getframe・sys._current_frames・
+      gc.get_referrers・gc.get_objects・object.__getattr__（例外の tb_frame など）・
+      _posixsubprocess.fork_exec・subprocess.Popen・os.system・os.posix_spawn・os.mkdir・
+      os.symlink・os.rename・os.remove・sqlite3.connect・ctypes.dlopen・socket.*・
+      sys.settrace・sys.setprofile・sys.addaudithook。
+    - 一覧にあるイベントでも、次のものは止める。
+        open：書き込みのモード（mode に w・a・x・+ のどれか、または flags に
+          O_WRONLY・O_RDWR・O_CREAT・O_APPEND・O_TRUNC のどれか）で、パスの realpath が
+          allowed（本体の保存先のファイルと、マニフェスト）に無いもの。記述子の番号での
+          書き込みの open は常に止める。builtins.open、io.open、os.open、_io.FileIO、
+          os.fdopen がこのイベントを出す。
+        object.__setattr__：属性の名前が SETATTR_NAMES（__doc__・__module__・__defaults__。
+          標準ライブラリの namedtuple などが読み込みのときに使う）に無いもの。関数の
+          __code__ の差し替えなどは止まる。
+    止めるときは、Blocked（BaseException の子）を投げる。取得のコードの except Exception では
+    捕まらない。
 
-見張りの範囲（これより外は見ていない）
-    - audit のイベントを出さない経路（os.write で既にある記述子に書く、など）は、この見張り
-      では止まらない。子プロセスが持つ記述子は 0・1・2 と report_fd だけである。1・2 は親が
-      パイプで受けて比べ、report_fd に余計なものが書かれれば JSON が壊れて親のテストが失敗する。
-    - C の拡張が audit のイベントを出さずに書く経路は見えない。
+見張りの状態の置き場所（T-012 の監査 軽1(b)）
+    - 見張りを外す・弱める状態（以前の active のような旗）は持たない。見張りは一度入れたら、
+      子プロセスが終わるまで同じ判定をする。
+    - 判定に使う値（許すイベント・許すパス・許す属性の名前）は frozenset で、見張りの関数の
+      クロージャの中だけにある。モジュールの変数としては置かない。クロージャやフレームに
+      届く経路（sys._getframe、例外の tb_frame、gc.get_referrers など）は、上の一覧で止める。
+    - 止めた記録（violations）は、リストに溜めずに、止めたその時に violation_fd へ os.write で
+      1行ずつ書く。後から取得のコードがリストを消しても、書いた記録は消せない。
+      os.write は audit のイベントを出さないので、見張りの中で使っても見張りに掛からない。
+
+見張りの範囲（これより外は見ていない。事実どおりに書く）
+    - audit のイベントを出さない操作は見えない。os.write・os.close・os.dup2 などは
+      イベントを出さないので、既に開いている記述子への書き込みは止まらない。子プロセスが
+      開いている記述子は、0・1・2 と report_fd・violation_fd と、Python の処理系が内部で
+      開くものである。1・2 は親がパイプで受け取って比べる。report_fd と violation_fd に
+      余計なものが書かれれば、JSON が壊れて親のテストが失敗する。
+      見張りを入れる前に開いた記述子はこれだけで、見張りを入れた後に書き込みのモードで
+      開こうとすると止まる（filelist.py の読み込みの時点を含む）。
+    - C の拡張が audit のイベントを出さずに行う操作は見えない。
+    - os.path.realpath などの判定に使う関数は、見張りを入れる時点のものをクロージャに
+      持っている。ただし、その関数が中で使う標準ライブラリのモジュールの変数（posixpath の
+      中の os など）を書き換えられると、判定を誤らせうる。
 """
 
 import base64
@@ -34,30 +65,66 @@ import json
 import os
 import sys
 
-BLOCKED_EVENTS = frozenset({
-    # 割り振りで挙がったもの
-    "os.mkdir", "os.symlink", "os.rename", "subprocess.Popen", "os.system",
-    "os.posix_spawn", "sqlite3.connect", "ctypes.dlopen",
-    # それ以外に、ファイル・プロセス・ネットワークに触れるもの
-    "os.link", "os.remove", "os.rmdir", "os.truncate", "os.chmod", "os.chown",
-    "os.utime", "os.chflags", "os.lchflags", "os.setxattr", "os.removexattr",
-    "os.mkfifo", "os.mknod", "os.fork", "os.forkpty", "os.exec", "os.spawn",
-    "os.kill", "os.killpg", "os.putenv", "os.unsetenv", "os.chdir",
-    "pty.spawn", "shutil.copyfile", "shutil.copymode", "shutil.copystat",
-    "shutil.copytree", "shutil.move", "shutil.rmtree", "shutil.make_archive",
-    "shutil.unpack_archive", "tempfile.mkstemp", "tempfile.mkdtemp",
-    "socket.__new__", "socket.connect", "socket.bind", "socket.getaddrinfo",
-    "socket.sendto", "socket.sendmsg", "http.client.connect", "urllib.Request",
-    "ctypes.dlsym", "ctypes.dlsym/handle", "ctypes.cdata", "ctypes.call_function",
-    "sqlite3.connect/handle", "sqlite3.enable_load_extension",
-    "sqlite3.load_extension", "webbrowser.open", "mmap.__new__",
-})
+# 変異で使うモジュールは、見張りを入れる前に読み込んでおく（読み込みそのものの
+# イベントで、変異の前に止まらないようにするため）。
+import _io  # noqa: F401
+import _posixsubprocess  # noqa: F401
+import ctypes  # noqa: F401
+import gc  # noqa: F401
+import sqlite3  # noqa: F401
+import subprocess  # noqa: F401
 
+# 見張りの下で filelist.py を読み込み、run_acquisition() を動かしたときに出るイベント。
+# これ以外は止める。
+ALLOWED_EVENTS = frozenset({
+    "open", "import", "exec", "compile", "marshal.loads", "os.listdir",
+    "sys._getframemodulename", "object.__setattr__",
+})
+SETATTR_NAMES = frozenset({"__doc__", "__module__", "__defaults__"})
 WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_TRUNC
 
 
 class Blocked(BaseException):
     """見張りが止めた操作。取得のコードの except Exception に捕まらない。"""
+
+
+def make_hook(allowed_paths, violation_fd):
+    """見張りの関数を作る。判定に使う値は、すべてこのクロージャの中にだけある。"""
+    allowed = frozenset(os.path.realpath(p) for p in allowed_paths)
+    events = ALLOWED_EVENTS
+    setattr_names = SETATTR_NAMES
+    write_flags = WRITE_FLAGS
+    realpath, fsdecode, write, dumps = os.path.realpath, os.fsdecode, os.write, json.dumps
+    blocked = Blocked
+
+    def report(kind, detail):
+        write(violation_fd, (dumps([kind, detail], ensure_ascii=True) + "\n").encode("ascii"))
+
+    def hook(event, args):
+        if event not in events:
+            report(event, None)
+            raise blocked(event)
+        if event == "open":
+            path, mode, flags = (tuple(args) + (None, None, None))[:3]
+            writing = ((isinstance(mode, str) and any(c in mode for c in "wax+"))
+                       or (isinstance(flags, int) and bool(flags & write_flags)))
+            if not writing:
+                return
+            if isinstance(path, int):
+                report("open-fd", path)
+                raise blocked("記述子の番号での書き込みの open")
+            rp = realpath(fsdecode(path))
+            if rp not in allowed:
+                report("open", rp)
+                raise blocked("許していない書き込み")
+            return
+        if event == "object.__setattr__":
+            name = args[1] if len(args) > 1 else None
+            if name not in setattr_names:
+                report(event, str(name))
+                raise blocked(event)
+
+    return hook
 
 
 def _load(name, path):
@@ -95,11 +162,31 @@ class _Response:
 
 
 def _mutation(name, outside):
-    """監査が挙げた変異。取得の途中で、見張りの外へ書こうとする。例外は握りつぶす。"""
-    import _io
-    import ctypes
-    import sqlite3
-    import subprocess
+    """監査が挙げた変異（取得の途中で動くもの）。見張りの外へ書こうとする。例外は握りつぶす。"""
+
+    def touch_fork_exec():
+        r, w = os.pipe()
+        _posixsubprocess.fork_exec(
+            [b"/usr/bin/touch", os.path.join(outside, "forked").encode()],
+            [b"/usr/bin/touch"], True, (w,), None, None,
+            -1, -1, -1, -1, -1, -1, r, w, False, False, -1, None, None, -1, -1, None)
+
+    def getframe_walk():
+        f = sys._getframe()
+        while f is not None:
+            f = f.f_back
+        open(os.path.join(outside, "after-getframe.txt"), "a")
+
+    def referrers():
+        gc.get_referrers(os.write)
+        open(os.path.join(outside, "after-referrers.txt"), "a")
+
+    def tb_frame():
+        try:
+            raise ValueError("x")
+        except ValueError as e:
+            e.__traceback__.tb_frame  # noqa: B018
+        open(os.path.join(outside, "after-tb.txt"), "a")
 
     actions = {
         "fileio": lambda: _io.FileIO(os.path.join(outside, "fileio.txt"), "w"),
@@ -115,6 +202,11 @@ def _mutation(name, outside):
         "open_append": lambda: open(os.path.join(outside, "appended.txt"), "a"),
         "os_open": lambda: os.open(os.path.join(outside, "osopen.txt"),
                                    os.O_WRONLY | os.O_CREAT, 0o644),
+        "fork_exec": touch_fork_exec,
+        "getframe": getframe_walk,
+        "get_referrers": referrers,
+        "tb_frame": tb_frame,
+        "settrace": lambda: sys.settrace(lambda *a: None),
         "print": lambda: print("MUTATION-STDOUT"),
         "stderr_fd": lambda: os.write(2, b"MUTATION-FD2\n"),
     }
@@ -124,16 +216,29 @@ def _mutation(name, outside):
         try:
             act()
         except BaseException:
-            pass  # 握りつぶしても、violations は親に届く
+            pass  # 握りつぶしても、violations は書いた時点で親に届いている
     return run
 
 
 def main():
     cfg = json.loads(sys.stdin.read())
     report_fd = cfg["report_fd"]
-    filelist = _load("filelist", cfg["filelist_path"])
-
+    violation_fd = cfg["violation_fd"]
     responses = list(cfg["responses"])
+    times = [datetime.datetime.fromisoformat(t) for t in cfg["now"]]
+    mutation = _mutation(cfg["mutation"], cfg["outside"]) if cfg.get("mutation") else None
+
+    # 見張りを入れる。これより後に filelist.py を読み込む。
+    sys.addaudithook(make_hook(cfg["allowed"], violation_fd))
+
+    report = {"out": None, "error": None, "loaded": False}
+    try:
+        filelist = _load("filelist", cfg["filelist_path"])
+        report["loaded"] = True
+    except BaseException as e:  # noqa: B902 （読み込みの時点で止まった変異）
+        report["error"] = [type(e).__name__, str(e)]
+        filelist = None
+
     calls = []
 
     def transport(url, timeout):
@@ -151,8 +256,6 @@ def main():
         sleeps.append(s)
         clock_t[0] += s
 
-    times = [datetime.datetime.fromisoformat(t) for t in cfg["now"]]
-
     def now():
         return times.pop(0) if len(times) > 1 else times[0]
 
@@ -167,59 +270,27 @@ def main():
         events.append("result")
         result_args.append(kw)
 
-    if cfg.get("mutation"):
-        mut = _mutation(cfg["mutation"], cfg["outside"])
-        real_fetch = filelist.fetch_kept_lines
+    if filelist is not None:
+        if mutation is not None:
+            real_fetch = filelist.fetch_kept_lines
 
-        def fetch(*a, **k):
-            mut()
-            return real_fetch(*a, **k)
-        filelist.fetch_kept_lines = fetch
-
-    allowed = {os.path.realpath(p) for p in cfg["allowed"]}
-    violations = []
-    active = [True]
-    realpath, fsdecode = os.path.realpath, os.fsdecode
-
-    def hook(event, args):
-        if not active[0]:
-            return
-        if event == "open":
-            path, mode, flags = (tuple(args) + (None, None, None))[:3]
-            writing = ((isinstance(mode, str) and any(c in mode for c in "wax+"))
-                       or (isinstance(flags, int) and bool(flags & WRITE_FLAGS)))
-            if not writing:
-                return
-            if isinstance(path, int):
-                violations.append(["open-fd", path])
-                raise Blocked("記述子の番号での書き込みの open")
-            rp = realpath(fsdecode(path))
-            if rp not in allowed:
-                violations.append(["open", rp])
-                raise Blocked("許していない書き込み")
-            return
-        if event in BLOCKED_EVENTS:
-            violations.append([event, None])
-            raise Blocked(event)
-
-    sys.addaudithook(hook)
-
-    report = {"out": None, "error": None}
-    try:
-        out = filelist.run_acquisition(
-            start_hook=start_hook, result_hook=result_hook, root=cfg["root"],
-            manifest_dir=cfg["manifest_dir"], store_dir=cfg["store_dir"], url=cfg["url"],
-            transport=transport, sleep=sleep, clock=lambda: clock_t[0], now=now,
-            log=logs.append)
-        out = dict(out)
-        out["path"] = os.path.basename(out["path"])
-        report["out"] = out
-    except BaseException as e:  # noqa: B902 （Blocked も含めて親に返す）
-        report["error"] = [type(e).__name__, str(e)]
-    active[0] = False
+            def fetch(*a, **k):
+                mutation()
+                return real_fetch(*a, **k)
+            filelist.fetch_kept_lines = fetch
+        try:
+            out = filelist.run_acquisition(
+                start_hook=start_hook, result_hook=result_hook, root=cfg["root"],
+                store_dir=cfg["store_dir"], home=cfg["home"], url=cfg["url"],
+                transport=transport, sleep=sleep, clock=lambda: clock_t[0], now=now,
+                log=logs.append)
+            out = dict(out)
+            out["path"] = os.path.basename(out["path"])
+            report["out"] = out
+        except BaseException as e:  # noqa: B902 （Blocked も含めて親に返す）
+            report["error"] = [type(e).__name__, str(e)]
     report.update({"events": events, "start_args": start_args, "result_args": result_args,
-                   "logs": logs, "sleeps": sleeps, "calls": calls,
-                   "violations": violations})
+                   "logs": logs, "sleeps": sleeps, "calls": calls})
     data = json.dumps(report, sort_keys=True, ensure_ascii=True).encode("ascii")
     view = memoryview(data)
     while view:

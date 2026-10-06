@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GDELT 2.0 のファイル一覧（masterfilelist）の取得（T-010、保存先は T-012。試運転の手順3）。
+"""GDELT 2.0 のファイル一覧（masterfilelist）の取得（T-010、保存先は T-012・T-015。試運転の手順3）。
 
 データ出典
     Data: The GDELT Project (https://www.gdeltproject.org/). This project is not
@@ -7,8 +7,9 @@
     データ出典：GDELT Project（https://www.gdeltproject.org/）。本プロジェクトは
     GDELT Project と提携・承認の関係にありません。
 
-このモジュールは、実際の取得をまだ一度も行っていない（T-010 はコードとテストだけ）。
-取得の実行は、オーナーとリードの確認を経た別のタスクで行う。
+このモジュールは、実際の取得をまだ一度も行っていない（T-010・T-012・T-015 はコードとテスト
+だけ）。取得の実行は、入口のスクリプト acquire_filelist.py から行う（T-016）。このモジュールを
+直接実行しても取得はしない。入口のスクリプトと手順は src/collector/README.md。
 
 ------------------------------------------------------------------------
 1. 取得元
@@ -154,25 +155,29 @@
     ASCII。並べ替えるのは、GDELT の一覧の行の順番が変わっても、同じ中身なら同じ
     sha256 になるようにするため。まったく同じ行が二つあれば、二つとも残す。
 
-    保存先（T-012。オーナーの決定「git に入れずハッシュのみ記録する」）
+    保存先（T-012、T-015。オーナーの決定「git に入れずハッシュのみ記録する」）
       一覧の本体は Git の外に書く。リポジトリの中（data/manifest/）には、ハッシュの一覧
       （マニフェスト）の行だけを追記する。
 
-      本体：<store_dir>/masterfilelist-kept-<取得を始める直前の UTC 時刻>.tsv
-        store_dir は、引数 store_dir、なければ環境変数 NDSC_GDELT_FILELIST_STORE、
-        なければ既定の ~/news-stick-data/gdelt-filelist（default_store_dir()。
-        コードの中で Path.home() / "news-stick-data" / "gdelt-filelist" として組み立てる。
-        2026-10-06 のオーナーの決定「ホームフォルダの下の news-stick-data」による。
-        記録は reviews/T-010.md の末尾）。どれもプロジェクトの外を想定している。
-        .gitignore の対象の data/raw/ は使わない（root の下は、下の確認で拒む）。
-        フォルダは前もって作っておくこと。このモジュールはフォルダを作らない
+      本体：<home>/Desktop/news-stick-data/gdelt-filelist/masterfilelist-kept-<取得を始める直前の
+        UTC 時刻>.tsv
+        保存先は FIXED_STORE_PARTS（Desktop / news-stick-data / gdelt-filelist）で固定する。
+        2026-10-06 のオーナーの決定「デスクトップ直下」（reviews/T-011.md の末尾）による。
+        引数 store_dir の realpath が <home>/Desktop/news-stick-data/gdelt-filelist の realpath と
+        一致しなければ止まる。news-stick-data と gdelt-filelist の2段は、どちらもシンボリック
+        リンクでない既にあるフォルダでなければならない（リンクで別の場所に向けられないように）。
+        home は引数で受け取る。本番の入口（acquire_filelist.py）は、環境変数 HOME ではなく
+        利用者のデータベース（pwd）から決めたホームを渡す。環境変数で保存先を変える口は無い
+        （T-012 の NDSC_GDELT_FILELIST_STORE と既定の ~/news-stick-data は T-015 で外した）。
+        フォルダは前もってオーナーが作る。このモジュールはフォルダを作らない
         （os.mkdir を呼ばない。テストの見張りでも mkdir を許していない）。
         名前は start_hook を呼ぶ前に一度だけ決め、前もっての確認と実際の書き込みに同じ名前を
         使う。マニフェストの fetched_at は取得の完了の時刻で、名前の時刻とは別である。
         本体は、Git の外の一時領域と同じ扱いになる（後で GitHub のリリースなどに置くかは、
         別のタスクで決める）。大きさの見込みは約60万行、約40 MB。
 
-      マニフェスト：<manifest_dir>/gdelt-filelist.jsonl に、1回の取得につき1行を追記する。
+      マニフェスト：<root>/data/manifest/gdelt-filelist.jsonl に、1回の取得につき1行を追記する。
+        置き場は data/manifest に固定で、引数では変えられない（T-015。T-012 の監査 軽3）。
         過去の行は書き換えない。1行は次の項目だけの JSON（キーの順に並べ、ASCII）。
           file_name              本体のファイル名（名前だけ。パスは入れない）
           sha256                 本体のバイト列の sha256（書いたファイルから計算し直して照合）
@@ -180,17 +185,27 @@
           fetched_at             取得の完了の時刻（UTC、ISO 8601）
           source_url             取得元の URL（データ源の URL。記事の URL ではない）
           acquisition_start_seq  start_hook が返した acquisition-start の seq
-          code_sha256            このファイル（filelist.py）の sha256
+          code_path              取得のコードの、ルートからの相対パス（CODE_REL。入口のスクリプト）
+          code_sha256            取得のコード（入口のスクリプト acquire_filelist.py）の sha256。
+                                 入口のスクリプトは、このファイルと privacy_scan.py の sha256 を
+                                 中に固定しているので、この値がその二つも縛る（6章）
+          store_location         本体の保存先の名前の形 STORE_LOCATION_NAME
+                                 （"~/Desktop/news-stick-data/gdelt-filelist"）。絶対パスではない。
+                                 実際の保存先が、この決まった場所であることを確かめてから書く
+                                 （T-015。T-012 の監査 軽4）
         手元の絶対パス・ユーザー名・ホームのパスは入れない。追記の前に、行がそれらを
         含まないこと、file_name が上の名前の形であることを確かめ、違えば書かずに止まる。
 
-    保存先の確認（T-010 の監査 B-3 への対応）
+    保存先の確認（T-010 の監査 B-3 への対応。T-015 で場所を固定）
       確かめること
-        - root、manifest_dir、store_dir を realpath にしてから比べる（途中のシンボリック
-          リンクを解いた実際の場所で比べる）。manifest_dir の実際の場所は root の実際の場所の
-          下（root そのものは不可）。store_dir の実際の場所は root の下でも root そのもの
-          でもなく、それ自身とその上のどのフォルダにも .git が無い（Git の作業ツリーの外）。
-          どちらも既にあるフォルダであること。
+        - root、マニフェストのフォルダ、store_dir を realpath にしてから比べる（途中の
+          シンボリックリンクを解いた実際の場所で比べる）。
+        - マニフェストのフォルダの realpath は、root の realpath に data/manifest を足したものと
+          一致しなければならない（途中にリンクがあれば一致しないので止まる）。その途中に
+          .git があれば止まる（T-012 の監査 軽3）。
+        - store_dir の実際の場所は root の下でも root そのものでもなく、それ自身とその上の
+          どのフォルダにも .git が無い（Git の作業ツリーの外）。さらに上の「本体」の決まった
+          場所と一致する。どちらも既にあるフォルダであること。
         - この確認を、取得の前（start_hook より前）と、書く直前の2回行う。2回の結果
           （realpath と、フォルダの装置番号・i ノード番号）が違えば、書かずに止まる。
         - 本体は realpath にしたフォルダの下の名前を O_CREAT | O_EXCL | O_NOFOLLOW で開く。
@@ -206,9 +221,12 @@
         - 確かめてから開くまでのあいだに、同じ利用者の別のプロセスが途中のフォルダを
           差し替える競合は、開いたあとの照合で見つけて止まる。ただし、その時点で書いて
           しまったものは消さない（ファイルを削除する処理は無い）。
-        - root が本当にプロジェクトのルートであるかは、呼び出し側の引数に頼る。
+        - root が本当にプロジェクトのルートであるかは、呼び出し側の引数に頼る（本番の入口は
+          自分の置き場所から決めた root を渡し、引数では変えさせない）。
         - .git の有無で Git の外かを判定するので、GIT_DIR などの環境変数で作業ツリーを
           別の場所に指定している場合は見分けられない。
+        - 保存先が同期フォルダ（iCloud の「デスクトップと書類」など）の中にあるかは確かめない。
+          デスクトップを同期している場合、本体は同期先にも送られる（手順書に書いた）。
 
     同じ名前のファイルがあれば上書きせずに止まる（取得の前に確かめ、書くときにも O_EXCL で
     確かめる。書くときに重なった場合も FilelistError で止まる）。マニフェストの最後の行に
@@ -243,11 +261,16 @@
         取得だったかは照合できる。マニフェストの sha256 を使って result を後から追記するか、
         取得をやり直すかは、このモジュールでは決めない（リードに報告する）。
 
-    start_hook と result_hook は封印係の T-009 の仕組みに
-    つなぐ。このモジュールには既定の値を置かない（呼び忘れて記録なしで取得できないように、
-    必須の引数にしている）。
+    start_hook と result_hook は、入口のスクリプト acquire_filelist.py のアダプタが封印係の
+    seal_acquisition（T-009）につなぐ。このモジュールには既定の値を置かない（呼び忘れて
+    記録なしで取得できないように、必須の引数にしている）。
 
-    code_sha256 は、このファイル（filelist.py）のバイト列の sha256 である。
+    code_sha256 は、入口のスクリプト（CODE_REL = src/collector/acquire_filelist.py。この
+    ファイルと同じフォルダの ENTRY_NAME）のバイト列の sha256 である（T-015。T-009 の監査 M-2）。
+    封印の仕組みも同じパスのファイルの sha256 を計算し、アダプタが二つを照合する。
+    入口のスクリプトは、このファイル（filelist.py）と privacy_scan.py の sha256 を定数として
+    中に持ち、実行の最初に照合する。そのため、入口のスクリプトの sha256 が決まれば、
+    取得のコードの3つのファイルがすべて決まる。
 
 外部のライブラリは使わない（Python 3 の標準ライブラリだけ）。
 """
@@ -259,7 +282,6 @@ import http.client
 import importlib.util
 import json
 import os
-import pathlib
 import re
 import socket
 import stat
@@ -312,12 +334,17 @@ FILE_TYPES = {
 }
 
 MANIFEST_NAME = "gdelt-filelist.jsonl"
-# 本体の保存先（5章）。プロジェクトの外。
-STORE_ENV = "NDSC_GDELT_FILELIST_STORE"
-DEFAULT_STORE_PARTS = ("news-stick-data", "gdelt-filelist")
+# マニフェストの置き場（5章）。root からの相対で固定。
+MANIFEST_DIR_PARTS = ("data", "manifest")
+# 本体の保存先（5章）。ホームからの相対で固定。プロジェクトの外。
+FIXED_STORE_PARTS = ("Desktop", "news-stick-data", "gdelt-filelist")
+STORE_LOCATION_NAME = "~/" + "/".join(FIXED_STORE_PARTS)
 STORE_NAME_RE = re.compile(r"\Amasterfilelist-kept-\d{8}T\d{6}Z\.tsv\Z")
-MANIFEST_KEYS = ("acquisition_start_seq", "code_sha256", "fetched_at", "file_name",
-                 "kept_rows", "sha256", "source_url")
+MANIFEST_KEYS = ("acquisition_start_seq", "code_path", "code_sha256", "fetched_at", "file_name",
+                 "kept_rows", "sha256", "source_url", "store_location")
+# 取得のコード（6章）。入口のスクリプト。封印の記録の fetch.code_path と同じ値。
+ENTRY_NAME = "acquire_filelist.py"
+CODE_REL = "src/collector/" + ENTRY_NAME
 
 _TS_IN_NAME = re.compile(rb"/(\d{14})\.[^/]*\Z")
 _SIZE = re.compile(rb"\A[0-9]{1,15}\Z")
@@ -596,7 +623,8 @@ def fetch_kept_lines(url, transport, sleep, clock, log):
 # ---------------------------------------------------------------------------
 
 def code_sha256():
-    with open(os.path.abspath(__file__), "rb") as f:
+    """取得のコード（入口のスクリプト ENTRY_NAME）のバイト列の sha256（6章）。"""
+    with open(os.path.join(HERE, ENTRY_NAME), "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()
 
 
@@ -621,13 +649,9 @@ def _check_no_address(data, what):
         raise FilelistError("%s にメールアドレスの形の文字列があるので書かずに止まる" % what)
 
 
-def default_store_dir(environ=None):
-    """本体の既定の保存先（5章）。環境変数 STORE_ENV があればそれ、なければホームの下。"""
-    environ = os.environ if environ is None else environ
-    v = environ.get(STORE_ENV)
-    if v:
-        return v
-    return str(pathlib.Path.home().joinpath(*DEFAULT_STORE_PARTS))
+def fixed_store_dir(home):
+    """本体の保存先（5章）。<home>/Desktop/news-stick-data/gdelt-filelist。"""
+    return os.path.join(home, *FIXED_STORE_PARTS)
 
 
 def _is_strictly_under(path_real, root_real):
@@ -657,9 +681,10 @@ def _dir_id(path_real):
     return (st.st_dev, st.st_ino)
 
 
-def _resolve_paths(root, manifest_dir, store_dir):
+def _resolve_paths(root, store_dir, home):
     """5章の保存先の確認。realpath にした場所と、フォルダの識別子を返す。"""
     root_real = os.path.realpath(root)
+    manifest_dir = os.path.join(root, *MANIFEST_DIR_PARTS)
     manifest_real = os.path.realpath(manifest_dir)
     store_real = os.path.realpath(store_dir)
     for d in (root_real, manifest_real, store_real):
@@ -667,10 +692,28 @@ def _resolve_paths(root, manifest_dir, store_dir):
             raise FilelistError("root・マニフェスト・本体の保存先のどれかが既にあるフォルダでない")
     if not _is_strictly_under(manifest_real, root_real):
         raise FilelistError("マニフェストの保存先が root の下に無い")
+    rel_parts = os.path.relpath(manifest_real, root_real).split(os.sep)
+    if ".git" in rel_parts:
+        raise FilelistError("マニフェストの保存先が .git の下にある")
+    if manifest_real != os.path.join(root_real, *MANIFEST_DIR_PARTS):
+        raise FilelistError("マニフェストの保存先が root の data/manifest でない"
+                            "（途中にシンボリックリンクがある）")
     if store_real == root_real or _is_strictly_under(store_real, root_real):
         raise FilelistError("本体の保存先が root の下にある（Git の外に置く）")
     if _inside_git_worktree(store_real):
         raise FilelistError("本体の保存先が Git の作業ツリーの中にある（Git の外に置く）")
+    fixed = fixed_store_dir(home)
+    if store_real != os.path.realpath(fixed):
+        raise FilelistError("本体の保存先が、決まった場所 %s でない" % STORE_LOCATION_NAME)
+    for depth in (1, 2):  # news-stick-data と gdelt-filelist の2段
+        d = os.path.join(home, *FIXED_STORE_PARTS[:len(FIXED_STORE_PARTS) - 2 + depth])
+        try:
+            st = os.lstat(d)
+        except OSError:
+            raise FilelistError("本体の保存先のフォルダが無い（%s）" % STORE_LOCATION_NAME) from None
+        if not stat.S_ISDIR(st.st_mode):
+            raise FilelistError("本体の保存先の2段のフォルダのどちらかが、シンボリックリンクか"
+                                "フォルダでない（%s）" % STORE_LOCATION_NAME)
     manifest_path = os.path.join(manifest_real, MANIFEST_NAME)
     if not _is_strictly_under(manifest_path, root_real):
         raise FilelistError("マニフェストが root の下に無い")
@@ -798,14 +841,16 @@ def _check_manifest_entry(entry, line, paths):
     for p in local_paths:
         if p in text:
             raise FilelistError("マニフェストの行に手元のパスがあるので書かない")
+    if entry["code_path"] != CODE_REL or entry["store_location"] != STORE_LOCATION_NAME:
+        raise FilelistError("マニフェストの code_path か store_location が決めた値でない")
     # ユーザー名は、16進の値（sha256 など）と偶然に重なりうるので、文字列の項目だけで調べる
-    for key in ("file_name", "fetched_at", "source_url"):
+    for key in ("file_name", "fetched_at", "source_url", "store_location"):
         for u in users:
             if u in entry[key]:
                 raise FilelistError("マニフェストの行にユーザー名があるので書かない")
 
 
-def run_acquisition(*, start_hook, result_hook, root, manifest_dir, store_dir=None,
+def run_acquisition(*, start_hook, result_hook, root, store_dir, home,
                     url=MASTERFILELIST_URL, transport=urllib_transport,
                     sleep=time.sleep, clock=time.monotonic, now=_utc_now,
                     log=_stderr_log):
@@ -813,14 +858,14 @@ def run_acquisition(*, start_hook, result_hook, root, manifest_dir, store_dir=No
 
     start_hook(code_sha256=str, source_url=str) -> int（acquisition-start の seq）
     result_hook(start_seq=int, kept_rows_sha256=str) -> 何でもよい
-    root: プロジェクトのルート。manifest_dir はこの下、store_dir はこの外（5章）
-    store_dir: 本体の保存先（Git の外）。None なら default_store_dir()
+    root: プロジェクトのルート。マニフェストは root/data/manifest に固定（5章）
+    store_dir: 本体の保存先（Git の外）。<home>/Desktop/news-stick-data/gdelt-filelist と
+        同じ場所でなければ止まる（5章）
+    home: 利用者のホーム。本番の入口は pwd から決めたものを渡す
     返り値の "path" は本体の絶対パス（呼び出し側に返すだけで、どこにも書かない）。
     """
     validate_url(url)
-    if store_dir is None:
-        store_dir = default_store_dir()
-    paths = _resolve_paths(root, manifest_dir, store_dir)
+    paths = _resolve_paths(root, store_dir, home)
     # 名前は一度だけ決め、前もっての確認と実際の書き込みに同じものを使う
     name = "masterfilelist-kept-%s.tsv" % _stamp(now())
     if os.path.lexists(os.path.join(paths["store_dir"], name)):
@@ -855,14 +900,16 @@ def run_acquisition(*, start_hook, result_hook, root, manifest_dir, store_dir=No
         "fetched_at": _iso(fetched_at),
         "source_url": url,
         "acquisition_start_seq": seq,
+        "code_path": CODE_REL,
         "code_sha256": code_hash,
+        "store_location": STORE_LOCATION_NAME,
     }
     manifest_line = (json.dumps(entry, sort_keys=True, ensure_ascii=True) + "\n").encode("ascii")
 
     _check_no_address(data, "一覧")
     _check_no_address(manifest_line, "マニフェストの行")
     # 書く直前にもう一度確かめる。取得の前と違えば書かない
-    if _resolve_paths(root, manifest_dir, store_dir) != paths:
+    if _resolve_paths(root, store_dir, home) != paths:
         raise FilelistError("保存先が取得のあいだに変わったので書かない")
     _check_manifest_entry(entry, manifest_line, paths)
     out_path = _write_store(paths, name, data, sha)
@@ -885,6 +932,7 @@ def run_acquisition(*, start_hook, result_hook, root, manifest_dir, store_dir=No
 
 
 if __name__ == "__main__":
-    print("このモジュールはライブラリとしてだけ使う。取得の実行は、封印の記録（T-009）に"
-          "つないだ別のタスクで行う。", file=sys.stderr)
+    print("このモジュールはライブラリとしてだけ使う。取得は入口のスクリプト "
+          "src/collector/acquire_filelist.py から行う（手順は src/collector/README.md）。",
+          file=sys.stderr)
     sys.exit(2)
