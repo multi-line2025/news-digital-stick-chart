@@ -7,9 +7,9 @@
 1 行の形（キーはこの 6 つだけ。ほかのキーがあれば検証で失敗にする）
     seq          通し番号。1 から始まり、行の順に 1 ずつ増える。
     prev_hash    直前の行のバイト列（末尾の改行を含めない）の sha256。1 行目は 0 が 64 個。
-    kind         種類。許可リスト（ALLOWED_KINDS）の 5 つだけ。それ以外は検証で失敗にする。
+    kind         種類。許可リスト（ALLOWED_KINDS）の 6 つだけ。それ以外は検証で失敗にする。
                  periods / periods-triggers / threshold-access / acquisition-start /
-                 acquisition-result
+                 acquisition-result / candidates（T-013）
     targets      対象のファイルの一覧。各要素は {"path", "role", "sha256"}。
                  path はリポジトリのルートからの相対パス（区切りは /）。
     recorded_at  記録した日時（UTC、"YYYY-MM-DDTHH:MM:SSZ"）。記録した機械の時計による
@@ -43,7 +43,7 @@
     定義は docs/stats/periods.md 8章 (2) に従う（ディスクに書く・画面に表示する・集計する・
     ログに出す。メモリの上で受け取り、ディスクに書く前に捨てることは含めない）。
     採用するのは、最初の threshold-access の記録より seq が小さい記録のうち、その種類
-    （periods、periods-triggers）の最後のもの。
+    （periods、periods-triggers、candidates）の最後のもの。
     - acquisition-start・acquisition-result（試運転の手順3の取得）は区切りに使わない。
       8章 (2) は、手順3で 2020-12-15 以降の行をメモリの上で捨てるなら、手順3は期限に
       当たらないとしている。そのため、手順3の後に追記したきっかけの値も、最初の
@@ -82,6 +82,18 @@ drand を持つ記録（threshold-access、acquisition-start）の照合（check
     閾値を決める期間の区画のデータに触れるコードは、最初に require_threshold_access を呼ぶ。
     関門を飛ばしたかどうかは、記録からは検出できない（require_threshold_access の注記）。
 
+閾値と判定期間の候補（kind が candidates。T-013）
+    対象は docs/stats/candidates.md（doc）、src/stats/candidates.py（code）、
+    tests/stats/test_candidates.py（test）、src/stats/periods.py（import。candidates.py が
+    読み込むので、出力を作り直すのに要る）、sealed/candidates-output-<sha256>.json（output）の
+    5 つで、role とパスの組は固定（CANDIDATES_SOURCES。check_candidates_record）。
+    output のファイル名の <sha256> は、記録の output の sha256 と同じでなければならない。
+    採用の規則は periods と同じ（adoption）。
+    これに加えて、candidates の記録は、すべて最初の acquisition-start の記録より前になければ
+    ならない（check_candidates_order）。CLAUDE.md は候補を「手法を作る期間のデータに触れる
+    前に」封印すると決めており、区切りの threshold-access より強い条件になるため。後ろに
+    あれば検証は失敗する。
+
 きっかけの値（kind が periods-triggers）
     区切りを作り直すきっかけの値は、periods-triggers の記録として追記する。periods の
     出力の rebuild_triggers が、採用された periods-triggers の記録と完全に一致すれば
@@ -116,8 +128,9 @@ TRIGGERS_KIND = "periods-triggers"
 THRESHOLD_ACCESS_KIND = "threshold-access"
 ACQ_START_KIND = "acquisition-start"
 ACQ_RESULT_KIND = "acquisition-result"
+CANDIDATES_KIND = "candidates"
 ALLOWED_KINDS = (PERIODS_KIND, TRIGGERS_KIND, THRESHOLD_ACCESS_KIND, ACQ_START_KIND,
-                 ACQ_RESULT_KIND)
+                 ACQ_RESULT_KIND, CANDIDATES_KIND)
 
 # stamp で使う公開カレンダー（ots の既定と同じ 4 つ）と、その集約先が返す Pending の宛先
 # （実体のカレンダー）。stamp.py はこの左側に送る。.ots の Pending の宛先は右側に限る。
@@ -301,7 +314,7 @@ def records_of_kind(records, kind):
     return out
 
 
-ADOPTED_KINDS = (PERIODS_KIND, TRIGGERS_KIND)
+ADOPTED_KINDS = (PERIODS_KIND, TRIGGERS_KIND, CANDIDATES_KIND)
 
 
 def first_threshold_access(records):
@@ -504,6 +517,123 @@ def acquisition_start_fields(doc):
     if not isinstance(sha, str) or not HEX64.match(sha):
         raise LedgerError("acquisition-start の fetch.code_sha256 の形が違う")
     return path, sha
+
+
+# ---------------------------------------------------------------- candidates の検査（T-013）
+
+# candidates の記録の対象。role とパスの組は固定で、これ以外の対象は認めない。
+# output は sealed/candidates-output-<sha256>.json（下の CANDIDATES_OUTPUT_RE）。
+CANDIDATES_SOURCES = (
+    ("docs/stats/candidates.md", "doc"),
+    ("src/stats/candidates.py", "code"),
+    ("tests/stats/test_candidates.py", "test"),
+    ("src/stats/periods.py", "import"),
+)
+CANDIDATES_SCRIPT = "src/stats/candidates.py"
+CANDIDATES_OUTPUT_RE = re.compile(r"\Asealed/candidates-output-([0-9a-f]{64})\.json\Z")
+
+
+def candidates_output_rel(sha):
+    return "sealed/candidates-output-%s.json" % sha
+
+
+def check_candidates_record(record):
+    """candidates の記録の対象の形を照合する。output の対象を返す。
+
+    - 対象は CANDIDATES_SOURCES の 4 つと output の 1 つ、合わせて 5 つだけ。
+    - 各 role のパスが決まったものと同じ。
+    - output のパスが sealed/candidates-output-<sha256>.json の形で、<sha256> が記録の
+      output の sha256 と同じ。
+    """
+    seq = record["seq"]
+    if record["kind"] != CANDIDATES_KIND:
+        raise LedgerError("seq %d は candidates の記録ではない" % seq)
+    want = dict((role, path) for path, role in CANDIDATES_SOURCES)
+    got = {}
+    for t in record["targets"]:
+        if t["role"] in got:
+            raise LedgerError("seq %d の candidates の記録に、role %s の対象が二つ以上ある"
+                              % (seq, t["role"]))
+        got[t["role"]] = t
+    if sorted(got) != sorted(list(want) + ["output"]):
+        raise LedgerError("seq %d の candidates の記録の対象の role が、決まった 5 つ（%s）と"
+                          "一致しない（あるのは %s）"
+                          % (seq, "、".join(sorted(list(want) + ["output"])),
+                             "、".join(sorted(got))))
+    for role, path in want.items():
+        if got[role]["path"] != path:
+            raise LedgerError("seq %d の candidates の記録の %s のパスが %s でない（%s）"
+                              % (seq, role, path, got[role]["path"]))
+    out = got["output"]
+    m = CANDIDATES_OUTPUT_RE.match(out["path"])
+    if not m:
+        raise LedgerError("seq %d の candidates の記録の output のパスが "
+                          "sealed/candidates-output-<sha256>.json の形でない" % seq)
+    if m.group(1) != out["sha256"]:
+        raise LedgerError("seq %d の candidates の記録の output のファイル名の sha256 が、"
+                          "記録の sha256 と一致しない" % seq)
+    return out
+
+
+def _increasing_positive_ints(v):
+    return (isinstance(v, list) and v and all(type(x) is int and x >= 1 for x in v)
+            and all(a < b for a, b in zip(v, v[1:])))
+
+
+def check_candidates_output(doc):
+    """candidates の出力（JSON）の形を照合する。(倍率の一覧, 判定期間の一覧) を返す。
+
+    - threshold_multipliers・horizon_days が、正の整数の、狭義に増える空でない一覧。
+    - combinations が、倍率と判定期間のすべての組（[倍率, 判定期間]）とちょうど一致し、
+      重複が無い。combination_count がその数。
+    """
+    if not isinstance(doc, dict):
+        raise LedgerError("candidates の出力が JSON のオブジェクトでない")
+    ms, hs = doc.get("threshold_multipliers"), doc.get("horizon_days")
+    if not _increasing_positive_ints(ms):
+        raise LedgerError("candidates の出力の threshold_multipliers が、正の整数の増える一覧でない")
+    if not _increasing_positive_ints(hs):
+        raise LedgerError("candidates の出力の horizon_days が、正の整数の増える一覧でない")
+    combos = doc.get("combinations")
+    if not isinstance(combos, list) or not all(
+            isinstance(c, list) and len(c) == 2 for c in combos):
+        raise LedgerError("candidates の出力の combinations が [倍率, 判定期間] の一覧でない")
+    pairs = [tuple(c) for c in combos]
+    want = {(m, h) for m in ms for h in hs}
+    if len(pairs) != len(set(pairs)) or set(pairs) != want:
+        raise LedgerError("candidates の出力の combinations が、倍率と判定期間のすべての組と"
+                          "一致しない")
+    if doc.get("combination_count") != len(want):
+        raise LedgerError("candidates の出力の combination_count が組の数 %d と一致しない"
+                          % len(want))
+    return ms, hs
+
+
+def first_acquisition_start(records):
+    """最初の kind=acquisition-start の記録。無ければ None。"""
+    for r in records:
+        if r["kind"] == ACQ_START_KIND:
+            return r
+    return None
+
+
+def check_candidates_order(records):
+    """candidates の記録が、すべて最初の acquisition-start の記録より前にあるか。T-013。
+
+    CLAUDE.md は、閾値と判定期間の候補を「手法を作る期間のデータに触れる前に」封印すると
+    決めている。採用の区切り（threshold-access）より強い条件なので、別に照合する。
+    後ろにある candidates の記録が一つでもあれば LedgerError。
+    返り値: 最初の acquisition-start の記録（無ければ None）。
+    """
+    cut = first_acquisition_start(records)
+    if cut is None:
+        return None
+    late = [r["seq"] for r in records if r["kind"] == CANDIDATES_KIND and r["seq"] > cut["seq"]]
+    if late:
+        raise LedgerError("candidates の記録（seq %s）が、最初の acquisition-start の記録（seq %d）"
+                          "より後にある。候補は、手法を作る期間のデータに触れる前に封印する決まり"
+                          % (", ".join(map(str, late)), cut["seq"]))
+    return cut
 
 
 # ---------------------------------------------------------------- periods の検査

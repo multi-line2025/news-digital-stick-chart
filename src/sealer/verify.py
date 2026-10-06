@@ -14,12 +14,14 @@
     python3 -B src/sealer/verify.py acquisition        acquisition-start の ledger_head と drand の回、
                                                        acquisition-result との対応
     python3 -B src/sealer/verify.py periods            区画の境目と deadline_status の照合
+    python3 -B src/sealer/verify.py candidates         閾値と判定期間の候補の記録の形・出力の形、
+                                                       最初の acquisition-start より前にあること（T-013）
     python3 -B src/sealer/verify.py adopted            採用される版（鎖の順番で決める）
     python3 -B src/sealer/verify.py all [--rev R]      上のすべて
 
 採用の規則（T-007、T-008）
     最初の kind=threshold-access の記録より seq が小さい記録のうち、その種類（periods、
-    periods-triggers）の最後のものを採用する。threshold-access の記録が無いうちは保留。
+    periods-triggers、candidates）の最後のものを採用する。threshold-access の記録が無いうちは保留。
     acquisition-start・acquisition-result は区切りに使わない。
     時刻（Bitcoin の確定時刻、drand の回の公開時刻）と、Pending かどうかは使わない。
 
@@ -338,10 +340,37 @@ def cmd_periods(st, _a):
         print("保留: periods の %s 件目の deadline_status の照合" % ", ".join(map(str, held)))
 
 
+def cmd_candidates(st, _a):
+    """閾値と判定期間の候補（kind が candidates）の照合。T-013。"""
+    recs = ledger.records_of_kind(st.records, ledger.CANDIDATES_KIND)
+    cut = ledger.check_candidates_order(st.records)
+    if not recs:
+        print("candidates の記録：なし（照合するものが無い）")
+        return
+    for v, r in recs:
+        out = ledger.check_candidates_record(r)
+        ms, hs = ledger.check_candidates_output(st.file_json(r, "output"))
+        print("  candidates の %d 件目（seq %d）: 対象の role とパスは決まった 5 つと一致。"
+              "出力 %s の sha256 %s" % (v, r["seq"], out["path"], out["sha256"]))
+        for t in sorted(r["targets"], key=lambda t: t["path"]):
+            if t["role"] != "output":
+                print("      %-6s %s  %s" % (t["role"], t["path"], t["sha256"]))
+        print("      閾値の倍率 %s、判定期間（日）%s、組み合わせ %d"
+              % (", ".join(map(str, ms)), ", ".join(map(str, hs)), len(ms) * len(hs)))
+        if cut is None:
+            print("      acquisition-start の記録は無い（この記録は、どの acquisition-start "
+                  "よりも前）")
+        else:
+            print("      最初の acquisition-start（seq %d）より前" % cut["seq"])
+    print("candidates の記録は、すべて最初の acquisition-start の記録より前にある。")
+
+
 def cmd_adopted(st, _a):
     print("採用の規則：最初の threshold-access の記録より seq が小さい記録のうち、その種類の最後の"
           "もの。acquisition-start・acquisition-result は区切りに使わない。時刻（Bitcoin の確定"
           "時刻、drand の回の公開時刻）と Pending かどうかは使わない。")
+    print("candidates は、これに加えて、すべての記録が最初の acquisition-start より前に"
+          "なければならない（candidates の検査。後ろにあれば検証は失敗する）。")
     if st.cut is None:
         print("採用は保留（threshold-access の記録が無いため）。")
     else:
@@ -374,6 +403,7 @@ def cmd_all(st, a):
     cmd_access(st, a)
     cmd_acquisition(st, a)
     cmd_periods(st, a)
+    cmd_candidates(st, a)
     cmd_adopted(st, a)
     print("すべての検査に通った。" + ("採用は保留（threshold-access の記録が無いため）。"
                                       if st.cut is None else ""))
@@ -385,8 +415,8 @@ def main(argv=None):
     p.add_argument("--root", default=os.getcwd())
     sub = p.add_subparsers(dest="cmd", required=True)
     parsers = {}
-    for name in ("chain", "anchors", "targets", "access", "acquisition", "periods", "adopted",
-                 "all"):
+    for name in ("chain", "anchors", "targets", "access", "acquisition", "periods", "candidates",
+                 "adopted", "all"):
         s = sub.add_parser(name, allow_abbrev=False)
         s.add_argument("--btc-header", type=_parse_header_arg, action="append",
                        help="高さ=80 バイトのヘッダの16進。.ots の中の Bitcoin の証明と照合する")
@@ -397,7 +427,8 @@ def main(argv=None):
         parsers[name].add_argument("--rev", default="working")
     a = p.parse_args(argv)
     fn = {"chain": cmd_chain, "anchors": cmd_anchors, "targets": cmd_targets,
-          "access": cmd_access, "acquisition": cmd_acquisition, "periods": cmd_periods, "adopted": cmd_adopted,
+          "access": cmd_access, "acquisition": cmd_acquisition, "periods": cmd_periods,
+          "candidates": cmd_candidates, "adopted": cmd_adopted,
           "all": cmd_all}[a.cmd]
     try:
         st = State(os.path.abspath(a.root), a.btc_header, a.ots_dir)

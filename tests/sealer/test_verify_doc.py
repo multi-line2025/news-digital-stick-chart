@@ -13,7 +13,8 @@
   （元のリポジトリには何も書かない）。この結果は、コミットされた版の検証にはならない。
 - 壊さない複製では、すべての塊が終了コード 0 で終わり、記録の値が出力に現れること。
 - わざと壊した複製（記録の書き換え・記録の削除・.ots の削除・履歴の書き換え・
-  許可していないカレンダーの Pending・許可リストに無い kind の記録）では、同じ手順が失敗すること。
+  許可していないカレンダーの Pending・許可リストに無い kind の記録・candidates の出力の
+  書き換え・acquisition-start の後の candidates の記録（T-013））では、同じ手順が失敗すること。
 - コミットがまだ無いときは、複製できないので飛ばす（理由を表示する）。
 """
 
@@ -34,6 +35,9 @@ WORKTREE_MODE = os.environ.get("SEALER_DOC_TEST_WORKTREE") == "1"
 OVERLAY = ("src/sealer", "tests/sealer", "docs/verify")
 
 import ledger  # noqa: E402
+
+sys.path.insert(0, HERE)
+import test_ledger as tl  # noqa: E402
 
 AUTHOR = ("-c", "user.name=Multi-line", "-c",
           "user.email=197505900+multi-line2025@users.noreply.github.com")
@@ -121,6 +125,9 @@ class TestDocProcedure(unittest.TestCase):
             self.assertIn("採用は保留（threshold-access の記録が無いため）", out)
         for r in records:
             self.assertRegex(out, r"seq %d: (Pending|Bitcoin で確定)" % r["seq"])
+        # candidates の記録があれば、その照合の結果が出る（T-013）。
+        for v, r in ledger.records_of_kind(records, ledger.CANDIDATES_KIND):
+            self.assertIn("candidates の %d 件目（seq %d）" % (v, r["seq"]), out)
         # 確かめていないこと（ヘッダが本当の鎖にあること、drand の署名）が出る。
         self.assertIn("ヘッダが、Bitcoin の本当の鎖にあること", out)
         self.assertIn("drand の署名（BLS）は、オフラインでは検証していない", out)
@@ -179,6 +186,58 @@ class TestDocProcedure(unittest.TestCase):
             f.write(ledger.canonical_line(rec) + b"\n")
         self.git("add", "-A")
         self.git("commit", "-q", "-m", "unknown kind")
+        self.assertProcedureFails()
+
+    def _candidates_records(self):
+        data = ledger.read_ledger(os.path.join(self.clone, "sealed", "ledger.jsonl"))
+        recs = ledger.records_of_kind(ledger.verify_chain(data), ledger.CANDIDATES_KIND)
+        if not recs:
+            self.skipTest("candidates の記録がまだ無い")
+        return recs
+
+    def test_tampered_candidates_output_fails(self):
+        """封印した候補の出力（sealed/candidates-output-*.json）を書き換えると失敗する。"""
+        _v, rec = self._candidates_records()[-1]
+        out = os.path.join(self.clone, ledger.check_candidates_record(rec)["path"])
+        with open(out, "rb") as f:
+            raw = f.read()
+        with open(out, "wb") as f:
+            f.write(raw.replace(b"16", b"20", 1))
+        self.assertProcedureFails()
+
+    def _append_with_ots(self, kind, targets):
+        sealed = os.path.join(self.clone, "sealed")
+        p = os.path.join(sealed, "ledger.jsonl")
+        records = ledger.append_record(p, kind, targets, "",
+                                       ledger.parse_time("2099-01-01T00:00:00Z"))
+        seq = records[-1]["seq"]
+        prefix = ledger.prefix_bytes(ledger.read_ledger(p), seq)
+        with open(os.path.join(sealed, ledger.ots_name(seq)), "xb") as f:
+            f.write(tl.build_ots(prefix))
+        return seq
+
+    def test_candidates_after_acquisition_start_fails(self):
+        """acquisition-start の後に candidates の記録を足すと、手順が失敗する。
+        acquisition-start だけを足した段階では通ることも確かめ、失敗の原因を順番に絞る。"""
+        _v, rec = self._candidates_records()[-1]
+        sealed = os.path.join(self.clone, "sealed")
+        data = ledger.read_ledger(os.path.join(sealed, "ledger.jsonl"))
+        seq = len(ledger.split_lines(data)) + 1
+        doc = tl.drand_doc("acquisition-start", 30_000_000,
+                           head=ledger.expected_ledger_head(data, seq))
+        content = ledger.canonical_line(doc) + b"\n"
+        rel = "sealed/acquisition-start-%s.json" % ledger.sha256_hex(content)
+        with open(os.path.join(self.clone, rel), "wb") as f:
+            f.write(content)
+        self._append_with_ots("acquisition-start", [
+            {"path": rel, "role": "acquisition-start", "sha256": ledger.sha256_hex(content)}])
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "start")
+        for code, out in self.run_blocks():
+            self.assertEqual(code, 0, out)
+        self._append_with_ots("candidates", rec["targets"])
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "late candidates")
         self.assertProcedureFails()
 
     def test_rewritten_history_fails(self):

@@ -284,10 +284,10 @@ class TestChain(LedgerCase):
             ledger.append_record(self.path, "acquisition", [target("b")], "", T0 + H)
         self.assertEqual(len(self.lines()), 1)
 
-    def test_allowed_kinds_are_the_five(self):
+    def test_allowed_kinds_are_the_six(self):
         self.assertEqual(set(ledger.ALLOWED_KINDS),
                          {"periods", "periods-triggers", "threshold-access",
-                          "acquisition-start", "acquisition-result"})
+                          "acquisition-start", "acquisition-result", "candidates"})
         self.assertNotIn("acquisition", ledger.ALLOWED_KINDS)
         self.add(n=1)
         for i, k in enumerate(ledger.ALLOWED_KINDS):
