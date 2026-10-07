@@ -117,6 +117,10 @@ def as_record():
             "same_for_all_combinations": True,
             "applies_to": "stick chart, naive, threshold-period rate table, baseline period, forward",
         },
+        "revision": "the cooldown rule and the empty-week rule may be revised only while working on the "
+                    "method period, as a new sealed version with owner approval, sealed before the first "
+                    "threshold-access record; the same version applies to every series; no change after "
+                    "threshold-access; earlier versions are published alongside",
         "statuses": list(STATUSES),
         "empty_weeks": {
             "kinds": ["has_targets", "no_target_missing", "no_target_quiet"],

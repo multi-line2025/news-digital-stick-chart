@@ -74,38 +74,117 @@ class Guarded:
 # ---------------------------------------------------------------------------
 
 class TestExclusion(unittest.TestCase):
+    # テストに使う名前は、すべてテストのために作ったもの。
+
+    def terms_hit(self, name, desc=None, optional=None):
+        return [(m[1], m[3]) for m in tagrules.exclusion_matches(name, desc, optional)]
+
     def test_tokens(self):
-        self.assertEqual(tagrules.tokens("WB_123_Fragility-Conflict and violence"),
-                         ("WB", "123", "FRAGILITY", "CONFLICT", "AND", "VIOLENCE"))
+        self.assertEqual(tagrules.tokens("AB_123_Fragility-Conflict and violence"),
+                         ("AB", "123", "FRAGILITY", "CONFLICT", "AND", "VIOLENCE"))
+        self.assertEqual(tagrules.tokens("ELECTION2016"), ("ELECTION", "2016"))
+        self.assertEqual(tagrules.tokens("x_covid19_y"), ("X", "COVID", "19", "Y"))
         self.assertEqual(tagrules.tokens(None), ())
         self.assertEqual(tagrules.tokens(""), ())
 
-    def test_exact_token_match(self):
-        self.assertTrue(tagrules.is_excluded("ECON_WAR_DAMAGE"))
-        self.assertTrue(tagrules.is_excluded("x", "about the election results"))
-        self.assertTrue(tagrules.is_excluded("tax_fncact_police"))
+    def test_inflections(self):
+        f = tagrules.inflections
+        self.assertEqual(f("WAR"), {"WARS", "WARED", "WARING", "WARER", "WARERS"})
+        self.assertEqual(f("VOTE"), {"VOTES", "VOTED", "VOTER", "VOTERS", "VOTING"})
+        self.assertIn("ARMIES", f("ARMY"))
+        self.assertIn("CASUALTIES", f("CASUALTY"))
+        self.assertIn("TORNADOES", f("TORNADO"))
+        self.assertIn("CRASHES", f("CRASH"))
+        self.assertNotIn("GANGES", f("GANG"))
+        self.assertNotIn("KIDNAPPING", f("KIDNAP"))   # 子音を重ねる形は作らない
+        self.assertEqual(f("H1N1"), frozenset())
+
+    def test_exact_and_inflection(self):
+        self.assertIn(("WAR", "exact"), self.terms_hit("ECON_WAR_DAMAGE"))
+        self.assertIn(("ELECTION", "exact"), self.terms_hit("x", "about the election results"))
+        self.assertIn(("POLICE", "exact"), self.terms_hit("ab_cd_police"))
+        self.assertIn(("WAR", "inflection"), self.terms_hit("AB_WARS"))
+        self.assertIn(("KILL", "inflection"), self.terms_hit("AB_KILLED"))
+        self.assertIn(("VOTE", "inflection"), self.terms_hit("AB_VOTING"))
+
+    def test_digits_glued(self):
+        self.assertIn(("ELECTION", "exact"), self.terms_hit("ELECTION2016"))
+        self.assertIn(("COVID", "exact"), self.terms_hit("AB_COVID19"))
+        self.assertIn(("H1N1", "exact"), self.terms_hit("AB_DISEASE_H1N1"))
+        self.assertIn(("SARSCOV", "exact"), self.terms_hit("SARSCOV2"))
+
+    def test_words_glued(self):
+        self.assertIn(("CRASH", "glue"), self.terms_hit("AB_PLANECRASH"))
+        self.assertIn(("ATTACK", "glue"), self.terms_hit("CYBERATTACK"))
+        self.assertIn(("ATTACK", "glue"), self.terms_hit("CYBERATTACKS"))
+        self.assertIn(("MILITARY", "glue"), self.terms_hit("PARAMILITARY"))
+        self.assertIn(("CRIME", "glue"), self.terms_hit("AB_GENERALCRIME"))
+        self.assertIn(("AIR FORCE", "joined-exact"), self.terms_hit("AB_AIRFORCE"))
+        self.assertIn(("PRIME MINISTER", "joined-exact"), self.terms_hit("PRIMEMINISTER"))
+
+    def test_added_terms(self):
+        for name in ("ASSASSINATION", "EXECUTION", "STABBING", "EXPLOSION", "PLANE_CRASH",
+                     "CYBERATTACK", "ELECTION2016", "AB_ASSASSINATIONS", "AB_STABBINGS"):
+            self.assertTrue(tagrules.is_excluded(name), name)
+
+    def test_crisislex_removed(self):
+        allt = [t for ts in tagrules.EXCLUSION_TERMS.values() for t in ts]
+        self.assertNotIn("CRISISLEX", allt)
+        self.assertFalse(tagrules.is_excluded("CRISISLEX_AB_CD"))
 
     def test_no_substring_match(self):
-        for name in ("SOFTWARE", "AWARD", "FARMS", "GRAPE", "AIDGROUPS", "STOCKMARKET",
-                     "KINGDOM_TRAVEL", "FIREWORKS", "FLUENT"):
+        for name in ("SOFTWARE", "AWARD", "WARNING", "WARM", "FARMS", "GRAPE", "AIDGROUPS",
+                     "STOCKMARKET", "KINGDOM_TRAVEL", "FIREWORKS", "FLUENT", "COUPON", "PATRIOT",
+                     "POLLEN", "GANGES", "SCAMPI", "DEADLINE", "GUNPOWDER", "EXECUTIVE"):
             self.assertFalse(tagrules.is_excluded(name), name)
 
+    def test_short_words_never_glue(self):
+        for t in [t for ts in tagrules.EXCLUSION_TERMS.values() for t in ts]:
+            tt = tagrules.tokens(t)
+            if len(tt) == 1 and len(tt[0]) < tagrules.GLUE_MIN_LEN:
+                self.assertIsNone(tagrules._word_matches(tt[0], "ZZ" + tt[0]))
+                self.assertIsNone(tagrules._word_matches(tt[0], tt[0] + "QQ"))
+        self.assertEqual(tagrules.GLUE_MIN_LEN, 5)
+
+    def test_glue_only_at_ends(self):
+        self.assertIsNone(tagrules._word_matches("CRASH", "ABCRASHCD"))
+        self.assertEqual(tagrules._word_matches("CRASH", "CRASHPAD"), "glue")
+        self.assertEqual(tagrules._word_matches("CRASH", "BIGCRASH"), "glue")
+        self.assertIsNone(tagrules._word_matches("COVID", "COVID19"))  # 数字は別の語に区切ってから照合する
+
+    def test_known_overexclusion(self):
+        # 外しすぎの方向の誤りとして受け入れたもの（文書 2章 (1)、0章の5）。
+        for name in ("PRINCETON", "STORMWATER", "LEADERBOARD", "PROTESTANT", "HEART_ATTACK",
+                     "AB_DEFENSE_ATTORNEY", "OBITUARY_DEATH", "AB_VACCINE_POLICY", "AB_FIRED"):
+            self.assertTrue(tagrules.is_excluded(name), name)
+
     def test_phrase_needs_contiguous_tokens(self):
-        self.assertTrue(tagrules.is_excluded("TAX_FNCACT_PRIME_MINISTER"))
-        m = tagrules.exclusion_matches("PRIME_RATE")
-        self.assertEqual(m, [])
-        self.assertIn(("politics_election", "HEAD OF STATE", "description"),
+        self.assertTrue(tagrules.is_excluded("AB_CD_PRIME_MINISTER"))
+        self.assertEqual(tagrules.exclusion_matches("PRIME_RATE"), [])
+        self.assertIn(("politics_election", "HEAD OF STATE", "description", "exact"),
                       tagrules.exclusion_matches("X", "visit by a head of state"))
         self.assertFalse(tagrules.is_excluded("HEAD_STATE_OF"))
 
     def test_description_used_and_reported(self):
         m = tagrules.exclusion_matches("SOC_GENERAL", "Outbreak of cholera")
-        self.assertIn(("disaster_disease", "OUTBREAK", "description"), m)
-        self.assertIn(("disaster_disease", "CHOLERA", "description"), m)
+        self.assertIn(("disease_general", "OUTBREAK", "description", "exact"), m)
+        self.assertIn(("disease_named", "CHOLERA", "description", "exact"), m)
+
+    def test_optional_categories(self):
+        self.assertEqual(tagrules.OPTIONAL_CATEGORIES, ("disease_named", "ethnic_religious_group"))
+        self.assertEqual(tagrules.ENABLED_OPTIONAL_CATEGORIES, tagrules.OPTIONAL_CATEGORIES)
+        # 案B：病名を使わない
+        self.assertTrue(tagrules.is_excluded("AB_EBOLA"))
+        self.assertFalse(tagrules.is_excluded("AB_EBOLA", optional=("ethnic_religious_group",)))
+        self.assertTrue(tagrules.is_excluded("AB_DISEASE", optional=()))
+        self.assertFalse(tagrules.is_excluded("AB_ETHNICITY_X", optional=("disease_named",)))
+        with self.assertRaises(ValueError):
+            tagrules.is_excluded("X", optional=("crime",))
 
     def test_neutral_examples_kept(self):
         for name, desc in (("ECON_STOCKMARKET", "Stock market"), ("EDUCATION", None),
-                           ("ENV_SOLAR", "Solar power"), ("SOC_INNOVATION", "")):
+                           ("ENV_SOLAR", "Solar power"), ("SOC_INNOVATION", ""),
+                           ("AB_AGRICULTURE", "Farming and crops"), ("AB_TOURISM", None)):
             self.assertFalse(tagrules.is_excluded(name, desc), name)
 
     def test_terms_wellformed(self):
@@ -113,9 +192,11 @@ class TestExclusion(unittest.TestCase):
         self.assertEqual(len(allt), len(set(allt)))
         for t in allt:
             self.assertRegex(t, r"\A[A-Z0-9]+( [A-Z0-9]+)*\Z")
-        self.assertEqual(set(tagrules.EXCLUSION_TERMS),
-                         set(tagrules.CLAUDE_CATEGORIES) | set(tagrules.EXTRA_CATEGORIES_NEEDING_APPROVAL))
+        self.assertEqual(set(tagrules.EXCLUSION_TERMS), set(tagrules.CLAUDE_CATEGORY_OF))
+        self.assertEqual(set(v for v in tagrules.CLAUDE_CATEGORY_OF.values() if v),
+                         set(tagrules.CLAUDE_CATEGORIES))
         self.assertEqual(len(tagrules.CLAUDE_CATEGORIES), 5)
+        self.assertIsNone(tagrules.CLAUDE_CATEGORY_OF["ethnic_religious_group"])
 
     def test_no_per_theme_exception_mechanism(self):
         # 一件ずつの例外を持たない：照合は名前と説明と語の一覧だけで決まる。
@@ -126,10 +207,13 @@ class TestExclusion(unittest.TestCase):
 
     def test_doc_terms_table(self):
         head, rows = read_table("terms")
-        self.assertEqual(head, ["区分", "語"])
-        got = {r[0]: tuple(x.strip() for x in r[1].split(",")) for r in rows}
+        self.assertEqual(head, ["区分", "CLAUDE.md の区分", "語"])
+        got = {r[0]: tuple(x.strip() for x in r[2].split(",")) for r in rows}
         self.assertEqual(got, tagrules.EXCLUSION_TERMS)
         self.assertEqual([r[0] for r in rows], list(tagrules.EXCLUSION_TERMS))
+        for r in rows:
+            want = tagrules.CLAUDE_CATEGORY_OF[r[0]] or "（5つの区分の外）"
+            self.assertEqual(r[1], want)
 
 
 # ---------------------------------------------------------------------------
@@ -204,8 +288,8 @@ class TestBuildTagList(unittest.TestCase):
         self.assertFalse(rows["ECON_B"]["mean_ratio_at_least_a"])
         self.assertFalse(rows["ECON_C"]["present_throughout"])
         self.assertEqual(rows["ECON_C"]["quarter_counts"][0], 0)
-        self.assertEqual(rows["MILITARY_X"]["exclusion_matches"], [["conflict_violence", "MILITARY", "name"]])
-        self.assertEqual(rows["ECON_D"]["exclusion_matches"], [["disaster_disease", "FLOOD", "description"]])
+        self.assertEqual(rows["MILITARY_X"]["exclusion_matches"], [["conflict_violence", "MILITARY", "name", "exact"]])
+        self.assertEqual(rows["ECON_D"]["exclusion_matches"], [["disaster", "FLOOD", "description", "exact"]])
         self.assertFalse(rows["ECON_E"]["present_throughout"])
         self.assertTrue(rows["ECON_A"]["in_category_table"])
         self.assertEqual([x["name"] for x in r["themes"]], sorted(rows))
@@ -522,6 +606,26 @@ class TestLogistic(unittest.TestCase):
         X, y, _ = self.data(12, 500)
         self.assertEqual(naive.fit_logistic(X, y), naive.fit_logistic(X, y))
 
+    def test_row_order_fixed(self):
+        X, y, _ = self.data(13, 400)
+        rows = [(D(2017, 1, 2) + 7 * DAY * (i % 20), "TAG%03d" % (i // 20), X[i], y[i]) for i in range(400)]
+        shuffled = list(rows)
+        random.Random(5).shuffle(shuffled)
+        a = naive.fit_rows(rows)
+        b = naive.fit_rows(shuffled)
+        self.assertEqual(a, b)  # 浮動小数点まで同じ
+        ordered = naive.sort_rows(shuffled)
+        self.assertEqual([(r[0], r[1]) for r in ordered], sorted((r[0], r[1]) for r in rows))
+        self.assertEqual(a, naive.fit_logistic([r[2] for r in ordered], [r[3] for r in ordered]))
+        with self.assertRaises(ValueError):
+            naive.sort_rows(rows + [rows[0]])
+
+    def test_fixed_constants(self):
+        self.assertEqual((naive.RIDGE_LAMBDA, naive.MAX_ITER, naive.TOL), (1.0, 100, 1e-10))
+        rec = json.loads(naive.canonical_json())
+        self.assertIn("ridge_lambda, max_iter, tol", rec["revision_rule"])
+        self.assertIn("(prediction date, tag name)", rec["row_order"])
+
     def test_separation_converges_with_ridge(self):
         X = [[1.0, float(i)] for i in range(-10, 11)]
         y = [1 if i > 0 else 0 for i in range(-10, 11)]
@@ -575,10 +679,17 @@ class TestOutput(unittest.TestCase):
         self.assertEqual(rec["periods_trigger"]["naive_history_days"], 399)
         self.assertFalse(rec["periods_trigger"]["rebuild_needed"])
 
+    def test_scoring_output_has_revision_rule(self):
+        rec = json.loads(scoring.canonical_json())
+        self.assertIn("before the first threshold-access", rec["revision"])
+
     def test_tagrules_output(self):
         rec = json.loads(tagrules.canonical_json())
         self.assertEqual(rec["inclusion"]["k_articles_per_day"], 10)
         self.assertEqual(rec["exclusion"]["per_theme_exceptions"], "none")
+        self.assertEqual(rec["exclusion"]["glue_min_len"], 5)
+        self.assertIn("no new words", rec["changes_after_seeing_table"])
+        self.assertIn("counting method", rec["counting"])
         self.assertEqual(rec["exclusion"]["terms"], {k: list(v) for k, v in tagrules.EXCLUSION_TERMS.items()})
 
 

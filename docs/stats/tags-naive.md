@@ -21,17 +21,33 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/stats -v
 
 ## 0. オーナーに承認をお願いしたい点
 
-1. **A の決め方**（1章 (2)）：A = 10 ÷ N_med。N_med は、手法を作る期間の区画で、欠けた日でない日の全体の報道量の中央値。「全体の報道量が普段どおりの日に、1日あたり平均10件」に当たる比率である。V は A と同じ値にする（T-011 で決定済み）。
+タグの一覧（1章・2章）
+1. **A の決め方**（1章 (2)）：A = 10 ÷ N_med。N_med は、手法を作る期間の区画のうち欠けた日でない日の、全体の報道量の中央値。「全体の報道量が普段どおりの日に、1日あたり平均10件」に当たる比率である。V は A と同じ値にする（T-011 で決定済み）。
 2. **「全体にわたって存在する」の定義**（1章 (1)）：区画を暦の四半期（24個）に分け、どの四半期でも、欠けた日でない日の報道量の合計が1件以上あること。
-3. **除外の規則**（2章）：テーマの名前と説明を語に区切り、決めた語の一覧（2章 (2) の表）と完全に一致する語があれば外す。部分一致と語幹の処理はしない。一件ずつの例外は持たない。
-4. **民族・宗教の集団の区分を足すか**（2章 (4)）：CLAUDE.md の5つの区分の外にある。統計係の推奨は「足す」。足す場合は CLAUDE.md の決定事項の変更になる。
-5. **組織名**（2章 (4)）：別の規則を作らない。5つの区分の語に当たる組織のテーマだけが外れる。
-6. **区分表を見たあとで語を変える手順**（2章 (5)）：新しい版として封印し、オーナーの承認を得る。変えてよいのは語だけで、テーマ名を名指しで足したり外したりしない。手順4の開始（method-access）のあとは、v0 の一覧を変えない。
-7. **素朴な予測の形**（3章）：特徴量6つと切片のロジスティック回帰を、21組それぞれで作る。手法を作る期間での改訂は、特徴量を足すことだけを認める。
-8. **素朴な予測の過去分**（3章 (4)）：7日のまとまりの分を含めて399日。periods.py の LOOKBACK_DAYS（400日）に収まり、区切りの作り直しは要らない。399 をきっかけの値として、封印の記録に追記する。
-9. **一度跳ねたタグ**（4章 (1)）：直近56日のうちに、7日の平均が max(2 × B(t), V) を超えたタグは、その週の対象にしない。
-10. **「対象なし」の週**（4章 (2)）：試行として数えない。記録は残し、件数と種類を公開する。
-11. **封印の順番**（5章）：この文書の規則は、テーマの区分表の取得（T-018）より前に封印する必要がある。T-018 の取得がこれより先になると、「区分表を見る前に決めた」ことを記録で示せなくなる。
+3. **報道量の数え方を先に封印すること**（1章 (2)、5章）：r(d) の分子と分母の単位は、収集係が T-018 で決める。K（と A の式）は、その数え方が封印されるまで封印しない。数え方の封印は、この文書の規則の封印と同時か、それより前に行う。
+4. **除外の照合のしかた**（2章 (1)）：名前と説明を語に区切り（英字と数字の境目でも区切る）、語の一覧の語に「完全一致」「形の変化」「くっつき一致（5文字以上の語が、名前の語の先頭か末尾にある）」のどれかで当たれば外す。一件ずつの例外は持たない。
+5. **外しすぎの方向を選ぶ方針**（2章 (1)・(3)）：5つの区分のテーマが一覧に残るより、関係の無いテーマが外れる方を選ぶ。たとえば DEFENSE（法廷の弁護側も外れる）、DEATH と DEAD（訃報も外れる）、VACCINE（予防接種の制度も外れる）、FIRE（解雇の意味の FIRED も外れる）、ATTACK（心臓発作も外れる）、PRINCE（PRINCETON も外れる）。
+6. **語の一覧**（2章 (2)）。前回の案から CRISISLEX を外し、抜けていた語（ASSASSINATION、EXECUTION、STABBING、EXPLOSION、CRASH など）を足した。
+7. **病名の扱い**（2章 (4)）：次の二つから選ぶ。
+   - 案A（今の案）：一般の語（DISEASE、VIRUS、EPIDEMIC など）に加えて、病名（EBOLA、ZIKA、COVID など）の区分 `disease_named` も使う。
+   - 案B：一般の語だけを使い、`disease_named` を使わない。
+   - 病名は過去の流行の知識から選んだ（7章）。案Bなら、その知識は規則に入らない。代わりに、名前と説明に一般の語が無い病気のテーマが一覧に残る。
+8. **民族・宗教の集団の区分を足すか**（2章 (5)）：CLAUDE.md の5つの区分の外にある。統計係の推奨は「足す」。足す場合は CLAUDE.md の決定事項の変更になる。
+9. **組織名**（2章 (5)）：別の規則を作らない。5つの区分の語に当たる組織のテーマだけが外れる。
+10. **区分表を見たあとの変更の範囲**（2章 (6)）：新しい語は足さない。認めるのは、封印した語の不規則な形の変化を足すことと、区切り方・形の変化・くっつき一致の規則をすべての語に同じく掛かる形で直すことだけ。どちらも新しい版として、オーナーの承認を得て、method-access より前に封印する。
+
+素朴な予測（3章）
+11. **素朴な予測の形**（3章 (1)(2)）：特徴量6つと切片のロジスティック回帰を、21組それぞれで作る。
+12. **推定の手順と行の並べ方の固定**（3章 (2)(3)）：推定の定数（RIDGE_LAMBDA、MAX_ITER、TOL）、推定の手順、学習データの選び方、行の並べ方（予言日、タグ名の順）は naive-v1 の値に固定する。改訂で変えてよいのは、特徴量を足すことだけ。
+13. **素朴な予測の過去分**（3章 (4)）：7日のまとまりの分を含めて399日。periods.py の LOOKBACK_DAYS（400日）に収まり、区切りの作り直しは要らない。399 をきっかけの値として、封印の記録に追記する。
+
+採点計画（4章）
+14. **一度跳ねたタグ**（4章 (1)）：直近56日のうちに、7日の平均が max(2 × B(t), V) を超えたタグは、その週の対象にしない。
+15. **「対象なし」の週**（4章 (2)）：試行として数えない。記録は残し、件数と種類を公開する。
+16. **冷却と「対象なし」の規則の改訂の可否**（4章 (3)）：手法を作る期間の作業中に限り、新しい版として、オーナーの承認を得て、最初の threshold-access より前に封印すれば改訂してよい。threshold-access のあとは変えない。
+
+封印（5章）
+17. **封印の順番**：この文書の規則は、テーマの区分表の取得（T-018）より前に封印する。手法を作る期間の区画の欠けた日の一覧は、タグの一覧の結果より前に封印する。
 
 ## 1. タグを入れる規則の数値の決め方（未決事項3）
 
@@ -52,6 +68,10 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/stats -v
   - データ源は、テーマの体系に無いテーマを付けない。そのため、1件でも付いていれば、その四半期にテーマが体系に入っていたと読める。件数の大きさは (2) の A で見るので、ここでは存在だけを見る。
   - 月ごとにすると、季節にだけ現れるテーマが外れやすくなる。季節や予定された行事のテーマは、素朴な予測が取るべき島なので、一覧から外したくない。年ごとにすると、区画の途中で生まれたテーマを見落とす。四半期はその間をとった。
 - 代償：一つの四半期まるごと報道が無い季節のテーマ（たとえば4年に1度の行事だけのテーマ）は、この規則で外れる。この規則は量ではなく存在を見るためのもので、データを見ずにこれ以上細かく分けられない。
+- 四半期の端の扱いと限界：
+  - 最初の四半期（2015-03-02 から 2015-03-31、30日）と最後の四半期（2020-10-01 から 2020-12-14、75日）は、ほかの四半期（90日前後）より短い。短い四半期では、件数の少ないテーマが偶然0件になりやすく、存在の条件で外れやすい。
+  - 区画の最初の四半期の途中で生まれたテーマ（たとえば 2015-03-20 に体系に加わったもの）も、その四半期に1件あれば条件を満たす。区画の最後の四半期の途中で消えたテーマも同じ。生まれた日と消えた日は、四半期より細かくは見ない。
+  - 欠けた日の多い四半期では、使える日が少ないので、同じく0件になりやすい。使える日が一日も無い四半期だけは条件から外すが、少ないだけの四半期は外さない。外す基準を件数で決めると、データを見て決める数がもう一つ増えるため。
 
 ### (2) A の決め方
 - テーマの平均報道量は、区画の欠けた日でない日の比率 r(d) の単純平均とする（日ごとに同じ重み）。r(d) の分子と分母の数え方は、収集係が決める報道量の数え方に従う。
@@ -60,52 +80,77 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/stats -v
 - V = A（docs/stats/candidates.md 3章 (4)）。島の判定には「7日の平均 > V」が要るので、全体の報道量が普段どおりの週なら、島になるには7日で70件を超える報道が要る。
 - 分位で決める案（例：全テーマの平均の上位何%）を採らなかった理由：分位はテーマの体系にどれだけ細かいテーマが多いかで動き、件数の少なさから来るばらつきとは関係がない。V の役目は、少ない件数のばらつきで島にならないようにすることである。そのため、件数で決める形にした。
 - K = 10 にした理由：7日で70件なら、件数の偶然のばらつき（ポアソン分布なら標準偏差は約8.4件）に比べて十分大きい。1日に1本の記事も無いテーマを「ニュースになった」と呼ばないための下限でもある。この値はデータを見ずに決めた。
+- **V は比率で固定される**ことの限界：A と V は手法を作る期間の N_med で決まる比率で、三つの期間と前向きの予言で同じ値を使う。全体の報道量（r(d) の分母）が期間によって増減すると、同じ V が別の件数に当たる。たとえば全体の報道量が手法を作る期間の倍になれば、V は1日あたり約20件に当たり、半分になれば約5件に当たる。V を件数で固定せず比率で固定したのは、CLAUDE.md が報道量を比率で扱うと決めているためである。各期間の全体の報道量の中央値は公開し、V が何件に当たるかを読めるようにする。
+- **数え方への依存**：r(d) の分子と分母の単位（記事の数え方、重複のまとめ方、どのテーマの欄を数えるか）は、収集係が T-018 で決める。K = 10 の意味（1日あたり10件）はその単位に依る。そのため、**数え方が封印されるまで、K は封印しない**。数え方の封印は、この文書の規則の封印と同時か、それより前に行う（5章）。
 - 結果の一覧の件数が多すぎても少なすぎても、K を変えない。変える場合は、手法を作る期間のデータを見たあとの変更として、新しい版で封印し、オーナーの承認を得て、前の版の結果と並べて公開する。
 
 ### (3) 一覧を作る手順（`build_tag_list()`）
 - 対象のテーマは、区分表に載っているテーマと、手法を作る期間のデータに現れたテーマを合わせたもの。
 - 入力は、手法を作る期間の区画のデータだけ。引数に区画の外の日付が一つでもあれば止まる（テスト `test_rejects_dates_outside_block`）。閾値を決める期間より後のデータを、渡す余地を無くすため。
 - 欠けた日の一覧は、封印したもの（candidates.md 3章 (5)）を使う。欠けた日の報道量は、存在の条件にも平均にも入れない。
-- 出力には、テーマごとに四半期ごとの件数、平均、A 以上か、一致した除外の語（区分・語・名前と説明のどちらの欄か）、一覧に入ったかを載せる。一覧に入らなかったテーマとその理由も、すべて公開する。
+- 出力には、テーマごとに四半期ごとの件数、平均、A 以上か、一致した除外の語（区分・語・名前と説明のどちらの欄か・当たり方）、一覧に入ったかを載せる。一覧に入らなかったテーマとその理由も、すべて公開する。
 
 ## 2. 除外の規則の作り方（未決事項5）
 
 ### (1) 照合のしかた
 - 使うのは区分表の **名前** と **説明** の二つの欄だけ。ほかの欄があっても使わない。説明が無ければ名前だけで照合する。
-- 名前と説明を大文字にし、英字と数字以外（下線、空白、記号）で区切って語の並びにする（`tokens()`）。
-- 一覧の語が、語の並びの中に完全に一致して現れれば外す。複数の語からなるもの（例：PRIME MINISTER）は、続けて現れたときだけ一致とする。
-- 部分一致はしない。たとえば WAR は SOFTWARE や AWARD に一致しない（テスト `test_no_substring_match`）。
-- 語幹の処理もしない。単数形と複数形などは、一覧に一つずつ書いた。
-- どの区分の語に当たっても同じく外す。区分の名前は、報告のためだけに使う。
-- 名前と説明のどちらかで当たれば外す。説明に語が付随して出てくるだけのテーマも外れることになる。外しすぎの方向の誤りを選んだ。5つの区分のテーマが一覧に残る誤りの方が、プロジェクトの目的に反するため。
+- **語に区切る**（`tokens()`）：大文字にし、英字の続きと数字の続きを一つずつの語とする。英字と数字以外（下線、空白、記号）は区切りとして捨てる。英字と数字の境目でも区切る。たとえば ELECTION2016 は ELECTION と 2016、COVID19 は COVID と 19 になる。
+- **当たり方**は次の三つだけ（`_word_matches()`）。
+  1. 完全一致：名前の語が、一覧の語と同じ。
+  2. 形の変化：名前の語が、一覧の語の形の変化（`inflections()`）と同じ。形の変化は次の規則で機械的に作る。
+     - 常に +S
+     - S, X, Z, CH, SH, O で終わる語に +ES
+     - 子音 + Y で終わる語は、Y を IES、IED に替えた形
+     - E で終わる語は +D、+R、+RS と、E を除いて +ING
+     - それ以外の語は +ED、+ING、+ER、+ERS
+     - 子音を重ねる形（KIDNAP から KIDNAPPING）は作らない。要るものは語の一覧に書いた。
+  3. くっつき一致：一覧の語が **5文字以上** で、名前の語が英字だけのとき、名前の語がその語で始まるか、その語（または形の変化）で終わる。たとえば PLANECRASH は CRASH、CYBERATTACK は ATTACK、PARAMILITARY は MILITARY に当たる。
+- 語の並び（例：PRIME MINISTER）は、続けて現れたときに一致とする（最後の語だけ形の変化を認める）。加えて、並びをつなげた一語（PRIMEMINISTER、AIRFORCE）を、上の三つの当たり方で照合する。
+- **部分一致の誤りを防ぐ条件**：
+  - 語の途中にだけ現れるものは当たらない。くっつき一致は、名前の語の先頭か末尾だけを見る。たとえば AWARD は WAR を途中に含むが、先頭でも末尾でもない。
+  - 4文字以下の語（WAR、GUN、FIRE、KING、RAPE、COUP、RIOT、FLU、HIV など）は、くっつき一致を使わない。短い語は、ほかの語の先頭や末尾に偶然現れやすいため。WAR は SOFTWARE、WARNING、WARM に当たらず、KING は KINGDOM に、FIRE は FIREWORKS に、RAPE は GRAPE に当たらない（テスト `test_no_substring_match`）。
+  - 数字を含む語はくっつき一致を使わない。
+  - 5文字以上の語のくっつき一致には誤りが残る。今わかっている例：PRINCE が PRINCETON に、STORM が STORMWATER に、LEADER が LEADERBOARD に、PROTEST が PROTESTANT に当たる（テスト `test_known_overexclusion`）。外しすぎの方向の誤りとして受け入れる。
+- どの区分の語に当たっても同じく外す。区分の名前は、報告のためだけに使う。出力には、当たった語・欄・当たり方を、テーマごとにすべて載せる。
+- 名前と説明のどちらかで当たれば外す。説明に語が付随して出てくるだけのテーマも外れる。**外しすぎの方向の誤りを選んだ。** 5つの区分のテーマが一覧に残る誤りの方が、プロジェクトの目的に反するため。この方針で外れる例は 0章の5。
 
 ### (2) 語の一覧
 
 <!-- table:terms -->
-| 区分 | 語 |
-|---|---|
-| politics_election | ELECTION, ELECTIONS, ELECTORAL, ELECTED, VOTE, VOTES, VOTING, VOTER, VOTERS, BALLOT, BALLOTS, REFERENDUM, REFERENDUMS, POLITICS, POLITICAL, POLITICIAN, POLITICIANS, PARLIAMENT, PARLIAMENTARY, LEGISLATURE, LEGISLATIVE, CONGRESS, SENATE, SENATOR, SENATORS, LAWMAKER, LAWMAKERS, PRESIDENT, PRESIDENTS, PRESIDENTIAL, PRIME MINISTER, MINISTER, MINISTERS, GOVERNOR, GOVERNORS, MAYOR, MAYORS, LEADER, LEADERS, HEAD OF STATE, CABINET, COUP, COUPS, IMPEACH, IMPEACHMENT, REGIME, REGIMES, DICTATOR, DICTATORS, DICTATORSHIP, PROTEST, PROTESTS, PROTESTER, PROTESTERS, DEMONSTRATOR, DEMONSTRATORS, SANCTION, SANCTIONS, DIPLOMACY, DIPLOMATIC, DIPLOMAT, DIPLOMATS, EMBASSY, AMBASSADOR, PROPAGANDA, LOBBYING |
-| conflict_violence | WAR, WARS, WARFARE, MILITARY, ARMY, ARMIES, ARMED, NAVY, AIR FORCE, SOLDIER, SOLDIERS, TROOP, TROOPS, MILITIA, MILITIAS, INSURGENCY, INSURGENT, INSURGENTS, REBEL, REBELS, REBELLION, TERROR, TERRORISM, TERRORIST, TERRORISTS, EXTREMISM, EXTREMIST, EXTREMISTS, JIHAD, JIHADIST, JIHADISTS, CONFLICT, CONFLICTS, VIOLENCE, VIOLENT, ATTACK, ATTACKS, BOMB, BOMBS, BOMBING, BOMBINGS, EXPLOSIVE, EXPLOSIVES, WEAPON, WEAPONS, GUN, GUNS, FIREARM, FIREARMS, SHOOTING, SHOOTINGS, MISSILE, MISSILES, AIRSTRIKE, AIRSTRIKES, KILL, KILLS, KILLED, KILLING, KILLINGS, MASSACRE, MASSACRES, GENOCIDE, CEASEFIRE, PEACEKEEPING, PEACEKEEPER, PEACEKEEPERS, INVASION, HOSTAGE, HOSTAGES, TORTURE, RIOT, RIOTS, UNREST, CRACKDOWN, PERSECUTION, SIEGE, BLOCKADE, DEFENSE, DEFENCE, REFUGEE, REFUGEES, DISPLACED, ETHNIC CLEANSING |
-| crime | CRIME, CRIMES, CRIMINAL, CRIMINALS, MURDER, MURDERS, HOMICIDE, HOMICIDES, ASSAULT, ASSAULTS, ROBBERY, THEFT, BURGLARY, FRAUD, CORRUPTION, BRIBERY, BRIBE, BRIBES, SMUGGLING, TRAFFICKING, NARCOTICS, CARTEL, CARTELS, GANG, GANGS, MAFIA, LAUNDERING, EXTORTION, KIDNAP, KIDNAPPING, KIDNAPPINGS, RAPE, HARASSMENT, ABUSE, ARREST, ARRESTS, ARRESTED, POLICE, PRISON, PRISONS, PRISONER, PRISONERS, JAIL, INCARCERATION, PROSECUTION, PROSECUTOR, PROSECUTORS, INDICTMENT, PIRACY, SCAM, SCAMS, VANDALISM, ARSON, CYBERCRIME |
-| specific_person | POPE, KING, KINGS, QUEEN, QUEENS, PRINCE, PRINCES, PRINCESS, MONARCH, MONARCHY, ROYAL, ROYALS, EMPEROR, EMPRESS, CELEBRITY, CELEBRITIES |
-| disaster_disease | DISASTER, DISASTERS, EARTHQUAKE, EARTHQUAKES, TSUNAMI, TSUNAMIS, FLOOD, FLOODS, FLOODING, HURRICANE, HURRICANES, TYPHOON, TYPHOONS, CYCLONE, CYCLONES, TORNADO, TORNADOES, WILDFIRE, WILDFIRES, FIRE, FIRES, DROUGHT, DROUGHTS, LANDSLIDE, LANDSLIDES, VOLCANO, VOLCANOES, VOLCANIC, ERUPTION, AVALANCHE, HEATWAVE, HEAT WAVE, STORM, STORMS, BLIZZARD, FAMINE, CRISISLEX, CASUALTY, CASUALTIES, FATALITY, FATALITIES, DEATH, DEATHS, DEAD, EPIDEMIC, EPIDEMICS, PANDEMIC, PANDEMICS, OUTBREAK, OUTBREAKS, DISEASE, DISEASES, INFECTION, INFECTIONS, INFECTIOUS, VIRUS, VIRUSES, INFLUENZA, FLU, EBOLA, ZIKA, CHOLERA, MALARIA, MEASLES, HIV, TUBERCULOSIS, POLIO, CORONAVIRUS, COVID, SARS, MERS, PLAGUE, DENGUE, VACCINE, VACCINES, VACCINATION, QUARANTINE |
-| ethnic_religious_group | ETHNIC, ETHNICITY, ETHNICITIES, TRIBE, TRIBES, TRIBAL, RELIGION, RELIGIONS, RELIGIOUS, SECTARIAN |
+| 区分 | CLAUDE.md の区分 | 語 |
+|---|---|---|
+| politics_election | 政治・選挙 | ELECTION, ELECTORAL, ELECT, VOTE, BALLOT, REFERENDUM, POLL, CANDIDATE, INAUGURATION, POLITICS, POLITICAL, POLITICIAN, PARLIAMENT, PARLIAMENTARY, LEGISLATURE, LEGISLATIVE, LEGISLATOR, CONGRESS, SENATE, SENATOR, LAWMAKER, PRESIDENT, PRESIDENTIAL, PRIME MINISTER, MINISTER, CHANCELLOR, GOVERNOR, MAYOR, LEADER, HEAD OF STATE, CABINET, COUP, IMPEACH, IMPEACHMENT, REGIME, DICTATOR, DICTATORSHIP, PROTEST, DEMONSTRATOR, SANCTION, DIPLOMACY, DIPLOMATIC, DIPLOMAT, EMBASSY, AMBASSADOR, PROPAGANDA, LOBBYING, LOBBYIST |
+| conflict_violence | 紛争・暴力 | WAR, WARFARE, MILITARY, ARMY, ARMED, NAVY, NAVAL, AIR FORCE, SOLDIER, TROOP, MILITIA, INSURGENCY, INSURGENT, INSURRECTION, REBEL, REBELLION, GUERRILLA, SEPARATIST, TERROR, TERRORISM, TERRORIST, EXTREMISM, EXTREMIST, JIHAD, JIHADIST, CONFLICT, VIOLENCE, VIOLENT, ATTACK, BOMB, BOMBING, EXPLOSIVE, EXPLOSION, WEAPON, GUN, GUNMAN, GUNMEN, GUNFIRE, FIREARM, SHOOTING, SHOOTER, SNIPER, MISSILE, ARTILLERY, AIRSTRIKE, KILL, MASSACRE, GENOCIDE, SLAUGHTER, ASSASSIN, ASSASSINATE, ASSASSINATION, EXECUTION, BEHEADING, STABBING, LYNCHING, CEASEFIRE, PEACEKEEPING, PEACEKEEPER, INVASION, HOSTAGE, TORTURE, RIOT, UNREST, CRACKDOWN, PERSECUTION, SIEGE, BLOCKADE, DEFENSE, DEFENCE, CONSCRIPTION, REFUGEE, DISPLACED, ETHNIC CLEANSING |
+| crime | 犯罪 | CRIME, CRIMINAL, MURDER, HOMICIDE, ASSAULT, ROBBERY, THEFT, THIEF, THIEVES, BURGLARY, FRAUD, EMBEZZLEMENT, CORRUPTION, BRIBERY, BRIBE, SMUGGLING, SMUGGLER, TRAFFICKING, TRAFFICKER, NARCOTICS, CARTEL, GANG, MAFIA, LAUNDERING, EXTORTION, KIDNAP, KIDNAPPING, KIDNAPPED, KIDNAPPER, ABDUCTION, RAPE, HARASSMENT, ABUSE, ARREST, DETAIN, DETAINEE, DETENTION, POLICE, PRISON, JAIL, INCARCERATION, PROSECUTION, PROSECUTOR, INDICTMENT, FELONY, PIRACY, SCAM, VANDALISM, ARSON, POACHING, COUNTERFEIT, ESPIONAGE, TREASON, VICTIM |
+| specific_person | 特定の人物 | POPE, KING, QUEEN, PRINCE, PRINCESS, MONARCH, MONARCHY, ROYAL, EMPEROR, EMPRESS, CELEBRITY |
+| disaster | 災害・感染症 | DISASTER, EARTHQUAKE, TSUNAMI, FLOOD, HURRICANE, TYPHOON, CYCLONE, TORNADO, WILDFIRE, FIRE, DROUGHT, LANDSLIDE, MUDSLIDE, SINKHOLE, VOLCANO, VOLCANIC, ERUPTION, AVALANCHE, HEATWAVE, HEAT WAVE, STORM, BLIZZARD, FAMINE, CRASH, DERAILMENT, SHIPWRECK, ACCIDENT, EVACUATION, CASUALTY, FATALITY, INJURED, DEATH, DEAD |
+| disease_general | 災害・感染症 | EPIDEMIC, PANDEMIC, OUTBREAK, DISEASE, INFECTION, INFECTIOUS, CONTAGION, CONTAGIOUS, VIRUS, PATHOGEN, VACCINE, VACCINATION, QUARANTINE |
+| disease_named | 災害・感染症 | INFLUENZA, FLU, EBOLA, ZIKA, CHOLERA, MALARIA, MEASLES, HIV, TUBERCULOSIS, POLIO, CORONAVIRUS, COVID, SARS, SARSCOV, MERS, PLAGUE, DENGUE, ANTHRAX, SMALLPOX, HEPATITIS, MENINGITIS, RABIES, H1N1, H5N1 |
+| ethnic_religious_group | （5つの区分の外） | ETHNIC, ETHNICITY, TRIBE, TRIBAL, RELIGION, RELIGIOUS, SECTARIAN |
 
 ### (3) 語の選び方と、区分ごとの境目
-語は、区分の意味から一般の英語の語を挙げて選んだ。区分表は見ていない。
-- 政治・選挙：選挙と投票、議会、国や地方の首長と閣僚、政変、抗議行動、外交と制裁。GOVERNMENT と GOVERNANCE は入れていない。行政一般のテーマ（予算、公共事業など）まで外れるため。移民などの政策の論点も入れていない。
-- 紛争・暴力：戦争と軍、武装集団、テロ、攻撃と武器、殺害、暴動、難民。SECURITY は入れていない（食料安全保障、サイバーセキュリティなども外れるため）。DEFENSE は入れた（法廷の弁護側も外れるが、外しすぎの方向の誤りとして受け入れる）。
-- 犯罪：犯罪の種類、汚職、組織犯罪、逮捕・警察・刑務所・訴追。
+語は、区分の意味から英語の語を挙げて選んだ。区分表は見ていない。ただし、語を選ぶのに使った知識は一般の英語だけではない（7章）。
+- 政治・選挙：選挙と投票、候補と世論調査、議会、国や地方の首長と閣僚、政変、抗議行動、外交と制裁。GOVERNMENT と GOVERNANCE は入れていない。行政一般のテーマ（予算、公共事業など）まで外れるため。移民などの政策の論点も入れていない。
+- 紛争・暴力：戦争と軍、武装集団、テロ、攻撃と武器、殺害と暗殺・処刑、暴動、難民。SECURITY は入れていない（食料安全保障、サイバーセキュリティなども外れるため）。DEFENSE は入れた。
+- 犯罪：犯罪の種類、汚職、組織犯罪、逮捕・拘束・警察・刑務所・訴追、被害者。
 - 特定の人物：GDELT のテーマの欄は分類の名前で、人物名は別の欄（人物の欄）に入る（T-001）。この欄は、収集係の項目の一覧に入れず、取得もしない。テーマの名前で一人の人物を指しやすいのは、君主・教皇などの地位と、有名人の分類なので、それらの語を入れた。大統領・首相などは政治・選挙の区分で外れる。
-- 災害・感染症：自然災害、火災、飢饉、死傷、感染症とワクチン。CRISISLEX は、GDELT の公開文書でテーマの体系の一つ（危機の際の言葉の一覧）として名前が挙がっていることを、一般の知識として知っていたので入れた。
-- 例外：ATTACK は HEART ATTACK（心臓発作）にも当たる。DEAD と DEATH は訃報のテーマにも当たる。どちらも外しすぎの方向の誤りとして受け入れる。
+- 災害（disaster）：自然災害、火災、飢饉、事故（墜落・脱線・難破）、避難、死傷。
+- 感染症（disease_general と disease_named）：一般の語は disease_general、病名は disease_named に分けた（(4)）。
+- 前回の案の CRISISLEX は外した。一般の英語の語ではなく、GDELT のテーマの体系の名前を知っていたことから入れた語だったため。
 
 **区分表を見ずに決めたことの限界**：
-- GDELT のテーマ名の一部（KILL、ARREST、PROTEST など）が一般の英語と同じ形であることは、一般の知識として知っている。知っているテーマ名に合わせて語を足し引きしてはいないが、その知識の影響を完全に切り離したとは言えない。
-- 区分表の名前には、語をつなげて一語にしたもの（例：二つの語の間に区切りの無い名前）があるかもしれない。この規則は部分一致をしないので、そうした名前の中の語には当たらない。説明の欄で当たらなければ、一覧に残る。
+- 名前の語が、5文字以上の語の先頭や末尾以外の場所でくっついている場合（例：語が三つ以上つながり、当たる語が真ん中にある名前）は当たらない。説明の欄で当たらなければ、一覧に残る。
 - 説明の欄が無い区分表なら、名前だけで照合することになり、取りこぼしが増える。
+- 名前が略語だけでできているテーマには当たらない。
 
-### (4) 組織名と民族集団のテーマ（T-001 の申し送り）
+### (4) 病名（案A と案B）
+- 病名（`disease_named` の行）は、一般の英語の語ではなく、過去の流行の知識から選んだ（7章）。CLAUDE.md の「データ源の区分を使って機械的に判定する」に照らすと、知識から名前を選ぶことは、テーマを名指しする判断に近づく。
+- そのため、次の二つを並べてオーナーに選んでもらう。
+  - 案A（今のコードの既定）：`disease_general` と `disease_named` の両方を使う。名前と説明に一般の語が無い病気のテーマも外れる。
+  - 案B：`disease_general` だけを使う。知識から選んだ病名は規則に入らない。代わりに、名前が病名だけで説明にも一般の語が無いテーマは一覧に残る。
+- どちらを選ぶかは、封印の前に `ENABLED_OPTIONAL_CATEGORIES` に反映する。区分表を見る前なので、どちらを選んでも選び出しにはならない。
+
+### (5) 組織名と民族集団のテーマ（T-001 の申し送り）
 T-001 の報告では、テーマの欄に組織名と民族集団が入ることがある（codebook）。
 
 **民族・宗教の集団：外す区分を足すことを推奨する（オーナーの承認が要る）**
@@ -114,18 +159,22 @@ T-001 の報告では、テーマの欄に組織名と民族集団が入るこ�
   - 特定の民族・宗教の集団が来週ニュースになる、という予言を公開すること自体に、迫害や衝突を予告する読まれ方をする危うさがある。
   - そうしたテーマの報道が跳ねるのは、多くが紛争・暴力や犯罪の報道と重なると考えられる。しかし、その重なりは区分表の名前と説明の語では捕まえられない。
 - 語は `ethnic_religious_group` の行（ETHNIC、RELIGIOUS など）。言語の分類（言語の名前）は入れていない。言語の名前は、場所や報道の言語として付くことが多いと考えたため。
-- オーナーが足さないと決めた場合は、この行を除いた版を封印する。区分表を見る前なので、どちらを選んでも選び出しにはならない。
+- オーナーが足さないと決めた場合は、`ENABLED_OPTIONAL_CATEGORIES` からこの区分を除いた版を封印する。
 
 **組織名：別の規則を作らない**
 - 組織そのものは、CLAUDE.md の5つの区分に入らない。武装集団や政党などの組織のテーマは、TERROR、POLITICAL などの語で外れる。
 - 名前と説明だけから「組織の名前であること」を機械的に見分ける規則は、区分表を見ずには作れない。区分表を見てから作れば、一件ずつの判断に近くなる。
 
-### (5) 区分表を見たあとで語を変えたくなった場合
-- 統計係は、自分で語を変えない。変えたい語と理由をリードに報告する。
-- 変える場合は、次のすべてを満たす。
+### (6) 区分表を見たあとで変えたくなった場合
+- 統計係は、自分で変えない。変えたい点と理由をリードに報告する。
+- **新しい語は足さない。** 区分表を見てから語を選べば、名前を見ながら一件ずつ外すのと区別がつかないため。抜けていた語は、区分表を取得する前の今回の版で足した。
+- 認める変更は次の二つだけ。
+  1. 封印した語の、形の変化の規則（`inflections()`）で作られない形（子音を重ねる形などの不規則な形）を足すこと。足す形は、封印した語のどれかの英語の活用形・複数形でなければならない。
+  2. 区切り方・形の変化・くっつき一致の規則を直すこと。直した規則は、すべての語に同じく掛かる形でなければならない（特定の語やテーマ名だけに効く条件は作らない）。
+- どちらも次のすべてを満たす。
   - オーナーの承認を得て、新しい版として封印する。前の版は消さず、版ごとの一覧を並べて公開する。
-  - 変えるのは語だけ。テーマ名を名指しで足したり外したりしない（CLAUDE.md「一件ずつ人の判断で入れたり外したりしない」）。足す語は、その区分の意味を表す一般の英語の語であること。
-  - 変更点（足した語・除いた語）と、その変更で一覧の出入りが変わるテーマの一覧を公開する。
+  - テーマ名を名指しで足したり外したりしない（CLAUDE.md「一件ずつ人の判断で入れたり外したりしない」）。
+  - 変更点と、その変更で一覧の出入りが変わるテーマの一覧を公開する。
   - 手順4の開始（method-access の記録）より前に封印する。区分表には件数が無いので、この時点で変えても、報道量の動きを見て選ぶことにはならない。
 - method-access のあと（手法を作る期間の報道量を見たあと）は、v0 の一覧の除外の規則を変えない。変える必要が出た場合は、CLAUDE.md のとおり別の版として封印し直し、版ごとに別々に採点する。
 - 版の番号は、追記のみの記録で、この規則の封印が何件目かで決まる。
@@ -164,6 +213,8 @@ CLAUDE.md の定義（直近の報道量、季節性、予定された行事＝�
 - 組み合わせ（倍率7 × 判定期間3 = 21組）ごとのロジスティック回帰。係数は、手法を作る期間の予言日（月曜）の対象のタグ（4章の冷却を含む対象の規則）と、その判定（candidates.judge。判定不能は除く）だけで決める。
 - 推定の手順は固定する（`fit_logistic()`）：係数0から始め、リッジの重み1.0（切片にも掛ける）を付けたニュートン法。目的関数が減らなければ一歩を半分にする（最大30回）。係数の変化が 1e-10 未満で止める。100回で収まらなければ、そのモデルは使わず、作業を止めて報告する。
 - リッジを付けた理由：ある特徴量で完全に分かれるデータや、島が一つも無い組み合わせ（大きい倍率と短い判定期間では起こりうる）でも、係数が無限に発散しないようにするため。島が一つも無いと切片が発散するので、切片にも掛ける。件数が多ければ、重み1.0の影響は小さい。
+- 学習データの選び方（固定）：手法を作る期間の予言日の範囲にある、予言の曜日のすべての予言日。封印したタグの一覧のすべてのタグのうち、状態が "target" のもの。正解は、封印した V で計算した candidates.judge の値。判定不能の行だけを除き、ほかには何も除かない。
+- 行の並べ方（固定）：推定の前に、行を（予言日、タグ名）の昇順に並べ直す（`sort_rows()`、`fit_rows()`）。同じ予言日とタグの行が二つあれば止まる。浮動小数点の足し算は順番で結果がわずかに変わるので、第三者が計算し直したときに同じ係数になるよう、並べ方を規則で決めた。入力の順を変えても係数が同じになることを、テスト `test_row_order_fixed` で確かめる。
 - 確率は、封印した係数と上の特徴量から `predict()` で計算する。スティックチャートのモデルにも、同じ特徴量を入力として入れる（method.md 3章）。
 
 <!-- table:naive-constants -->
@@ -177,7 +228,8 @@ CLAUDE.md の定義（直近の報道量、季節性、予定された行事＝�
 | TOL | 1e-10 |
 
 ### (3) 改訂の規則
-- 手法を作る期間は自由に探索してよい期間なので、素朴な予測の特徴量を見直すことはありうる。ただし、改訂は **特徴量を足すことだけ** とし、除いたり定義を変えたりしない。足した特徴量は、スティックチャートのモデルの入力にも足す。
+- 手法を作る期間は自由に探索してよい期間なので、素朴な予測の特徴量を見直すことはありうる。ただし、改訂で変えてよいのは **特徴量を足すことだけ** とし、除いたり定義を変えたりしない。足した特徴量は、スティックチャートのモデルの入力にも足す。
+- 次のものは naive-v1 の値に固定し、改訂でも変えない：推定の定数（RIDGE_LAMBDA = 1.0、MAX_ITER = 100、TOL = 1e-10）、推定の手順（係数0から始めるニュートン法と一歩を半分にする規則）、学習データの選び方、行の並べ方。
 - 改訂は新しい版として封印し、naive-v1 の結果も並べて公開する。
 - 理由：素朴な予測を弱くする向きの変更（効いている特徴量を外すなど）ができると、スティックチャートが上回ったように見せられる。足すだけなら、手法を作る期間の上で素朴な予測が弱くなることはない。
 - 最後の版は、最初の threshold-access の記録より前に封印する（candidates.md 6章）。
@@ -233,6 +285,7 @@ CLAUDE.md の定義（直近の報道量、季節性、予定された行事＝�
 - 代償：跳ねた直後の余震のような島は、スティックチャートと素朴な予測のどちらの対象にも入らない。対象が減るので、成功率も下がる方向に動く。どちらも閾値を決める期間の割合の表を作る前に決まるので、表を見て選ぶことにはならない。
 - スティックチャート、素朴な予測、閾値を決める期間の割合の表、基準値を測る期間、前向きの予言のすべてに同じ規則を使う。
 - 冷却で外れたタグの件数は、週ごとに公開する。
+- 冷却が効くのは、跳ねたことが分かった **あと** の週だけである。跳ねる **前** の週の予言は、判定期間が重なるので、そろって島になる。たとえば判定期間28日なら、出来事の前の最大4週の予言が、一つの出来事で同時に島になる。この重なりは冷却では除けないので、束ねた評価で扱う（(4) の申し送り）。
 
 ### (2) 「対象なし」の週の数え方
 週の種類（`scoring.week_summary()`）：
@@ -249,10 +302,17 @@ CLAUDE.md の定義（直近の報道量、季節性、予定された行事＝�
 - 対象はあるが、対象の判定がすべて判定不能の週は、「判定不能の週」として別に数えて公開する。判定不能の予言は採点しない（candidates.md 3章 (5)）。
 - 束ねた評価で、採点する予言が一つも無い時期のまとまりは、信頼区間の計算から除き、除いた数を公開する。
 
-### (3) このタスクで決めないこと（次のタスクへの申し送り）
+### (3) 冷却と「対象なし」の規則の改訂
+- 手法を作る期間の作業中に限り、改訂してよい。改訂は新しい版として、オーナーの承認を得て、**最初の threshold-access の記録より前に** 封印する。前の版も並べて公開する。
+- 改訂した規則は、スティックチャート・素朴な予測・閾値を決める期間の割合の表・基準値・前向きの予言のすべてに同じく使う。
+- threshold-access のあとは変えない。閾値を決める期間の割合は、対象の規則に依るため。
+- 素朴な予測とスティックチャートのモデルは、対象の規則に依る。規則を改訂したら、両方のモデルを改訂した規則で作り直し、そのうえで封印する。
+
+### (4) このタスクで決めないこと（次のタスクへの申し送り）
 - **束ねた評価の単位と信頼区間、検出力の見積もり**：
   - 時期のまとまり：判定期間 H の予言は、続く H/7 − 1 週の予言と判定期間が重なる。重ならない連続した週のまとまり（H = 28 なら4週）を単位にする案がある。
   - 出来事のまとまり：同じ週に跳ねたタグを、予言の時点で分かる情報（共起の網など）でつないでまとめる案がある。判定のあとに人がまとめることはしない。
+  - 跳ねる前の週の予言がそろって島になる重なり（(1) の最後）を、時期のまとまりで扱う。冷却はこの重なりを除かない。
   - どちらも、閾値を決める期間の割合の表を見る前に決めて封印する。
 - **長いあいだ0が続いたテーマの印**（CLAUDE.md「タグの一覧」）：印の付け方と採点での扱い。案として、予言日 t の直前365日の欠けた日でない日で報道量の合計が0のタグに印を付け、主の採点には含め、印の付いたタグを除いた採点も並べて公開する形がある。
 - **採点の指標**（スティックチャートと素朴な予測の比べ方。確率の当てはまりの指標と「今週の島」の当たりの数え方）。
@@ -263,31 +323,43 @@ CLAUDE.md の定義（直近の報道量、季節性、予定された行事＝�
 
 | 順番 | 封印するもの | 時機 |
 |---|---|---|
-| 1 | この文書、3つのコードの出力（JSON）、3つのコード、`tests/stats/test_t019.py` | **テーマの区分表の取得（T-018 の acquisition-start）より前**、かつ method-access より前 |
-| 2 | 区分表を見たあとの語の変更（あれば） | method-access より前。オーナーの承認のあと |
-| 3 | タグの一覧の結果（`build_tag_list()` の出力。A = V、テーマごとの判定と理由を含む）と、入力のデータのハッシュ | 手法を作る期間のデータで作ったあと、モデルより前 |
-| 4 | `naive_history_days = 399`（periods のきっかけの値） | 最初の threshold-access より前 |
-| 5 | 素朴な予測の最後の版と、21組の係数 | 最初の threshold-access より前 |
+| 0 | 報道量の数え方（r(d) の分子と分母の単位。収集係が T-018 で決める） | 1 と同時か、1 より前 |
+| 1 | この文書、3つのコードの出力（JSON）、3つのコード、`tests/stats/test_t019.py` | 0 の封印のあと（同時でもよい）。**テーマの区分表の取得（T-018 の acquisition-start）より前**、かつ method-access より前 |
+| 2 | 区分表を見たあとの変更（2章 (6) の二つだけ。あれば） | method-access より前。オーナーの承認のあと |
+| 3 | 手法を作る期間の区画の欠けた日の一覧（candidates.md 3章 (5)） | 4 より前 |
+| 4 | タグの一覧の結果（`build_tag_list()` の出力。A = V、テーマごとの判定と理由を含む）と、入力のデータのハッシュ | 手法を作る期間のデータで作ったあと、モデルより前 |
+| 5 | 冷却と「対象なし」の規則の改訂（4章 (3)。あれば） | 最初の threshold-access より前 |
+| 6 | `naive_history_days = 399`（periods のきっかけの値） | 最初の threshold-access より前 |
+| 7 | 素朴な予測の最後の版と、21組の係数 | 最初の threshold-access より前 |
 
-- 1 を区分表の取得より前にする理由：区分表を見てから語を決めると、名前を見ながら一件ずつ外すのと区別がつかない。記録の順番（1 の記録が区分表の取得の記録より前にあること）で、第三者が確かめられる。
-- 3 では、規則（1 と 2）と結果をまとめて一つの記録にする（CLAUDE.md「入れる規則・除外する規則・その結果の一覧を、まとめて封印する」）。結果を再計算できるように、入力（区分表と、手法を作る期間の日ごとの件数と全体の報道量）のハッシュも入れる。
-- 検証の手順（docs/verify/）で、3 の結果が、封印した規則のコードと封印した入力から同じに再計算できることを確かめる手順を作ることを提案する。
+- 0 を 1 より前にする理由：K = 10 の意味（1日あたり10件）は数え方に依る。数え方が決まる前に K を封印すると、あとで数え方を選ぶことで A を動かせる。統計係の側では、**数え方が封印されるまで K を封印しない**。
+- 1 を区分表の取得より前にする理由：区分表を見てから語を決めると、名前を見ながら一件ずつ外すのと区別がつかない。記録の順番（1 の記録が区分表の取得の記録より前にあること）で、第三者が確かめられる。0 の封印が遅れる場合は、1 を待ち、区分表の取得も 1 のあとまで待つ。
+- 3 を 4 より前にする理由：タグの一覧の結果（存在の条件と平均）は、欠けた日の一覧に依る。一覧の結果を見てから欠けた日を決め直す余地を無くすため。
+- 4 では、規則（1 と 2）と結果をまとめて一つの記録にする（CLAUDE.md「入れる規則・除外する規則・その結果の一覧を、まとめて封印する」）。結果を再計算できるように、入力（区分表と、手法を作る期間の日ごとの件数と全体の報道量）のハッシュも入れる。
+- 検証の手順（docs/verify/）で、4 の結果が、封印した規則のコードと封印した入力から同じに再計算できることを確かめる手順を作ることを提案する。
 
 ## 6. 方針書との関係
-- CLAUDE.md の5つの区分の外の区分（民族・宗教の集団）を足す点は、CLAUDE.md の決定事項の変更になる。オーナーの承認を得るまで、この行は提案である（0章の4）。
+- CLAUDE.md の5つの区分の外の区分（民族・宗教の集団）を足す点は、CLAUDE.md の決定事項の変更になる。オーナーの承認を得るまで、この行は提案である（0章の8）。
+- 病名の区分（disease_named）は、CLAUDE.md の「災害・感染症」の範囲だが、語を知識から選んだ点でオーナーの選択に委ねる（0章の7）。
 - 一度跳ねたタグの冷却は、CLAUDE.md の「予言の対象」に条件を一つ足すことになる。CLAUDE.md の「採点計画で必ず扱うこと」が、この扱いを採点計画で決めるとしているので、その範囲の提案とした。
 - それ以外は、CLAUDE.md と docs/method.md の範囲で決めた。
 
 ## 7. 使った情報（データを見ていないことの宣言）
-- 次の文書と発言だけを使った：CLAUDE.md、docs/method.md、docs/stats/periods.md、docs/stats/candidates.md、src/stats/periods.py、src/stats/candidates.py、reviews/T-001.md・T-011.md・T-016.md。
-- 一般の知識として、次のものを使った。
-  - 英語の語彙（2章の語）
-  - GDELT のテーマの欄が分類の名前で、人物名は別の欄に入ること（T-001）
-  - CrisisLex がテーマの体系の一つとして使われていること（2章 (3)）
-  - 移動祝日などで行事の日付が年によって動くこと（3章 (1)）
-  - 件数のばらつきの大きさ（ポアソン分布。1章 (2)）
+- 次の文書と発言だけを使った：CLAUDE.md、docs/method.md、docs/stats/periods.md、docs/stats/candidates.md、src/stats/periods.py、src/stats/candidates.py、reviews/T-001.md・T-011.md・T-016.md・T-019.md。
 - GDELT のデータ、ファイル一覧、テーマの区分表、GDELT のどのページにもアクセスしていない。ネットワークは使っていない。
 - 3つのコードは、データのファイルを開かず、現在の日時を読まない（テスト `TestNoDataNoNetwork`）。
+
+**語の一覧に入った知識**（区分表は見ていないが、次の知識が語の選び方に入った）：
+- 英語の語彙。
+- **病名は、過去の流行の知識から選んだ。** EBOLA、ZIKA、COVID、SARS、MERS、H1N1、H5N1 などは、実際に大きく報じられた流行を知っていたから挙げた語である。そのため、病名の区分を使うかを案A・案Bとしてオーナーに選んでもらう（2章 (4)）。
+- **GDELT のテーマ名の形の知識。** テーマ名が、分類の体系の名前を頭に付け、下線で語をつないだ形（TAX_ETHNICITY_…、TAX_FNCACT_…、WB_…、CRISISLEX_… など）であること、KILL、ARREST、PROTEST などの一般の語がそのままテーマ名にもなっていることを知っている。この知識は、次の点で語の選び方に入った。
+  - 民族の区分に ETHNICITY を入れたこと、POLICE や LEADER などの役職・立場の語を入れたこと。
+  - 下線で区切る照合を基本にしたこと。
+  - 前回の案の CRISISLEX（今回は外した）。
+- **規則を確かめるときに、覚えているテーマ名の形を試しに照合した。** 今回の改訂の途中で、覚えている形のテーマ名（いくつかの体系の頭の名前を付けた名前）を数十個、`exclusion_matches()` に通して当たり方を見た。その結果を見てから語や規則を変えてはいない。ただし、覚えている名前で確かめたこと自体は、区分表の一部を記憶から見たのに近い。テストには、作った名前だけを使っている。
+- **今回足した語の出どころ**：ASSASSINATION、EXECUTION、STABBING、EXPLOSION、CRASH、CYBERATTACK（くっつき一致で拾う）と、語と数字がくっついた形は、リードの差し戻し（監査の所見）で挙がった例である。それ以外に足した語（GUNMAN、DETENTION、VICTIM、EVACUATION など）は、同じ区分の意味から統計係が挙げた。
+- 世の中の出来事の知識：病名のほかに、行事の日付が年によって動くこと（移動祝日など。3章 (1)）を使った。
+- 統計の一般の知識：件数のばらつきの大きさ（ポアソン分布。1章 (2)）。
 
 ## 8. 引用
 Data: The GDELT Project (https://www.gdeltproject.org/). This project is not affiliated with or endorsed by the GDELT Project.

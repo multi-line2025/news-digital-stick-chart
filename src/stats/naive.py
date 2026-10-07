@@ -22,6 +22,8 @@
 モデル
   組み合わせごとのロジスティック回帰（切片 + 上の6つ）。係数は手法を作る期間の予言日と
   対象（scoring.target_status が "target"）と判定（candidates.judge、判定不能は除く）だけで決める。
+  行は (予言日, タグ名) の順に並べてから推定する（fit_rows）。推定の定数・手順・学習データの選び方・
+  行の並べ方は naive-v1 の値に固定し、改訂で変えてよいのは特徴量を足すことだけ。
   推定はリッジ（RIDGE_LAMBDA、切片にも掛ける）付きのニュートン法で、手順を固定する。
 
 使い方
@@ -231,6 +233,25 @@ def fit_logistic(X, y, lam=RIDGE_LAMBDA):
     return {"coef": beta, "iterations": MAX_ITER, "converged": False}
 
 
+def sort_rows(rows):
+    """学習の行を、規則で決めた順（予言日、タグ名）に並べる。
+
+    rows: (予言日 t, タグ名, 特徴量の並び, 0 か 1) の並び。同じ (t, タグ名) が二つあれば止まる。
+    入力の順に依らず、同じ行の集まりからは同じ並びになる。
+    """
+    out = sorted(rows, key=lambda r: (r[0], r[1]))
+    for a, b in zip(out, out[1:]):
+        if (a[0], a[1]) == (b[0], b[1]):
+            raise ValueError("同じ予言日とタグの行が二つある")
+    return out
+
+
+def fit_rows(rows):
+    """sort_rows で並べ直してから fit_logistic で推定する。学習は必ずこの入口を通す。"""
+    ordered = sort_rows(rows)
+    return fit_logistic([r[2] for r in ordered], [r[3] for r in ordered])
+
+
 def predict(coef, x):
     if len(coef) != len(x):
         raise ValueError("長さが違う")
@@ -273,9 +294,16 @@ def as_record():
         "fit": {"ridge_lambda": RIDGE_LAMBDA, "penalize_intercept": True, "start": "zeros",
                 "method": "Newton with step halving (max 30)", "max_iter": MAX_ITER, "tol": TOL,
                 "not_converged": "model not used; stop and report"},
-        "revision_rule": "during the method period, features may only be added (never removed or "
-                         "changed), as a new sealed version; added features also go into the stick-chart "
-                         "model; v1 results are published alongside",
+        "training_data": "all prediction dates (prediction weekday) in the method period's prediction "
+                         "range; all tags of the sealed tag list with status target; label = candidates.judge "
+                         "with the sealed V; null labels dropped; nothing else dropped",
+        "row_order": "rows sorted by (prediction date, tag name) ascending before fitting (fit_rows); "
+                     "duplicate (date, tag) stops the fit",
+        "revision_rule": "during the method period, the only allowed change is adding features (never "
+                         "removing or changing one), as a new sealed version; ridge_lambda, max_iter, tol, "
+                         "the fitting procedure, the training-data selection and the row order stay at the "
+                         "naive-v1 values; added features also go into the stick-chart model; v1 results are "
+                         "published alongside",
         "periods_trigger": periods_trigger(),
         "latest_season_day_offset": {str(h): latest_season_day_offset(h) for h in candidates.HORIZON_DAYS},
     }

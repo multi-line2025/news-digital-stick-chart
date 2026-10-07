@@ -17,8 +17,9 @@
       中央値。A は「全体の報道量が普段どおりの日に、1日あたり平均 K 件」に当たる比率。
       最低の報道量 V は A と同じ値（docs/stats/candidates.md 3章 (4)）。
 除外する規則（CLAUDE.md「タグの一覧」2）
-  テーマの名前と説明を、英字と数字以外で区切って大文字の語の並びにし、EXCLUSION_TERMS の
-  語（または連続する語の並び）と完全に一致するものが一つでもあれば外す。部分一致はしない。
+  テーマの名前と説明を tokens() で語の並びにし、有効な区分の EXCLUSION_TERMS の語に当たる
+  ものが一つでもあれば外す。当たり方は、完全一致・形の変化（inflections()）・くっつき一致
+  （GLUE_MIN_LEN 文字以上の語が、名前の語の先頭か末尾にある）の三つだけ（_word_matches()）。
   一件ずつの例外（特定のテーマ名を足す・外す）は持たない。
 
 使い方
@@ -46,128 +47,212 @@ K_ARTICLES_PER_DAY = 10
 MIN_COUNT_PER_QUARTER = 1
 
 # ---------------------------------------------------------------------------
-# 除外する規則の語の一覧
-# 語は大文字の英字と数字だけ。複数の語の並びは、連続して現れたときだけ一致とする。
-# 単数形と複数形などの形は、一つずつ書く（語幹の処理はしない）。
-# 区分の名前は報告のためのもので、どの区分に当たっても同じく外す。
+# 除外する規則の語の一覧（docs/stats/tags-naive.md 2章）
+# 語は大文字の英字と数字。空白で区切ったものは語の並び（連続して現れたときだけ一致）。
+# 語の形の変化（複数形・活用形）は inflections() の規則で機械的に作る。
+# 区分の名前は報告のためのもので、有効な区分のどれに当たっても同じく外す。
 # ---------------------------------------------------------------------------
 
 EXCLUSION_TERMS = {
     "politics_election": (
-        "ELECTION", "ELECTIONS", "ELECTORAL", "ELECTED", "VOTE", "VOTES", "VOTING",
-        "VOTER", "VOTERS", "BALLOT", "BALLOTS", "REFERENDUM", "REFERENDUMS",
-        "POLITICS", "POLITICAL", "POLITICIAN", "POLITICIANS",
-        "PARLIAMENT", "PARLIAMENTARY", "LEGISLATURE", "LEGISLATIVE", "CONGRESS",
-        "SENATE", "SENATOR", "SENATORS", "LAWMAKER", "LAWMAKERS",
-        "PRESIDENT", "PRESIDENTS", "PRESIDENTIAL", "PRIME MINISTER", "MINISTER",
-        "MINISTERS", "GOVERNOR", "GOVERNORS", "MAYOR", "MAYORS", "LEADER", "LEADERS",
-        "HEAD OF STATE", "CABINET", "COUP", "COUPS", "IMPEACH", "IMPEACHMENT",
-        "REGIME", "REGIMES", "DICTATOR", "DICTATORS", "DICTATORSHIP",
-        "PROTEST", "PROTESTS", "PROTESTER", "PROTESTERS", "DEMONSTRATOR",
-        "DEMONSTRATORS", "SANCTION", "SANCTIONS", "DIPLOMACY", "DIPLOMATIC",
-        "DIPLOMAT", "DIPLOMATS", "EMBASSY", "AMBASSADOR", "PROPAGANDA", "LOBBYING",
+        "ELECTION", "ELECTORAL", "ELECT", "VOTE", "BALLOT", "REFERENDUM", "POLL",
+        "CANDIDATE", "INAUGURATION", "POLITICS", "POLITICAL", "POLITICIAN",
+        "PARLIAMENT", "PARLIAMENTARY", "LEGISLATURE", "LEGISLATIVE", "LEGISLATOR",
+        "CONGRESS", "SENATE", "SENATOR", "LAWMAKER", "PRESIDENT", "PRESIDENTIAL",
+        "PRIME MINISTER", "MINISTER", "CHANCELLOR", "GOVERNOR", "MAYOR", "LEADER",
+        "HEAD OF STATE", "CABINET", "COUP", "IMPEACH", "IMPEACHMENT", "REGIME",
+        "DICTATOR", "DICTATORSHIP", "PROTEST", "DEMONSTRATOR", "SANCTION",
+        "DIPLOMACY", "DIPLOMATIC", "DIPLOMAT", "EMBASSY", "AMBASSADOR", "PROPAGANDA",
+        "LOBBYING", "LOBBYIST",
     ),
     "conflict_violence": (
-        "WAR", "WARS", "WARFARE", "MILITARY", "ARMY", "ARMIES", "ARMED", "NAVY",
-        "AIR FORCE", "SOLDIER", "SOLDIERS", "TROOP", "TROOPS", "MILITIA", "MILITIAS",
-        "INSURGENCY", "INSURGENT", "INSURGENTS", "REBEL", "REBELS", "REBELLION",
-        "TERROR", "TERRORISM", "TERRORIST", "TERRORISTS", "EXTREMISM", "EXTREMIST",
-        "EXTREMISTS", "JIHAD", "JIHADIST", "JIHADISTS",
-        "CONFLICT", "CONFLICTS", "VIOLENCE", "VIOLENT", "ATTACK", "ATTACKS",
-        "BOMB", "BOMBS", "BOMBING", "BOMBINGS", "EXPLOSIVE", "EXPLOSIVES",
-        "WEAPON", "WEAPONS", "GUN", "GUNS", "FIREARM", "FIREARMS", "SHOOTING",
-        "SHOOTINGS", "MISSILE", "MISSILES", "AIRSTRIKE", "AIRSTRIKES",
-        "KILL", "KILLS", "KILLED", "KILLING", "KILLINGS", "MASSACRE", "MASSACRES",
-        "GENOCIDE", "CEASEFIRE", "PEACEKEEPING", "PEACEKEEPER", "PEACEKEEPERS",
-        "INVASION", "HOSTAGE", "HOSTAGES", "TORTURE", "RIOT", "RIOTS", "UNREST",
+        "WAR", "WARFARE", "MILITARY", "ARMY", "ARMED", "NAVY", "NAVAL", "AIR FORCE",
+        "SOLDIER", "TROOP", "MILITIA", "INSURGENCY", "INSURGENT", "INSURRECTION",
+        "REBEL", "REBELLION", "GUERRILLA", "SEPARATIST", "TERROR", "TERRORISM",
+        "TERRORIST", "EXTREMISM", "EXTREMIST", "JIHAD", "JIHADIST", "CONFLICT",
+        "VIOLENCE", "VIOLENT", "ATTACK", "BOMB", "BOMBING", "EXPLOSIVE", "EXPLOSION",
+        "WEAPON", "GUN", "GUNMAN", "GUNMEN", "GUNFIRE", "FIREARM", "SHOOTING",
+        "SHOOTER", "SNIPER", "MISSILE", "ARTILLERY", "AIRSTRIKE", "KILL", "MASSACRE",
+        "GENOCIDE", "SLAUGHTER", "ASSASSIN", "ASSASSINATE", "ASSASSINATION",
+        "EXECUTION", "BEHEADING", "STABBING", "LYNCHING", "CEASEFIRE", "PEACEKEEPING",
+        "PEACEKEEPER", "INVASION", "HOSTAGE", "TORTURE", "RIOT", "UNREST",
         "CRACKDOWN", "PERSECUTION", "SIEGE", "BLOCKADE", "DEFENSE", "DEFENCE",
-        "REFUGEE", "REFUGEES", "DISPLACED", "ETHNIC CLEANSING",
+        "CONSCRIPTION", "REFUGEE", "DISPLACED", "ETHNIC CLEANSING",
     ),
     "crime": (
-        "CRIME", "CRIMES", "CRIMINAL", "CRIMINALS", "MURDER", "MURDERS", "HOMICIDE",
-        "HOMICIDES", "ASSAULT", "ASSAULTS", "ROBBERY", "THEFT", "BURGLARY", "FRAUD",
-        "CORRUPTION", "BRIBERY", "BRIBE", "BRIBES", "SMUGGLING", "TRAFFICKING",
-        "NARCOTICS", "CARTEL", "CARTELS", "GANG", "GANGS", "MAFIA", "LAUNDERING",
-        "EXTORTION", "KIDNAP", "KIDNAPPING", "KIDNAPPINGS", "RAPE", "HARASSMENT",
-        "ABUSE", "ARREST", "ARRESTS", "ARRESTED", "POLICE", "PRISON", "PRISONS",
-        "PRISONER", "PRISONERS", "JAIL", "INCARCERATION", "PROSECUTION",
-        "PROSECUTOR", "PROSECUTORS", "INDICTMENT", "PIRACY", "SCAM", "SCAMS",
-        "VANDALISM", "ARSON", "CYBERCRIME",
+        "CRIME", "CRIMINAL", "MURDER", "HOMICIDE", "ASSAULT", "ROBBERY", "THEFT",
+        "THIEF", "THIEVES", "BURGLARY", "FRAUD", "EMBEZZLEMENT", "CORRUPTION",
+        "BRIBERY", "BRIBE", "SMUGGLING", "SMUGGLER", "TRAFFICKING", "TRAFFICKER",
+        "NARCOTICS", "CARTEL", "GANG", "MAFIA", "LAUNDERING", "EXTORTION", "KIDNAP",
+        "KIDNAPPING", "KIDNAPPED", "KIDNAPPER", "ABDUCTION", "RAPE", "HARASSMENT",
+        "ABUSE", "ARREST", "DETAIN", "DETAINEE", "DETENTION", "POLICE", "PRISON",
+        "JAIL", "INCARCERATION", "PROSECUTION", "PROSECUTOR", "INDICTMENT", "FELONY",
+        "PIRACY", "SCAM", "VANDALISM", "ARSON", "POACHING", "COUNTERFEIT",
+        "ESPIONAGE", "TREASON", "VICTIM",
     ),
     "specific_person": (
-        "POPE", "KING", "KINGS", "QUEEN", "QUEENS", "PRINCE", "PRINCES", "PRINCESS",
-        "MONARCH", "MONARCHY", "ROYAL", "ROYALS", "EMPEROR", "EMPRESS",
-        "CELEBRITY", "CELEBRITIES",
+        "POPE", "KING", "QUEEN", "PRINCE", "PRINCESS", "MONARCH", "MONARCHY", "ROYAL",
+        "EMPEROR", "EMPRESS", "CELEBRITY",
     ),
-    "disaster_disease": (
-        "DISASTER", "DISASTERS", "EARTHQUAKE", "EARTHQUAKES", "TSUNAMI", "TSUNAMIS",
-        "FLOOD", "FLOODS", "FLOODING", "HURRICANE", "HURRICANES", "TYPHOON",
-        "TYPHOONS", "CYCLONE", "CYCLONES", "TORNADO", "TORNADOES", "WILDFIRE",
-        "WILDFIRES", "FIRE", "FIRES", "DROUGHT", "DROUGHTS", "LANDSLIDE",
-        "LANDSLIDES", "VOLCANO", "VOLCANOES", "VOLCANIC", "ERUPTION", "AVALANCHE",
-        "HEATWAVE", "HEAT WAVE", "STORM", "STORMS", "BLIZZARD", "FAMINE",
-        "CRISISLEX", "CASUALTY", "CASUALTIES", "FATALITY", "FATALITIES",
-        "DEATH", "DEATHS", "DEAD",
-        "EPIDEMIC", "EPIDEMICS", "PANDEMIC", "PANDEMICS", "OUTBREAK", "OUTBREAKS",
-        "DISEASE", "DISEASES", "INFECTION", "INFECTIONS", "INFECTIOUS", "VIRUS",
-        "VIRUSES", "INFLUENZA", "FLU", "EBOLA", "ZIKA", "CHOLERA", "MALARIA",
-        "MEASLES", "HIV", "TUBERCULOSIS", "POLIO", "CORONAVIRUS", "COVID", "SARS",
-        "MERS", "PLAGUE", "DENGUE", "VACCINE", "VACCINES", "VACCINATION",
+    "disaster": (
+        "DISASTER", "EARTHQUAKE", "TSUNAMI", "FLOOD", "HURRICANE", "TYPHOON",
+        "CYCLONE", "TORNADO", "WILDFIRE", "FIRE", "DROUGHT", "LANDSLIDE", "MUDSLIDE",
+        "SINKHOLE", "VOLCANO", "VOLCANIC", "ERUPTION", "AVALANCHE", "HEATWAVE",
+        "HEAT WAVE", "STORM", "BLIZZARD", "FAMINE", "CRASH", "DERAILMENT",
+        "SHIPWRECK", "ACCIDENT", "EVACUATION", "CASUALTY", "FATALITY", "INJURED",
+        "DEATH", "DEAD",
+    ),
+    "disease_general": (
+        "EPIDEMIC", "PANDEMIC", "OUTBREAK", "DISEASE", "INFECTION", "INFECTIOUS",
+        "CONTAGION", "CONTAGIOUS", "VIRUS", "PATHOGEN", "VACCINE", "VACCINATION",
         "QUARANTINE",
     ),
-    # CLAUDE.md の五つの区分の外。オーナーの承認が要る（docs/stats/tags-naive.md 2章 (4)）。
+    # 病名。過去の流行の知識から選んだ（文書 7章）。入れるかはオーナーが選ぶ（2章 (4)）。
+    "disease_named": (
+        "INFLUENZA", "FLU", "EBOLA", "ZIKA", "CHOLERA", "MALARIA", "MEASLES", "HIV",
+        "TUBERCULOSIS", "POLIO", "CORONAVIRUS", "COVID", "SARS", "SARSCOV", "MERS",
+        "PLAGUE", "DENGUE", "ANTHRAX", "SMALLPOX", "HEPATITIS", "MENINGITIS", "RABIES",
+        "H1N1", "H5N1",
+    ),
+    # CLAUDE.md の五つの区分の外。オーナーの承認が要る（文書 2章 (5)）。
     "ethnic_religious_group": (
-        "ETHNIC", "ETHNICITY", "ETHNICITIES", "TRIBE", "TRIBES", "TRIBAL",
-        "RELIGION", "RELIGIONS", "RELIGIOUS", "SECTARIAN",
+        "ETHNIC", "ETHNICITY", "TRIBE", "TRIBAL", "RELIGION", "RELIGIOUS", "SECTARIAN",
     ),
 }
 
-# 五つの区分（CLAUDE.md）と、その外の区分。
-CLAUDE_CATEGORIES = (
-    "politics_election", "conflict_violence", "crime", "specific_person", "disaster_disease",
-)
-EXTRA_CATEGORIES_NEEDING_APPROVAL = ("ethnic_religious_group",)
+# 区分と CLAUDE.md の五つの区分の対応。None は五つの区分の外。
+CLAUDE_CATEGORY_OF = {
+    "politics_election": "政治・選挙",
+    "conflict_violence": "紛争・暴力",
+    "crime": "犯罪",
+    "specific_person": "特定の人物",
+    "disaster": "災害・感染症",
+    "disease_general": "災害・感染症",
+    "disease_named": "災害・感染症",
+    "ethnic_religious_group": None,
+}
+CLAUDE_CATEGORIES = ("政治・選挙", "紛争・暴力", "犯罪", "特定の人物", "災害・感染症")
+
+# オーナーが選ぶ区分（文書 0章）。この提案では両方を有効にしている。
+# オーナーの選択は、封印の前にこの定数に反映する（区分表を見る前なので選び出しにならない）。
+OPTIONAL_CATEGORIES = ("disease_named", "ethnic_religious_group")
+ENABLED_OPTIONAL_CATEGORIES = ("disease_named", "ethnic_religious_group")
 
 # 照合に使う欄。区分表のこの二つの欄だけを使う（ほかの欄は、あっても使わない）。
 MATCH_FIELDS = ("name", "description")
 
-_SPLIT = re.compile(r"[^A-Z0-9]+")
+# 語がくっついた形を拾う規則（くっつき一致）を使う、語の長さの下限（文字数）。
+GLUE_MIN_LEN = 5
+
+_PIECES = re.compile(r"[A-Z]+|[0-9]+")
 _TERM_OK = re.compile(r"\A[A-Z0-9]+( [A-Z0-9]+)*\Z")
 
 ONE_DAY = datetime.timedelta(days=1)
 
 
 def tokens(text):
-    """大文字にして、英字と数字以外で区切った語の並び。None や空は空の並び。"""
+    """大文字にし、英字の続きと数字の続きを一つずつの語にした並び。
+
+    英字と数字以外（下線・空白・記号）は区切りとして捨てる。英字と数字の境目でも区切る
+    （ELECTION2016 -> ELECTION, 2016）。None や空は空の並び。
+    """
     if not text:
         return ()
-    return tuple(t for t in _SPLIT.split(text.upper()) if t)
+    return tuple(_PIECES.findall(text.upper()))
 
 
-def _term_tokens(term):
-    return tuple(term.split(" "))
+def inflections(word):
+    """語の形の変化（複数形・活用形）の集合。word 自身は含めない。英字だけの語に作る。
+
+    - 常に +S
+    - S, X, Z, CH, SH, O で終わる語に +ES
+    - 子音 + Y で終わる語に Y を IES, IED に替えた形
+    - E で終わる語に +D, +R, +RS と、E を除いて +ING
+    - それ以外の語に +ED, +ING, +ER, +ERS
+    子音を重ねる形（KIDNAP -> KIDNAPPING）は作らない（必要なものは語の一覧に書いた）。
+    """
+    if not word.isalpha():
+        return frozenset()
+    out = {word + "S"}
+    if word.endswith(("S", "X", "Z", "CH", "SH", "O")):
+        out.add(word + "ES")
+    if len(word) >= 2 and word.endswith("Y") and word[-2] not in "AEIOU":
+        out.update({word[:-1] + "IES", word[:-1] + "IED"})
+    if word.endswith("E"):
+        out.update({word + "D", word + "R", word + "RS", word[:-1] + "ING"})
+    else:
+        out.update({word + "ED", word + "ING", word + "ER", word + "ERS"})
+    return frozenset(out)
 
 
-def _contains(seq, sub):
-    n = len(sub)
-    return any(seq[i:i + n] == sub for i in range(len(seq) - n + 1))
+def _word_matches(word, tok):
+    """一つの語 word が、名前の一つの語 tok に当たるか。当たり方の名前か None。"""
+    if tok == word:
+        return "exact"
+    if tok in inflections(word):
+        return "inflection"
+    if len(word) >= GLUE_MIN_LEN and word.isalpha() and tok.isalpha():
+        if tok.startswith(word) or tok.endswith(word):
+            return "glue"
+        if any(tok.endswith(f) for f in inflections(word)):
+            return "glue"
+    return None
 
 
-def exclusion_matches(name, description=None):
-    """名前と説明に一致した語の一覧 [(区分, 語, 欄)]。順番は区分・語・欄の定義順。"""
+def _term_match(term, toks):
+    """語（または語の並び）term が、語の並び toks に当たるか。当たり方の名前か None。
+
+    - 語が一つ：どれかの語に _word_matches が当たれば一致。
+    - 語の並び：並びが連続して現れれば一致（最後の語だけ形の変化を認める）。
+      加えて、並びをつなげた一語（AIR FORCE -> AIRFORCE）を、語が一つの場合と同じ規則で照合する。
+    """
+    tt = tokens(term)
+    if len(tt) == 1:
+        for t in toks:
+            how = _word_matches(tt[0], t)
+            if how:
+                return how
+        return None
+    n = len(tt)
+    for i in range(len(toks) - n + 1):
+        seg = toks[i:i + n]
+        if seg[:-1] == tt[:-1] and (seg[-1] == tt[-1] or seg[-1] in inflections(tt[-1])):
+            return "exact" if seg[-1] == tt[-1] else "inflection"
+    joined = "".join(tt)
+    if joined.isalpha():
+        for t in toks:
+            how = _word_matches(joined, t)
+            if how:
+                return "joined-" + how
+    return None
+
+
+def enabled_categories(optional=None):
+    opt = ENABLED_OPTIONAL_CATEGORIES if optional is None else tuple(optional)
+    for c in opt:
+        if c not in OPTIONAL_CATEGORIES:
+            raise ValueError("選べる区分ではない: %r" % c)
+    return tuple(c for c in EXCLUSION_TERMS if c not in OPTIONAL_CATEGORIES or c in opt)
+
+
+def exclusion_matches(name, description=None, optional=None):
+    """名前と説明に一致した語の一覧 [(区分, 語, 欄, 当たり方)]。順番は区分・語・欄の定義順。
+
+    optional：有効にする選べる区分（既定は ENABLED_OPTIONAL_CATEGORIES）。
+    """
     fields = {"name": tokens(name), "description": tokens(description)}
     out = []
-    for cat in CLAUDE_CATEGORIES + EXTRA_CATEGORIES_NEEDING_APPROVAL:
+    for cat in enabled_categories(optional):
         for term in EXCLUSION_TERMS[cat]:
-            tt = _term_tokens(term)
             for f in MATCH_FIELDS:
-                if _contains(fields[f], tt):
-                    out.append((cat, term, f))
+                how = _term_match(term, fields[f])
+                if how:
+                    out.append((cat, term, f, how))
     return out
 
 
-def is_excluded(name, description=None):
-    return bool(exclusion_matches(name, description))
+def is_excluded(name, description=None, optional=None):
+    return bool(exclusion_matches(name, description, optional))
 
 
 # ---------------------------------------------------------------------------
@@ -323,17 +408,32 @@ def as_record():
         },
         "exclusion": {
             "fields": list(MATCH_FIELDS),
-            "tokenize": "uppercase, split on any character other than A-Z and 0-9, drop empty",
-            "match": "a term (one or more tokens) matches if its tokens appear contiguously in the "
-                     "token sequence of the name or the description; no substring or stem matching",
+            "tokenize": "uppercase; maximal runs of A-Z and of 0-9 are tokens (letter/digit boundary "
+                        "splits); every other character is a separator",
+            "inflections": "+S always; +ES after S/X/Z/CH/SH/O; consonant+Y -> IES, IED; ending E -> +D, "
+                           "+R, +RS, drop E +ING; otherwise +ED, +ING, +ER, +ERS; letters only; no "
+                           "consonant doubling",
+            "match": "single word: token equals the word, or an inflection of it, or (word of >= %d "
+                     "letters, both alphabetic) token starts with the word or ends with the word or an "
+                     "inflection of it; phrase: contiguous tokens (last may be inflected), or the joined "
+                     "phrase matched as a single word" % GLUE_MIN_LEN,
+            "glue_min_len": GLUE_MIN_LEN,
+            "category_to_claude": CLAUDE_CATEGORY_OF,
             "claude_categories": list(CLAUDE_CATEGORIES),
-            "extra_categories_needing_owner_approval": list(EXTRA_CATEGORIES_NEEDING_APPROVAL),
+            "optional_categories": list(OPTIONAL_CATEGORIES),
+            "enabled_optional_categories": list(ENABLED_OPTIONAL_CATEGORIES),
             "terms": {k: list(v) for k, v in EXCLUSION_TERMS.items()},
             "per_theme_exceptions": "none",
             "organizations": "no separate rule; excluded only when a term of a category matches",
+            "direction": "over-exclusion preferred (e.g. DEFENSE, DEATH, VACCINE, FIRE also hit neutral themes)",
         },
-        "changes_after_seeing_table": "new version only, with owner approval; terms only (never theme "
-                                      "names); before method-access; diff and affected themes published",
+        "counting": "numerator and denominator of r(d) follow the counting method sealed by the collector "
+                    "(T-018); this record is sealed only after, or together with, that counting method",
+        "changes_after_seeing_table": "no new words. Allowed only: (a) irregular inflected forms of sealed "
+                                      "words not produced by the inflection rule, (b) a change of the "
+                                      "tokenize / inflection / glue rule applied to all words alike. New "
+                                      "version, owner approval, before method-access, diff and affected "
+                                      "themes published. Theme names are never named",
     }
 
 
