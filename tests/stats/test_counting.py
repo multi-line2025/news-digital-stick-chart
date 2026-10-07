@@ -982,6 +982,20 @@ class TestOrder3Gate(unittest.TestCase):
         self.assertFalse(counting.order3_gate([5], [rec2(9, "decided", 5)], tcheck(5), [a3])["may_seal"])
         with self.assertRaises(ValueError):
             counting.attempt_from_record(1, {"may_seal": False})
+        # timing_check の形が合わない記録は、ref_1b_seq が合っていても通さない（軽-C）
+        broken = dict(g3["record"], timing_check={k: v for k, v in g3["record"]["timing_check"].items()
+                                                  if k != "worktree_heads"})
+        with self.assertRaises(ValueError):
+            counting.attempt_from_record(14, broken)
+        broken2 = dict(g3["record"], timing_check=dict(g3["record"]["timing_check"], head="x"))
+        with self.assertRaises(ValueError):
+            counting.attempt_from_record(15, broken2)
+        # 封印係が足す bundle の欄を含めた記録は、そのままでは渡せない（gate の部分だけを渡す）
+        with self.assertRaises(ValueError):
+            counting.attempt_from_record(16, dict(g3["record"], bundle={"sha256": "0" * 64}))
+        # 1b が無かった試みは、最初の1b より前の seq なら通る
+        ok = counting.order3_gate([5], [rec2(9, "decided", 5)], tcheck(5), [att(2, None, False), att(3, None, False)])
+        self.assertTrue(ok["may_seal"])
         bad = dict(g3["record"], ref_1b_seq=7)
         with self.assertRaises(ValueError):
             counting.attempt_from_record(13, bad)
@@ -1001,6 +1015,10 @@ class TestOrder3Gate(unittest.TestCase):
             ([1, 5], [rec2(5, "decided", 1)], tcheck(5), []),            # 別の1b の seq と重なる（T-040 軽-1）
             ([1, 5], [], tcheck(5), [att(5, 1, True)]),                  # 試みが別の1b の seq と重なる
             ([3], [], tcheck(3), [att(9, None, True)]),                  # 1b の無い試みで timing_ok が True
+            # T-040 差し戻し1回目 中-2：1b=3 に対する破れの試みを None として書いても通さない
+            ([3], [rec2(9, "decided", 3)], tcheck(3), [att(10, None, False)]),
+            ([3], [], tcheck(3), [att(3, None, False)]),                 # 最初の1b と同じ seq
+            ([5], [], tcheck(5), [att(2, None, False), att(2, None, False)]),   # None の試みどうしの重なり（軽-C）
         )
         for args in bad:
             with self.assertRaises(ValueError, msg=args):

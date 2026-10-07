@@ -607,8 +607,10 @@ def _check_order3_attempt(r):
 
 
 def attempt_from_record(seq, record):
-    """封印係が ledger に書いた順番3の試みの記録（order3_gate() の record）と、その記録の seq から、
-    order3_gate() の order3_attempts の1要素を作る（T-040 軽-2）。timing_ok は record の timing_check.ok。"""
+    """封印係が ledger に書いた順番3の試みの記録のうち、関門の結果の部分（order3_gate() の record。キーは
+    ちょうど5個）と、その記録の seq から、order3_gate() の order3_attempts の1要素を作る（T-040 軽-2）。
+    timing_ok は record の timing_check.ok。git bundle の欄など、封印係が足す部分は渡さない
+    （seal-order1.md 3章 (3) の末尾。記録は {"gate": record, "bundle": {...}} の形で、gate だけを渡す）。"""
     if not isinstance(record, dict) or sorted(record) != ["chosen_order2_seq", "may_seal", "reason",
                                                           "ref_1b_seq", "timing_check"]:
         raise ValueError("順番3の試みの記録のキーが、order3_gate() の record と違う")
@@ -644,7 +646,8 @@ def order3_gate(order1b_seqs, order2_records, timing_check, order3_attempts):
       6. 2 の記録の中に、(a) で止まった記録が一つでもあれば封印しない（seq の大小によらない）。
       7. 2 の記録から select_order2_record() で選ぶ。無ければ封印しない。
     つじつまの合わない入力（ref_1b_seq がどの順番1b の記録にも無い順番2の記録・試みの記録、参照した
-    順番1b の記録より seq が小さい順番2の記録・試みの記録、seq の重なり）は ValueError。
+    順番1b の記録より seq が小さい順番2の記録・試みの記録、ref_1b_seq が None なのに seq が最初の順番1b の
+    記録より大きい試みの記録、seq の重なり）は ValueError。
     戻り値：{"may_seal", "ref_1b_seq", "chosen", "reason", "record"}。record は、通った場合も止まった
       場合も、封印係がこの試みの記録として ledger に書く中身（counting.md 4章 (3)）：
       {"may_seal", "reason", "ref_1b_seq", "chosen_order2_seq", "timing_check"}。
@@ -671,6 +674,10 @@ def order3_gate(order1b_seqs, order2_records, timing_check, order3_attempts):
     for r in order3_attempts:
         _check_order3_attempt(r)
         if r["ref_1b_seq"] is None:
+            # 順番1b の記録が無かったときの試みは、最初の順番1b の記録より前にしかありえない（T-040 差し戻し1回目 中-2）
+            if order1b_seqs and r["seq"] >= min(order1b_seqs):
+                raise ValueError("順番1b の記録が無かったときの試み（seq %d）が、最初の順番1b の記録より後にある"
+                                 % r["seq"])
             if r["seq"] in seqs:
                 raise ValueError("seq %d が重なっている" % r["seq"])
             seqs.add(r["seq"])
