@@ -15,26 +15,29 @@
   で作った日の集計で確かめる。
 
 候補（CANDIDATES）
-  r(d) = 分子 / 分母。どの候補も、翻訳の印 T の付いた組 g（"1T" など）を数えない（オーナーの
-  決定、案a。reviews/T-016.md）。数える組は COUNTED_GROUP_RULE（g の最後の文字が T でないもの。
-  形の違う X も含む）。
+  r(d) = 分子 / 分母。どの候補も、翻訳の印 T の付いた組 g（"1T" など）を数えない。出どころは
+  reviews/T-016.md（コミット 4e7c511）：オーナーの発言は「翻訳の記事については案aで良いです」で、
+  案a の中身（v0 では翻訳の記事を使わない）は、同じ節のリードの理解の行にある。数える組は
+  COUNTED_GROUP_RULE（g の最後の文字が T でないもの。形の違う X も含む）。
     分子：日の集計の T の行の、v1_docs・v2_docs・v2_mentions のどれか一つの欄を、数える組で
           足したもの（テーマごと）。
     分母："docs"（D の行の文書数を、数える組で足したもの）か、"same"（分子と同じ欄を、
           数える組とすべてのテーマで足したもの）。
 
 基準の案（CRITERIA）
-  入力は、試しの run の3日分の日の集計（TRIAL_DAYS）。どれの入力にするかは select_trial_input()
-  の規則で、試しの run のマニフェストだけから決まる。出力は候補の識別子ちょうど一つか、
-  None（該当なし。順番2を封印しない）。比べるのは分数（fractions.Fraction）で、丸めは入れない。
+  入力は3日分（TRIAL_DAYS）の日の集計。どの run の集計にするかは decide() の規則（1段目は最初の
+  試しの run、2段目は正式な run の同じ3日）で、マニフェストだけから決まる。出力は候補の識別子
+  ちょうど一つ。基準が該当なしなら FALLBACK_ORDER の順で使える最初の候補（apply_all の decided）。
+  比べるのは分数（fractions.Fraction）で、丸めは入れない。
 
 使い方
   .venv/bin/python -B src/stats/counting.py
       候補と基準の案の定義を JSON（キー順・UTF-8）で出力する（データは読まない）
-  .venv/bin/python -B src/stats/counting.py apply <試しの run のマニフェスト> <日の集計のフォルダ>
-      順番2の当てはめ（封印係が当てはめ直すときに使う）。マニフェストの規則で入力を決め、
-      日の集計の sha256 をマニフェストの day の行と照らし、すべての基準の案を当てはめた結果を
-      JSON で出力する。照らせなければ終了コード 1 で止まる。
+  .venv/bin/python -B src/stats/counting.py apply <試しの run のマニフェスト> <正式な run のマニフェスト>
+          <試しの run の保存先> <正式な run の保存先>
+      順番2の当てはめ（封印係が当てはめ直すときに使う）。マニフェストは、git の確かめに通った
+      コミットした版を渡す（通らなければ FAILED と書く）。結果を JSON で出力する。終了コードは
+      decided 0、stopped 1、pending 3。
 """
 
 import fractions
@@ -56,6 +59,7 @@ Fr = fractions.Fraction
 DAY_FORMAT_NAME = "gkg-day"
 DAY_FORMAT_VERSION = "2"
 TRIAL_MODE = "trial"
+OFFICIAL_MODE = "official"
 # gkg.TRIAL_DAYS と同じ（tests/stats/test_counting.py で照合する）
 TRIAL_DAYS = ("2015-03-02", "2015-03-03", "2015-03-04")
 TRIAL_MANIFEST_PATH = "data/manifest/gdelt-gkg-trial.jsonl"
@@ -96,10 +100,12 @@ _CAND = {c[0]: (c[1], c[2]) for c in CANDIDATES}
 # ---------------------------------------------------------------------------
 
 CRITERIA_IDS = ("B1", "B2", "B3", "B4", "B5")
-RECOMMENDED_CRITERION = "B1"
+RECOMMENDED_CRITERION = "B2"      # T-028 差し戻し1回目で B1 から変えた（counting.md 3章 (3)）
 OFFICIAL_CRITERION = None          # オーナーが決める。決まるまで None（"undecided"）
 B4_SPREAD_LIMIT = Fr(11, 10)       # 1日あたりのテーマの数の、最大と最小の比の上限
 B5_MENTION_LIMIT = Fr(21, 20)      # 言及の回数と文書の数の比の上限
+# 基準の結果が該当なしのときの代わり：この順で、入力のすべての日で使える最初の候補（T-028 差し戻し1回目 中3）
+FALLBACK_ORDER = ("C1", "C3", "C2", "C4", "C5", "C6")
 
 
 def official_criterion_status():
@@ -352,23 +358,50 @@ CRITERIA = {"B1": criterion_b1, "B2": criterion_b2, "B3": criterion_b3, "B4": cr
             "B5": criterion_b5}
 
 
+def fallback_candidate(summaries):
+    """基準の結果が該当なしのときの代わり（T-028 差し戻し1回目 中3）。
+
+    FALLBACK_ORDER の順で、入力のすべての日で使える（usable）最初の候補。どれも使えなければ None。
+    """
+    for cid in FALLBACK_ORDER:
+        if usable(summaries, cid):
+            return cid
+    return None
+
+
 def apply_all(summaries):
-    """すべての基準の案を当てはめる。正式な基準の結果に official: true を付ける。"""
+    """すべての基準の案を当てはめる。各案の結果に、該当なしのときの代わりを足した decided を付け、
+    正式な基準の結果に official: true を付ける。"""
     out = {}
+    fb = fallback_candidate(summaries)
     for bid in CRITERIA_IDS:
         r = CRITERIA[bid](summaries)
+        if r["candidate"] is not None:
+            r["decided"], r["decided_by"] = r["candidate"], "criterion"
+        else:
+            r["decided"], r["decided_by"] = fb, ("fallback" if fb is not None else "none")
         r["official"] = (bid == OFFICIAL_CRITERION)
         out[bid] = r
     return out
 
 
 # ---------------------------------------------------------------------------
-# 基準の入力を、試しの run のマニフェストから一つに決める（T-025 の監査の中2）
+# 基準の入力を一つに決める（T-025 の監査の中2。T-028 差し戻し1回目 中3 で、止まったあとの行き先を足した）
 # ---------------------------------------------------------------------------
 
+class InputNotReady(CountingError):
+    """入力がまだそろっていない（待てばそろいうる）。"""
+
+
+def day_file_name(mode, run_id, day):
+    """gkg.day_file_name(run_id, day, mode) と同じ名前（テストで照合する）。"""
+    if mode not in (TRIAL_MODE, OFFICIAL_MODE):
+        raise ValueError("mode は trial か official")
+    return "gkg-%s-%s-day-%s.tsv.gz" % (mode, run_id, day.replace("-", ""))
+
+
 def trial_day_file_name(run_id, day):
-    """gkg.day_file_name(run_id, day, "trial") と同じ名前（テストで照合する）。"""
-    return "gkg-%s-%s-day-%s.tsv.gz" % (TRIAL_MODE, run_id, day.replace("-", ""))
+    return day_file_name(TRIAL_MODE, run_id, day)
 
 
 def _manifest_entries(manifest_bytes):
@@ -386,43 +419,34 @@ def _manifest_entries(manifest_bytes):
     return out
 
 
-def select_trial_input(manifest_bytes):
-    """試しの run のマニフェスト（コミットした版のバイト列）から、基準の入力を一つに決める。
-
-    規則（docs/stats/counting.md 4章）
-      1. 行の並びで最初の kind == "run-start" の行の run_id を R とする。R の run だけを使い、
-         ほかの run は使わない（ほかの run の結果が良くても代えない）。
-      2. その run-start の mode が "trial"、trial が true であること。
-      3. R の run-complete の行があること。
-      4. R の day の行が、TRIAL_DAYS の各日についてちょうど一つずつあり、ほかの日が無いこと。
-         各行の mode が "trial"、file_name が trial_day_file_name(R, 日)、sha256 が16進64字。
-    どれか一つでも満たさなければ CountingError（順番2を封印しない）。
-    戻り値：{"run_id": R, "days": [{"day", "file_name", "sha256"}]}（TRIAL_DAYS の順）
-    """
-    entries = _manifest_entries(manifest_bytes)
+def _first_start(entries, mode):
     start = next((e for e in entries if e.get("kind") == "run-start"), None)
     if start is None:
-        raise CountingError("試しの run のマニフェストに run-start が無い")
+        raise InputNotReady("%s のマニフェストに run-start が無い" % mode)
     rid = start.get("run_id")
     if not isinstance(rid, str) or not _RUN_ID_RE.fullmatch(rid):
         raise CountingError("最初の run-start の run_id の形が違う")
-    if start.get("mode") != TRIAL_MODE or start.get("trial") is not True:
-        raise CountingError("最初の run-start が試しの run の行でない")
-    mine = [e for e in entries if e.get("run_id") == rid]
-    if not any(e.get("kind") == "run-complete" for e in mine):
-        raise CountingError("最初の試しの run（%s）が run-complete まで終わっていない" % rid)
+    if start.get("mode") != mode or start.get("trial") is not (mode == TRIAL_MODE) \
+            or start.get("official") is not (mode == OFFICIAL_MODE):
+        raise CountingError("最初の run-start が %s の run の行でない" % mode)
+    return start, rid
+
+
+def _day_rows(entries, rid, mode, need_all):
     days = {}
-    for e in mine:
-        if e.get("kind") != "day":
+    for e in entries:
+        if e.get("run_id") != rid or e.get("kind") != "day":
             continue
         d = e.get("day")
-        if d not in TRIAL_DAYS:
+        if mode == TRIAL_MODE and d not in TRIAL_DAYS:
             raise CountingError("試しの run の day の行に、TRIAL_DAYS の外の日がある")
+        if d not in TRIAL_DAYS:
+            continue                    # 正式な run のほかの日は使わない
         if d in days:
-            raise CountingError("試しの run に、同じ日の day の行が二つある（%s）" % d)
-        if e.get("mode") != TRIAL_MODE:
-            raise CountingError("day の行の mode が trial でない（%s）" % d)
-        if e.get("file_name") != trial_day_file_name(rid, d):
+            raise CountingError("同じ日の day の行が二つある（%s）" % d)
+        if e.get("mode") != mode:
+            raise CountingError("day の行の mode が %s でない（%s）" % (mode, d))
+        if e.get("file_name") != day_file_name(mode, rid, d):
             raise CountingError("day の行の file_name が決まった名前でない（%s）" % d)
         sha = e.get("sha256")
         if not isinstance(sha, str) or not _SHA_RE.fullmatch(sha):
@@ -430,8 +454,52 @@ def select_trial_input(manifest_bytes):
         days[d] = {"day": d, "file_name": e["file_name"], "sha256": sha}
     missing = [d for d in TRIAL_DAYS if d not in days]
     if missing:
-        raise CountingError("試しの run の day の行が無い日がある: %s" % ", ".join(missing))
-    return {"run_id": rid, "days": [days[d] for d in TRIAL_DAYS]}
+        msg = "day の行が無い日がある: %s" % ", ".join(missing)
+        raise (CountingError(msg) if need_all else InputNotReady(msg))
+    return [days[d] for d in TRIAL_DAYS]
+
+
+def select_trial_input(manifest_bytes):
+    """試しの run のマニフェスト（コミットした版のバイト列）から、1段目の入力を決める（counting.md 4章）。
+
+    1. 行の並びで最初の run-start の run_id を R とする。ほかの run は使わない。run-start が無ければ
+       InputNotReady。
+    2. その run-start の mode が trial、trial が true、official が false。
+    3. R の run-complete の行が無ければ InputNotReady。
+    4. R の day の行が TRIAL_DAYS の各日にちょうど一つずつ（ほかの日は無い）、mode が trial、file_name が
+       決まった名前、sha256 が16進64字。満たさなければ CountingError。
+    戻り値：{"mode", "run_id", "days": [{"day", "file_name", "sha256"}]}（TRIAL_DAYS の順）
+    """
+    entries = _manifest_entries(manifest_bytes)
+    _start, rid = _first_start(entries, TRIAL_MODE)
+    mine = [e for e in entries if e.get("run_id") == rid]
+    if not any(e.get("kind") == "run-complete" for e in mine):
+        raise InputNotReady("最初の試しの run（%s）が run-complete まで終わっていない" % rid)
+    return {"mode": TRIAL_MODE, "run_id": rid, "days": _day_rows(entries, rid, TRIAL_MODE, True)}
+
+
+def select_official_input(manifest_bytes):
+    """正式な run のマニフェストから、2段目の入力（正式な run の、TRIAL_DAYS と同じ3日の集計）を決める。
+
+    最初の run-start の run（正式な run。gkg.official_run_id と同じ決め方）の、TRIAL_DAYS の3日の
+    day の行。run-complete は求めない。日がそろっていなければ InputNotReady。
+    """
+    entries = _manifest_entries(manifest_bytes)
+    _start, rid = _first_start(entries, OFFICIAL_MODE)
+    return {"mode": OFFICIAL_MODE, "run_id": rid,
+            "days": _day_rows(entries, rid, OFFICIAL_MODE, False)}
+
+
+def official_trial_run_ids(official_manifest_bytes):
+    """正式な run の最初の run-start の trial_run_ids（run-start が無ければ None）。"""
+    entries = _manifest_entries(official_manifest_bytes)
+    start = next((e for e in entries if e.get("kind") == "run-start"), None)
+    if start is None:
+        return None
+    ids = start.get("trial_run_ids")
+    if not isinstance(ids, list):
+        raise CountingError("正式な run の run-start に trial_run_ids が無い")
+    return ids
 
 
 def check_prefix_versions(head_bytes, versions):
@@ -442,38 +510,100 @@ def check_prefix_versions(head_bytes, versions):
     """
     for v in versions:
         if not head_bytes.startswith(v):
-            raise CountingError("試しの run のマニフェストの過去の版が、HEAD の版の先頭と合わない"
+            raise CountingError("マニフェストの過去の版が、HEAD の版の先頭と合わない"
                                 "（コミットした行が書き換えられたか消された）")
 
 
-def apply_to_inputs(manifest_bytes, read_day_file):
-    """順番2の当てはめ。read_day_file(file_name) は日の集計のバイト列を返す関数。
-
-    1. select_trial_input() で入力を決める。
-    2. 各日のファイルの sha256 が、マニフェストの day の行の sha256 と一致すること。
-    3. 頭の行の日と mode が合うこと。
-    4. すべての基準の案を当てはめる。
-    """
-    sel = select_trial_input(manifest_bytes)
-    summaries = []
-    inputs = []
+def _load(sel, read_day_file):
+    summaries, inputs = [], []
     for d in sel["days"]:
-        data = read_day_file(d["file_name"])
+        data = read_day_file(sel["mode"], d["file_name"])
         sha = hashlib.sha256(data).hexdigest()
         if sha != d["sha256"]:
             raise CountingError("日の集計 %s の sha256 が、マニフェストの day の行と一致しない"
                                 % d["file_name"])
-        summaries.append(parse_day(data, expect_day=d["day"], expect_mode=TRIAL_MODE))
+        summaries.append(parse_day(data, expect_day=d["day"], expect_mode=sel["mode"]))
         inputs.append({"day": d["day"], "file_name": d["file_name"], "sha256": sha})
-    return {
-        "proposed_label": PROPOSED_LABEL,
-        "trial_run_id": sel["run_id"],
-        "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
-        "inputs": inputs,
-        "official_criterion": OFFICIAL_CRITERION,
-        "official_criterion_status": official_criterion_status(),
-        "results": apply_all(summaries),
-    }
+    return summaries, inputs
+
+
+def decide(trial_manifest, official_manifest, read_day_file):
+    """順番2の当てはめ（counting.md 4章の行き先の表）。
+
+    trial_manifest・official_manifest：コミットした版のバイト列（ファイルが無ければ b""）。git の
+      確かめ（作業ツリーと HEAD が同じ、過去の版が先頭と同じ）に通らなかったマニフェストは None を渡す。
+    read_day_file(mode, file_name)：日の集計のバイト列を返す関数。
+    戻り値の status：
+      "decided"  入力が決まり、正式な基準（決まっていなければ、すべての案）を当てはめた
+      "pending"  入力がまだそろっていない。そろってから同じ手順をもう一度行う
+      "stopped"  どの段でも決まらない。新しい版の順番1b へ（counting.md 4章 (3)）
+    """
+    tiers = []
+    official_started = None
+    if official_manifest is not None:
+        try:
+            official_started = official_trial_run_ids(official_manifest) is not None
+        except CountingError as e:
+            tiers.append({"tier": "official_manifest", "error": str(e)})
+            official_manifest = None
+    # 1段目：試しの run
+    t1 = {"tier": TRIAL_MODE}
+    tiers.append(t1)
+    if trial_manifest is None:
+        t1["error"] = "試しの run のマニフェストが git の確かめに通らない"
+    else:
+        try:
+            sel = select_trial_input(trial_manifest)
+            if official_started:
+                ids = official_trial_run_ids(official_manifest)
+                if not ids or ids[0] != sel["run_id"]:
+                    raise CountingError("正式な run の trial_run_ids の最初が R でない")
+            summaries, inputs = _load(sel, read_day_file)
+            results = apply_all(summaries)
+            if fallback_candidate(summaries) is None:
+                raise CountingError("試しの run の入力で、使える候補が一つも無い")
+            return _decided(sel, inputs, results, tiers)
+        except InputNotReady as e:
+            if not official_started:
+                t1["error"] = str(e)
+                return _out("pending", tiers)
+            t1["error"] = "正式な run が始まった時点で、試しの run の入力がそろっていない: %s" % e
+        except CountingError as e:
+            t1["error"] = str(e)
+    # 2段目：正式な run の同じ3日
+    t2 = {"tier": OFFICIAL_MODE}
+    tiers.append(t2)
+    if official_manifest is None:
+        t2["error"] = "正式な run のマニフェストが git の確かめに通らない"
+        return _out("stopped", tiers)
+    try:
+        sel = select_official_input(official_manifest)
+        summaries, inputs = _load(sel, read_day_file)
+        results = apply_all(summaries)
+        if fallback_candidate(summaries) is None:
+            raise CountingError("正式な run の同じ3日の入力で、使える候補が一つも無い")
+        return _decided(sel, inputs, results, tiers)
+    except InputNotReady as e:
+        t2["error"] = str(e)
+        return _out("pending", tiers)
+    except CountingError as e:
+        t2["error"] = str(e)
+        return _out("stopped", tiers)
+
+
+def _out(status, tiers, **kw):
+    d = {"proposed_label": PROPOSED_LABEL, "status": status, "tiers": tiers,
+         "official_criterion": OFFICIAL_CRITERION,
+         "official_criterion_status": official_criterion_status()}
+    d.update(kw)
+    return d
+
+
+def _decided(sel, inputs, results, tiers):
+    tiers[-1]["used"] = True
+    official = results[OFFICIAL_CRITERION]["decided"] if OFFICIAL_CRITERION else None
+    return _out("decided", tiers, input_mode=sel["mode"], input_run_id=sel["run_id"], inputs=inputs,
+                results=results, official_candidate=official)
 
 
 # ---------------------------------------------------------------------------
@@ -492,9 +622,10 @@ def as_record():
              "numerator_column": col, "denominator_kind": den}
             for cid, col, den in CANDIDATES],
         "criteria": {
-            "input": "the three trial day aggregates (TRIAL_DAYS) chosen by select_trial_input() from the "
-                     "committed trial manifest; each file's sha256 must equal its day row",
-            "output": "exactly one candidate id, or none (order 2 is not sealed)",
+            "input": "three day aggregates (TRIAL_DAYS) chosen by decide(): tier 1 the first trial run, "
+                     "tier 2 the official run's same three days; each file's sha256 must equal its day row",
+            "output": "exactly one candidate id; if the criterion gives none, the first usable candidate in "
+                      "FALLBACK_ORDER",
             "B1": "field = V1 if docs_without_v1_theme <= docs_without_v2_theme (S rows, summed over the "
                   "three days) else V2; tie -> V1; candidate C2 (V1) or C4 (V2); none if total docs of all "
                   "groups is 0, if the chosen field has no themed document, or if the candidate is not "
@@ -509,15 +640,29 @@ def as_record():
             "comparison": "exact fractions, no rounding",
         },
         "criteria_ids": list(CRITERIA_IDS),
+        "fallback_order": list(FALLBACK_ORDER),
         "recommended_criterion": RECOMMENDED_CRITERION,
         "official_criterion": OFFICIAL_CRITERION,
         "official_criterion_status": official_criterion_status(),
         "trial_days": list(TRIAL_DAYS),
-        "trial_input_rule": "first run-start line of the committed trial manifest gives run R; R must be "
-                            "trial, have run-complete, and exactly one day row for each TRIAL_DAYS day with "
-                            "the fixed file name; no other run is used; every committed version of the "
-                            "manifest must be a prefix of the HEAD version",
-        "no_translation": "groups ending with T are never counted (owner decision, plan a, reviews/T-016.md)",
+        "input_rule": {
+            "tier1": "first run-start line of the committed trial manifest gives run R; R must be trial, "
+                     "have run-complete, and exactly one day row for each TRIAL_DAYS day with the fixed "
+                     "file name; no other trial run is used; if the official run has started, its "
+                     "trial_run_ids[0] must be R",
+            "tier1_wait": "if R is not complete (or there is no trial run-start) and the official run has "
+                          "not started: pending; once the official run-start exists, tier 1 fails",
+            "tier2": "first run-start of the committed official manifest gives run O; O's day rows for the "
+                     "TRIAL_DAYS days (pending until all three exist)",
+            "tier_fail": "tier 1 fails on any check (git, manifest, sha256, header, no usable candidate) "
+                         "-> tier 2; tier 2 fails -> stopped -> new version of order 1b",
+            "git": "every committed version of each manifest must be a prefix of the HEAD version; the "
+                   "working tree file must equal the HEAD version; otherwise the manifest is treated as "
+                   "failing (None)",
+            "authority": "the sealer's own run of this sealed code on the verified inputs is the result",
+        },
+        "no_translation": "groups ending with T are never counted (reviews/T-016.md: owner said plan a; "
+                          "the lead recorded plan a as not using translated articles)",
     }
 
 
@@ -525,7 +670,8 @@ def canonical_json():
     return json.dumps(as_record(), ensure_ascii=False, sort_keys=True, indent=2) + "\n"
 
 
-_NAME_RE = re.compile(r"\Agkg-trial-[0-9a-f]{16}-day-[0-9]{8}\.tsv\.gz\Z")
+_NAME_RE = re.compile(r"\Agkg-(trial|official)-[0-9a-f]{16}-day-[0-9]{8}\.tsv\.gz\Z")
+EXIT_CODES = {"decided": 0, "stopped": 1, "pending": 3}
 
 
 def main(argv=None):
@@ -534,26 +680,36 @@ def main(argv=None):
     if not argv:
         sys.stdout.write(canonical_json())
         return 0
-    if len(argv) != 3 or argv[0] != "apply":
-        sys.stderr.write("counting: 引数なしか、apply <マニフェスト> <日の集計のフォルダ>\n")
+    if len(argv) != 5 or argv[0] != "apply":
+        sys.stderr.write("counting: 引数なしか、apply <試しの run のマニフェスト> <正式な run のマニフェスト> "
+                         "<試しの run の保存先> <正式な run の保存先>（マニフェストが git の確かめに通らないときは "
+                         "FAILED と書く。ファイルが無ければ空として読む）\n")
         return 2
-    manifest_path, store = argv[1], argv[2]
-    with open(manifest_path, "rb") as f:
-        manifest_bytes = f.read()
 
-    def read_day_file(name):
-        if not _NAME_RE.fullmatch(name):
+    def manifest(path):
+        if path == "FAILED":
+            return None
+        try:
+            with open(path, "rb") as f:
+                return f.read()
+        except FileNotFoundError:
+            return b""
+
+    stores = {TRIAL_MODE: argv[3], OFFICIAL_MODE: argv[4]}
+
+    def read_day_file(mode, name):
+        m = _NAME_RE.fullmatch(name)
+        if not m or m.group(1) != mode:
             raise CountingError("日の集計の名前の形が違う")
-        with open(store.rstrip("/") + "/" + name, "rb") as f:
-            return f.read()
+        try:
+            with open(stores[mode].rstrip("/") + "/" + name, "rb") as f:
+                return f.read()
+        except OSError as e:
+            raise CountingError("日の集計を読めない: %s" % e) from None
 
-    try:
-        out = apply_to_inputs(manifest_bytes, read_day_file)
-    except (CountingError, OSError) as e:
-        sys.stderr.write("counting: 止まった: %s\n" % e)
-        return 1
+    out = decide(manifest(argv[1]), manifest(argv[2]), read_day_file)
     sys.stdout.write(json.dumps(out, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
-    return 0
+    return EXIT_CODES[out["status"]]
 
 
 if __name__ == "__main__":
