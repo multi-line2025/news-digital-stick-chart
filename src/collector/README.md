@@ -340,6 +340,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/collector -v
 - T-026 差し戻し1回目：`test_gkg.py` の `TestT026Round2`（reason・attempts の形。監査の probe_c の偽の語で止まること）、`TestChangedResultOnHonestResume`（監査の probe_b4。取り直しで結果が変わると止まり続け、日の集計を保存先の外へ移すと続けられること）。
 - T-030：`test_gkg.py` の `TestT030`（既にある日の集計の検査、network_ の名前の固定）。
 - T-035：`test_gkg.py` の `TestT035`（V1 と V2 で同じ名前・違う名前・片方だけ・同じ文書で両方、`docs_without_any_theme`、頭の行の版3）。
+- T-050：除外の規則の関門（stats-order1 が無ければ要求の前に止まる）を確かめるテストは、本物の封印の記録の状態に頼らず、一時的なディレクトリに作る仮の封印の記録（`test_gkg.make_sealed_project`。順番1b・method-access・gkg-run-start はあるが stats-order1 の無い並びと、空の記録）で確かめる。stats-order1 を足した対照で、記録を読めていることも確かめる（`test_acquire_gkg.py` の `TestExclusionGateFirst`、`test_gkg.py` の `TestExclusionRecord`、`test_themes.py` の `TestExclusionGate`）。本物の `sealed/ledger.jsonl` を読むテストは、プロジェクトの写しを作るときの先頭の periods・candidates だけで（`test_acquire_filelist.rollback_to_before_step3`）、記録が後ろに伸びても変わらない。
 - T-045：`test_acquire_gkg.py` の `TestT045`（hook が常に `seal_gkg_run.start` を通ること、stamp の失敗のあと `.ots` を作らずに再実行すると要求0件で止まり、`.ots` を作ってやり直すと進むこと、入力が違えば要求0件で止まること、正直な再開、記録を使い回して行の順と記録の seq の順がずれても `trial_run_ids` が記録の seq の順になり封印係の照合が通ること）。
 - T-032 差し戻し1回目：`test_acquire_gkg.py` の `TestSealedRunCheck`（手で書いた run-start の行、seq の欠け、sha256 の食い違い、別の run_id・別の kind の記録を指す行で、再開が要求0件で止まること）、`test_gkg.py` の `TestCheckSealedRun`。
 - T-032：`test_gkg.py` の `TestT032`（start_hook の呼び方、書けなければ要求0件、vocab の分け方、日の集計のファイルのバイト列の検査、T-035 の軽-1）。`test_acquire_gkg.py` の `TestSealGkgRun`（一時の写しの封印の記録に、試しの run 2回で2件、正式な run で1件。書けなければ要求0件）。

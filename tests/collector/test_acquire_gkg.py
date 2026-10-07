@@ -147,18 +147,61 @@ def exclusion_rule_ref(rec):
 class TestExclusionGateFirst(unittest.TestCase):
     """重1・差し戻し2回目 軽-2：コードの関門 → 除外の規則の封印の関門 → method-access の関門の順。"""
 
-    def test_real_gate_stops_first_while_kind_undecided(self):
-        never = mock.Mock(side_effect=AssertionError("除外の規則の関門より先に進んではいけない"))
-        with mock.patch.object(ag, "_check_code", file_codes), \
-                mock.patch.object(ledger, "require_method_access", never), \
-                mock.patch.object(ag, "check_gate", never):
-            for mode in ("official", "trial"):
-                with self.assertRaisesRegex(ag.GateError, "除外の規則.*stats-order1）が無い"):
-                    ag._acquire(mode)
-            with mock.patch("sys.stderr"):
-                self.assertEqual(ag.main([]), 1)
-                self.assertEqual(ag.main(["--trial"]), 1)
-        never.assert_not_called()
+    def mini_project(self, kinds):
+        """仮の封印の記録（kinds）だけを持つ小さなプロジェクトを、一時的なディレクトリに作る（T-050）。
+
+        本物の封印の記録の状態（stats-order1 があるか、件数など）に頼らないため。除外の規則の関門が
+        読み込む themes.py と privacy_scan.py は、本物のものを写す。返り値: プロジェクトのパス。
+        """
+        tmp = tempfile.mkdtemp(prefix="gkg-mini-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        col = os.path.join(tmp, "src", "collector")
+        os.makedirs(col)
+        for n in ("themes.py", "privacy_scan.py"):
+            shutil.copyfile(os.path.join(PROJECT, "src", "collector", n), os.path.join(col, n))
+        tg.make_sealed_project(tmp, kinds)
+        return tmp
+
+    def run_production_on(self, project):
+        """本番の経路（_acquire と main）を、project を本番のプロジェクトとして動かす。"""
+        seams = ag._production_seams()
+        fields = {k: getattr(seams, k) for k in ag._Seams.FIELDS}
+        fields["project"] = project
+        mini = ag._Seams(**fields)
+        return mock.patch.object(ag, "_production_seams", lambda: mini), \
+            mock.patch.object(ledger, "PROJECT_ROOT", project)
+
+    def test_real_gate_stops_first_without_order1(self):
+        """封印の記録に stats-order1 が無ければ、本物の除外の規則の関門が、method-access の関門と
+        ほかの関門より前に止める（試しの run も正式な run も）。T-050：本物の記録の状態に頼らず、
+        順番1b・method-access・gkg-run-start はあるが stats-order1 の無い仮の記録で確かめる。"""
+        for kinds in ((), tg.KINDS_WITHOUT_ORDER1):
+            with self.subTest(kinds=kinds):
+                project = self.mini_project(kinds)
+                never = mock.Mock(side_effect=AssertionError("除外の規則の関門より先に進んではいけない"))
+                p1, p2 = self.run_production_on(project)
+                with p1, p2, mock.patch.object(ag, "_check_code", file_codes), \
+                        mock.patch.object(ledger, "require_method_access", never), \
+                        mock.patch.object(ag, "check_gate", never):
+                    for mode in ("official", "trial"):
+                        with self.assertRaisesRegex(ag.GateError, "除外の規則.*stats-order1）が無い"):
+                            ag._acquire(mode)
+                    with mock.patch("sys.stderr"):
+                        self.assertEqual(ag.main([]), 1)
+                        self.assertEqual(ag.main(["--trial"]), 1)
+                never.assert_not_called()
+
+    def test_real_gate_passes_with_order1(self):
+        """対照：同じ仮の記録に stats-order1 を足すと、除外の規則の関門は通り、次の method-access の
+        関門まで進む（記録を読めていることの確かめ）。"""
+        project = self.mini_project(tg.KINDS_WITHOUT_ORDER1[:4] + ("stats-order1",))
+        stop = mock.Mock(side_effect=ledger.MethodAccessRequired("見本：次の関門"))
+        p1, p2 = self.run_production_on(project)
+        with p1, p2, mock.patch.object(ag, "_check_code", file_codes), \
+                mock.patch.object(ledger, "require_method_access", stop):
+            with self.assertRaisesRegex(ledger.MethodAccessRequired, "次の関門"):
+                ag._acquire("trial")
+        stop.assert_called_once_with()
 
     def test_code_gate_runs_before_exclusion_gate(self):
         order = []

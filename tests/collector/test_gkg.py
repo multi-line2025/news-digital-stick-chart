@@ -491,6 +491,37 @@ class TestFetch(unittest.TestCase):
 
 EXCL_REF = {"seq": 7, "record_sha256": "e" * 64}
 
+# T-050：本物の封印の記録の状態に頼らないための、仮の封印の記録の種類の並び。
+# stats-order1 を除いて、本物の記録に足されうる種類（順番1b・method-access・gkg-run-start）を含める。
+KINDS_WITHOUT_ORDER1 = ("periods", "candidates", "acquisition-start", "acquisition-result",
+                        "stats-order1b", "method-access", "gkg-run-start")
+
+
+def make_sealed_project(root, kinds):
+    """root/sealed/ledger.jsonl に、kinds の種類の仮の記録を順に書く（鎖と .ots の照合に通る形）。
+
+    中身は仮のファイル（照合の関門は、鎖と .ots だけを見る）。.ots はテストの差し替えの ots で作る。
+    本物の sealed/ には書かない。返り値: 記録の一覧。T-050。
+    """
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)
+    import test_acquire_filelist as taf
+    themes_mod = gkg._load_sibling("themes")
+    ledger = themes_mod._import_ledger()
+    import stamp
+    os.makedirs(os.path.join(root, "sealed"), exist_ok=True)
+    path = os.path.join(root, "sealed", "ledger.jsonl")
+    for i, kind in enumerate(kinds, 1):
+        content = ("{\"kind\":\"%s\",\"dummy\":%d}\n" % (kind, i)).encode()
+        sha = hashlib.sha256(content).hexdigest()
+        rel = "sealed/%s-%s.json" % (kind, sha)
+        with open(os.path.join(root, rel), "wb") as f:
+            f.write(content)
+        ledger.append_record(path, kind, [{"path": rel, "role": kind, "sha256": sha}], "",
+                             NOW + datetime.timedelta(minutes=i))
+        stamp.stamp_seq(path, i, "ots", runner=taf.FakeOts())
+    return ledger.verify_chain(ledger.read_ledger(path))
+
 
 def fake_check_volume(volume):
     """一時的なディレクトリはマウント先でないので、マウントの検査だけを差し替える（本物は TestVolume）。"""
@@ -1638,14 +1669,42 @@ class TestExclusionRecord(RunCase):
                 self.run_once(exclusion_rule=other)
         self.assertEqual(self.transport.calls, [])
 
+    def real_chain(self, kinds):
+        """仮の封印の記録（kinds）を root に置き、関門が読むルートをそこにして、本物の照合で動かす。"""
+        make_sealed_project(self.root, kinds)
+        ledger = gkg._load_sibling("themes")._import_ledger()
+        return mock.patch.object(ledger, "PROJECT_ROOT", self.root), \
+            mock.patch.object(gkg, "chain_exclusion_ref", RunCase.real_chain_ref)
+
     def test_real_chain_check_stops_without_order1_record(self):
-        """関門を通らずに run_gkg を直接呼んでも、本物の封印の記録に stats-order1 が無いあいだは
-        何も書かずに止まる（T-032：kind は stats-order1 に決まった）。"""
-        with mock.patch.object(gkg, "chain_exclusion_ref", RunCase.real_chain_ref):
-            with self.assertRaisesRegex(gkg.GkgError, "stats-order1）が無い"):
+        """関門を通らずに run_gkg を直接呼んでも、封印の記録に stats-order1 が無ければ、要求の前に
+        何も書かずに止まる（T-032：kind は stats-order1 に決まった）。T-050：本物の記録の状態に
+        頼らず、順番1b・method-access・gkg-run-start はあるが stats-order1 の無い仮の記録で確かめる。"""
+        for kinds in ((), KINDS_WITHOUT_ORDER1):
+            with self.subTest(kinds=kinds):
+                self.tearDown_reset()
+                root_patch, chain_patch = self.real_chain(kinds)
+                with root_patch, chain_patch:
+                    with self.assertRaisesRegex(gkg.GkgError, "stats-order1）が無い"):
+                        self.run_once()
+                self.assertEqual(self.transport.calls, [])
+                self.assertEqual(self.sealed_runs, [])
+                self.assertEqual(self.manifest(), [])
+                self.assertEqual(os.listdir(self.store), [])
+
+    def test_real_chain_check_with_order1_record_goes_past_the_missing_check(self):
+        """対照：同じ仮の記録に stats-order1 を足すと「無い」では止まらない（記録を読めていることの確かめ）。
+        渡した除外の規則の記録（仮の seq 7）が鎖の上の記録と違うので、要求の前に止まる。"""
+        root_patch, chain_patch = self.real_chain(KINDS_WITHOUT_ORDER1[:4] + ("stats-order1",))
+        with root_patch, chain_patch:
+            with self.assertRaisesRegex(gkg.GkgError, "鎖の上の記録と違う"):
                 self.run_once()
-        self.assertEqual(self.sealed_runs, [])
+        self.assertEqual(self.transport.calls, [])
         self.assertEqual(self.manifest(), [])
+
+    def tearDown_reset(self):
+        shutil.rmtree(self.tmp, True)
+        self.setUp()
 
 
 class Kill9(BaseException):
