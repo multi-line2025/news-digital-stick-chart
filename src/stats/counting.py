@@ -623,6 +623,12 @@ def attempt_from_record(seq, record):
     return out
 
 
+def expected_ref_1b(seq, order1b_seqs):
+    """seq の記録が参照するはずの順番1b の記録の seq：seq より小さい順番1b の seq の最大。無ければ None。"""
+    before = [x for x in order1b_seqs if x < seq]
+    return max(before) if before else None
+
+
 def order3_gate(order1b_seqs, order2_records, timing_check, order3_attempts):
     """順番3を封印してよいかと、参照する記録を決め、ledger に書く記録の中身を返す（T-039、差し戻し1回目
     中-A・軽-D。T-038 の監査の中-1・中-2。counting.md 4章 (3)）。
@@ -645,9 +651,10 @@ def order3_gate(order1b_seqs, order2_records, timing_check, order3_attempts):
       5. timing_check.ok が False なら封印しない。
       6. 2 の記録の中に、(a) で止まった記録が一つでもあれば封印しない（seq の大小によらない）。
       7. 2 の記録から select_order2_record() で選ぶ。無ければ封印しない。
-    つじつまの合わない入力（ref_1b_seq がどの順番1b の記録にも無い順番2の記録・試みの記録、参照した
-    順番1b の記録より seq が小さい順番2の記録・試みの記録、ref_1b_seq が None なのに seq が最初の順番1b の
-    記録より大きい試みの記録、seq の重なり）は ValueError。
+    つじつまの合わない入力（順番2の記録・試みの記録の ref_1b_seq が、その記録の seq より小さい順番1b の seq
+    の最大（無ければ None。順番2の記録では None は許さない）と違うもの。どの順番1b にも無い ref_1b_seq、
+    参照した1b より前の seq、古い版を参照したことにした記録、1b があとにしか無いのに None でない記録、
+    1b がある時点の None の試みを含む。seq の重なり）は ValueError（T-044 中-β）。
     戻り値：{"may_seal", "ref_1b_seq", "chosen", "reason", "record"}。record は、通った場合も止まった
       場合も、封印係がこの試みの記録として ledger に書く中身（counting.md 4章 (3)）：
       {"may_seal", "reason", "ref_1b_seq", "chosen_order2_seq", "timing_check"}。
@@ -658,34 +665,27 @@ def order3_gate(order1b_seqs, order2_records, timing_check, order3_attempts):
     if not isinstance(order2_records, list) or not isinstance(order3_attempts, list):
         raise ValueError("order2_records・order3_attempts が一覧でない")
     check_timing_check(timing_check)
-    known = set(order1b_seqs)
     seqs = set(order1b_seqs)
+    # 各記録の ref_1b_seq は、その記録の seq より小さい順番1b の seq の最大（無ければ None）でなければならない
+    # （順番2・順番3は、その時点の ledger の最大の seq の順番1b を参照するため。T-044 中-β。古い版を参照した
+    # ことにして、新しい版に対する破れの試みや (a) の記録を書き、恒久の停止をすり抜けることを止める）
     for r in order2_records:
         _check_order2_record(r)
-        if type(r.get("ref_1b_seq")) is not int:
+        if r.get("ref_1b_seq") is not None and type(r.get("ref_1b_seq")) is not int:
             raise ValueError("順番2の記録の ref_1b_seq が整数でない")
-        if r["ref_1b_seq"] not in known:
-            raise ValueError("順番2の記録の ref_1b_seq %d が、どの順番1b の記録にも無い" % r["ref_1b_seq"])
-        if r["seq"] <= r["ref_1b_seq"]:
-            raise ValueError("順番2の記録の seq %d が、参照した順番1b の記録の seq 以下" % r["seq"])
+        want = expected_ref_1b(r["seq"], order1b_seqs)
+        if want is None or r.get("ref_1b_seq") != want:
+            raise ValueError("順番2の記録（seq %d）の ref_1b_seq %r が、その seq より小さい順番1b の seq の最大 %r と違う"
+                             % (r["seq"], r.get("ref_1b_seq"), want))
         if r["seq"] in seqs:
             raise ValueError("seq %d が重なっている" % r["seq"])
         seqs.add(r["seq"])
     for r in order3_attempts:
         _check_order3_attempt(r)
-        if r["ref_1b_seq"] is None:
-            # 順番1b の記録が無かったときの試みは、最初の順番1b の記録より前にしかありえない（T-040 差し戻し1回目 中-2）
-            if order1b_seqs and r["seq"] >= min(order1b_seqs):
-                raise ValueError("順番1b の記録が無かったときの試み（seq %d）が、最初の順番1b の記録より後にある"
-                                 % r["seq"])
-            if r["seq"] in seqs:
-                raise ValueError("seq %d が重なっている" % r["seq"])
-            seqs.add(r["seq"])
-            continue
-        if r["ref_1b_seq"] not in known:
-            raise ValueError("順番3の試みの記録の ref_1b_seq %d が、どの順番1b の記録にも無い" % r["ref_1b_seq"])
-        if r["seq"] <= r["ref_1b_seq"]:
-            raise ValueError("順番3の試みの記録の seq %d が、参照した順番1b の記録の seq 以下" % r["seq"])
+        want = expected_ref_1b(r["seq"], order1b_seqs)
+        if r["ref_1b_seq"] != want:
+            raise ValueError("順番3の試みの記録（seq %d）の ref_1b_seq %r が、その seq より小さい順番1b の seq の最大 %r と違う"
+                             % (r["seq"], r["ref_1b_seq"], want))
         if r["seq"] in seqs:
             raise ValueError("seq %d が重なっている" % r["seq"])
         seqs.add(r["seq"])

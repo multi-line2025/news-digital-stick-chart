@@ -946,6 +946,17 @@ class TestOrder3Gate(unittest.TestCase):
         self.assertFalse(counting.order3_gate([3], [rec2(8, "pending", 3)], tcheck(3), [])["may_seal"])
         self.assertFalse(counting.order3_gate([], [], tcheck(None, ok=False, reason="無い"), [])["may_seal"])
 
+    def test_expected_ref_1b(self):
+        """T-044：記録の ref_1b_seq は、その記録の seq より小さい1b の seq の最大。"""
+        self.assertIsNone(counting.expected_ref_1b(2, [3, 7]))
+        self.assertEqual(counting.expected_ref_1b(5, [3, 7]), 3)
+        self.assertEqual(counting.expected_ref_1b(11, [7, 3]), 7)
+        self.assertIsNone(counting.expected_ref_1b(5, []))
+        # 正しく書かれた記録は通る（1b の前の None の試み、古い版への記録、新しい版への記録）
+        g = counting.order3_gate([3, 7], [rec2(5, "decided", 3), rec2(11, "decided", 7)], tcheck(7),
+                                 [att(2, None, False), att(6, 3, False), att(12, 7, True)])
+        self.assertEqual((g["may_seal"], g["chosen"]["seq"]), (True, 11))
+
     def test_timing_check_must_match_reference(self):
         with self.assertRaises(ValueError):
             counting.order3_gate([3, 15], [], tcheck(3), [])
@@ -1019,6 +1030,13 @@ class TestOrder3Gate(unittest.TestCase):
             ([3], [rec2(9, "decided", 3)], tcheck(3), [att(10, None, False)]),
             ([3], [], tcheck(3), [att(3, None, False)]),                 # 最初の1b と同じ seq
             ([5], [], tcheck(5), [att(2, None, False), att(2, None, False)]),   # None の試みどうしの重なり（軽-C）
+            # T-044 中-β：新しい版（7）に対する破れの試みや (a) の記録を、古い版（3）を参照したことにして書く
+            ([3, 7], [rec2(11, "decided", 7)], tcheck(7), [att(10, 3, False)]),
+            ([3, 7], [rec2(11, "stopped", 3, "a"), rec2(12, "decided", 7)], tcheck(7), []),
+            # T-044 軽-1：1b が複数あるときの None の試み（seq 5 の時点では 3 がある）
+            ([3, 7], [rec2(11, "decided", 7)], tcheck(7), [att(5, None, False)]),
+            ([3, 7], [rec2(5, "decided", None)], tcheck(7), []),        # 順番2の記録は None を許さない
+            ([3, 7], [rec2(2, "decided", None)], tcheck(7), []),        # 1b より前の順番2の記録
         )
         for args in bad:
             with self.assertRaises(ValueError, msg=args):
