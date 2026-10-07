@@ -105,6 +105,12 @@ def add_order_record(project, kind, now):
     return seq
 
 
+def gkg_run_docs_unchecked(project):
+    """写しの封印の記録の gkg-run-start の記録（.ots の照合をしない。鎖の照合だけ）。"""
+    data = ledger.read_ledger(os.path.join(project, "sealed", "ledger.jsonl"))
+    return [r for r in ledger.verify_chain(data) if r["kind"] == ledger.GKG_RUN_KIND]
+
+
 def gkg_run_docs(project):
     """写しの封印の記録の gkg-run-start の [(記録, 中身)]。"""
     data = ledger.read_ledger(os.path.join(project, "sealed", "ledger.jsonl"))
@@ -625,7 +631,9 @@ class TestSealGkgRun(E2ECase):
             s = self.gseams()
             with self.assertRaises(Exception) as cm:
                 self.acquire(s, "trial")
-        self.assertIn("gkg-run-start を書けなかった", str(cm.exception))
+        # 封印係が関門（method-access の関門など）に順番1b の照合を入れても通るように、関門の文言も受け付ける
+        self.assertRegex(str(cm.exception),
+                         "gkg-run-start を書けなかった|stats-order1b（順番1b）の記録が無い")
         self.assertEqual(self.gtransport.calls, [])
         self.assertEqual(self.gdrand.urls, [])
 
@@ -654,6 +662,160 @@ class TestSealGkgRun(E2ECase):
         self.assertEqual(len(runs), 1)
         tm = gkg.read_jsonl(os.path.join(self.project, "data", "manifest", gkg.TRIAL_MANIFEST_NAME))
         self.assertEqual(tm[0]["gkg_run_seq"], runs[0][0]["seq"])
+
+
+class FailingStampOts(taf.FakeOts):
+    """ots --version は通し、ots stamp だけ失敗する（通信の失敗の見本）。"""
+
+    def __call__(self, cmd, input=None, capture_output=True, timeout=None):
+        if cmd[1:] == ["--version"]:
+            return super().__call__(cmd, input, capture_output, timeout)
+        self.calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 1, stdout=b"", stderr=b"stamp failed")
+
+
+class TestT045(E2ECase):
+    """T-045：make_start_hook は常に seal_gkg_run.start を呼び、使い回しの判断は start に任せる。"""
+
+    def ledger_path(self):
+        return os.path.join(self.project, "sealed", "ledger.jsonl")
+
+    def stop_before_row(self, **kw):
+        """gkg-run-start を書いたあと、印のファイルと run-start の行を書く前に止める。"""
+        orig = ag._exec_module
+        n = []
+
+        def exec_module(name, path, source):
+            mod = orig(name, path, source)
+            if name == "gkg" and not n:
+                n.append(1)
+
+                def mark(*a, **k):
+                    raise RuntimeError("見本：行を書く前に止まる")
+                mod.write_volume_mark = mark
+            return mod
+        with mock.patch.object(ag, "_exec_module", exec_module):
+            with self.assertRaises(RuntimeError):
+                self.acquire(self.gseams(**kw), mode="trial")
+        self.assertEqual(self.gtransport.calls, [])
+
+    def test_hook_always_calls_start(self):
+        self.add_method_access()
+        calls = []
+        real = ag.seal_gkg_run.start
+
+        def spy(*a, **k):
+            calls.append(a[1])
+            return real(*a, **k)
+        self.stop_before_row()
+        with mock.patch.object(ag.seal_gkg_run, "start", spy):
+            self.acquire(self.gseams(), mode="trial")       # 既にある記録でも start を通る
+        self.assertEqual(calls, ["trial"])
+        self.assertEqual(len(gkg_run_docs(self.project)), 1)
+        src = inspect.getsource(ag.make_start_hook)
+        self.assertNotIn("verify_chain", src)
+        self.assertNotIn("read_target_json", src)
+
+    def test_stamp_failure_then_rerun_without_ots_stops_then_stamp_and_retry_passes(self):
+        """T-043 の流れ：stamp の失敗 → .ots を作らずに再実行すると要求0件で止まる → stamp.py の
+        手順で .ots を作る → 同じ run_id でやり直すと、記録を使い回して進む。"""
+        self.add_method_access()
+        before = self.gsnapshot()["store"], self.gsnapshot()["trial"]
+        with self.assertRaises(Exception) as cm:
+            self.acquire(self.gseams(ots_runner=FailingStampOts()), mode="trial")
+        self.assertIn("gkg-run-start を書けなかった", str(cm.exception))
+        self.assertEqual(self.gtransport.calls, [])
+        runs = gkg_run_docs_unchecked(self.project)
+        self.assertEqual(len(runs), 1)                      # 記録は残り、.ots は無い
+        seq = runs[0]["seq"]
+        self.assertFalse(os.path.exists(os.path.join(self.project, "sealed", ledger.ots_name(seq))))
+        with self.assertRaises(Exception):
+            self.acquire(self.gseams(), mode="trial")       # .ots を作らずに再実行
+        self.assertEqual(self.gtransport.calls, [])
+        self.assertEqual((self.gsnapshot()["store"], self.gsnapshot()["trial"]), before)
+        stamp.stamp_seq(self.ledger_path(), seq, "ots", runner=taf.FakeOts())   # stamp.py の手順
+        out = self.acquire(self.gseams(), mode="trial")
+        self.assertEqual(out["days"], len(self.DAYS))
+        runs = gkg_run_docs(self.project)
+        self.assertEqual([r["seq"] for r, _d in runs], [seq])
+        tm = gkg.read_jsonl(os.path.join(self.project, "data", "manifest", gkg.TRIAL_MANIFEST_NAME))
+        self.assertEqual(tm[0]["gkg_run_seq"], seq)
+
+    def test_different_inputs_stop_with_no_request(self):
+        self.add_method_access()
+        self.stop_before_row()
+        real = ag.make_start_hook
+
+        def other_inputs(s, gate, exclusion_rule):
+            return real(s, dict(gate, filelist_sha256="0" * 64), exclusion_rule)
+        with mock.patch.object(ag, "make_start_hook", other_inputs):
+            with self.assertRaises(Exception) as cm:
+                self.acquire(self.gseams(), mode="trial")
+        self.assertIn("filelist_sha256", str(cm.exception))
+        self.assertEqual(self.gtransport.calls, [])
+        self.assertEqual(len(gkg_run_docs(self.project)), 1)
+
+    def test_honest_resume(self):
+        self.add_method_access()
+        calls = []
+
+        def disk_free(p):
+            calls.append(p)
+            return 100 * 1024 ** 3 if len(calls) == 1 else 0
+        with self.assertRaises(Exception):
+            self.acquire(self.gseams(disk_free=disk_free), mode="trial")
+        out = self.acquire(self.gseams(), mode="trial")
+        self.assertEqual(out["days"], len(self.DAYS))
+        self.assertEqual(len(gkg_run_docs(self.project)), 1)
+
+    def test_trial_run_ids_follow_record_seq_order(self):
+        """監査の a43probe の流れ：A の記録（行の前で止まる）→ B の記録と run → A に戻して使い回し
+        → 正式な run。マニフェストの行の順（B, A）と記録の seq の順（A, B）がずれても、
+        trial_run_ids は記録の seq の順になり、封印係の照合（verify.py gkg-runs）が通る。"""
+        self.add_method_access()
+        code = os.path.join(self.project, "src", "collector", "acquire_gkg.py")
+        with open(code, "rb") as f:
+            orig = f.read()
+        self.stop_before_row()                               # A：記録だけ
+        self.change_code("コード B")
+        self.acquire(self.gseams(), mode="trial")            # B：記録と行
+        with open(code, "wb") as f:
+            f.write(orig)
+        taf.git(self.project, "commit", "-q", "-am", "コード A に戻す")
+        self.acquire(self.gseams(), mode="trial")            # A：使い回し
+        runs = gkg_run_docs(self.project)
+        self.assertEqual(len(runs), 2)
+        tm = gkg.read_jsonl(os.path.join(self.project, "data", "manifest", gkg.TRIAL_MANIFEST_NAME))
+        row_order = [e["run_id"] for e in tm if e["kind"] == "run-start"]
+        seq_order = [d["run_id"] for _r, d in runs]
+        self.assertEqual(row_order, list(reversed(seq_order)))   # 行の順と seq の順がずれている
+        self.commit_manifest("試しの run")
+        out = self.acquire_official(self.gseams())
+        man = gkg.read_jsonl(os.path.join(self.project, "data", "manifest", gkg.MANIFEST_NAME))
+        self.assertEqual(man[0]["trial_run_ids"], seq_order)
+        self.commit_manifest("正式な run")
+        self.assertEqual(out["files_failed"], 0)
+        # 封印係の照合（verify.py gkg-runs が使う ledger.check_gkg_manifests）を、写しの上で直接呼ぶ。
+        # 写しの sealed/ には本物の Bitcoin のヘッダが写っていて、テストの .ots と合わないので、
+        # verify.py の .ots の照合は通さず、マニフェストの照合だけを行う
+        data = ledger.read_ledger(self.ledger_path())
+        records = ledger.verify_chain(data)
+        manifests = {}
+        for mode, rel in ledger.GKG_MANIFESTS.items():
+            with open(os.path.join(self.project, rel), "rb") as f:
+                manifests[mode] = f.read()
+        got = ledger.check_gkg_manifests(
+            records, lambda r, role: ledger.read_target_json(self.project, r, role), manifests)
+        self.assertEqual(got["trial"], (2, 2))
+        self.assertEqual(got["official"], (1, 1))
+        # 行の順で並べた一覧は、封印係の照合で止まる（並べ方を決めた理由）
+        rows = [json.loads(l) for l in manifests["official"].splitlines() if l.strip()]
+        rows[0]["trial_run_ids"] = row_order
+        bad = b"".join(json.dumps(r, sort_keys=True, ensure_ascii=True).encode() + b"\n" for r in rows)
+        with self.assertRaisesRegex(ledger.LedgerError, "trial_run_ids"):
+            ledger.check_gkg_manifests(
+                records, lambda r, role: ledger.read_target_json(self.project, r, role),
+                dict(manifests, official=bad))
 
 
 class TestSealedRunCheck(E2ECase):

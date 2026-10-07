@@ -127,7 +127,7 @@ DISKUTIL_TIMEOUT_SECONDS = 60
 # 取得のコードのうち、このファイル以外の4つの sha256。変えたらここも直してコミットする
 # （テストが照合する）。
 PINNED_SHA256 = (
-    (GKG_REL, "08f473b489371b3af4ffa650edf14e6ebd5975f1e65f3b1bca1f9ccf656b364f"),
+    (GKG_REL, "94f2deb3dd2edbec3e24f2ac2db596dc2c6818a423f84f1b08c4920c6f08ec0b"),
     (FILELIST_REL, "afd7a9dd47bc052a691e1a4cd558b211f4d72cf1ce1f451fa9f3016540cd04a7"),
     (PRIVACY_SCAN_REL, "68d8836d56489ca5df9f2f55e24a2642ebf3aa14afdc2e0120577c7b6c6cb887"),
     (CODEGATE_REL, "d422be41dc59c4be50689a2426453db965be506a9981770ab3eb7557ed078769"),
@@ -409,21 +409,16 @@ def record_ref(rec):
 
 
 def make_start_hook(s, gate, exclusion_rule):
-    """手順3a（T-032）：gkg.run_gkg が run の最初の実行で呼ぶ。封印係の seal_gkg_run.start で
+    """手順3a（T-032・T-045）：gkg.run_gkg が run の最初の実行で呼ぶ。封印係の seal_gkg_run.start で
     gkg-run-start を封印の記録に書き、その記録の {"seq", "record_sha256"} を返す。
 
-    同じ mode・run_id の gkg-run-start が既に記録にあれば（記録を書いたあと、マニフェストの
-    run-start の行を書く前に止まった跡）、新しく書かずにその記録を使う（同じ run の記録は1件）。
-    書けなければ例外を出し、gkg.run_gkg は何も書かずに止まる（要求を1件も送らない）。
+    常に seal_gkg_run.start を呼ぶ（T-045。T-043 の監査 軽-C）。同じ mode・run_id の記録が既に
+    あるときに使い回すかどうかの判断と照合（入力がすべて同じ・run-start の行がまだ無い・.ots が
+    ある・trial なら official がまだ無い）は、start に任せる。このスクリプトは自分で使い回さない。
+    書けなければ（使い回せない場合を含む）例外を出し、gkg.run_gkg は何も書かずに止まる
+    （要求を1件も送らない）。
     """
     def hook(*, mode, run_id, trial_days):
-        data = ledger.read_ledger(os.path.join(s.project, "sealed", "ledger.jsonl"))
-        for r in ledger.verify_chain(data):
-            if r["kind"] != ledger.GKG_RUN_KIND:
-                continue
-            doc = ledger.read_target_json(s.project, r, ledger.GKG_RUN_KIND)
-            if doc.get("mode") == mode and doc.get("run_id") == run_id:
-                return record_ref(r)
         rec, _rel, _ots = seal_gkg_run.start(
             s.project, mode, CODE_REL, run_id, gate["filelist_sha256"],
             gate["method_access_seq"], trial_days, exclusion_rule["seq"],

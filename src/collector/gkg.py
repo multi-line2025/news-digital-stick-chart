@@ -230,8 +230,8 @@
       - 試しの run の回数と範囲（中4）：正式な run は、試しの run のマニフェスト
         （gdelt-gkg-trial.jsonl）が全部コミットされていなければ始めない（作業ツリーの中身が
         HEAD の中身と同じであること。無ければ両方とも空）。正式な run の run-start には、試しの
-        run の run_id の一覧（trial_run_ids）と、試しの run のマニフェストの sha256
-        （trial_manifest_sha256）を書く。再開のたびに、試しの run のマニフェストがこの sha256 の
+        run の run_id の一覧（trial_run_ids。各 run-start の行の gkg_run_seq の小さい順。T-045）と、
+        試しの run のマニフェストの sha256（trial_manifest_sha256）を書く。再開のたびに、試しの run のマニフェストがこの sha256 の
         ままであることを確かめる。
       - 試しの run の保存先の照合（差し戻し2回目 中-C・3回目 中-2。check_trial_folder）：
         正式な run の run-start の前と再開のたびに、gkg-trial のフォルダを一覧する
@@ -1763,16 +1763,30 @@ def check_trial_folder(root, volume, check_volume, trial_bytes, trial_run_ids):
 
 
 def _trial_info(paths):
+    """試しの run のマニフェストのバイト列と、trial_run_ids・trial_manifest_sha256。
+
+    trial_run_ids の並べ方（T-045。T-043 の監査 軽-A）：試しの run の run-start の行の run_id を、
+    その行の gkg_run_seq（封印の記録の gkg-run-start（trial）の seq）の小さい順に並べ、重なりを除く。
+    マニフェストの行の順ではない。封印の記録を使い回すと（T-043）、行の順と記録の seq の順がずれる
+    ことがあるため。封印係の照合（記録の seq の順）と同じ並べ方になる。
+    """
     data = read_bytes_nofollow(paths["trial_manifest"])
-    ids = []
+    pairs = []
     for raw in data.splitlines():
         if raw.strip():
             try:
                 e = json.loads(raw)
             except ValueError:
                 raise GkgError("試しの run のマニフェストに JSON でない行がある") from None
-            if e.get("kind") == "run-start" and e.get("run_id") not in ids:
-                ids.append(e.get("run_id"))
+            if e.get("kind") == "run-start":
+                seq = e.get("gkg_run_seq")
+                if type(seq) is not int or seq < 1:
+                    raise GkgError("試しの run の run-start の行に gkg_run_seq が無い（リードに報告）")
+                pairs.append((seq, e.get("run_id")))
+    ids = []
+    for _seq, rid in sorted(pairs):
+        if rid not in ids:
+            ids.append(rid)
     return data, {"trial_run_ids": ids,
                   "trial_manifest_sha256": hashlib.sha256(data).hexdigest() if data else None}
 
