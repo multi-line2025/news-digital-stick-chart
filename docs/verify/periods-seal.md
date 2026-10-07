@@ -1,4 +1,4 @@
-# 期間の区切りと候補の封印を検証する手順（T-005、T-007、T-008、T-009、T-013、T-014、T-017、T-023、T-027、T-031、T-037、T-041、T-043）
+# 期間の区切りと候補の封印を検証する手順（T-005、T-007、T-008、T-009、T-013、T-014、T-017、T-023、T-027、T-031、T-037、T-041、T-043、T-049）
 
 この文書は、第三者が次のことを自分で確かめるための手順である。
 
@@ -866,6 +866,7 @@ grep -n '"kind":"gkg-run-start"' sealed/ledger.jsonl | cut -d: -f1 || true
 - `owner_choice`：2d23cdf の版の reviews/T-020.md の見出しと三行（`{"source", "heading", "lines"}`。`ledger.OWNER_CHOICE`）。
 - `checks`：`worktree_clean`・`not_shallow`・`method_access_absent`・`themes_manifest_absent`・`gkg_manifests_absent`（どれも true）、`optional_choice_status`（"decided"）、`acquisition_starts`（照らした acquisition-start の一覧）、`stats_tests`（"OK (N tests)"）、`targets_only_copy`（`{"tests": "OK (N tests)", "files": [写しに置いた5件]}`。下の項目10）。
 - `ledger_head`：この行を足す前の記録の先頭 seq 行の sha256。
+- **記録の行の `recorded_at` は、封印を始めた時刻である**（T-049。T-048 の監査 軽-2）。`seal_stats.seal_order1`・`seal_order1b` は、始めた時点の時計の時刻を `recorded_at` に入れ、そのあとで関門の確認、10件の計算、`tests/stats`、対象だけの写しのテストを行ってから、ledger に書く。そのため、ledger に書いた時刻は `recorded_at` より後になる（T-048 の seq 5 では約27秒）。どちらも記録した機械の時計による申告で、証明ではない（1章）。書いた時刻の上限は、その seq の `.ots` の確定時刻で決まる。
 
 `stats-order1b` の中身（キーはこの11個だけ：`ancestors`・`approvals`・`checks`・`counting`・`files`・`head`・`kind`・`ledger_head`・`order1_ref`・`owner_approval`・`python`）：
 - `files`：封印の対象のファイルのパスと sha256（`[{"path", "sha256"}]`）。`ledger.ORDER1B_REQUIRED_FILES`（`docs/stats/counting.md`・`src/stats/counting.py`・`tests/stats/test_counting.py`・`docs/stats/seal-order1.md`）を必ず含む（T-037 の差し戻し1回目 中2）。
@@ -916,6 +917,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py stats-order
 grep -n '"kind":"stats-order1' sealed/ledger.jsonl | cut -d: -f1 || true
 ```
 
+- **`verify.py all`（と `stats-order`）は、順番1 の10件の sha256 を計算し直さない**（T-049。T-048 の監査 軽-1）。verify が照らすのは、記録の中身の形と、名前・承認・出どころ・祖先などが決まった値と同じことまでで、10件の値そのものは記録に写した値をそのまま表示する。凍結の確認（作業ツリーの10件が、封印したときと同じであること）は、docs/stats/seal-order1.md 3章 (1) の手順で、自分で計算し直して行う。
 - 記録の10件の sha256 を作業ツリーで計算し直して照らす手順は、docs/stats/seal-order1.md 3章 (1) のとおり（`shasum -a 256 <ファイル>`、`git show <commit>:<path> | shasum -a 256`、`PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/stats/exclusion.py | shasum -a 256` など）。順番1b の `counting.output_sha256` は `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/stats/counting.py | shasum -a 256` と照らす。
 
 ### 順番2 への申し送り（統計係の T-036 の監査の軽-4）

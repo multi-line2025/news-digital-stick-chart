@@ -316,8 +316,10 @@ class TestRealLedger(unittest.TestCase):
             doc = f.read()
         self.assertIn("\n".join("  " + l for l in post_text.build(PROJECT, 4)[0].split("\n")), doc)
         out = io.StringIO()
+        # T-049：照らす時刻を最初の投稿の時点に固定する。本物の記録が伸びても、それより後の記録は
+        # 「保留」（まだ期限の前）になり、この投稿の照合の結果は変わらない
         bad = post_text.check_posts(PROJECT, posts, account=account,
-                                    now=ledger.parse_time("2026-12-31T00:00:00Z"), out=out)
+                                    now=ledger.parse_time("2026-10-07T18:25:00Z"), out=out)
         self.assertEqual(bad, [], out.getvalue())
         text = out.getvalue()
         for k in (1, 2):
@@ -328,9 +330,31 @@ class TestRealLedger(unittest.TestCase):
                                r"上限 24 時間の中")
         # 同じ投稿が 24 時間を超えて遅れていれば、seq 3・4 は合わない（例外は seq 1・2 だけ）
         late = [(1, when + datetime.timedelta(hours=20), 4, h, acc)]
+        # T-049：照らす時刻は、遅れた投稿の時点（本物の記録が伸びても、それより後の記録は保留になる）
         bad = post_text.check_posts(PROJECT, late, account=account, out=io.StringIO(),
-                                    now=ledger.parse_time("2026-12-31T00:00:00Z"))
+                                    now=when + datetime.timedelta(hours=20, minutes=1))
         self.assertEqual([b.split(":")[0] for b in bad], ["seq 3", "seq 4"])
+
+    def test_second_post_seq5_follows_rule(self):
+        """T-049：2 つめの投稿（seq 1-5。ID 2107974118754980205、reviews/T-048.md のオーナーの発言）を、
+        最初の投稿と並べて照らす。照らす時刻は 2 つめの投稿の時点に固定する（それより後の記録は保留）。"""
+        data = subprocess.run(["git", "-C", PROJECT, "show", "HEAD:sealed/ledger.jsonl"],
+                              check=True, capture_output=True).stdout
+        if len(ledger.verify_chain(data)) < 5:
+            self.skipTest("記録に seq 5 が無い")
+        account = doc_fixed(PROJECT, "account")
+        listing = "\n".join([
+            "https://x.com/%s/status/2107899885177704739 4 %s" % (account, ledger.prefix_digest(data, 4)),
+            "https://x.com/%s/status/2107974118754980205 5 %s" % (account, ledger.prefix_digest(data, 5))])
+        posts = post_text.parse_posts(listing)
+        second = posts[1][1]
+        self.assertEqual(post_text._iso(second), "2026-10-07T23:19:28.833Z")
+        out = io.StringIO()
+        bad = post_text.check_posts(PROJECT, posts, account=account,
+                                    now=second + datetime.timedelta(minutes=1), out=out)
+        self.assertEqual(bad, [], out.getvalue())
+        self.assertRegex(out.getvalue(), r"seq 5: 最初に投稿された時刻 2026-10-07T23:19:28\.833Z、遅れ 0\.08 時間"
+                                         r".*上限 24 時間の中")
 
     def test_real_recorded_at_before_headers(self):
         """本物の記録では、どの seq の recorded_at も確定時刻 + 3 時間より前。"""

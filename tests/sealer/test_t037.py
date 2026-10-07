@@ -703,35 +703,84 @@ class TestVerifyGitNotes(StatsCase):
 
 
 class TestRealClone(unittest.TestCase):
-    """本物のリポジトリの clone の HEAD で、seal_order1 と seal_order1b（今の counting.md・counting.py）が
-    通ること。決まった値は差し替えない。clone の sealed/ にだけ書く（本物には書かない）。"""
+    """本物のリポジトリの clone で、seal_order1 と seal_order1b（counting.md・counting.py）が通ること。
+    決まった値は差し替えない。clone の sealed/ にだけ書く（本物には書かない）。
 
-    def test_seal_order1_and_order1b_on_clone(self):
+    T-049：本物の記録に順番1（seq 5。T-048 で封印）が入ったので、本物の記録の状態に頼らない形に分けた。
+      - test_before_order1_at_77d0dd2：順番1 の封印の直前の commit（77d0dd2。本物の記録は seq 1〜4）に
+        clone を合わせ、順番1 → 順番1b の流れを通す。commit を固定するので、本物の記録が先へ進んでも
+        変わらない。
+      - test_head_with_real_order1：HEAD の clone。本物の記録に順番1 があればそれを使い（seal_order1 は
+        呼ばない）、無ければ封印する。method-access がまだ無ければ順番1b を封印し、verify stats-order を
+        確かめる。method-access があれば（本物の記録が先へ進んだら）、順番1b は書けないので、verify
+        stats-order だけを確かめる。
+    """
+
+    BEFORE_ORDER1 = "77d0dd22d8e397a9b1e53b079a31bb93db765452"
+
+    def clone(self, d, commit=None):
+        c = os.path.join(d, "clone")
+        subprocess.run(["git", "clone", "-q", tl.PROJECT, c], check=True, capture_output=True)
+        if commit is not None:
+            subprocess.run(["git", "-C", c, "checkout", "-q", commit], check=True, capture_output=True)
+        os.makedirs(os.path.join(c, ".venv", "bin"))
+        os.symlink(os.path.realpath(os.path.join(tl.PROJECT, ".venv", "bin", "python"))
+                   if os.path.exists(os.path.join(tl.PROJECT, ".venv", "bin", "python")) else sys.executable,
+                   os.path.join(c, ".venv", "bin", "python"))
+        return c
+
+    def records(self, c):
+        return ledger.verify_chain(ledger.read_ledger(os.path.join(c, "sealed", "ledger.jsonl")))
+
+    def commit(self, c, msg):
+        subprocess.run(["git", "-C", c, "add", "-A"], check=True)
+        subprocess.run(["git", "-C", c] + list(tw.AUTHOR) + ["commit", "-q", "-m", msg], check=True)
+
+    def seal_1b_and_check(self, c, now, order1_seq):
+        rec2, rel2, _o = seal_stats.seal_order1b(c, ORDER1B_FILES, [], now, "ots", runner=tw.FakeOts())
+        with open(os.path.join(c, rel2), encoding="utf-8") as f:
+            doc2 = json.load(f)
+        self.assertEqual(doc2["counting"]["official_candidate"], "C7")
+        # 中-B：承認（a970019 の reviews/T-036.md）を照らした上で通る
+        self.assertEqual(doc2["owner_approval"], ledger.expected_owner_approval_1b())
+        self.assertEqual(doc2["approvals"], [ledger.expected_order1_approvals()[2]])
+        self.assertEqual(doc2["counting"]["official_status"], "decided")
+        self.assertEqual(doc2["order1_ref"]["seq"], order1_seq)
+        return rec2
+
+    def test_before_order1_at_77d0dd2(self):
         with tempfile.TemporaryDirectory() as d:
-            c = os.path.join(d, "clone")
-            subprocess.run(["git", "clone", "-q", tl.PROJECT, c], check=True, capture_output=True)
-            os.makedirs(os.path.join(c, ".venv", "bin"))
-            os.symlink(os.path.realpath(os.path.join(tl.PROJECT, ".venv", "bin", "python"))
-                       if os.path.exists(os.path.join(tl.PROJECT, ".venv", "bin", "python")) else sys.executable,
-                       os.path.join(c, ".venv", "bin", "python"))
+            c = self.clone(d, self.BEFORE_ORDER1)
+            self.assertEqual(len(self.records(c)), 4)
+            self.assertIsNone(ledger.first_order1(self.records(c)))
             now = datetime.datetime.now(datetime.timezone.utc)
             rec, rel, _o = seal_stats.seal_order1(c, now, "ots", runner=tw.FakeOts())
             with open(os.path.join(c, rel), encoding="utf-8") as f:
                 doc = json.load(f)
             self.assertEqual(sorted(t["name"] for t in doc["targets"]), sorted(ledger.ORDER1_TARGET_NAMES))
-            subprocess.run(["git", "-C", c, "add", "-A"], check=True)
-            subprocess.run(["git", "-C", c] + list(tw.AUTHOR) + ["commit", "-q", "-m", "順番1"], check=True)
-            rec2, rel2, _o = seal_stats.seal_order1b(c, ORDER1B_FILES, [], now, "ots", runner=tw.FakeOts())
-            with open(os.path.join(c, rel2), encoding="utf-8") as f:
-                doc2 = json.load(f)
-            self.assertEqual(doc2["counting"]["official_candidate"], "C7")
-            # 中-B：承認（a970019 の reviews/T-036.md）を照らした上で通る
-            self.assertEqual(doc2["owner_approval"], ledger.expected_owner_approval_1b())
-            self.assertEqual(doc2["approvals"], [ledger.expected_order1_approvals()[2]])
-            self.assertEqual(doc2["counting"]["official_status"], "decided")
-            self.assertEqual(doc2["order1_ref"]["seq"], rec["seq"])
+            self.assertEqual(doc["head"], self.BEFORE_ORDER1)
+            self.commit(c, "順番1")
+            self.seal_1b_and_check(c, now, rec["seq"])
             code, out, err = tl.run_verify_inproc(c, "stats-order")
             self.assertEqual(code, 0, err)
+
+    def test_head_with_real_order1(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self.clone(d)
+            now = datetime.datetime.now(datetime.timezone.utc)
+            o1 = ledger.first_order1(self.records(c))
+            if o1 is None:
+                o1, _rel, _o = seal_stats.seal_order1(c, now, "ots", runner=tw.FakeOts())
+                self.commit(c, "順番1")
+            else:
+                # 本物の順番1 があれば、2 件目は書けない（順番1 は 1 件だけ）
+                with self.assertRaisesRegex(ledger.LedgerError, "stats-order1 の記録が既にある"):
+                    seal_stats.seal_order1(c, now, "ots", runner=tw.FakeOts())
+            if not any(r["kind"] == ledger.METHOD_ACCESS_KIND for r in self.records(c)):
+                self.seal_1b_and_check(c, now, o1["seq"])
+            code, out, err = tl.run_verify_inproc(c, "stats-order")
+            self.assertEqual(code, 0, err)
+            self.assertIn("除外の規則の kind（stats-order1）の記録：seq %d（1 件だけ）" % o1["seq"], out)
 
 
 # ---------------------------------------------------------------- 7. T-031 の監査の軽1 と手順書

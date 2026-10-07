@@ -255,6 +255,17 @@ class TestDocT041(unittest.TestCase):
         self.assertNotIn("`method-access` の前に `stats-order1` を求めることは、まだしていない", self.text)
 
 
+class TestDocT049(unittest.TestCase):
+    def test_statements(self):
+        with open(DOC, encoding="utf-8") as f:
+            text = f.read()
+        for phrase in ("`verify.py all`（と `stats-order`）は、順番1 の10件の sha256 を計算し直さない",
+                       "docs/stats/seal-order1.md 3章 (1) の手順で、自分で計算し直して行う",
+                       "記録の行の `recorded_at` は、封印を始めた時刻である",
+                       "ledger に書いた時刻は `recorded_at` より後になる"):
+            self.assertIn(phrase, text)
+
+
 class TestDocT043(unittest.TestCase):
     def setUp(self):
         with open(DOC, encoding="utf-8") as f:
