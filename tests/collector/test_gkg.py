@@ -406,7 +406,7 @@ class TestAggregate(unittest.TestCase):
         self.assertEqual(privacy_scan.find_in_bytes(data), {})
         self.assertEqual(gkg.serialize_day("2015-03-02", a, files), data)   # 決まった並べ方
         lines = data.decode().splitlines()
-        self.assertEqual(lines[0], "#\tgkg-day\t1\t2015-03-02")
+        self.assertEqual(lines[0], "#\tgkg-day\t2\t2015-03-02\tofficial")
         tags = {l.split("\t")[0] for l in lines}
         self.assertTrue({"F", "FD", "V", "D", "T", "C", "L", "P1", "P2", "NC", "NL", "E", "S"}
                         <= tags)
@@ -549,7 +549,10 @@ class RunCase(unittest.TestCase):
                     filelist_sha256="c" * 64, method_access_seq=5, code_sha256=CODE_SHA,
                     transport=self.transport, sleep=self.sleep, clock=self.clock,
                     now=lambda: NOW, log=self.logs.append, disk_free=self.disk_free,
-                    check_volume=self.check_volume, committed_manifest=self.committed_now())
+                    check_volume=self.check_volume, committed_manifest=self.committed_now(),
+                    committed_trial_manifest=gkg.read_bytes_nofollow(
+                        self.manifest_path(gkg.TRIAL_MANIFEST_NAME)),
+                    volume_id="TEST-VOLUME-UUID")
         args.update(kw)
         return gkg.run_gkg(**args)
 
@@ -649,14 +652,15 @@ class TestRun(RunCase):
         self.low_after = 2          # run-start と run-resume の確かめは通し、日の集計の前で止める
         with self.assertRaises(gkg.RunInterrupted):        # 日の集計を書く前に止まる
             self.run_gkg()
-        self.assertEqual([e["kind"] for e in self.manifest()], ["run-start", "run-resume"])
+        self.assertEqual([e["kind"] for e in self.manifest()],
+                         ["run-start", "run-resume", "run-stop"])
         self.responses[bad] = [ok_response(self.zips[bad])]   # 相手が直っても
         self.low_after = None
         self.run_gkg()
         self.assertNotIn(bad, self.transport.calls)          # 取り直さない
         self.assertIn(ts_of(self.DAYS[0], 0), self.transport.calls)   # ok は取り直す
         kinds = [e["kind"] for e in self.manifest()]
-        self.assertEqual(kinds, ["run-start", "run-resume", "run-resume", "day", "day",
+        self.assertEqual(kinds, ["run-start", "run-resume", "run-stop", "run-resume", "day", "day",
                                  "run-complete"])
         day = [e for e in self.manifest() if e.get("kind") == "day"][0]
         self.assertEqual(day["files_failed"], 1)
@@ -685,7 +689,8 @@ class TestRun(RunCase):
             self.responses[ts] = [FakeResponse(status=503)]
         with self.assertRaises(gkg.RunInterrupted):
             self.run_gkg()
-        self.assertEqual([e["kind"] for e in self.manifest()], ["run-start", "run-resume"])
+        self.assertEqual([e["kind"] for e in self.manifest()],
+                         ["run-start", "run-resume", "run-stop"])
         inter = [e["file_time"] for e in self.fetch_log() if e["result"] == "interrupted"]
         self.assertEqual(inter, streak)
 
@@ -1148,6 +1153,174 @@ class TestTrial(RunCase):
                 gkg.trial_plan(plan)
 
 
+class TestLogCheckpoint(RunCase):
+    """差し戻し1回目 中1：run と run のあいだの取得の記録の書き換えを見つける。"""
+
+    def log_path(self, mode="official"):
+        folder = self.store if mode == "official" else self.trial_store
+        return os.path.join(folder, gkg.fetch_log_name(RUN_ID, mode))
+
+    def test_deleting_failed_line_between_runs_is_refused(self):
+        bad = ts_of(self.DAYS[0], 1)
+        self.responses[bad] = [FakeResponse(status=404)]
+        self.low_after = 2                     # 日の集計を書く前に止まる（run-stop を書く）
+        with self.assertRaises(gkg.RunInterrupted):
+            self.run_gkg()
+        self.assertEqual(self.manifest()[-1]["kind"], "run-stop")
+        with open(self.log_path(), "rb") as f:
+            lines = f.read().splitlines(keepends=True)
+        kept = [l for l in lines if not (bad.encode() in l and b'"failed"' in l)]
+        self.assertLess(len(kept), len(lines))
+        with open(self.log_path(), "wb") as f:  # failed の行を消す（取り直させる書き換え）
+            f.write(b"".join(kept))
+        self.low_after = None
+        self.responses[bad] = [ok_response(self.zips[bad])]
+        with self.assertRaisesRegex(gkg.GkgError, "書き換わっている"):
+            self.run_gkg()
+        self.assertEqual(self.transport.calls, [])
+
+    def test_deleted_log_is_refused(self):
+        self.low_after = 2
+        with self.assertRaises(gkg.RunInterrupted):
+            self.run_gkg()
+        os.rename(self.log_path(), self.log_path() + "-aside")
+        self.low_after = None
+        with self.assertRaisesRegex(gkg.GkgError, "書き換わっている"):
+            self.run_gkg()
+
+    def test_every_checkpoint_matches_log_prefix(self):
+        bad = sorted(self.zips)[0]
+        self.responses[bad] = [FakeResponse(status=503), ok_response(self.zips[bad])]
+        self.run_gkg()
+        with open(self.log_path(), "rb") as f:
+            data = f.read()
+        marks = [e for e in self.manifest() if "fetch_log_size" in e]
+        self.assertEqual([e["kind"] for e in marks],
+                         ["run-start", "run-resume", "day", "day", "run-complete"])
+        for e in marks:
+            self.assertEqual(hashlib.sha256(data[:e["fetch_log_size"]]).hexdigest(),
+                             e["fetch_log_sha256"], e["kind"])
+        self.assertEqual(marks[-1]["fetch_log_size"], len(data))
+
+    def test_log_before_run_start_is_refused(self):
+        with open(self.log_path(), "wb") as f:
+            f.write(b"")
+        with self.assertRaisesRegex(gkg.GkgError, "run-start の前なのに"):
+            self.run_gkg()
+        self.assertEqual(self.manifest(), [])
+
+
+class TestModeMarks(RunCase):
+    """差し戻し1回目 中2：試しの run と正式な run を、名前と行の mode で分ける。"""
+
+    DAYS = ("20150302", "20150303")
+    N = 2
+
+    def test_names_and_lines_carry_mode(self):
+        self.run_once(mode="trial", committed_manifest=None)
+        names = sorted(os.listdir(self.trial_store))
+        self.assertEqual(names, sorted([gkg.fetch_log_name(RUN_ID, "trial")]
+                                       + [gkg.day_file_name(RUN_ID, d, "trial")
+                                          for d in ("2015-03-02", "2015-03-03")]))
+        for n in names:
+            self.assertTrue(n.startswith("gkg-trial-"), n)
+        log = gkg.read_jsonl(os.path.join(self.trial_store, gkg.fetch_log_name(RUN_ID, "trial")))
+        self.assertTrue(all(e["mode"] == "trial" for e in log))
+        self.assertTrue(all(e["mode"] == "trial" for e in self.manifest(gkg.TRIAL_MANIFEST_NAME)))
+        with open(os.path.join(self.trial_store, names[0]), "rb") as f:
+            head = gzip.decompress(f.read()).split(b"\n", 1)[0]
+        self.assertEqual(head, b"#\tgkg-day\t2\t2015-03-02\ttrial")
+        self.run_gkg()
+        self.assertTrue(all(n.startswith("gkg-official-") for n in os.listdir(self.store)))
+        with self.assertRaises(gkg.GkgError):
+            gkg.day_file_name(RUN_ID, "2015-03-02", "other")
+
+    def test_trial_log_copied_into_official_is_refused(self):
+        self.run_once(mode="trial", committed_manifest=None)
+        with self.assertRaises(gkg.RunStartWritten):
+            self.run_once()
+        with open(os.path.join(self.trial_store, gkg.fetch_log_name(RUN_ID, "trial")), "rb") as f:
+            trial_log = f.read()
+        with open(os.path.join(self.store, gkg.fetch_log_name(RUN_ID)), "wb") as f:
+            f.write(trial_log)                         # 試しの run の記録を写す
+        with self.assertRaisesRegex(gkg.GkgError, "別の mode"):
+            self.run_once()
+        self.assertEqual(self.transport.calls, [])
+
+
+class TestTrialRecordInOfficial(RunCase):
+    """差し戻し1回目 中4：試しの run の回数と範囲を、正式な run の run-start に記録して照らす。"""
+
+    DAYS = ("20150302",)
+    N = 2
+
+    def test_uncommitted_trial_manifest_refused(self):
+        self.run_once(mode="trial", committed_manifest=None)
+        with self.assertRaisesRegex(gkg.GkgError, "試しの run のマニフェストが、全部コミット"):
+            self.run_once(committed_trial_manifest=b"")
+        self.assertFalse(os.path.exists(self.manifest_path()))
+        with self.assertRaises(gkg.GkgError):
+            self.run_once(committed_trial_manifest=None)
+
+    def test_run_start_records_trials(self):
+        self.run_once(mode="trial", committed_manifest=None)
+        self.run_once(mode="trial", committed_manifest=None, code_sha256="cd" * 32)
+        with open(self.manifest_path(gkg.TRIAL_MANIFEST_NAME), "rb") as f:
+            trial_bytes = f.read()
+        with self.assertRaises(gkg.RunStartWritten):
+            self.run_once()
+        s0 = self.manifest()[0]
+        self.assertEqual(s0["trial_run_ids"], [RUN_ID, "cd" * 8])
+        self.assertEqual(s0["trial_manifest_sha256"], hashlib.sha256(trial_bytes).hexdigest())
+        with open(self.manifest_path(gkg.TRIAL_MANIFEST_NAME), "ab") as f:
+            f.write(b'{"kind": "x"}\n')                # 正式な run が始まったあとで変える
+        with self.assertRaisesRegex(gkg.GkgError, "試しの run のマニフェスト"):
+            self.run_once()
+        self.assertEqual(self.transport.calls, [])
+
+    def test_no_trial(self):
+        with self.assertRaises(gkg.RunStartWritten):
+            self.run_once()
+        s0 = self.manifest()[0]
+        self.assertEqual((s0["trial_run_ids"], s0["trial_manifest_sha256"]), ([], None))
+
+
+class TestVolumeIdAndEmptyFile(RunCase):
+    """差し戻し1回目 軽3：ディスクの識別子を実行をまたいで照らす。0バイトの日の集計の扱い。"""
+
+    def test_other_volume_id_refused_on_resume(self):
+        with self.assertRaises(gkg.RunStartWritten):
+            self.run_once()
+        self.assertEqual(self.manifest()[0]["volume_id"], "TEST-VOLUME-UUID")
+        with self.assertRaisesRegex(gkg.GkgError, "volume_id"):
+            self.run_once(volume_id="OTHER-UUID")
+        self.assertEqual(self.transport.calls, [])
+
+    def test_empty_day_file_is_filled_not_replaced(self):
+        name = gkg.day_file_name(RUN_ID, "2015-03-02")
+        open(os.path.join(self.store, name), "wb").close()     # 作った直後に止まった跡
+        self.run_gkg()
+        day = [e for e in self.manifest() if e.get("kind") == "day"]
+        self.assertTrue(day[0]["refilled_empty_file"])
+        self.assertNotIn("refilled_empty_file", day[1])
+        with open(os.path.join(self.store, name), "rb") as f:
+            self.assertEqual(hashlib.sha256(f.read()).hexdigest(), day[0]["sha256"])
+
+    def test_write_new_file_cases(self):
+        self.assertEqual(gkg.write_new_file(self.store, "a.gz", b"abc")[1], False)
+        self.assertEqual(gkg.write_new_file(self.store, "a.gz", b"abc")[1], False)
+        with self.assertRaisesRegex(gkg.GkgError, "中身の違う"):
+            gkg.write_new_file(self.store, "a.gz", b"abd")
+        open(os.path.join(self.store, "b.gz"), "wb").close()
+        sha, refilled = gkg.write_new_file(self.store, "b.gz", b"xyz")
+        self.assertTrue(refilled)
+        self.assertEqual(sha, hashlib.sha256(b"xyz").hexdigest())
+        with open(os.path.join(self.store, "c.gz"), "wb") as f:
+            f.write(b"x")                              # 途中まで書かれた（中身がある）
+        with self.assertRaisesRegex(gkg.GkgError, "中身の違う"):
+            gkg.write_new_file(self.store, "c.gz", b"xyz")
+
+
 # --- T-021：FAT32 のイメージの上での検査（環境変数でイメージのマウント先を渡したときだけ） -----
 
 FAT32_ENV = "GKG_FAT32_TEST_VOLUME"
@@ -1235,9 +1408,11 @@ class TestOnFat32(RunCase):
 
     def test_symlinked_fetch_log_refused(self):
         target = os.path.join(self.volume, gkg.STORE_PARTS[0], "elsewhere.jsonl")
+        with self.assertRaises(gkg.RunStartWritten):
+            self.run_once()
         os.symlink(target, os.path.join(self.store, gkg.fetch_log_name(RUN_ID)))
         with self.assertRaisesRegex(gkg.GkgError, "開けない"):
-            self.run_gkg()
+            self.run_once()
         self.assertEqual(self.transport.calls, [])
         self.assertFalse(os.path.lexists(target))
 

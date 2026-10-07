@@ -219,6 +219,44 @@
       - 取得・集計・試行の規則は、正式な run と同じコードで同じに動く（run_id も同じ）。
       - 正式な run は、試しの run の3日も含めて、全部の日を取り直す。試しの run の集計は、
         正式な run の結果として使わない。
+      - 試しの run の印（T-021 の差し戻し1回目 中2）：日の集計と取得の記録のファイル名に mode
+        （trial・official）を入れる（gkg-<mode>-<run_id>-day-<日>.tsv.gz、
+        gkg-<mode>-<run_id>-fetch-log.jsonl）。取得の記録の各行と、マニフェストの各行に mode を
+        書く。日の集計の頭の行（# の行）にも mode を書く（形式の版 2）。取得の記録に、別の
+        run_id か別の mode の行が1つでもあれば止まる。そのため、試しの run の記録を正式な run の
+        場所に写しても、名前が合わず、写した行は正式な run の判定に使われない。
+      - 試しの run の回数と範囲（中4）：正式な run は、試しの run のマニフェスト
+        （gdelt-gkg-trial.jsonl）が全部コミットされていなければ始めない（作業ツリーの中身が
+        HEAD の中身と同じであること。無ければ両方とも空）。正式な run の run-start には、試しの
+        run の run_id の一覧（trial_run_ids）と、試しの run のマニフェストの sha256
+        （trial_manifest_sha256）を書く。再開のたびに、試しの run のマニフェストがこの sha256 の
+        ままであることを確かめる。試しの run の run_id はコードの sha256 から決まるので、
+        試しの run のあとでコードを変えたかどうかは、run_id の一覧と正式な run の run_id を
+        比べて分かる。
+
+------------------------------------------------------------------------
+5.2 run と run のあいだの書き換えと、ディスクの取り違え（T-021 の差し戻し1回目 中1・軽3）
+------------------------------------------------------------------------
+    取得の記録の大きさと sha256 の控え（中1）
+      - マニフェスト（Git に入る側）の run-start・run-resume・day・run-stop・run-complete の
+        行に、その時点の取得の記録の大きさ（fetch_log_size）と sha256（fetch_log_sha256）を
+        書く。run-stop は、止まる条件（RunInterrupted）か Ctrl-C で止まったときに書く
+        （書けなければ書かない）。
+      - 再開のときは、最後に控えた行の値について、取得の記録の先頭からその大きさまでの
+        sha256 が一致することを確かめる。一致しなければ（行を消した・書き換えた）、要求を
+        送らずに GkgError で止まる。
+      - 限界：最後の控えのあとに書いた行（停電などで run-stop を書けなかった場合の、最後の
+        day の行より後の行）は、控えが無いので確かめられない。範囲は最大で1日分と、続いている
+        一時的な失敗の分である。マニフェストはコミットするまで書き換えられる。
+    ディスクの識別子（軽3）
+      - 入口のスクリプトが diskutil で読んだ VolumeUUID（volume_id）を run-start に書き、
+        再開のたびに同じであることを確かめる。違うディスク（同じ名前の別のディスク・
+        フォーマットし直したディスク）なら止まる。形式が msdos でなければ、関門で止まる。
+    0バイトの日の集計（軽3）
+      - 日の集計のファイルを作った直後（中身を書く前）に止まると、0バイトのファイルが残る。
+        再開のときに同じ名前の0バイトのファイルがあれば、消さずに、そこへ中身を書き足す
+        （write_new_file）。マニフェストの day の行に refilled_empty_file: true を書く。
+      - 中身のある違うファイルがあれば、これまでどおり止まる（リードに報告）。
 
 ------------------------------------------------------------------------
 6. 集計の単位と形（ディスクに書く前に集計する。行単位のデータは保存しない）
@@ -471,7 +509,7 @@ BAD_COLL = b"X"
 # 日の集計に使ってよい文字（7章）
 OUTPUT_ALPHABET = frozenset(
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_\t\n-. #")
-DAY_FORMAT = b"gkg-day\t1"
+DAY_FORMAT = b"gkg-day\t2"          # T-021 の差し戻し1回目で頭の行に mode を足した
 DAY_TABLES = ("t1", "t2", "t2m", "c1", "c2", "c2m", "l1", "l2", "l2m", "p1", "p2",
               "nc", "nl", "eng")
 
@@ -1016,7 +1054,8 @@ def resolve_paths(root, volume, mode="official", check_volume=check_volume):
     return {"mode": mode, "store": store_real, "store_id": (sst.st_dev, sst.st_ino),
             "volume": volume, "check_volume": check_volume, "location": location,
             "manifest": os.path.join(root_real, *MANIFEST_DIR_PARTS, manifest_name),
-            "official_manifest": os.path.join(root_real, *MANIFEST_DIR_PARTS, MANIFEST_NAME)}
+            "official_manifest": os.path.join(root_real, *MANIFEST_DIR_PARTS, MANIFEST_NAME),
+            "trial_manifest": os.path.join(root_real, *MANIFEST_DIR_PARTS, TRIAL_MANIFEST_NAME)}
 
 
 def _guard_store(paths):
@@ -1118,7 +1157,11 @@ def read_bytes_nofollow(path):
 
 
 def write_new_file(store, name, data):
-    """保存先に新しいファイルを書く。同じ名前があれば、中身が同じときだけ書かずに認める。"""
+    """保存先に新しいファイルを書く。返り値：(sha256, 空のファイルを埋めたか)。
+
+    同じ名前があれば、中身が同じときだけ書かずに認める。0バイトのファイルがあれば（作った直後に
+    止まった跡。7章）、それに書き足す。中身のある違うファイルがあれば止まる（上書きしない）。
+    """
     if len(data) > FAT32_MAX_FILE_BYTES:
         raise RunInterrupted("%s が FAT32 の1ファイルの大きさの上限を超えるので、書かずに止めた"
                              "（リードに報告）" % name)
@@ -1128,17 +1171,7 @@ def write_new_file(store, name, data):
         fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
                      0o644)
     except FileExistsError:
-        try:
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-        except OSError:
-            raise GkgError("同じ名前のものがあり、通常のファイルとして開けない") from None
-        with os.fdopen(fd, "rb") as f:
-            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
-                raise GkgError("同じ名前のものがあり、通常のファイルでない")
-            old = f.read()
-        if hashlib.sha256(old).hexdigest() != sha:
-            raise GkgError("同じ名前で中身の違うファイルが既にある（上書きしない。リードに報告）")
-        return sha
+        return _existing_file(path, data, sha)
     try:
         st = os.fstat(fd)
         # st_nlink は FAT32 では常に 1（8章）。APFS などでの検査として残す
@@ -1157,7 +1190,40 @@ def write_new_file(store, name, data):
             raise GkgError("書いたファイルの sha256 が一致しない")
     finally:
         os.close(fd)
-    return sha
+    return sha, False
+
+
+def _existing_file(path, data, sha):
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        raise GkgError("同じ名前のものがあり、通常のファイルとして開けない") from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise GkgError("同じ名前のものがあり、通常のファイルでない")
+        if st.st_size == 0:
+            # 0バイト：作った直後（書く前）に止まった跡。消さずに、そこへ書き足す（7章）
+            _write_all(fd, data)
+            os.fsync(fd)
+            os.lseek(fd, 0, os.SEEK_SET)
+            if hashlib.sha256(_read_all(fd)).hexdigest() != sha:
+                raise GkgError("書いたファイルの sha256 が一致しない")
+            return sha, True
+        if hashlib.sha256(_read_all(fd)).hexdigest() != sha:
+            raise GkgError("同じ名前で中身の違うファイルが既にある（上書きしない。リードに報告）")
+        return sha, False
+    finally:
+        os.close(fd)
+
+
+def _read_all(fd):
+    out = bytearray()
+    while True:
+        chunk = os.read(fd, 1 << 20)
+        if not chunk:
+            return bytes(out)
+        out += chunk
 
 
 # ---------------------------------------------------------------------------
@@ -1168,9 +1234,10 @@ def _b(n):
     return b"%d" % n
 
 
-def serialize_day(day, agg, files):
-    """6章の形のバイト列（gzip の前）。行の順はすべて決まった並べ方。"""
-    out = [b"#\t" + DAY_FORMAT + b"\t" + day.encode("ascii")]
+def serialize_day(day, agg, files, mode="official"):
+    """6章の形のバイト列（gzip の前）。行の順はすべて決まった並べ方。頭の行に mode を書く。"""
+    store_spec(mode)
+    out = [b"#\t" + DAY_FORMAT + b"\t" + day.encode("ascii") + b"\t" + mode.encode("ascii")]
     for f in files:
         out.append(b"\t".join([b"F", f["file_time"].encode(), f["result"].encode(),
                                (f["reason"] or "-").encode(), f["md5"].encode(),
@@ -1227,12 +1294,16 @@ def gzip_bytes(data):
     return gzip.compress(data, compresslevel=6, mtime=0)
 
 
-def day_file_name(run_id, day):
-    return "gkg-%s-day-%s.tsv.gz" % (run_id, day.replace("-", ""))
+def day_file_name(run_id, day, mode="official"):
+    """日の集計の名前。mode（official・trial）を名前に入れる（T-021 の差し戻し1回目 中2）。"""
+    store_spec(mode)
+    return "gkg-%s-%s-day-%s.tsv.gz" % (mode, run_id, day.replace("-", ""))
 
 
-def fetch_log_name(run_id):
-    return "gkg-%s-fetch-log.jsonl" % run_id
+def fetch_log_name(run_id, mode="official"):
+    """取得の記録の名前。mode を名前に入れる。"""
+    store_spec(mode)
+    return "gkg-%s-%s-fetch-log.jsonl" % (mode, run_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1318,15 +1389,61 @@ def check_committed_start(manifest_bytes, committed):
     raise GkgError("マニフェストに run-start が無い")
 
 
+def _log_state(log_path):
+    """取得の記録の今の (大きさ, sha256)。無ければ (0, 空のバイト列の sha256)。"""
+    data = read_bytes_nofollow(log_path)
+    return len(data), hashlib.sha256(data).hexdigest()
+
+
+def check_log_checkpoint(log_path, mine):
+    """5章（T-021 の差し戻し1回目 中1）：取得の記録が、マニフェストに書いた最後の時点の
+    バイト列で始まることを確かめる。違えば GkgError（run と run のあいだの書き換え）。"""
+    last = None
+    for e in mine:
+        if "fetch_log_size" in e:
+            last = e
+    if last is None:
+        raise GkgError("マニフェストに、取得の記録の大きさと sha256 の行が無い")
+    data = read_bytes_nofollow(log_path)
+    size = last["fetch_log_size"]
+    if len(data) < size or hashlib.sha256(data[:size]).hexdigest() != last["fetch_log_sha256"]:
+        raise GkgError("取得の記録が、マニフェストに書いた時点（%s）から書き換わっている"
+                       "（行を消した・差し替えたなど。リードに報告）" % last.get("kind"))
+
+
+def _check_log_lines(entries, run_id, mode):
+    """取得の記録の行が、どれもこの run_id と mode のものであること（中2）。"""
+    for e in entries:
+        if e.get("run_id") != run_id or e.get("mode") != mode:
+            raise GkgError("取得の記録に、別の run か別の mode（試しの run と正式な run）の行がある")
+
+
+def _trial_info(paths):
+    data = read_bytes_nofollow(paths["trial_manifest"])
+    ids = []
+    for raw in data.splitlines():
+        if raw.strip():
+            try:
+                e = json.loads(raw)
+            except ValueError:
+                raise GkgError("試しの run のマニフェストに JSON でない行がある") from None
+            if e.get("kind") == "run-start" and e.get("run_id") not in ids:
+                ids.append(e.get("run_id"))
+    return data, {"trial_run_ids": ids,
+                  "trial_manifest_sha256": hashlib.sha256(data).hexdigest() if data else None}
+
+
 def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, code_sha256,
-            mode="official", committed_manifest=None, transport=urllib_transport,
-            sleep=time.sleep, clock=time.monotonic,
+            mode="official", committed_manifest=None, committed_trial_manifest=None,
+            volume_id=None, transport=urllib_transport, sleep=time.sleep, clock=time.monotonic,
             now=lambda: datetime.datetime.now(datetime.timezone.utc), log=_stderr_log,
             disk_free=_disk_free, check_volume=check_volume):
     """5章の取得の全体。全部の日が終われば dict を返す。
 
     止まる条件では RunInterrupted。正式な run の最初の実行は、run-start を書いたところで
     RunStartWritten（5章）。mode が trial なら 5.1章の試しの run。
+    committed_trial_manifest：HEAD の試しの run のマニフェスト（正式な run だけ。5.1章）。
+    volume_id：保存先のディスクの識別子（入口のスクリプトが diskutil で読む。7章）。
     """
     if not re.fullmatch(r"[0-9a-f]{64}", code_sha256 or ""):
         raise GkgError("code_sha256 の形が違う")
@@ -1353,38 +1470,78 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
         raise GkgError("この run_id の取得は完了している（取り直さない）")
     start = [e for e in mine if e.get("kind") == "run-start"]
     n_files = sum(len(v) for v in plan.values())
-    base = {"run_id": run_id, "code_path": CODE_REL, "code_sha256": code_sha256,
+    base = {"run_id": run_id, "mode": mode, "code_path": CODE_REL, "code_sha256": code_sha256,
             "filelist_sha256": filelist_sha256, "method_access_seq": method_access_seq,
             "official": mode == "official"}
+    log_path = os.path.join(paths["store"], fetch_log_name(run_id, mode))
+    if mode == "official":
+        trial_bytes, trial = _trial_info(paths)
+        if not isinstance(committed_trial_manifest, bytes) or trial_bytes != committed_trial_manifest:
+            raise GkgError("試しの run のマニフェストが、全部コミットされていない（正式な run の前に"
+                           "コミットする。5.1章）")
     if start:
         s0 = start[0]
-        for k in ("code_sha256", "filelist_sha256", "method_access_seq"):
-            if s0.get(k) != base[k]:
+        for k in ("code_sha256", "filelist_sha256", "method_access_seq", "mode", "volume_id"):
+            want = volume_id if k == "volume_id" else base[k]
+            if s0.get(k) != want:
                 raise GkgError("再開しようとした run の %s が、最初の run-start と違う" % k)
         if mode == "official":
             check_committed_start(read_bytes_nofollow(paths["manifest"]), committed_manifest)
+            if s0.get("trial_manifest_sha256") != trial["trial_manifest_sha256"]:
+                raise GkgError("試しの run のマニフェストが、正式な run の run-start のあとで変わった")
+        check_log_checkpoint(log_path, mine)
         if disk_free(paths["store"]) < MIN_FREE_DISK_BYTES:
             raise RunInterrupted("保存先のディスクの空きが足りない")
-        append_jsonl(paths["manifest"], dict(base, kind="run-resume", at=_iso(now())),
+        size, sha = _log_state(log_path)
+        append_jsonl(paths["manifest"], dict(base, kind="run-resume", at=_iso(now()),
+                                             fetch_log_size=size, fetch_log_sha256=sha),
                      "マニフェストの行")
     else:
         if disk_free(paths["store"]) < MIN_FREE_DISK_BYTES:
             raise RunInterrupted("保存先のディスクの空きが足りない")
+        if os.path.lexists(log_path):
+            raise GkgError("run-start の前なのに、取得の記録が既にある（リードに報告）")
+        size, sha = _log_state(log_path)
         head = dict(base, kind="run-start", started_at=_iso(now()), files_selected=n_files,
                     days=len(plan), block_start=METHOD_BLOCK[0], block_end=METHOD_BLOCK[1],
-                    store_location=paths["location"])
+                    store_location=paths["location"], volume_id=volume_id,
+                    fetch_log_size=size, fetch_log_sha256=sha)
         if mode == "trial":
             head.update(trial=True, trial_days=sorted(plan))
+        else:
+            head.update(trial)
         append_jsonl(paths["manifest"], head, "マニフェストの行")
         if mode == "official":
             raise RunStartWritten("正式な run の run-start を書いた（GKG にはまだ要求を送って"
                                   "いない）。data/manifest/%s をコミットしてから（リモートが"
                                   "あれば push も）、同じコマンドでもう一度実行する" % MANIFEST_NAME)
+    try:
+        return _run_plan(plan, mine, base, paths, log_path, run_id, mode, transport, sleep,
+                         clock, now, log, disk_free)
+    except (RunInterrupted, KeyboardInterrupt):
+        _write_stop(paths, base, log_path, now)
+        raise
+
+
+def _write_stop(paths, base, log_path, now):
+    """止まったときに、取得の記録の大きさと sha256 をマニフェストに書く（中1。書けなければ書かない）。"""
+    try:
+        size, sha = _log_state(log_path)
+        append_jsonl(paths["manifest"], dict(base, kind="run-stop", at=_iso(now()),
+                                             fetch_log_size=size, fetch_log_sha256=sha),
+                     "マニフェストの行")
+    except (GkgError, OSError):
+        pass
+
+
+def _run_plan(plan, mine, base, paths, log_path, run_id, mode, transport, sleep, clock, now,
+              log, disk_free):
     done_days = {e["day"] for e in mine if e.get("kind") == "day"}
-    log_path = os.path.join(paths["store"], fetch_log_name(run_id))
     latest, used, trips = {}, Counter(), set()
-    for e in read_jsonl(log_path):
-        if e.get("run_id") != run_id or "file_time" not in e:
+    entries_in_log = read_jsonl(log_path)
+    _check_log_lines(entries_in_log, run_id, mode)
+    for e in entries_in_log:
+        if "file_time" not in e:
             continue
         ft = e["file_time"]
         if e.get("result") == "attempt":
@@ -1394,8 +1551,9 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
         used[ft] = 0
         if e.get("result") == "interrupted":
             trips.add(e.get("trip"))
+    del entries_in_log
     state = {"transient": [], "format": 0, "retries_used": len(trips)}
-    ctx = {"paths": paths, "log_path": log_path, "run_id": run_id, "now": now}
+    ctx = {"paths": paths, "log_path": log_path, "run_id": run_id, "mode": mode, "now": now}
     pacer = Pacer(clock, sleep)
     vocab = {}
     totals = Counter()
@@ -1405,10 +1563,14 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
         while pending:
             day, n_listed, day_agg, files = pending.pop(0)
             info = _write_day(day, day_agg, files, run_id, paths, disk_free)
+            size, sha = _log_state(log_path)
             dline = dict(base, kind="day", day=day, file_name=info["file_name"],
                          sha256=info["sha256"], files_listed=n_listed,
                          files_ok=info["ok"], files_failed=info["failed"], docs=info["docs"],
-                         written_at=_iso(now()), store_location=paths["location"])
+                         written_at=_iso(now()), store_location=paths["location"],
+                         fetch_log_size=size, fetch_log_sha256=sha)
+            if info["refilled"]:
+                dline["refilled_empty_file"] = True
             append_jsonl(paths["manifest"], dline, "マニフェストの行")
             log("%s：ok %d・failed %d・文書 %d" % (day, info["ok"], info["failed"],
                                                  info["docs"]))
@@ -1431,22 +1593,18 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
             totals["files_failed"] += e["files_failed"]
     if totals["days"] != len(plan):
         raise GkgError("マニフェストの day の行の数が、日の数と合わない")
-    try:
-        fd = os.open(log_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    except OSError:
-        raise GkgError("取得の記録を開けない") from None
-    with os.fdopen(fd, "rb") as f:
-        log_sha = hashlib.sha256(f.read()).hexdigest()
+    size, log_sha = _log_state(log_path)
     done = dict(base, kind="run-complete", completed_at=_iso(now()), days=totals["days"],
                 files_ok=totals["files_ok"], files_failed=totals["files_failed"],
-                fetch_log_file=fetch_log_name(run_id), fetch_log_sha256=log_sha,
-                store_location=paths["location"])
+                fetch_log_file=fetch_log_name(run_id, mode), fetch_log_sha256=log_sha,
+                fetch_log_size=size, store_location=paths["location"])
     append_jsonl(paths["manifest"], done, "マニフェストの行")
     return done
 
 
 def _log_file(ctx, entry, result, reason, transient, attempts, sha, docs, stats, trip=None):
-    rec = {"run_id": ctx["run_id"], "file_time": entry["file_time"], "listed_md5": entry["md5"],
+    rec = {"run_id": ctx["run_id"], "mode": ctx["mode"], "file_time": entry["file_time"],
+           "listed_md5": entry["md5"],
            "listed_size": entry["size"], "result": result, "reason": reason,
            "transient": transient, "attempts": attempts, "sha256": sha,
            "docs": {g.decode() if isinstance(g, bytes) else g: n for g, n in sorted(docs.items())},
@@ -1459,7 +1617,8 @@ def _log_file(ctx, entry, result, reason, transient, attempts, sha, docs, stats,
 
 def _log_attempt(ctx, entry, n):
     """要求を送る直前の試行の行（5章。T-018 の監査 軽1）。書けなければ要求を送らない。"""
-    rec = {"run_id": ctx["run_id"], "file_time": entry["file_time"], "result": "attempt",
+    rec = {"run_id": ctx["run_id"], "mode": ctx["mode"], "file_time": entry["file_time"],
+           "result": "attempt",
            "attempt": n, "at": _iso(ctx["now"]())}
     append_store_jsonl(ctx["paths"], ctx["log_path"], rec, "取得の記録の行")
 
@@ -1546,22 +1705,22 @@ def _run_day(day, entries, latest, used, state, pacer, vocab, ctx, transport, sl
 
 
 def _write_day(day, day_agg, files, run_id, paths, disk_free):
-    data = serialize_day(day, day_agg, files)
+    data = serialize_day(day, day_agg, files, paths["mode"])
     check_output_bytes(data, "日の集計")
     gz = gzip_bytes(data)
     del data
     _guard_store(paths)
     if disk_free(paths["store"]) < MIN_FREE_DISK_BYTES:
         raise RunInterrupted("保存先のディスクの空きが足りない（%s の集計を書く前）" % day)
-    name = day_file_name(run_id, day)
+    name = day_file_name(run_id, day, paths["mode"])
     try:
-        sha = write_new_file(paths["store"], name, gz)
+        sha, refilled = write_new_file(paths["store"], name, gz)
     except OSError:
         raise RunInterrupted("保存先に書けなかった（ディスクが外れたなど）。%s の集計が途中まで"
                              "書かれていれば、再開のときに止まる（リードに報告）" % day) from None
     ok = sum(1 for f in files if f["result"] == "ok")
     return {"file_name": name, "sha256": sha, "ok": ok, "failed": len(files) - ok,
-            "docs": sum(day_agg.docs.values())}
+            "docs": sum(day_agg.docs.values()), "refilled": refilled}
 
 
 if __name__ == "__main__":

@@ -30,6 +30,20 @@
     決める照合の仕組みで行う。
 
 ------------------------------------------------------------------------
+0.1 コードの関門と「1回だけ」の記録（T-021 の差し戻し1回目 中3）
+------------------------------------------------------------------------
+    - コードの関門（_code_gate）：src/collector に未コミットの変更・無視されるファイル・
+      skip-worktree の印が無く（codegate.check_clean）、動いている themes.py と privacy_scan.py
+      が HEAD にコミットした中身と同じであること。区分表の取得は、このファイル（2.1 の名前の欄
+      だけを残す規則を含む）をコミットしたあとの、その code_sha256 のコードでだけ行う。
+    - 1回だけの取得（オーナーの承認「1回取得してよい」）：通信の前に、マニフェスト
+      data/manifest/gdelt-themes.jsonl に試行の行（kind が attempt。code_sha256・source_url・
+      attempted_at）を書く。マニフェストに既に行が1つでもあれば（前の試行が成功しても失敗
+      しても）、通信せずに止まる。失敗した取得も、試行の行として記録に残る。
+      取得に成功すれば、結果の行（kind が result）を書く。
+      限界：マニフェストは Git に入るまで消せる。試行の行は、取得のあとすぐにコミットする。
+
+------------------------------------------------------------------------
 1. 取得元と通信
 ------------------------------------------------------------------------
     - https://data.gdeltproject.org/api/v2/guides/<名前> の形で、名前が ALLOWED_GUIDE_FILES
@@ -75,6 +89,24 @@
         シートが1つのときは、シート名を書かない。
       - 限界：数字を使わずに書いた量（「one million」など）は見分けられない。
     保存するのは、残した欄の見出しと値だけ。
+
+------------------------------------------------------------------------
+2.1 見出しの無い「名前・件数」の2欄の表（T-021 の差し戻し1回目。リードの判断、監査の条件）
+------------------------------------------------------------------------
+    1行目の値に数字だけの値がある（見出しの無い形）とき、次の条件をすべて満たす場合に限り、
+    名前の欄だけを残す（headerless_name_count）。満たさなければ、これまでどおり止まる。
+      (1) どの行も、欄がちょうど2つ。
+      (2) 一方の欄の値がすべて THEME_NAME_RE に合い、もう一方の欄の値がすべて ASCII の数字
+          （0〜9）だけ。判定は欄の位置ではなく値の形で行う。
+      (3) (2) に合う割り当て（どちらが名前の欄か）が、ちょうど1つ。両方の割り当てが合う場合と、
+          どちらも合わない場合は止まる。
+      (4) 残すのは名前の欄だけで、見出しは THEME とする。件数の欄はメモリの上で捨て、見出しの
+          代わりに欄の位置（column_A か column_B）をマニフェストの dropped_columns に書く。
+          行は並べ替えてから書く（元の並び＝件数の順を残さないため）。マニフェストの
+          headerless を true にする。
+    限界：区分表は取得した時点の全テーマの一覧なので、2020-12-15 以降に生まれたテーマの名前も
+    入る。名前があることは、そのテーマが後ろの期間に使われたことを示しうる。タグの一覧の規則は
+    手法を作る期間のデータで存在を確かめるので、名前だけでは一覧に入らない。
 
 ------------------------------------------------------------------------
 3. 読める形
@@ -138,6 +170,7 @@ DROP_HEADER_RE = re.compile(
     r"hits|popular|\bn\b|cnt|rank|percent|share|ratio", re.I)
 NAME_HEADER_RE = re.compile(
     r"\A(?:theme|themes|name|names|theme ?name|category ?name|tag)\Z", re.I)
+ASCII_DIGITS_RE = re.compile(r"\A[0-9]+\Z")
 NUMBER_SEPARATORS = frozenset(",. +-_'\u00a0\u202f")
 THEME_NAME_RE = re.compile(r"\A[A-Z][A-Z0-9_]{0,159}\Z")
 
@@ -410,7 +443,8 @@ def classify_columns(header, rows):
 def build_output(sheets):
     """表から残す欄だけの TSV を作る。
 
-    返り値: (バイト列, 行数, 残した見出し, 捨てた見出し, シート名を位置に替えたか)。
+    返り値: (バイト列, 行数, 残した見出し, 捨てた見出し, シート名を位置に替えたか,
+             見出しの無い2欄の表として読んだか)。
     """
     data_sheets = [(n, rows) for n, rows in sheets if rows]
     if not data_sheets:
@@ -420,9 +454,18 @@ def build_output(sheets):
     replaced = multi and any(has_numeric(n) for n, _rows in data_sheets)
     if replaced:
         data_sheets = [("sheet_" + _letters(i), rows) for i, (_n, rows) in enumerate(data_sheets)]
+    headerless = False
     for sname, rows in data_sheets:
-        header, body = rows[0], rows[1:]
-        keep, drop = classify_columns(header, body)
+        if any(looks_like_number(h) for h in rows[0]):
+            name_i, count_i = headerless_name_count(rows)     # 2.1章。合わなければ止まる
+            headerless = True
+            header = ["", ""]
+            header[name_i] = "THEME"
+            body = rows
+            keep, drop = [name_i], ["column_" + _letters(count_i)]
+        else:
+            header, body = rows[0], rows[1:]
+            keep, drop = classify_columns(header, body)
         h = [header[i].strip() for i in keep]
         if multi:
             h = ["sheet"] + h
@@ -439,7 +482,26 @@ def build_output(sheets):
             out_rows.append(([sname] if multi else []) + vals)
     out_rows.sort()
     text = "\n".join("\t".join(r) for r in [out_header] + out_rows) + "\n"
-    return text.encode("utf-8"), len(out_rows), out_header, dropped, replaced
+    return text.encode("utf-8"), len(out_rows), out_header, dropped, replaced, headerless
+
+
+def headerless_name_count(rows):
+    """2.1章。返り値：(名前の欄の位置, 件数の欄の位置)。条件に合わなければ ThemesError。"""
+    if any(len(r) != 2 for r in rows):
+        raise ThemesError("1行目に数字だけの値がある（見出しの行が無い形）。欄がちょうど2つでない"
+                          "ので、名前の欄を決められず止まる")
+    cols = [[r[i].strip() for r in rows] for i in (0, 1)]
+
+    def names(c):
+        return all(THEME_NAME_RE.match(v) for v in c)
+
+    def counts(c):
+        return all(ASCII_DIGITS_RE.match(v) for v in c)
+    fits = [(a, b) for a, b in ((0, 1), (1, 0)) if names(cols[a]) and counts(cols[b])]
+    if len(fits) != 1:
+        raise ThemesError("1行目に数字だけの値がある（見出しの行が無い形）。名前の欄と数字の欄を"
+                          "値の形で一つに決められないので止まる")
+    return fits[0]
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +511,9 @@ def build_output(sheets):
 def code_sha256():
     with open(os.path.join(HERE, "themes.py"), "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()
+
+
+_LOADED_SHA256 = code_sha256()          # 読み込んだ時点の themes.py（_code_gate が照らす）
 
 
 def _iso(dt):
@@ -475,28 +540,90 @@ def _resolve(root, home):
     return store, os.path.join(root_real, *MANIFEST_DIR_PARTS, MANIFEST_NAME)
 
 
+def _load_codegate():
+    spec = importlib.util.spec_from_file_location("codegate_for_themes",
+                                                  os.path.join(HERE, "codegate.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _code_gate(root):
+    """0.1章。返り値：themes.py の code_sha256。通らなければ ThemesError（何も書かない）。"""
+    import subprocess
+    if os.path.realpath(HERE) != os.path.join(os.path.realpath(root), "src", "collector"):
+        raise ThemesError("動いている themes.py が、root のプロジェクトのものでない")
+    cg = _load_codegate()
+    try:
+        codes = cg.check_clean(root, ("src/collector",),
+                               (CODE_REL, "src/collector/privacy_scan.py"))
+    except cg.CodeGateError as e:
+        raise ThemesError("コードの関門：%s" % e) from None
+    except (OSError, subprocess.SubprocessError):
+        raise ThemesError("コードの関門：git の実行に失敗した") from None
+    sha = hashlib.sha256(codes[CODE_REL]).hexdigest()
+    if sha != _LOADED_SHA256 or sha != code_sha256():
+        raise ThemesError("動いている themes.py が、HEAD にコミットした中身と違う")
+    return sha
+
+
+def _read_manifest(path):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return b""
+    except OSError:
+        raise ThemesError("マニフェストを開けない（シンボリックリンクなど）") from None
+    with os.fdopen(fd, "rb") as f:
+        return f.read()
+
+
+def _append_line(path, entry, what):
+    line = (json.dumps(entry, sort_keys=True, ensure_ascii=True) + "\n").encode("ascii")
+    if privacy_scan.find_in_bytes(line):
+        raise ThemesError("%s にメールアドレスの形の文字列があるので書かずに止まる" % what)
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+                 0o644)
+    try:
+        os.write(fd, line)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def run(*, root, home, url=None, transport=urllib_transport, clock=time.monotonic,
         now=lambda: datetime.datetime.now(datetime.timezone.utc)):
-    """1回だけ取得し、件数の欄を捨てて保存する。止まるときは何も書かない（ThemesError）。"""
+    """1回だけ取得し、件数の欄を捨てて保存する（ThemesError で止まる）。
+
+    関門（0章・0.1章）で止まるときは何も書かない。通信の直前に試行の行を書くので、通信の
+    あとで止まったときは、試行の行だけが残る（区分表の本体は書かない）。
+    """
     url = THEMES_URL if url is None else url
     name = validate_doc_url(url)
     _exclusion_gate(root)                             # 0章。通信の前に最初に確かめる
+    sha_code = _code_gate(root)                       # 0.1章
     store, manifest = _resolve(root, home)
+    if _read_manifest(manifest).strip():
+        raise ThemesError("区分表の取得は既に試みた（マニフェストに行がある）。2回目は取得しない")
     stamp = now().astimezone(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     file_name = "gdelt-themes-%s.tsv" % stamp
     out_path = os.path.join(store, file_name)
     if os.path.lexists(out_path):
         raise ThemesError("同じ名前のファイルが既にある")
+    attempted_at = _iso(now())
+    _append_line(manifest, {"kind": "attempt", "attempted_at": attempted_at, "source_url": url,
+                            "code_path": CODE_REL, "code_sha256": sha_code}, "マニフェストの行")
     raw = fetch_once(url, transport, clock)
     fetched_at = _iso(now())
     sheets = read_table(raw, name)
     del raw                                           # 元の応答はここで手放す
-    data, nrows, kept, dropped, replaced = build_output(sheets)
+    data, nrows, kept, dropped, replaced, headerless = build_output(sheets)
     del sheets
-    entry = {"file_name": file_name, "sha256": hashlib.sha256(data).hexdigest(), "rows": nrows,
-             "kept_columns": kept, "dropped_columns": dropped, "fetched_at": fetched_at,
-             "sheet_names_replaced": replaced,
-             "source_url": url, "code_path": CODE_REL, "code_sha256": code_sha256(),
+    entry = {"kind": "result", "file_name": file_name, "sha256": hashlib.sha256(data).hexdigest(),
+             "rows": nrows, "kept_columns": kept, "dropped_columns": dropped,
+             "fetched_at": fetched_at, "attempted_at": attempted_at,
+             "sheet_names_replaced": replaced, "headerless": headerless,
+             "source_url": url, "code_path": CODE_REL, "code_sha256": sha_code,
              "store_location": STORE_LOCATION_NAME}
     line = (json.dumps(entry, sort_keys=True, ensure_ascii=True) + "\n").encode("ascii")
     for what, b in (("区分表", data), ("マニフェストの行", line)):
@@ -511,13 +638,7 @@ def run(*, root, home, url=None, transport=urllib_transport, clock=time.monotoni
         os.fsync(fd)
     finally:
         os.close(fd)
-    fd = os.open(manifest, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
-                 0o644)
-    try:
-        os.write(fd, line)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    _append_line(manifest, entry, "マニフェストの行")
     return entry
 
 

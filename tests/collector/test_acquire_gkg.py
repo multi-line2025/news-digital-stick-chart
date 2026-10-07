@@ -18,14 +18,17 @@
 import hashlib
 import importlib.util
 import inspect
+import io
 import json
 import os
+import plistlib
 import pwd
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 from unittest import mock
 
@@ -73,7 +76,85 @@ def tearDownModule():
     taf.tearDownModule()
 
 
+def pass_exclusion_gate(s):
+    """除外の規則の封印の関門を通ったことにする（関門そのものは TestExclusionGateFirst）。"""
+    return None
+
+
+class TestExclusionGateFirst(unittest.TestCase):
+    """差し戻し1回目 重1：試しの run と正式な run の両方で、最初に除外の規則の封印の関門を通す。"""
+
+    def test_real_gate_stops_first_while_kind_undecided(self):
+        never = mock.Mock(side_effect=AssertionError("除外の規則の関門より先に進んではいけない"))
+        with mock.patch.object(ledger, "require_method_access", never), \
+                mock.patch.object(ag, "check_gate", never):
+            for mode in ("official", "trial"):
+                with self.assertRaisesRegex(ag.GateError, "除外の規則.*まだ決まっていない"):
+                    ag._acquire(mode)
+            with mock.patch("sys.stderr"):
+                self.assertEqual(ag.main([]), 1)
+                self.assertEqual(ag.main(["--trial"]), 1)
+        never.assert_not_called()
+
+    def test_gate_uses_pinned_themes_and_root(self):
+        project = ag.PROJECT
+        s = ag._production_seams()
+
+        class ThemesError(Exception):
+            pass
+        ok = types.SimpleNamespace(ThemesError=ThemesError,
+                                   require_exclusion_rules_sealed=lambda: ({"seq": 9}, project))
+        with mock.patch.object(ag, "_load_pinned", return_value=ok) as load:
+            ag._exclusion_gate(s)
+        load.assert_called_once_with(project, ag.THEMES_REL, "themes")
+        other = types.SimpleNamespace(ThemesError=ThemesError,
+                                      require_exclusion_rules_sealed=lambda: ({"seq": 9}, "/"))
+        with mock.patch.object(ag, "_load_pinned", return_value=other):
+            with self.assertRaisesRegex(ag.GateError, "プロジェクトが違う"):
+                ag._exclusion_gate(s)
+
+        def boom():
+            raise ThemesError("見本")
+        bad = types.SimpleNamespace(ThemesError=ThemesError, require_exclusion_rules_sealed=boom)
+        with mock.patch.object(ag, "_load_pinned", return_value=bad):
+            with self.assertRaisesRegex(ag.GateError, "見本"):
+                ag._exclusion_gate(s)
+
+    def test_pinned_themes_must_match(self):
+        tmp = tempfile.mkdtemp(prefix="gkg-themes-pin-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        os.makedirs(os.path.join(tmp, "src", "collector"))
+        with open(os.path.join(tmp, ag.THEMES_REL), "wb") as f:
+            f.write(b"EXCLUSION_RULE_KIND = 'x'\n")
+        with self.assertRaisesRegex(ag.GateError, "固定した値と違う"):
+            ag._load_pinned(tmp, ag.THEMES_REL, "themes")
+
+
+class TestVolumeIdentity(unittest.TestCase):
+    """差し戻し1回目 軽3：diskutil で形式と VolumeUUID を読む（ここでは diskutil を差し替える）。"""
+
+    def run_with(self, info, code=0):
+        out = types.SimpleNamespace(returncode=code, stdout=plistlib.dumps(info))
+        with mock.patch.object(ag.subprocess, "run", return_value=out) as r:
+            v = ag.volume_identity("/x")
+        self.assertEqual(r.call_args.args[0], [ag.DISKUTIL, "info", "-plist", "/x"])
+        return v
+
+    def test_cases(self):
+        self.assertEqual(self.run_with({"FilesystemType": "msdos", "VolumeUUID": "U-1"}), "U-1")
+        for info, code, pattern in (({"FilesystemType": "exfat", "VolumeUUID": "U"}, 0, "msdos"),
+                                    ({"FilesystemType": "msdos"}, 0, "VolumeUUID"),
+                                    ({"FilesystemType": "msdos", "VolumeUUID": "U"}, 1, "読めない")):
+            with self.assertRaisesRegex(ag.GateError, pattern):
+                self.run_with(info, code)
+
+
 class TestMethodAccessFirst(unittest.TestCase):
+    def setUp(self):
+        p = mock.patch.object(ag, "_exclusion_gate", pass_exclusion_gate)
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_production_calls_gate_without_arguments_first(self):
         calls = []
         gate = mock.Mock(side_effect=ledger.MethodAccessRequired("見本"))
@@ -95,7 +176,8 @@ class TestMethodAccessFirst(unittest.TestCase):
         body = src.split('"""', 2)[2]
         first = [l.strip() for l in body.splitlines() if l.strip()]
         self.assertTrue(first[0].startswith("s = "))
-        self.assertTrue(first[1].startswith("method_rec = _method_access_gate("))
+        self.assertEqual(first[1], "_exclusion_gate(s)")
+        self.assertTrue(first[2].startswith("method_rec = _method_access_gate("))
         self.assertIn("rec = ledger.require_method_access()\n",
                       inspect.getsource(ag._method_access_gate))
 
@@ -107,6 +189,10 @@ class E2ECase(taf.CopyCase):
 
     def setUp(self):
         super().setUp()
+        p = mock.patch.object(ag, "_exclusion_gate", pass_exclusion_gate)
+        p.start()
+        self.addCleanup(p.stop)
+        self.volume_id = lambda v: "TEST-VOLUME-UUID"
         self.zips = {}
         for d in self.DAYS:
             for i in range(3):
@@ -170,7 +256,8 @@ class E2ECase(taf.CopyCase):
         base = dict(project=self.project, home=self.home, volume=self.volume,
                     transport=self.gtransport, sleep=lambda s: None, clock=self.clock,
                     now=lambda: tg.NOW, log=self.gkg_logs.append,
-                    disk_free=lambda p: 100 * 1024 ** 3, check_volume=self.check_volume)
+                    disk_free=lambda p: 100 * 1024 ** 3, check_volume=self.check_volume,
+                    volume_id=self.volume_id)
         base.update(kw)
         return ag._TestSeams(**base)
 
@@ -263,9 +350,16 @@ class TestEndToEnd(E2ECase):
                                          gkg.TRIAL_MANIFEST_NAME))
         self.assertEqual(tm[0]["store_location"], "LACIE SHARE:/news-stick-data/gkg-trial")
         self.assertEqual(os.listdir(self.gkg_store), [])
+        with self.assertRaises(Exception) as cm:              # 試しの run を未コミットのまま
+            self.acquire(self.gseams())
+        self.assertIn("全部コミットされていない", str(cm.exception))
+        self.assertFalse(os.path.exists(os.path.join(self.project, "data", "manifest",
+                                                     gkg.MANIFEST_NAME)))
         self.commit_manifest("試しの run")
         out = self.acquire_official(self.gseams())
         self.assertEqual(out["days"], len(self.DAYS))
+        man = gkg.read_jsonl(os.path.join(self.project, "data", "manifest", gkg.MANIFEST_NAME))
+        self.assertEqual(man[0]["trial_run_ids"], [out["run_id"]])
         with self.assertRaises(Exception) as cm:
             self.acquire(self.gseams(), mode="trial")
         self.assertIn("試しの run はしない", str(cm.exception))
@@ -350,6 +444,7 @@ class TestEndToEndOnFat32(E2ECase):
     def setUp(self):
         super().setUp()
         self.check_volume = None                       # 関門と取得で本物の gkg.check_volume
+        self.volume_id = None                          # 本物の diskutil で VolumeUUID を読む
 
     def test_trial_and_official_on_fat32(self):
         self.add_method_access()
@@ -358,6 +453,7 @@ class TestEndToEndOnFat32(E2ECase):
         out = self.acquire_official(self.gseams())
         self.assertEqual(out["files_ok"], len(self.zips))
         man = gkg.read_jsonl(os.path.join(self.project, "data", "manifest", gkg.MANIFEST_NAME))
+        self.assertRegex(man[0]["volume_id"], r"\A[0-9A-F-]{36}\Z")
         for e in man:
             if e["kind"] == "day":
                 with open(os.path.join(self.gkg_store, e["file_name"]), "rb") as f:
@@ -373,7 +469,8 @@ class TestCodeScope(unittest.TestCase):
     def test_pins_match_current_files(self):
         self.assertEqual([r for r, _ in ag.PINNED_SHA256],
                          ["src/collector/gkg.py", "src/collector/filelist.py",
-                          "src/collector/privacy_scan.py", "src/collector/codegate.py"])
+                          "src/collector/privacy_scan.py", "src/collector/codegate.py",
+                          "src/collector/themes.py"])
         for rel, want in ag.PINNED_SHA256:
             self.assertEqual(taf.sha_file(os.path.join(PROJECT, rel)), want, rel)
         self.assertEqual(ag.CODE_REL, gkg.CODE_REL)
@@ -396,11 +493,18 @@ class TestProductionPath(unittest.TestCase):
     def test_main_modes(self):
         done = {"run_id": "a" * 16, "days": 1, "files_ok": 1, "files_failed": 0}
         got = mock.Mock(return_value=done)
-        with mock.patch.object(ag, "_acquire", got), mock.patch("sys.stdout"):
+        out = io.StringIO()
+        with mock.patch.object(ag, "_acquire", got), mock.patch("sys.stdout", out):
             self.assertEqual(ag.main([]), 0)
             self.assertEqual(ag.main(["--trial"]), 0)
+        text = " ".join(out.getvalue().split())
+        self.assertIn("Data: The GDELT Project (https://www.gdeltproject.org/). This project is not "
+                      "affiliated with or endorsed by the GDELT Project.", text)
+        self.assertIn("データ出典：GDELT Project（https://www.gdeltproject.org/）。本プロジェクトは "
+                      "GDELT Project と提携・承認の関係にありません。", text)
         self.assertEqual([c.args for c in got.call_args_list], [("official",), ("trial",)])
         with mock.patch.object(ledger, "require_method_access", return_value={"seq": 1}), \
+                mock.patch.object(ag, "_exclusion_gate", pass_exclusion_gate), \
                 mock.patch.object(ag, "check_gate", side_effect=AssertionError("進まない")):
             with self.assertRaises(ValueError):
                 ag._acquire("other")
@@ -450,7 +554,8 @@ class TestProductionPath(unittest.TestCase):
 
         def seams(**kw):
             base = dict(project=tmp, home=tmp, volume=tmp, transport=None, sleep=None,
-                        clock=None, now=None, log=None, disk_free=None, check_volume=None)
+                        clock=None, now=None, log=None, disk_free=None, check_volume=None,
+                        volume_id=None)
             base.update(kw)
             return ag._TestSeams(**base)
 

@@ -26,14 +26,20 @@
                    （gkg.py 5章。T-018 の監査 軽2）
 
 このスクリプトがすること（この順。途中で止まれば、それより後のことはしない）
-    0. 最初に ledger.require_method_access() を引数なしで呼ぶ（T-014）。鎖に method-access の
+    00. 最初に、除外の規則の封印の関門（themes.require_exclusion_rules_sealed。区分表の取得と
+       同じ関門）を通す（T-021 の差し戻し1回目 重1。試しの run と正式な run の両方）。GKG の
+       集計にはテーマの名前と件数が出るので、除外の規則の封印より前には取得しない。themes.py は
+       PINNED_SHA256 の値と一致するバイト列だけを読み込む。**封印係の kind が未決のあいだは、
+       ここで必ず止まる（GKG も取得しない）。** ledger の側の検査（method-access より前に除外の
+       規則の封印があること）は、封印係の別のタスクで行う。
+    0. 次に ledger.require_method_access() を引数なしで呼ぶ（T-014）。鎖に method-access の
        記録が無いか、検証に通らなければ、ほかのことを何もせずに止まる。
     1. 関門（check_gate）。ネットワークは使わない。どれか1つでも欠ければ GateError で止まり、
        何も書かない。
          (1) method-access の記録の中身の区画が、gkg.METHOD_BLOCK（2015-03-02〜2020-12-14）と同じ
          (2) codegate.py の sha256 が PINNED_SHA256 と一致し、src/collector・src/sealer に未コミット
              の変更・無視されるファイル・skip-worktree などの印が無い。入口・gkg.py・filelist.py・
-             privacy_scan.py・codegate.py の中身が HEAD と同じで、PINNED_SHA256 と一致する
+             privacy_scan.py・codegate.py・themes.py の中身が HEAD と同じで、PINNED_SHA256 と一致する
              （codegate.py の docstring）。sealed/・data/manifest/ がリンクでない
          (3) ファイル一覧：data/manifest/gdelt-filelist.jsonl がちょうど1行で、その sha256 が、
              封印の記録のただ1件の acquisition-result の kept_rows_sha256 と同じ。その行の
@@ -42,10 +48,13 @@
          (4) 保存先（gkg.py 7章。正式な run は LACIE SHARE の news-stick-data/gkg-method、
              試しの run は news-stick-data/gkg-trial）：ディスクがマウントされていて読み取り
              専用でなく、2段のフォルダがリンクでない既にあるフォルダで、名前の大文字と小文字
-             まで同じ（gkg.resolve_paths）。外れていれば、何も書かずに止まる
+             まで同じ（gkg.resolve_paths）。外れていれば、何も書かずに止まる。
+             さらに diskutil でディスクの形式（msdos）と VolumeUUID を読む。形式が msdos で
+             なければ止まる。VolumeUUID は run-start に書き、再開のたびに照らす（gkg.py 5.2章）
          (5) 正式な run では、HEAD のコミットの中のマニフェスト（data/manifest/
-             gdelt-gkg-method.jsonl。無ければ空）を git から読み、gkg.run_gkg に渡す。
-             run-start がコミットされていなければ、gkg.run_gkg が要求を送る前に止まる
+             gdelt-gkg-method.jsonl と gdelt-gkg-trial.jsonl。無ければ空）を git から読み、
+             gkg.run_gkg に渡す。run-start がコミットされていなければ、また試しの run の
+             マニフェストが全部コミットされていなければ、gkg.run_gkg が要求を送る前に止まる
     2. gkg.py を、関門で照合したバイト列そのものとして読み込み、3つのファイルを読み直して
        変わっていないことを確かめる。
     3. gkg.run_gkg を1回動かす（取得・集計・保存・マニフェスト。gkg.py の docstring）。
@@ -66,8 +75,8 @@
 
 取得のコードのハッシュの範囲
     マニフェストの行の code_sha256 は、このファイルの sha256 である。このファイルは
-    gkg.py・filelist.py・privacy_scan.py・codegate.py の sha256 を PINNED_SHA256 に固定するので、
-    この1つの値で取得のコードの5つのファイルが決まる。範囲の外：src/sealer の封印の仕組み
+    gkg.py・filelist.py・privacy_scan.py・codegate.py・themes.py の sha256 を PINNED_SHA256 に固定
+    するので、この1つの値で取得のコードの6つのファイルが決まる。範囲の外：src/sealer の封印の仕組み
     （関門で未コミットの変更が無いことだけを確かめる）、Python の処理系。
 
 限界
@@ -99,14 +108,18 @@ GKG_REL = "src/collector/gkg.py"
 FILELIST_REL = "src/collector/filelist.py"
 PRIVACY_SCAN_REL = "src/collector/privacy_scan.py"
 CODEGATE_REL = "src/collector/codegate.py"
+THEMES_REL = "src/collector/themes.py"
+DISKUTIL = "/usr/sbin/diskutil"
+DISKUTIL_TIMEOUT_SECONDS = 60
 
 # 取得のコードのうち、このファイル以外の4つの sha256。変えたらここも直してコミットする
 # （テストが照合する）。
 PINNED_SHA256 = (
-    (GKG_REL, "89a144a46fe5e8c8df5a8042379f46b755ee2dc58b90c1040c1f08a72ab92190"),
+    (GKG_REL, "c86d95b955a0ef3698dcc9186f5368aa452f50dc7de7e0e5ce7088e5371ea96b"),
     (FILELIST_REL, "afd7a9dd47bc052a691e1a4cd558b211f4d72cf1ce1f451fa9f3016540cd04a7"),
     (PRIVACY_SCAN_REL, "68d8836d56489ca5df9f2f55e24a2642ebf3aa14afdc2e0120577c7b6c6cb887"),
     (CODEGATE_REL, "d422be41dc59c4be50689a2426453db965be506a9981770ab3eb7557ed078769"),
+    (THEMES_REL, "4a90e02cd60afb08dcb00a32c5edbb8db703d2acbe30563d25ed657de998cdad"),
 )
 CLEAN_PATHS = ("src/collector", "src/sealer")
 FILELIST_MANIFEST_REL = ("data", "manifest", "gdelt-filelist.jsonl")
@@ -130,7 +143,7 @@ def production_home():
 
 class _Seams:
     FIELDS = ("project", "home", "volume", "transport", "sleep", "clock", "now", "log", "disk_free",
-              "check_volume")
+              "check_volume", "volume_id")
     __slots__ = FIELDS
 
     def __init__(self, **kw):
@@ -150,7 +163,7 @@ def _utc_now():
 def _production_seams():
     return _Seams(project=PROJECT, home=production_home(), volume=None, transport=None,
                   sleep=time.sleep, clock=time.monotonic, now=_utc_now, log=None, disk_free=None,
-                  check_volume=None)
+                  check_volume=None, volume_id=None)
 
 
 class _TestSeams(_Seams):
@@ -182,6 +195,52 @@ def _checked_test_seams(t):
             raise ValueError("テストの project の %s が、リンクか一時的なディレクトリの外を指す"
                              % "/".join(parts))
     return t
+
+
+def _load_pinned(project, rel, name):
+    path = os.path.join(project, rel)
+    try:
+        st = os.lstat(path)
+    except OSError:
+        raise GateError("取得のコードが無い: %s" % rel) from None
+    if not stat.S_ISREG(st.st_mode):
+        raise GateError("取得のコードが通常のファイルでない: %s" % rel)
+    with open(path, "rb") as f:
+        source = f.read()
+    if _sha256(source) != dict(PINNED_SHA256)[rel]:
+        raise GateError("%s の sha256 が、入口のスクリプトに固定した値と違う" % rel)
+    return _exec_module(name, path, source)
+
+
+def _exclusion_gate(s):
+    """手順00（重1）。区分表の取得と同じ、除外の規則の封印の関門。通らなければ GateError。"""
+    themes = _load_pinned(s.project, THEMES_REL, "themes")
+    try:
+        _rec, root = themes.require_exclusion_rules_sealed()
+    except themes.ThemesError as e:
+        raise GateError("除外の規則の封印の関門：%s" % e) from None
+    if os.path.realpath(root) != os.path.realpath(s.project):
+        raise GateError("除外の規則の関門が読んだプロジェクトと、取得に使うプロジェクトが違う")
+
+
+def volume_identity(volume):
+    """関門 (4)。diskutil でディスクの形式と VolumeUUID を読む。形式が msdos でなければ止まる。"""
+    import plistlib
+    try:
+        r = subprocess.run([DISKUTIL, "info", "-plist", volume], capture_output=True,
+                           timeout=DISKUTIL_TIMEOUT_SECONDS, env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                                                                  "LC_ALL": "C"})
+        info = plistlib.loads(r.stdout) if r.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        info = None
+    if not isinstance(info, dict):
+        raise GateError("保存先のディスクの情報を diskutil で読めない")
+    if info.get("FilesystemType") != "msdos":
+        raise GateError("保存先のディスクの形式が msdos（FAT32）でない")
+    uuid = info.get("VolumeUUID")
+    if not isinstance(uuid, str) or not uuid:
+        raise GateError("保存先のディスクの VolumeUUID が無い")
+    return uuid
 
 
 def _method_access_gate(s):
@@ -318,10 +377,13 @@ def check_gate(s, method_rec, mode="official"):
         gkg.resolve_paths(s.project, volume, mode, check_volume)
     except gkg.GkgError as e:
         raise GateError(str(e)) from None
-    committed = None
+    volume_id = (volume_identity if s.volume_id is None else s.volume_id)(volume)
+    committed = committed_trial = None
     if mode == "official":
         committed = _committed_manifest(
             cg, s.project, "/".join(gkg.MANIFEST_DIR_PARTS + (gkg.MANIFEST_NAME,)))
+        committed_trial = _committed_manifest(
+            cg, s.project, "/".join(gkg.MANIFEST_DIR_PARTS + (gkg.TRIAL_MANIFEST_NAME,)))
     for rel, data in codes.items():
         with open(os.path.join(s.project, rel), "rb") as f:
             if f.read() != data:
@@ -329,7 +391,8 @@ def check_gate(s, method_rec, mode="official"):
     return {"codes": codes, "code_sha256": _sha256(codes[CODE_REL]), "gkg": gkg,
             "filelist_rows": rows, "filelist_sha256": fl_sha, "method_access_seq":
             method_rec["seq"], "volume": volume, "check_volume": check_volume,
-            "committed_manifest": committed}
+            "committed_manifest": committed, "committed_trial_manifest": committed_trial,
+            "volume_id": volume_id}
 
 
 # ---------------------------------------------------------------------------
@@ -337,8 +400,9 @@ def check_gate(s, method_rec, mode="official"):
 # ---------------------------------------------------------------------------
 
 def _acquire(mode="official", _test=None):
-    """手順0 → 関門 → 取得。mode は official か trial。_test はテストだけが渡す（_TestSeams）。"""
+    """手順00 → 手順0 → 関門 → 取得。mode は official か trial。_test はテストだけが渡す。"""
     s = _production_seams() if _test is None else _checked_test_seams(_test)
+    _exclusion_gate(s)
     method_rec = _method_access_gate(s)
     if mode not in ("official", "trial"):
         raise ValueError("mode は official か trial だけ")
@@ -355,6 +419,8 @@ def _acquire(mode="official", _test=None):
                        method_access_seq=gate["method_access_seq"],
                        code_sha256=gate["code_sha256"],
                        committed_manifest=gate["committed_manifest"],
+                       committed_trial_manifest=gate["committed_trial_manifest"],
+                       volume_id=gate["volume_id"],
                        check_volume=gate["check_volume"], sleep=s.sleep, clock=s.clock,
                        now=s.now, **kw)
 
@@ -391,7 +457,10 @@ def main(argv=None):
     print("%s run_id: %s 日数: %d ok: %d failed: %d"
           % ("正式な run" if mode == "official" else "試しの run", out["run_id"], out["days"],
              out["files_ok"], out["files_failed"]))
-    print("データ出典：GDELT Project（https://www.gdeltproject.org/）")
+    print("データ出典：GDELT Project（https://www.gdeltproject.org/）。本プロジェクトは "
+          "GDELT Project と提携・承認の関係にありません。")
+    print("Data: The GDELT Project (https://www.gdeltproject.org/). This project is not "
+          "affiliated with or endorsed by the GDELT Project.")
     return 0
 
 

@@ -16,12 +16,14 @@ import json
 import os
 import shutil
 import socket
+import sys
 import tempfile
 import unittest
 import zipfile
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
 PROJECT = os.path.dirname(os.path.dirname(HERE))
 SRC = os.path.join(PROJECT, "src", "collector")
 
@@ -60,6 +62,14 @@ def setUpModule():
 def no_gate(root):
     """0章の関門を通ったことにする（関門そのものは TestExclusionGate で確かめる）。"""
     return None
+
+
+CODE_SHA = "ab" * 32
+
+
+def no_code_gate(root):
+    """0.1章のコードの関門を通ったことにする（関門そのものは TestCodeGate で確かめる）。"""
+    return CODE_SHA
 
 
 def tearDownModule():
@@ -160,6 +170,84 @@ class TestUrl(unittest.TestCase):
             themes.urllib_transport(g + "LOOKUP-LANGUAGES.TXT", 1)
 
 
+class TestHeaderlessRule(unittest.TestCase):
+    """質問 G の条件 (1)〜(4)。判定は値の形で、欄の位置によらない。"""
+
+    def build(self, rows):
+        return themes.build_output([("", rows)])
+
+    def test_count_column_first_is_also_found_by_shape(self):
+        data, n, kept, dropped, _r, headerless = self.build(
+            [["123", "QQ_B"], ["45", "QQ_A"]])
+        self.assertTrue(headerless)
+        self.assertEqual((kept, dropped, n), (["THEME"], ["column_A"], 2))
+        self.assertEqual(data, b"THEME\nQQ_A\nQQ_B\n")
+
+    def test_stops_unless_exactly_one_assignment(self):
+        for rows in ([["QQ_A", "1"], ["QQ_B", "x"]],         # 数字でない値
+                     [["QQ_A", "1"], ["qq_b", "2"]],          # 名前の形でない値
+                     [["QQ_A", "1", "2"]],                    # 欄が3つ
+                     [["QQ_A", "1"], ["QQ_B"]],               # 欄が1つの行
+                     [["QQ_A", "1,234"]],                     # ASCII の数字だけでない
+                     [["QQ_A", "\uff11"]],                    # 全角の数字
+                     [["\u00b2", "\u00b3"]],                   # どちらの割り当ても合わない
+                     [["1", "2"]]):
+            with self.subTest(rows=rows):
+                with self.assertRaises(themes.ThemesError):
+                    self.build(rows)
+
+    def test_both_assignments_fit_stops(self):
+        with mock.patch.object(themes, "THEME_NAME_RE", themes.re.compile(r"\A[A-Z0-9_]+\Z")):
+            with self.assertRaisesRegex(themes.ThemesError, "一つに決められない"):
+                self.build([["1", "2"], ["3", "4"]])
+
+    def test_header_rows_are_not_affected(self):
+        _d, _n, kept, dropped, _r, headerless = self.build([["THEME", "COUNT"], ["QQ_A", "5"]])
+        self.assertFalse(headerless)
+        self.assertEqual((kept, dropped), (["THEME"], ["COUNT"]))
+
+
+class TestCodeGate(unittest.TestCase):
+    """差し戻し1回目 中3：区分表の取得は、コミットした themes.py のコードでだけ行う。"""
+
+    def setUp(self):
+        import test_acquire_filelist as taf
+        self.taf = taf
+        self.tmp = tempfile.mkdtemp(prefix="themes-code-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.root = os.path.join(self.tmp, "proj")
+        col = os.path.join(self.root, "src", "collector")
+        os.makedirs(col)
+        for n in ("themes.py", "privacy_scan.py", "codegate.py"):
+            shutil.copyfile(os.path.join(SRC, n), os.path.join(col, n))
+        taf.git(self.root, "init", "-q")
+        taf.git(self.root, "add", "-A")
+        taf.git(self.root, "commit", "-q", "-m", "x")
+        self.mod = _load("themes_copy", os.path.join(col, "themes.py"))
+
+    def test_committed_code_passes(self):
+        sha = self.mod._code_gate(self.root)
+        self.assertEqual(sha, self.mod.code_sha256())
+
+    def test_uncommitted_change_stops(self):
+        with open(os.path.join(self.root, "src", "collector", "privacy_scan.py"), "ab") as f:
+            f.write(b"# x\n")
+        with self.assertRaisesRegex(self.mod.ThemesError, "コードの関門"):
+            self.mod._code_gate(self.root)
+
+    def test_running_code_differs_from_head_stops(self):
+        p = os.path.join(self.root, "src", "collector", "themes.py")
+        with open(p, "ab") as f:
+            f.write(b"# x\n")
+        self.taf.git(self.root, "commit", "-q", "-am", "y")   # 読み込んだあとでコミットを変える
+        with self.assertRaisesRegex(self.mod.ThemesError, "HEAD にコミットした中身と違う"):
+            self.mod._code_gate(self.root)
+
+    def test_other_root_stops(self):
+        with self.assertRaisesRegex(themes.ThemesError, "root のプロジェクトのものでない"):
+            themes._code_gate(self.root)
+
+
 class TestExclusionGate(unittest.TestCase):
     """T-021：統計係の除外の規則の封印より前には、区分表を取得しない。"""
 
@@ -231,6 +319,7 @@ class TestExclusionGate(unittest.TestCase):
             self.gate_with(self.records(["periods", "exclusion-rules"]), root=self.tmp)
         self.assertEqual(self.tr.calls, [])
 
+    @mock.patch.object(themes, "_code_gate", no_code_gate)
     def test_passes_with_record(self):
         e = self.gate_with(self.records(["periods", "exclusion-rules"]))
         self.assertEqual(len(self.tr.calls), 1)
@@ -276,6 +365,7 @@ class TestClassify(unittest.TestCase):
             themes.classify_columns(header, rows)
 
     @mock.patch.object(themes, "_exclusion_gate", no_gate)
+    @mock.patch.object(themes, "_code_gate", no_code_gate)
     def test_hidden_counts_never_written(self):
         tmp = tempfile.mkdtemp(prefix="themes-hidden-")
         self.addCleanup(shutil.rmtree, tmp, True)
@@ -322,7 +412,7 @@ class TestClassify(unittest.TestCase):
 
     def test_sheet_names_with_numbers_are_replaced(self):
         rows = [["THEME", "DESCRIPTION"], ["QQ_A", "alpha"]]
-        data, n, kept, dropped, replaced = themes.build_output(
+        data, n, kept, dropped, replaced, _h = themes.build_output(
             [("Themes (12,345)", rows), ("Other", [["THEME", "DESCRIPTION"], ["QQ_B", "beta"]])])
         self.assertTrue(replaced)
         text = data.decode()
@@ -331,12 +421,12 @@ class TestClassify(unittest.TestCase):
         self.assertIn("sheet_A\tQQ_A\talpha", text)
         self.assertIn("sheet_B\tQQ_B\tbeta", text)
         for name in ("\u2460", "\u00b2x", "\u0661"):
-            _d, _n, _k, _dr, rep2 = themes.build_output([(name, rows), ("Other", rows)])
+            _d, _n, _k, _dr, rep2, _h = themes.build_output([(name, rows), ("Other", rows)])
             self.assertTrue(rep2, name)
-        data, _n, _k, _d, replaced = themes.build_output([("Alpha", rows), ("Beta", rows)])
+        data, _n, _k, _d, replaced, _h = themes.build_output([("Alpha", rows), ("Beta", rows)])
         self.assertFalse(replaced)
         self.assertIn("Alpha\tQQ_A", data.decode())
-        data, _n, _k, _d, replaced = themes.build_output([("Themes 2024", rows)])
+        data, _n, _k, _d, replaced, _h = themes.build_output([("Themes 2024", rows)])
         self.assertFalse(replaced)                     # シートが1つならシート名は書かない
         self.assertNotIn("2024", data.decode())
 
@@ -358,9 +448,10 @@ class TestClassify(unittest.TestCase):
 
 class RunCase(unittest.TestCase):
     def setUp(self):
-        p = mock.patch.object(themes, "_exclusion_gate", no_gate)
-        p.start()
-        self.addCleanup(p.stop)
+        for p in (mock.patch.object(themes, "_exclusion_gate", no_gate),
+                  mock.patch.object(themes, "_code_gate", no_code_gate)):
+            p.start()
+            self.addCleanup(p.stop)
         self.tmp = tempfile.mkdtemp(prefix="themes-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.root = os.path.join(self.tmp, "proj")
@@ -399,7 +490,7 @@ class TestRun(RunCase):
         body = files[e["file_name"]].decode()
         self.assertEqual(body.splitlines()[0], "THEME\tDESCRIPTION")
         self.assertIn("QQ_ALPHA\tAlpha desc", body)
-        line = json.loads(files[themes.MANIFEST_NAME])
+        line = json.loads(files[themes.MANIFEST_NAME].splitlines()[-1])
         self.assertEqual(line["sha256"], e["sha256"])
         self.assertEqual(line["source_url"], URL)
         self.assertNotIn(self.home, files[themes.MANIFEST_NAME].decode())
@@ -417,27 +508,82 @@ class TestRun(RunCase):
             for m in COUNT_MARKS:
                 self.assertNotIn(m.encode(), data)
 
+    def attempt_only(self):
+        """通信のあとで止まったとき：試行の行だけが残り、区分表の本体は書かれない。"""
+        files = self.written()
+        self.assertEqual(sorted(files), [themes.MANIFEST_NAME])
+        lines = [json.loads(l) for l in files[themes.MANIFEST_NAME].splitlines()]
+        self.assertEqual([l["kind"] for l in lines], ["attempt"])
+        self.assertEqual(lines[0]["code_sha256"], CODE_SHA)
+        self.assertEqual(lines[0]["source_url"], URL)
+
+    def fresh(self):
+        shutil.rmtree(self.tmp, True)
+        self.setUp()
+
     def test_stops_without_writing(self):
-        cases = [tsv(["QQ_X", "5"], [["QQ_Y", "6"]]),             # 見出しが無い
+        cases = [tsv(["QQ_X", "5", "x"], [["QQ_Y", "6", "y"]]),  # 見出しが無く、欄が3つ
                  GOOD.replace(b"QQ_ALPHA", b"see " + b"a" + b"@" + b"b.org" * 1),
                  b"\xff\xfe broken"]
         for body in cases:
             with self.subTest(body=body[:20]):
+                self.fresh()
                 with self.assertRaises(themes.ThemesError):
                     self.run_themes(body)
-                self.assertEqual(self.written(), {})
+                self.attempt_only()
 
     def test_single_attempt_no_retry(self):
         with self.assertRaises(themes.ThemesError):
             self.run_themes(GOOD, status=503)
         self.assertEqual(len(self.tr.calls), 1)
-        self.assertEqual(self.written(), {})
+        self.attempt_only()
 
     def test_size_limit(self):
         with mock.patch.object(themes, "MAX_BYTES", 10):
             with self.assertRaises(themes.ThemesError):
                 self.run_themes(GOOD)
+        self.attempt_only()
+
+    def test_only_one_attempt_ever(self):
+        """差し戻し1回目 中3：失敗しても成功しても、2回目は通信せずに止まる。"""
+        with self.assertRaises(themes.ThemesError):
+            self.run_themes(GOOD, status=503)
+        with self.assertRaisesRegex(themes.ThemesError, "既に試みた"):
+            self.run_themes(GOOD)
+        self.assertEqual(self.tr.calls, [])
+        self.attempt_only()
+        self.fresh()
+        e = self.run_themes(GOOD)
+        self.assertEqual(e["kind"], "result")
+        with self.assertRaisesRegex(themes.ThemesError, "既に試みた"):
+            self.run_themes(GOOD)
+        self.assertEqual(self.tr.calls, [])
+        lines = [json.loads(l) for l in self.written()[themes.MANIFEST_NAME].splitlines()]
+        self.assertEqual([l["kind"] for l in lines], ["attempt", "result"])
+        self.assertEqual(lines[1]["attempted_at"], lines[0]["attempted_at"])
+        self.assertEqual(lines[1]["code_sha256"], CODE_SHA)
+
+    def test_gate_failure_writes_nothing(self):
+        def stop(root):
+            raise themes.ThemesError("見本")
+        with mock.patch.object(themes, "_code_gate", stop):
+            with self.assertRaises(themes.ThemesError):
+                self.run_themes(GOOD)
         self.assertEqual(self.written(), {})
+        self.assertEqual(self.tr.calls, [])
+
+    def test_headerless_name_and_count(self):
+        """リードの判断（質問 G）：見出しの無い「名前・件数」の2欄なら、名前の欄だけを残す。"""
+        body = tsv(["QQ_ZETA", COUNT_MARKS[0]],
+                   [["QQ_ALPHA", COUNT_MARKS[1]], ["QQ_MID_7", COUNT_MARKS[2]]])
+        e = self.run_themes(body)
+        self.assertTrue(e["headerless"])
+        self.assertEqual((e["kept_columns"], e["dropped_columns"]), (["THEME"], ["column_B"]))
+        out = self.written()[e["file_name"]].decode()
+        self.assertEqual(out.splitlines(), ["THEME", "QQ_ALPHA", "QQ_MID_7", "QQ_ZETA"])  # 並べ替え
+        for data in self.written().values():
+            for m in COUNT_MARKS:
+                self.assertNotIn(m.encode(), data)
 
     def test_citation(self):
         self.assertIn("Data: The GDELT Project (https://www.gdeltproject.org/).",
