@@ -24,7 +24,8 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT = os.path.dirname(os.path.dirname(HERE))
 SRC = os.path.join(PROJECT, "src", "stats")
-DOC = os.path.join(PROJECT, "docs", "stats", "tags-naive.md")
+# 素朴な予測と採点計画の表は、凍結する tags-naive.md から naive-scoring.md に移した（T-022 差し戻し3回目）。
+DOC = os.path.join(PROJECT, "docs", "stats", "naive-scoring.md")
 sys.path.insert(0, SRC)
 
 import candidates  # noqa: E402
@@ -483,6 +484,27 @@ def seal_target_bytes():
 
 
 class TestSealTargets(unittest.TestCase):
+    def test_digest_script_agrees(self):
+        # src/stats/order1_digests.py（seal-order1.md 3章の照合に使う）が、このテストの中の別の実装と
+        # 同じ値を出すこと。CLI の出力も同じ。
+        import order1_digests
+        want = {k: _sha256(v) for k, v in seal_target_bytes().items()}
+        self.assertEqual(order1_digests.digests(PROJECT), want)
+        r = subprocess.run([sys.executable, "-B", os.path.join(SRC, "order1_digests.py")], capture_output=True,
+                           text=True, env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"), cwd=PROJECT)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), want)
+        r2 = subprocess.run([sys.executable, "-B", os.path.join(SRC, "order1_digests.py"), "--x"],
+                            capture_output=True, cwd=PROJECT)
+        self.assertEqual(r2.returncode, 2)
+
+    def test_frozen_doc_hash_in_sealed_test(self):
+        # M-3：封印するテスト test_tagrules.py の中の定数が、今の tags-naive.md の sha256 と同じ。
+        import test_tagrules
+        b = seal_target_bytes()
+        self.assertEqual(test_tagrules.TAGS_NAIVE_SHA256, _sha256(b["docs/stats/tags-naive.md"]))
+        self.assertIn(test_tagrules.TAGS_NAIVE_SHA256.encode(), b["tests/stats/test_tagrules.py"])
+
     def test_seal_targets(self):
         head, rows = read_handoff_table("seal-targets")
         self.assertEqual(head, ["対象", "sha256"])
@@ -521,11 +543,19 @@ class TestSealTargets(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 順番1で封印するテストが、封印の対象の外を読まないこと（T-022 差し戻し2回目 M-1）
+# 順番1で封印するテストが、封印の対象の外を読まないこと（T-022 差し戻し2回目・3回目 M-1）
+#
+# 二つの確かめ方を組み合わせる。
+#   (a) 実行の見張り：二つのテストを子プロセスで流し、Python の audit hook で、開いたファイル・
+#       フォルダの一覧・プロセスの起動（subprocess.Popen と _posixsubprocess.fork_exec）・リンクの作成・
+#       ctypes・通信などの事象を集め、許可リストと照らす（audit_sealed_tests）。
+#   (b) ソースの検査：二つのテストのソースを ast で調べ、使ってよいモジュールと os・subprocess・sys の
+#       使い方を許可リストに限る（sealed_test_source_problems）。audit hook で見えない読み方
+#       （os.stat、os.path.exists など）と、見張りの有無で振る舞いを変える書き方を、ここで禁じる。
+# 限界は docs/stats/tags-naive.md 5章 (1) の後の「限界」に書いた。
 # ---------------------------------------------------------------------------
 
 # 子プロセス（と、その子の Python）に audit hook を入れる sitecustomize。
-# 開いたファイル（open の事象）と、起動したプロセス・通信の事象を、ログに1行ずつ書く。
 # フックの中では import をしない（import 自身が open の事象を起こすため）。
 _SITECUSTOMIZE = """
 import os, sys, json
@@ -535,9 +565,16 @@ if _log:
     _dumps = json.dumps
     _getcwd = os.getcwd
     _fspath = os.fspath
-    _PROC = ("subprocess.Popen", "os.system", "os.exec", "os.posix_spawn", "os.spawn", "os.fork",
-             "os.forkpty", "pty.spawn")
-    _NET = ("socket.connect", "socket.getaddrinfo", "socket.bind", "urllib.Request", "http.client.connect")
+    _environ = os.environ
+    _realpath = os.path.realpath
+    _OTHER = ("os.system", "os.exec", "os.posix_spawn", "os.spawn", "os.fork", "os.forkpty", "pty.spawn",
+              "os.link", "os.symlink", "os.rename", "os.remove", "os.rmdir", "os.truncate", "os.chdir",
+              "os.mkdir", "os.chmod", "os.putenv", "os.unsetenv", "socket.connect", "socket.getaddrinfo",
+              "socket.bind", "socket.__new__", "urllib.Request", "http.client.connect",
+              "ctypes.dlopen", "ctypes.dlsym", "ctypes.call_function", "ctypes.cdata",
+              "ctypes.addressof", "ctypes.string_at", "ctypes.wstring_at", "ctypes.create_string_buffer",
+              "mmap.__new__", "shutil.copyfile", "shutil.copytree", "shutil.move", "shutil.rmtree",
+              "tempfile.mkstemp", "tempfile.mkdtemp", "glob.glob", "os.walk", "pathlib.Path.glob")
 
     def _s(x):
         if isinstance(x, bytes):
@@ -549,18 +586,39 @@ if _log:
         except TypeError:
             return repr(x)
 
+    def _envdiff(env):
+        if env is None:
+            return []
+        if not isinstance(env, dict):
+            env = dict(_s(e).split("=", 1) for e in env)
+        env = {_s(k): _s(v) for k, v in env.items()}
+        keys = set(env) | set(_environ)
+        return sorted([k, env.get(k)] for k in keys if env.get(k) != _environ.get(k))
+
     def _hook(event, args):
         try:
             if event == "open":
-                rec = ["open", _s(args[0]), _s(args[1]) if len(args) > 1 else None,
-                       args[2] if len(args) > 2 and isinstance(args[2], int) else None, _getcwd()]
+                path = args[0]
+                rec = ["open", _s(path), _s(args[1]) if len(args) > 1 else None,
+                       args[2] if len(args) > 2 and isinstance(args[2], int) else None,
+                       None if isinstance(path, int) else _realpath(_fspath(path) if not isinstance(path, bytes)
+                                                                   else path.decode("utf-8", "replace"))]
+            elif event in ("os.listdir", "os.scandir"):
+                path = args[0] if args and args[0] is not None else "."
+                rec = ["dir", None if isinstance(path, int) else _realpath(_s(path))]
             elif event == "subprocess.Popen":
                 argv = args[1]
                 if isinstance(argv, (str, bytes)) or not hasattr(argv, "__iter__"):
                     argv = [argv]
-                rec = ["proc", [_s(a) for a in argv], _s(args[2]) if args[2] is not None else None]
-            elif event in _PROC or event in _NET:
-                rec = ["other", event, repr(args)]
+                cwd = _realpath(_s(args[2])) if args[2] is not None else _getcwd()
+                rec = ["proc", [_s(a) for a in argv], cwd, _envdiff(args[3])]
+            elif event == "_posixsubprocess.fork_exec":
+                argv = args[1]
+                if isinstance(argv, (str, bytes)) or not hasattr(argv, "__iter__"):
+                    argv = [argv]
+                rec = ["fork", [_s(a) for a in argv], _envdiff(args[2])]
+            elif event in _OTHER:
+                rec = ["other", event, repr(args)[:500]]
             else:
                 return
             os.write(_fd, (_dumps(rec) + "\\n").encode("utf-8"))
@@ -577,8 +635,11 @@ ALLOWED_OPENS = frozenset({
     "src/stats/exclusion.py", "src/stats/tagrules.py", "docs/stats/tags-naive.md",
     "tests/stats/test_exclusion.py", "tests/stats/test_tagrules.py",
 })
-# プロセスは、封印の対象の二つのコードを引数なしで動かすもの（と、拒むことを確かめる --x）と、
-# 決まった git show（2d23cdf の版の reviews/T-020.md）だけ。
+# フォルダの一覧は、import の仕組みが sys.path のフォルダを読むものだけ。
+ALLOWED_DIRS = frozenset({".", "tests", "tests/stats", "src/stats", "<WATCH>"})  # <WATCH> は sitecustomize を探すため
+# プロセスは、封印の対象の二つのコードを動かすもの（拒むことを確かめる --x を含む）と、決まった
+# git show だけ。どれもプロジェクトのルートで、環境変数を変えずに（テストが渡す
+# PYTHONDONTWRITEBYTECODE=1 は、見張りの側で既に 1 なので差にならない）起動する。
 ALLOWED_PROCS = frozenset({
     ("PYTHON", "-B", "src/stats/exclusion.py"), ("PYTHON", "-B", "src/stats/exclusion.py", "--x"),
     ("PYTHON", "-B", "src/stats/tagrules.py"), ("PYTHON", "-B", "src/stats/tagrules.py", "--x"),
@@ -592,16 +653,21 @@ def _under(path, roots):
 
 
 def audit_sealed_tests(project, test_files=SEALED_TEST_FILES):
-    """test_files を子プロセスの unittest で流し、開いたファイルと起動したプロセスを集める。
+    """test_files を子プロセスの unittest で流し、事象を集める。
 
-    戻り値: (opens, procs, others, returncode)。
-      opens:  プロジェクトの中で開いたファイルの (相対パス, 書き込みか) の集合。
-              Python の本体と標準ライブラリ（sys.prefix・sys.base_prefix の下）と、このテストの
-              一時のディレクトリは数えない。プロジェクトの外のそれ以外のファイルは、絶対パスのまま入れる。
-      procs:  起動したプロセスの引数の組。Python の実行ファイルは "PYTHON"、プロジェクトの中の
-              パスは相対パスにする。
-      others: 通信など、ほかの事象。
+    戻り値は dict：
+      opens:  開いたファイルの (パス, 書き込みか) の集合。プロジェクトの中は相対パス、外は絶対パス。
+              Python の本体と標準ライブラリ（sys.prefix などの下）と、見張りの sitecustomize.py と
+              pyc の置き場だけを数えない。一時のフォルダのほかのファイル（ログを含む）は数える。
+              パスは、事象が起きた時点で realpath にしたもの（リンクは指す先になる）。
+      dirs:   一覧を読んだフォルダ（同じく）。
+      procs:  subprocess.Popen の (引数, cwd, 環境変数の差) の組。Python の実行ファイルは "PYTHON"、
+              プロジェクトの中のパスは相対パス。
+      forks:  _posixsubprocess.fork_exec の引数の組の数（Popen を通らない起動を見つけるため）。
+      others: ほかの事象（リンクの作成、ctypes、通信、プロセスを起こすほかの道など）。
+      rc:     unittest の終了コード。
     """
+    import collections
     import tempfile
     project = os.path.realpath(project)
     with tempfile.TemporaryDirectory() as tmp:
@@ -615,81 +681,262 @@ def audit_sealed_tests(project, test_files=SEALED_TEST_FILES):
                            capture_output=True, env=env, cwd=project)
         with open(log, encoding="utf-8") as f:
             lines = [json.loads(x) for x in f]
-    ignore = {os.path.realpath(p) for p in (sys.prefix, sys.base_prefix, sys.exec_prefix,
-                                            sys.base_exec_prefix)} | {tmp}
-    exe = {sys.executable, os.path.realpath(sys.executable)}
-    opens, procs, others = set(), set(), []
-    for rec in lines:
-        if rec[0] == "open":
-            path, mode, flags, cwd = rec[1:]
-            if isinstance(path, int):
-                continue  # 既に開いたファイル記述子（os.fdopen など）。新しいファイルではない。
-            full = os.path.realpath(os.path.join(cwd, path))
-            if _under(full, ignore):
-                continue
-            write = (isinstance(mode, str) and any(c in mode for c in "wax+")) or \
-                    (isinstance(flags, int) and bool(flags & _WRITE_FLAGS))
-            rel = os.path.relpath(full, project) if _under(full, [project]) else full
-            opens.add((rel, write))
-        elif rec[0] == "proc":
-            argv, cwd = rec[1], rec[2] or project
-            out = []
-            for k, a in enumerate(argv):
-                if k == 0 and (a in exe or os.path.realpath(a) in exe):
-                    out.append("PYTHON")
-                elif isinstance(a, str) and os.path.isabs(a) and _under(os.path.realpath(a), [project]):
-                    out.append(os.path.relpath(os.path.realpath(a), project))
-                else:
-                    out.append(a)
-            procs.add(tuple(out))
-        else:
-            others.append(rec)
-    return opens, procs, others, r.returncode
+        # 一時のフォルダを消す前に、パスの比べ方を決める（消したあとでは realpath が変わりうるため）。
+        ignore_roots = [os.path.realpath(p) for p in (sys.prefix, sys.base_prefix, sys.exec_prefix,
+                                                      sys.base_exec_prefix)]
+        ignore_files = {os.path.join(tmp, "sitecustomize.py")}
+        pyc_root = os.path.join(tmp, "pyc")
+        exe = {sys.executable, os.path.realpath(sys.executable)}
+        environ = dict(env)
+
+        def rel(full):
+            if _under(full, [tmp]):
+                return "<WATCH>" + full[len(tmp):]   # 見張りの一時のフォルダ（ログを含む）
+            return os.path.relpath(full, project) if _under(full, [project]) else full
+
+        out = {"opens": set(), "dirs": set(), "procs": set(), "forks": collections.Counter(),
+               "others": [], "rc": r.returncode}
+        popen_argv = collections.Counter()
+        for rec in lines:
+            kind = rec[0]
+            if kind == "open":
+                path, mode, flags, full = rec[1:]
+                if full is None:
+                    continue  # 既に開いたファイル記述子（os.fdopen など）。新しいファイルではない。
+                write = (isinstance(mode, str) and any(c in mode for c in "wax+")) or \
+                        (isinstance(flags, int) and bool(flags & _WRITE_FLAGS))
+                if not write and (_under(full, ignore_roots) or full in ignore_files
+                                  or _under(full, [pyc_root])):
+                    continue
+                out["opens"].add((rel(full), write))
+            elif kind == "dir":
+                full = rec[1]
+                if full is None or _under(full, ignore_roots) or _under(full, [pyc_root]):
+                    continue
+                out["dirs"].add(rel(full))
+            elif kind == "proc":
+                argv, cwd, envdiff = rec[1], rec[2], rec[3]
+                norm = []
+                for k, a in enumerate(argv):
+                    if k == 0 and (a in exe or os.path.realpath(a) in exe):
+                        norm.append("PYTHON")
+                    elif isinstance(a, str) and os.path.isabs(a) and _under(os.path.realpath(a), [project]):
+                        norm.append(rel(os.path.realpath(a)))
+                    else:
+                        norm.append(a)
+                out["procs"].add((tuple(norm), rel(os.path.realpath(cwd)),
+                                  tuple(tuple(x) for x in envdiff)))
+                popen_argv[tuple(argv)] += 1
+            elif kind == "fork":
+                out["forks"][tuple(rec[1])] += 1
+            else:
+                out["others"].append(rec)
+        # fork_exec は、Popen を通った起動ごとにちょうど一つ。Popen を通らない起動があれば数が合わない。
+        out["unpaired_forks"] = sorted((out["forks"] - popen_argv).elements())
+        out["unpaired_popens"] = sorted((popen_argv - out["forks"]).elements())
+        del environ
+    return out
+
+
+def allowed_procs_with_context():
+    return {(p, ".", ()) for p in ALLOWED_PROCS}
+
+
+def audit_problems(out):
+    """audit_sealed_tests() の結果のうち、許可リストと違う点の一覧（空なら問題なし）。"""
+    problems = []
+    if out["rc"] != 0:
+        problems.append("封印するテストが通らない（rc=%s）" % out["rc"])
+    if out["others"]:
+        problems.append("許可しない事象：%r" % out["others"][:5])
+    writes = sorted(p for p, w in out["opens"] if w)
+    if writes:
+        problems.append("書き込み：%r" % writes)
+    opens = {p for p, w in out["opens"]}
+    if opens != set(ALLOWED_OPENS):
+        problems.append("開いたファイルが違う：多い %r、少ない %r"
+                        % (sorted(opens - ALLOWED_OPENS), sorted(ALLOWED_OPENS - opens)))
+    if not out["dirs"] <= ALLOWED_DIRS:
+        problems.append("一覧を読んだフォルダ：%r" % sorted(out["dirs"] - ALLOWED_DIRS))
+    if out["procs"] != allowed_procs_with_context():
+        problems.append("起動したプロセスが違う：多い %r、少ない %r"
+                        % (sorted(out["procs"] - allowed_procs_with_context()),
+                           sorted(allowed_procs_with_context() - out["procs"])))
+    if out["unpaired_forks"] or out["unpaired_popens"]:
+        problems.append("Popen を通らない起動：%r %r" % (out["unpaired_forks"], out["unpaired_popens"]))
+    return problems
+
+
+# ソースの検査の許可リスト。
+SEALED_ALLOWED_IMPORTS = frozenset({"ast", "datetime", "fractions", "hashlib", "json", "os", "random", "subprocess",
+                                    "sys", "unittest", "exclusion", "tagrules"})
+SEALED_ALLOWED_ATTRS = {
+    "os": frozenset({"path.join", "path.dirname", "path.abspath", "environ"}),
+    "subprocess": frozenset({"run"}),
+    "sys": frozenset({"executable", "path.insert"}),
+}
+SEALED_BANNED_NAMES = frozenset({"__import__", "eval", "exec", "compile", "getattr", "setattr", "globals",
+                                 "locals", "vars", "__builtins__", "importlib", "breakpoint", "input"})
+
+
+def _attr_chain(node):
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        return node.id, ".".join(reversed(parts))
+    return None, None
+
+
+def sealed_test_source_problems(source):
+    """封印するテストのソースの、許可リストの外の書き方の一覧（空なら問題なし）。"""
+    tree = ast.parse(source)
+    problems = []
+    parents = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name.split(".")[0] not in SEALED_ALLOWED_IMPORTS or a.asname:
+                    problems.append("import %s" % a.name)
+        elif isinstance(node, ast.ImportFrom):
+            problems.append("from %s import" % node.module)
+        elif isinstance(node, ast.Name):
+            if node.id in SEALED_BANNED_NAMES:
+                problems.append("名前 %s" % node.id)
+            if node.id in SEALED_ALLOWED_ATTRS:
+                top = node
+                while isinstance(parents.get(top), ast.Attribute):
+                    top = parents[top]
+                base, chain = _attr_chain(top)
+                if not chain or chain not in SEALED_ALLOWED_ATTRS[node.id]:
+                    problems.append("%s.%s" % (node.id, chain or ""))
+                elif (node.id, chain) == ("os", "environ"):
+                    # os.environ は、子プロセスに渡す dict(os.environ, ...) の最初の引数としてだけ使ってよい。
+                    call = parents.get(top)
+                    if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                            and call.func.id == "dict" and call.args and call.args[0] is top):
+                        problems.append("os.environ をそのまま読む")
+                if isinstance(node.ctx, (ast.Store, ast.Del)):
+                    problems.append("%s を置き換える" % node.id)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)):
+            v = node.value if isinstance(node.value, str) else node.value.decode("latin-1")
+            if "STATS_" in v:
+                problems.append("見張りの環境変数の名前 %r" % v)
+        elif isinstance(node, ast.Attribute) and node.attr.startswith("__") and node.attr != "__file__" \
+                and node.attr != "__name__":
+            problems.append("属性 %s" % node.attr)
+    return problems
 
 
 class TestSealedTestsReadOnlyTargets(unittest.TestCase):
     def test_sealed_tests_read_only_targets(self):
-        opens, procs, others, rc = audit_sealed_tests(PROJECT)
-        self.assertEqual(rc, 0, "封印するテストが通らない")
-        self.assertEqual(others, [])
-        self.assertEqual({p for p, w in opens if w}, set(), "書き込みがある")
-        self.assertEqual({p for p, w in opens}, set(ALLOWED_OPENS))
-        self.assertEqual(procs, set(ALLOWED_PROCS))
+        out = audit_sealed_tests(PROJECT)
+        self.assertEqual(audit_problems(out), [])
+        self.assertTrue(out["procs"])  # 見張りが働いていること（空の記録で通らないこと）
+
+    def test_sealed_tests_source(self):
+        for rel in SEALED_TEST_FILES:
+            with open(os.path.join(PROJECT, rel), encoding="utf-8") as f:
+                self.assertEqual(sealed_test_source_problems(f.read()), [], rel)
 
     def test_allowlist_is_seal_targets(self):
         # 許可リストのファイルは、すべて順番1の封印の対象（seal-order1.md の表）に入っている。
         head, rows = read_handoff_table("seal-targets")
         targets = {r[0].strip("`") for r in rows}
         self.assertLessEqual(set(ALLOWED_OPENS), targets)
+        self.assertLessEqual(set(SEALED_TEST_FILES), targets)
         self.assertIn("2d23cdf:reviews/T-020.md", targets)
 
-    def test_detects_reads_outside_targets(self):
-        # 封印の対象の写しに、対象の外を読む行を足すと、集めた中に現れること（検出の確かめ）。
+    # 回り道の例（T-022 の監査が試したもの）。どれも、ソースの検査か実行の見張りのどちらかで止まる。
+    DETOURS = {
+        "open_relative": 'data = open("reviews/T-020.md", "rb").read()',
+        "open_joined": 'data = open(os.path.join(PROJECT, "rev" + "iews", "T-" + "020.md"), "rb").read()',
+        "git_other": 'data = subprocess.run(["git", "show", "HEAD:" + "reviews/T-020.md"], capture_output=True).stdout',
+        "fork_exec": 'import _posixsubprocess\ndata = b"x"',
+        "spawnv_passfds": 'from multiprocessing.util import spawnv_passfds\ndata = b"x"',
+        "ctypes": 'import ctypes\ndata = b"x"',
+        "env_conditional": 'data = b"x" if "STATS_AUDIT_LOG" in os.environ else open("reviews/T-020.md", "rb").read()',
+        "env_name_joined": 'data = b"x" if os.environ.get("STATS" + "_AUDIT_LOG") else b"y"',
+        "stat": 'data = str(os.stat("reviews/T-020.md").st_size).encode()',
+        "exists": 'data = str(os.path.exists("reviews/T-020.md")).encode()',
+        "listdir": 'data = str(os.listdir("reviews")).encode()',
+        "link": 'os.link("reviews/T-020.md", "x")\ndata = b"x"',
+        "other_env": 'env = dict(os.environ, PYTHONPATH="")\n'
+                     'data = subprocess.run([sys.executable, "-B", os.path.join(PROJECT, "src", "stats", "exclusion.py")], '
+                     'capture_output=True, env=env, cwd=PROJECT).stdout',
+        "other_cwd": 'data = subprocess.run([sys.executable, "-B", os.path.join(PROJECT, "src", "stats", "exclusion.py")], '
+                     'capture_output=True, cwd=os.path.join(PROJECT, "src")).stdout or b"x"',
+        "dunder": 'data = os.path.__dict__["exists"]("reviews/T-020.md") and b"x" or b"y"',
+    }
+
+    def _with_detour(self, src, body):
+        import textwrap
+        extra = ("\n\nclass TestDetour(unittest.TestCase):\n    def test_detour(self):\n"
+                 + textwrap.indent(body, "        ") + "\n        self.assertTrue(len(data) > 0)\n")
+        return src.replace('\n\nif __name__ == "__main__":', extra + '\n\nif __name__ == "__main__":')
+
+    def test_detours_are_caught_by_source_check(self):
+        with open(os.path.join(PROJECT, SEALED_TEST_FILES[0]), encoding="utf-8") as f:
+            src = f.read()
+        caught_by_source = {"fork_exec", "spawnv_passfds", "ctypes", "env_conditional", "env_name_joined",
+                            "stat", "exists", "listdir", "link", "dunder"}
+        for name, body in self.DETOURS.items():
+            probs = sealed_test_source_problems(self._with_detour(src, body))
+            if name in caught_by_source:
+                self.assertTrue(probs, name)
+
+    def test_detours_are_caught_by_audit(self):
+        # ソースの検査をすり抜けても、実行の見張りが見つけることを、写しで確かめる。
+        # ソースの検査で止まるものも、実行の見張りで止まるかを並べて確かめる（ctypes と fork_exec を除く。
+        # この二つは、写しの中で実際に呼ぶと環境に依るので、ソースの検査だけで止める）。
         import shutil
         import tempfile
-        with tempfile.TemporaryDirectory() as d:
-            for rel in ALLOWED_OPENS | {"reviews/T-020.md"}:
-                os.makedirs(os.path.join(d, os.path.dirname(rel)), exist_ok=True)
-                shutil.copyfile(os.path.join(PROJECT, rel), os.path.join(d, rel))
-            path = os.path.join(d, "tests", "stats", "test_exclusion.py")
-            with open(path, encoding="utf-8") as f:
-                src = f.read()
-            extra = (
-                "\n\nclass TestInjected(unittest.TestCase):\n"
-                "    def test_a(self):\n"
-                "        open(\"reviews/T-020.md\").close()\n"
-                "    def test_b(self):\n"
-                "        open(os.path.join(PROJECT, \"rev\" + \"iews\", \"T-\" + \"020.md\")).close()\n"
-                "    def test_c(self):\n"
-                "        subprocess.run([\"git\", \"show\", \"HEAD:\" + \"reviews/T-020.md\"], capture_output=True)\n"
-            )
-            src = src.replace("\n\nif __name__ == \"__main__\":", extra + "\n\nif __name__ == \"__main__\":")
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(src)
-            opens, procs, others, rc = audit_sealed_tests(d)
-        self.assertIn(("reviews/T-020.md", False), opens)
-        self.assertIn(("git", "show", "HEAD:reviews/T-020.md"), procs)
-        self.assertNotEqual({p for p, w in opens}, set(ALLOWED_OPENS))
+        bodies = dict(self.DETOURS)
+        bodies["fork_exec_real"] = (
+            "from multiprocessing.util import spawnv_passfds\n"
+            "r, w = os.pipe()\n"
+            "pid = spawnv_passfds(b\"/bin/cat\", [b\"/bin/cat\", b\"reviews/T-020.md\"], (w,))\n"
+            "os.close(w)\n"
+            "data = b\"\"\n"
+            "while True:\n"
+            "    c = os.read(r, 65536)\n"
+            "    if not c:\n"
+            "        break\n"
+            "    data += c\n"
+            "os.waitpid(pid, 0)")
+        bodies["symlink_into_log_dir"] = (
+            "d = os.path.dirname(os.environ[\"STATS\" + \"_AUDIT_LOG\"])\n"
+            "p = os.path.join(d, \"s\")\n"
+            "os.symlink(os.path.join(PROJECT, \"reviews\", \"T-020.md\"), p)\n"
+            "data = open(p, \"rb\").read()")
+        bodies["hardlink_into_log_dir"] = (
+            "d = os.path.dirname(os.environ[\"STATS\" + \"_AUDIT_LOG\"])\n"
+            "p = os.path.join(d, \"h\")\n"
+            "os.link(os.path.join(PROJECT, \"reviews\", \"T-020.md\"), p)\n"
+            "data = open(p, \"rb\").read()")
+        skip = {"fork_exec", "spawnv_passfds", "ctypes", "env_conditional", "env_name_joined", "stat",
+                "exists", "dunder"}
+        for name, body in bodies.items():
+            if name in skip:
+                continue
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as d:
+                for rel in ALLOWED_OPENS | {"reviews/T-020.md"}:
+                    os.makedirs(os.path.join(d, os.path.dirname(rel)), exist_ok=True)
+                    shutil.copyfile(os.path.join(PROJECT, rel), os.path.join(d, rel))
+                path = os.path.join(d, SEALED_TEST_FILES[0])
+                with open(path, encoding="utf-8") as f:
+                    src = f.read()
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(self._with_detour(src, body))
+                out = audit_sealed_tests(d)
+                # 写しは git の履歴を持たないので rc は 0 にならない。rc 以外の違いで見つかることを確かめる。
+                probs = [p for p in audit_problems(out) if not p.startswith("封印するテストが通らない")
+                         and "git" not in p]
+                self.assertTrue(probs, name)
 
 
 class TestNoDataNoNetwork(unittest.TestCase):

@@ -13,6 +13,7 @@ src/stats/ の tagrules.py と exclusion.py と、同じく順番1で封印す�
 import ast
 import datetime
 import fractions
+import hashlib
 import json
 import os
 import random
@@ -33,6 +34,11 @@ import tagrules  # noqa: E402
 D = datetime.date
 DAY = datetime.timedelta(days=1)
 F = fractions.Fraction
+
+# docs/stats/tags-naive.md の sha256（T-022 差し戻し3回目 M-3）。この文書は順番1で封印したあと凍結する
+# （文書 5章 (2)）。文書を直せば test_doc_is_frozen が失敗する。この定数を直せば、このファイルの sha256 が
+# 順番1の封印の記録と合わなくなる（docs/stats/seal-order1.md 3章の照合で見つかる）。
+TAGS_NAIVE_SHA256 = "de54364e20ce491a772bb9b487a403e8d11ff9eb2cb9ebd85a01b2de08bb937e"
 
 # 手法を作る期間の区画（docs/stats/periods.md。periods.py と一致することは test_t019.py で確かめる）。
 METHOD_START, METHOD_END = D(2015, 3, 2), D(2020, 12, 14)
@@ -273,6 +279,12 @@ class TestBuildTagList(unittest.TestCase):
                                      optional=tagrules.OPTIONAL_CATEGORIES)
         self.assertEqual(tagrules.compare_lists(r1, r4)["in_both"], 1)
 
+
+
+class TestFrozenDoc(unittest.TestCase):
+    def test_doc_is_frozen(self):
+        with open(DOC, "rb") as f:
+            self.assertEqual(hashlib.sha256(f.read()).hexdigest(), TAGS_NAIVE_SHA256)
 
 
 class TestTagrulesOutput(unittest.TestCase):
