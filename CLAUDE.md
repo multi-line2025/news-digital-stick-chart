@@ -19,6 +19,7 @@
   - Data: The GDELT Project (https://www.gdeltproject.org/). This project is not affiliated with or endorsed by the GDELT Project.
   - データ出典：GDELT Project（https://www.gdeltproject.org/）。本プロジェクトは GDELT Project と提携・承認の関係にありません。
 - 報道量は、同じ時間帯の全体の報道量で割った比率で扱う。収集元のサイト数の増減や、テーマ付与の変化による見かけの変動を除くため。
+  - 正式に使う数え方：分子は、そのテーマがテーマの二つの欄（V1・V2）の少なくとも一方に付いた記事の数。分母は、同じ数え方の全テーマの合計。データを見ずに決め打ちにし、試運転より前に封印する。ほかの数え方の結果は、比べるための参考として並べて公開する（2026-10-08 オーナー決定）。
 - 取得は利用条件と速度制限を守り、待ち時間と再試行の上限をコードに明記する。
 
 ### タグの一覧
