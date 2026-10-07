@@ -517,6 +517,7 @@ class RunCase(unittest.TestCase):
         self.trial_store = os.path.join(self.volume, *gkg.TRIAL_STORE_PARTS)
         os.makedirs(self.trial_store)
         self.check_volume = fake_check_volume
+        self.sealed_runs = []                # start_hook に渡された値（封印の記録に書いた run）
         # 除外の規則の封印の記録（鎖の上の記録の読み取りだけを差し替える。照らす規則は本物）
         self.excl = dict(EXCL_REF)
         p = mock.patch.object(gkg, "chain_exclusion_ref", lambda root: dict(EXCL_REF))
@@ -548,6 +549,11 @@ class RunCase(unittest.TestCase):
     def manifest_path(self, name=None):
         return os.path.join(self.root, "data", "manifest", name or gkg.MANIFEST_NAME)
 
+    def start_hook(self, *, mode, run_id, trial_days):
+        """封印の記録に gkg-run-start を書く入口の差し替え（本物は acquire_gkg.make_start_hook）。"""
+        self.sealed_runs.append((mode, run_id, trial_days))
+        return {"seq": 20 + len(self.sealed_runs), "record_sha256": "9" * 64}
+
     def committed_now(self):
         """作業ツリーのマニフェストの全部をコミットした、とみなしたバイト列。"""
         return gkg.read_bytes_nofollow(self.manifest_path())
@@ -561,7 +567,7 @@ class RunCase(unittest.TestCase):
                     check_volume=self.check_volume, committed_manifest=self.committed_now(),
                     committed_trial_manifest=gkg.read_bytes_nofollow(
                         self.manifest_path(gkg.TRIAL_MANIFEST_NAME)),
-                    exclusion_rule=self.excl)
+                    exclusion_rule=self.excl, start_hook=self.start_hook)
         args.update(kw)
         return gkg.run_gkg(**args)
 
@@ -1623,11 +1629,13 @@ class TestExclusionRecord(RunCase):
                 self.run_once(exclusion_rule=other)
         self.assertEqual(self.transport.calls, [])
 
-    def test_real_chain_check_stops_while_kind_undecided(self):
-        """関門を通らずに run_gkg を直接呼んでも、kind が未決のあいだは何も書かずに止まる。"""
+    def test_real_chain_check_stops_without_order1_record(self):
+        """関門を通らずに run_gkg を直接呼んでも、本物の封印の記録に stats-order1 が無いあいだは
+        何も書かずに止まる（T-032：kind は stats-order1 に決まった）。"""
         with mock.patch.object(gkg, "chain_exclusion_ref", RunCase.real_chain_ref):
-            with self.assertRaisesRegex(gkg.GkgError, "まだ決まっていない"):
+            with self.assertRaisesRegex(gkg.GkgError, "stats-order1）が無い"):
                 self.run_once()
+        self.assertEqual(self.sealed_runs, [])
         self.assertEqual(self.manifest(), [])
 
 
@@ -1995,8 +2003,8 @@ class TestChangedResultOnHonestResume(RunCase):
         self.assertEqual(done["files_failed"], 1)
 
 
-class TestT030(RunCase):
-    """T-030：既にある日の集計をそのまま使う前の検査（軽-A。監査の probe_b5x）、network_ の名前（軽-D）。"""
+class _DayFileMixin:
+    """日の集計を書いたあと、day の行を書く前に止めて、その日の集計を書き換える部品。"""
 
     DAYS = ("20150302", "20150303")
     N = 3
@@ -2025,6 +2033,10 @@ class TestT030(RunCase):
         with open(p, "wb") as f:
             f.write(gkg.gzip_bytes(b"\n".join(lines)))
 
+
+class TestT030(_DayFileMixin, RunCase):
+    """T-030：既にある日の集計をそのまま使う前の検査（軽-A。監査の probe_b5x）、network_ の名前（軽-D）。"""
+
     def assert_refused(self, val, pattern):
         self.kill_after_dayfile_and_edit(val)
         with self.assertRaisesRegex(gkg.GkgError, pattern):
@@ -2049,8 +2061,11 @@ class TestT030(RunCase):
     def test_check_existing_day_file_unit(self):
         good = gkg.gzip_bytes(b"#\tgkg-day\t2\t2015-03-02\tofficial\nF\tt\tok\t-\tm\t1\ts\t0\t3\n")
         gkg.check_existing_day_file(good, "2015-03-02")
-        with self.assertRaisesRegex(gkg.GkgError, "展開できない"):
+        with self.assertRaisesRegex(gkg.GkgError, "gzip の頭"):
             gkg.check_existing_day_file(b"not gzip", "2015-03-02")
+        broken = good[:10] + b"\xff" * (len(good) - 10)          # 頭は正しく、中身が壊れている
+        with self.assertRaisesRegex(gkg.GkgError, "展開できない"):
+            gkg.check_existing_day_file(broken, "2015-03-02")
 
     def test_network_names_are_fixed(self):
         self.assertIsInstance(gkg.NETWORK_ERROR_NAMES, frozenset)
@@ -2144,6 +2159,176 @@ class TestT035(unittest.TestCase):
         _lines, t, _st = self.day_tables(rows)
         self.assertEqual(t[("1", "QQ_SAME")], (1, 1, 1, 1))
         self.assertEqual(t[("2", "QQ_SAME")], (1, 0, 0, 1))
+
+
+class TestT032(RunCase):
+    """T-032：run の開始を封印の記録に書く入口（start_hook）の呼び方。"""
+
+    def test_hook_called_once_per_run_before_any_request(self):
+        seen = []
+        inner_hook = self.start_hook
+
+        def hook(**k):
+            seen.append(("hook", list(self.transport.calls), os.listdir(self.trial_store)))
+            return inner_hook(**k)
+        self.run_once(mode="trial", committed_manifest=None, start_hook=hook)
+        self.assertEqual(seen[0][1:], ([], []))                 # 要求も印のファイルもまだ無い
+        self.assertEqual(self.sealed_runs, [("trial", RUN_ID, list(gkg.TRIAL_DAYS)[:len(self.DAYS)])])
+        s0 = self.manifest(gkg.TRIAL_MANIFEST_NAME)[0]
+        self.assertEqual((s0["gkg_run_seq"], s0["gkg_run_record_sha256"]), (21, "9" * 64))
+        # 2回目の試しの run（コードが違う）：もう1件
+        self.run_once(mode="trial", committed_manifest=None, code_sha256="cd" * 32)
+        self.assertEqual([r[:2] for r in self.sealed_runs], [("trial", RUN_ID), ("trial", "cd" * 8)])
+        # 正式な run：1回目（run-start を書いて止まる）で1件、2回目は書かない
+        with self.assertRaises(gkg.RunStartWritten):
+            self.run_once()
+        self.assertEqual(self.sealed_runs[-1], ("official", RUN_ID, None))
+        self.run_once()
+        self.assertEqual(len(self.sealed_runs), 3)
+        m0 = self.manifest()[0]
+        self.assertEqual(m0["gkg_run_seq"], 23)
+
+    def test_resume_does_not_write_again(self):
+        self.low_after = 2
+        with self.assertRaises(gkg.RunInterrupted):
+            self.run_gkg()
+        self.low_after = None
+        self.run_gkg()
+        self.assertEqual(len(self.sealed_runs), 1)
+
+    def test_hook_failure_sends_no_request_and_writes_nothing(self):
+        def boom(**k):
+            raise RuntimeError("見本：封印の記録に書けない")
+        for mode, kw in (("trial", {"committed_manifest": None}), ("official", {})):
+            with self.subTest(mode=mode):
+                with self.assertRaisesRegex(gkg.GkgError, "gkg-run-start を書けなかった"):
+                    self.run_once(mode=mode, start_hook=boom, **kw)
+                self.assertEqual(self.transport.calls, [])
+                self.assertEqual(os.listdir(self.store), [])
+                self.assertEqual(os.listdir(self.trial_store), [])
+                self.assertFalse(os.path.exists(self.manifest_path()))
+                self.assertFalse(os.path.exists(self.manifest_path(gkg.TRIAL_MANIFEST_NAME)))
+
+    def test_missing_or_bad_hook_is_refused(self):
+        for hook, pattern in ((None, "受け取っていない"),
+                              (lambda **k: {"seq": 0, "record_sha256": "9" * 64}, "形が違う"),
+                              (lambda **k: {"seq": 3}, "形が違う"),
+                              (lambda **k: {"seq": 3, "record_sha256": "x"}, "形が違う")):
+            with self.subTest(hook=hook):
+                with self.assertRaisesRegex(gkg.GkgError, pattern):
+                    self.run_once(start_hook=hook)
+                self.assertEqual(self.transport.calls, [])
+                self.assertFalse(os.path.exists(self.manifest_path()))
+
+
+class TestT032Vocab(unittest.TestCase):
+    """T-032（T-035 の監査 中-1。A3 と同じ形）：同じプロセスで先に言語の符号や ENG の語を見ても、
+    テーマの数は変わらない。"""
+
+    TS = "20150302000000"
+
+    def tables(self, rows, vocab):
+        a = gkg.aggregate_zip(make_zip(self.TS, rows), self.TS, vocab)
+        files = [{"file_time": self.TS, "result": "ok", "reason": "", "md5": "a" * 32, "size": 9,
+                  "sha256": "b" * 64, "attempts": 1, "docs": {"1": len(rows)}}]
+        return gkg.serialize_day("2015-03-02", a, files)
+
+    def test_other_vocab_kinds_do_not_leak_into_themes(self):
+        ts = self.TS
+        first = [gkg_row(ts, 1, translated=True, srclc="jpn", eng="GT-JPN 1.0",
+                         countries=("JA",))]
+        second = [gkg_row(ts, 2, themes1=("jpn", "GT-JPN 1.0", "QQ_REAL"),
+                          themes2=(("jpn", 5), ("QQ_REAL", 1)))]
+        shared = {}
+        self.tables(first, shared)                       # 先に言語の符号と ENG の語を見る
+        after = self.tables(second, shared)
+        fresh = self.tables(second, {})
+        self.assertEqual(after, fresh)
+        self.assertNotIn(b"\tjpn\n", b"\n".join(l for l in after.split(b"\n") if l.startswith(b"V")) + b"\n")
+        st = {l.split(b"\t")[1]: int(l.split(b"\t")[2]) for l in after.split(b"\n") if l.startswith(b"S\t")}
+        self.assertEqual(st[b"theme_tokens_invalid_v1"], 2)
+        self.assertEqual(st[b"theme_tokens_invalid_v2"], 1)
+
+    def test_vocab_kinds_are_separate(self):
+        v = {}
+        t, c, l, e = gkg._vocabs(v)
+        self.assertEqual(len({id(x) for x in (t, c, l, e)}), 4)
+        self.assertEqual(sorted(v), ["country", "eng", "lang", "theme"])
+
+
+class TestT035Light(unittest.TestCase):
+    """T-035 の監査 軽-1：同じ文書の V1 に同じテーマが2回、形の合わない名前しか付かない文書、
+    docs_without_any_theme とほかの2つの値の関係。"""
+
+    TS = "20150302000000"
+
+    def run_rows(self, rows):
+        a = gkg.aggregate_zip(make_zip(self.TS, rows), self.TS, {})
+        return a
+
+    def test_cases(self):
+        ts = self.TS
+        rows = [gkg_row(ts, 1, themes1=("QQ_TWICE", "QQ_TWICE"), themes2=(("QQ_TWICE", 1),)),
+                gkg_row(ts, 2, themes1=("lower one",), themes2=(("bad name", 1),)),
+                gkg_row(ts, 3, themes1=("QQ_ONLY_V1",), themes2=()),
+                gkg_row(ts, 4, themes1=(), themes2=(("QQ_ONLY_V2", 1),))]
+        a = self.run_rows(rows)
+        T = a.tables
+        self.assertEqual(T["t1"][b"1"][b"QQ_TWICE"], 1)
+        self.assertEqual(T["t12"][b"1"][b"QQ_TWICE"], 1)
+        st = a.stats
+        self.assertEqual(st["docs_without_any_theme"], 1)         # 形の合わない名前しか無い文書
+        self.assertEqual(st["docs_without_v1_theme"], 2)
+        self.assertEqual(st["docs_without_v2_theme"], 2)
+        self.assertLessEqual(st["docs_without_any_theme"],
+                             min(st["docs_without_v1_theme"], st["docs_without_v2_theme"]))
+        # 少なくとも一方に付いた文書 = 全体 − どちらにも付かない文書
+        self.assertEqual(sum(a.docs.values()) - st["docs_without_any_theme"], 3)
+
+
+class TestT032DayFileBytes(_DayFileMixin, RunCase):
+    """T-032（T-030 の監査 中-1）：既にある日の集計の、ファイルのバイト列の検査。"""
+
+    def tamper_bytes(self, change):
+        self.kill_after_dayfile_and_edit(b"1")
+        p = os.path.join(self.store, gkg.day_file_name(RUN_ID, "2015-03-02"))
+        with open(p, "rb") as f:
+            gz = f.read()
+        with open(p, "wb") as f:
+            f.write(change(gz))
+
+    def refused(self, change, pattern):
+        self.tamper_bytes(change)
+        with self.assertRaisesRegex(gkg.GkgError, pattern):
+            self.run_once()
+        self.assertEqual([e for e in self.manifest() if e["kind"] == "day"], [])
+
+    def test_fname_with_address_shape(self):
+        addr = b"someone" + b"@" + b"example.com"
+        self.refused(lambda gz: gz[:3] + b"\x08" + gz[4:10] + addr + b"\x00" + gz[10:], "gzip の頭")
+
+    def test_fcomment_with_free_word(self):
+        self.refused(lambda gz: gz[:3] + b"\x10" + gz[4:10] + b"Taro Example\x00" + gz[10:],
+                     "gzip の頭")
+
+    def test_fextra(self):
+        self.refused(lambda gz: gz[:3] + b"\x04" + gz[4:10] + b"\x05\x00Hello" + gz[10:],
+                     "gzip の頭")
+
+    def test_nonzero_mtime(self):
+        self.refused(lambda gz: gz[:4] + b"\x01\x00\x00\x00" + gz[8:], "gzip の頭")
+
+    def test_trailing_empty_member(self):
+        self.refused(lambda gz: gz + gzip.compress(b"", mtime=0), "後ろに、別の部分かバイト")
+
+    def test_trailing_bytes(self):
+        self.refused(lambda gz: gz + b"Taro_Example", "後ろに、別の部分かバイト")
+
+    def test_unchanged_file_is_reused(self):
+        self.tamper_bytes(lambda gz: gz)
+        self.run_once()
+        day = [e for e in self.manifest() if e["kind"] == "day"][0]
+        self.assertTrue(day["reused_existing_day_file"])
 
 
 class TestRound3Trial(RunCase):

@@ -62,6 +62,11 @@
              マニフェストが全部コミットされていなければ、gkg.run_gkg が要求を送る前に止まる
     2. gkg.py を、関門で照合したバイト列そのものとして読み込み、3つのファイルを読み直して
        変わっていないことを確かめる。
+    （3 の中で）run の最初の実行（マニフェストに run-start の行を書く実行）では、gkg.run_gkg が、run-start の
+       行を書く前・要求を送る前に、封印係の seal_gkg_run.start で封印の記録に gkg-run-start を
+       書く（make_start_hook。T-032）。drand と OpenTimestamps の通信を使う。書けなければ、
+       何も書かずに止まり、要求は1件も送らない。同じ run の再開と、正式な run の2回目の実行では
+       書かない。
     3. gkg.run_gkg を1回動かす（取得・集計・保存・マニフェスト。gkg.py の docstring）。
 
 固定するもの（本番では差し替えを受け付けない）
@@ -107,6 +112,8 @@ SEALER_DIR = os.path.join(PROJECT, "src", "sealer")
 sys.path.insert(0, SEALER_DIR)
 
 import ledger  # noqa: E402
+import seal_gkg_run  # noqa: E402  （T-032：run の開始を封印の記録に書く。src/sealer の入口）
+import stamp  # noqa: E402
 
 CODE_REL = "src/collector/acquire_gkg.py"
 GKG_REL = "src/collector/gkg.py"
@@ -120,11 +127,11 @@ DISKUTIL_TIMEOUT_SECONDS = 60
 # 取得のコードのうち、このファイル以外の4つの sha256。変えたらここも直してコミットする
 # （テストが照合する）。
 PINNED_SHA256 = (
-    (GKG_REL, "5ac627981df5f02d0075303fa32b70d03ae5bd03292c1a100566e288600f7aad"),
+    (GKG_REL, "fa2ca1938407cf0dd3ca70d97e6b3a05f2c82fd87bfdf76382d1e9494b444644"),
     (FILELIST_REL, "afd7a9dd47bc052a691e1a4cd558b211f4d72cf1ce1f451fa9f3016540cd04a7"),
     (PRIVACY_SCAN_REL, "68d8836d56489ca5df9f2f55e24a2642ebf3aa14afdc2e0120577c7b6c6cb887"),
     (CODEGATE_REL, "d422be41dc59c4be50689a2426453db965be506a9981770ab3eb7557ed078769"),
-    (THEMES_REL, "fbb5faf69bc5fa5e0e698ec69d928b9b748a3a06a356c45a596ee6988d4e1673"),
+    (THEMES_REL, "d430e682c38555b364e3f46252598d8bc5dac097d5b41e027f9981ae8fce34f8"),
 )
 CLEAN_PATHS = ("src/collector", "src/sealer")
 FILELIST_MANIFEST_REL = ("data", "manifest", "gdelt-filelist.jsonl")
@@ -148,7 +155,7 @@ def production_home():
 
 class _Seams:
     FIELDS = ("project", "home", "volume", "transport", "sleep", "clock", "now", "log", "disk_free",
-              "check_volume", "fs_check")
+              "check_volume", "fs_check", "drand_fetch", "ots_cmd", "ots_runner")
     __slots__ = FIELDS
 
     def __init__(self, **kw):
@@ -168,7 +175,8 @@ def _utc_now():
 def _production_seams():
     return _Seams(project=PROJECT, home=production_home(), volume=None, transport=None,
                   sleep=time.sleep, clock=time.monotonic, now=_utc_now, log=None, disk_free=None,
-                  check_volume=None, fs_check=None)
+                  check_volume=None, fs_check=None, drand_fetch=None, ots_cmd=stamp.DEFAULT_OTS,
+                  ots_runner=subprocess.run)
 
 
 class _TestSeams(_Seams):
@@ -395,6 +403,36 @@ def check_gate(s, method_rec, mode="official", code=None):
 # 本体
 # ---------------------------------------------------------------------------
 
+def record_ref(rec):
+    """封印の記録の {"seq", "record_sha256"}（記録の行の正規の形の sha256）。"""
+    return {"seq": rec["seq"], "record_sha256": ledger.sha256_hex(ledger.canonical_line(rec))}
+
+
+def make_start_hook(s, gate, exclusion_rule):
+    """手順3a（T-032）：gkg.run_gkg が run の最初の実行で呼ぶ。封印係の seal_gkg_run.start で
+    gkg-run-start を封印の記録に書き、その記録の {"seq", "record_sha256"} を返す。
+
+    同じ mode・run_id の gkg-run-start が既に記録にあれば（記録を書いたあと、マニフェストの
+    run-start の行を書く前に止まった跡）、新しく書かずにその記録を使う（同じ run の記録は1件）。
+    書けなければ例外を出し、gkg.run_gkg は何も書かずに止まる（要求を1件も送らない）。
+    """
+    def hook(*, mode, run_id, trial_days):
+        data = ledger.read_ledger(os.path.join(s.project, "sealed", "ledger.jsonl"))
+        for r in ledger.verify_chain(data):
+            if r["kind"] != ledger.GKG_RUN_KIND:
+                continue
+            doc = ledger.read_target_json(s.project, r, ledger.GKG_RUN_KIND)
+            if doc.get("mode") == mode and doc.get("run_id") == run_id:
+                return record_ref(r)
+        rec, _rel, _ots = seal_gkg_run.start(
+            s.project, mode, CODE_REL, run_id, gate["filelist_sha256"],
+            gate["method_access_seq"], trial_days, exclusion_rule["seq"],
+            exclusion_rule["record_sha256"], s.now(), s.ots_cmd, drand_fetch=s.drand_fetch,
+            runner=s.ots_runner)
+        return record_ref(rec)
+    return hook
+
+
 def _acquire(mode="official", _test=None):
     """手順00 → 手順0 → 関門 → 取得。mode は official か trial。_test はテストだけが渡す。"""
     s = _production_seams() if _test is None else _checked_test_seams(_test)
@@ -418,6 +456,7 @@ def _acquire(mode="official", _test=None):
                        committed_manifest=gate["committed_manifest"],
                        committed_trial_manifest=gate["committed_trial_manifest"],
                        exclusion_rule=exclusion_rule,
+                       start_hook=make_start_hook(s, gate, exclusion_rule),
                        check_volume=gate["check_volume"], sleep=s.sleep, clock=s.clock,
                        now=s.now, **kw)
 

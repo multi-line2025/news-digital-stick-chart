@@ -405,13 +405,26 @@ class TestExclusionGate(unittest.TestCase):
             os.path.join(self.root, "data", "manifest", themes.MANIFEST_NAME))
         return out
 
-    def test_kind_undecided_stops_before_network(self):
-        """今（T-021）は封印係の kind が未定なので、関門が必ず止まる。"""
-        self.assertIsNone(themes.EXCLUSION_RULE_KIND)
-        with self.assertRaisesRegex(themes.ExclusionRulesNotSealed, "まだ決まっていない"):
+    def test_kind_is_stats_order1(self):
+        """T-032：除外の規則の kind は stats-order1（封印係の ledger.ORDER1_KIND と同じ）。"""
+        self.assertEqual(themes.EXCLUSION_RULE_KIND, "stats-order1")
+        self.assertEqual(themes.EXCLUSION_RULE_KIND, self.ledger.ORDER1_KIND)
+        self.assertIn(themes.EXCLUSION_RULE_KIND, self.ledger.ALLOWED_KINDS)
+
+    def test_real_ledger_without_order1_stops_before_network(self):
+        """本物の封印の記録に stats-order1 の記録がまだ無いあいだは、関門が止まる。"""
+        data = self.ledger.read_ledger(os.path.join(PROJECT, "sealed", "ledger.jsonl"))
+        if any(r["kind"] == "stats-order1" for r in self.ledger.verify_chain(data)):
+            self.skipTest("本物の封印の記録に stats-order1 がある")
+        with self.assertRaisesRegex(themes.ExclusionRulesNotSealed, "stats-order1）が無い"):
             self.run_themes()
         self.assertEqual(self.tr.calls, [])
         self.assertEqual(self.written(), [])
+
+    def test_two_records_of_kind_stop(self):
+        with self.assertRaisesRegex(themes.ExclusionRulesNotSealed, "2 件ある"):
+            self.gate_with(self.records(["periods", "exclusion-rules", "exclusion-rules"]))
+        self.assertEqual(self.tr.calls, [])
 
     def records(self, kinds):
         return [{"seq": i + 1, "kind": k} for i, k in enumerate(kinds)]

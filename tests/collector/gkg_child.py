@@ -96,6 +96,7 @@ def main():
                 committed_manifest=committed, committed_trial_manifest=b"",
                 check_volume=check_volume,
                 exclusion_rule={"seq": 7, "record_sha256": "e" * 64},
+                start_hook=lambda **k: {"seq": 21, "record_sha256": "9" * 64},
                 transport=transport, sleep=sleep, clock=lambda: clock[0], now=lambda: now,
                 log=report["logs"].append, disk_free=lambda p: 100 * 1024 ** 3)
 

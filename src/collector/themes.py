@@ -17,14 +17,15 @@
     区分表は、統計係の除外の規則を封印したあとでだけ取得する（docs/stats/tags-naive.md 5章の
     順番1：除外の規則を区分表の取得より前に封印する）。run() は、通信の前に最初にこの関門を
     呼ぶ。関門が確かめること：
-      - 除外の規則の封印の記録の種類（EXCLUSION_RULE_KIND）が決まっている。**T-021 の時点では
-        封印係の側でまだ決まっていない（None）。そのため、今は関門が必ず止まり、区分表は
-        取得できない。** kind が決まったら、その名前をここに書いてコミットする（別のタスク）。
+      - 除外の規則の封印の記録の種類（EXCLUSION_RULE_KIND）は "stats-order1"（統計係の順番1。
+        封印係の T-037 で決まった。src/sealer/ledger.py の ORDER1_KIND と同じことをテストで
+        確かめる。T-032）。
       - その kind が、封印の記録の種類の許可リスト（src/sealer/ledger.py の ALLOWED_KINDS）に
         入っている。
       - 封印の記録（sealed/ledger.jsonl）の鎖と、すべての seq の .ots が検証に通る
         （ledger._load_for_gate。プロジェクトのルートは ledger.PROJECT_ROOT に固定）。
-      - その kind の記録が1件以上ある。
+      - その kind の記録がちょうど1件ある（封印係の check_stats_order が、stats-order1 を1件に
+        限っている。0件なら止まり、2件以上でも止まる）。
       - run() に渡した root が、関門が読んだプロジェクトと同じ。
     確かめないこと：記録の中身（どの規則を封印したか）の照合。それは封印係が kind と一緒に
     決める照合の仕組みで行う。
@@ -167,8 +168,8 @@ ALLOWED_GUIDE_FILES = ("LOOKUP-GKGTHEMES.TXT",)
 THEMES_URL = "https://data.gdeltproject.org/api/v2/guides/" + ALLOWED_GUIDE_FILES[0]
 _DOC_URL_RE = re.compile(
     r"\Ahttps://data\.gdeltproject\.org/api/v2/guides/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\Z")
-# 0章：除外の規則の封印の記録の種類。封印係が決める。T-021 の時点では未定（関門が必ず止まる）
-EXCLUSION_RULE_KIND = None
+# 0章：除外の規則の封印の記録の種類。封印係の T-037 で決まった（ledger.ORDER1_KIND と同じ。T-032）
+EXCLUSION_RULE_KIND = "stats-order1"
 MAX_ATTEMPTS = 1
 REQUEST_TIMEOUT_SECONDS = 60
 TOTAL_DEADLINE_SECONDS = 300
@@ -278,6 +279,9 @@ def require_exclusion_rules_sealed():
     if not recs:
         raise ExclusionRulesNotSealed("除外の規則の封印の記録（kind %s）が無い。区分表は取得しない"
                                       % kind)
+    if len(recs) != 1:
+        raise ExclusionRulesNotSealed("除外の規則の封印の記録（kind %s）が %d 件ある。1件だけの決まり"
+                                      "（リードに報告）" % (kind, len(recs)))
     return recs[0], root
 
 

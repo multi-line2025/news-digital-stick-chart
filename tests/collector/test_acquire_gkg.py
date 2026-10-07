@@ -52,6 +52,7 @@ def _load(name, path):
 
 ag = _load("acquire_gkg", ENTRY)
 ledger = ag.ledger
+stamp = ag.stamp
 seal_method = importlib.import_module("seal_method")
 gkg = tg.gkg
 
@@ -77,6 +78,38 @@ def tearDownModule():
 
 
 EXCL_REF = {"seq": 7, "record_sha256": "e" * 64}
+
+_SEALER_TESTS = os.path.join(PROJECT, "tests", "sealer", "test_ledger.py")
+_sealer_test_ledger = None
+
+
+def add_order_record(project, kind, now):
+    """写しの封印の記録に、統計係の順番1・1b の記録（照合に通る仮の中身）を足す（T-032）。
+
+    中身は封印係のテストの order_doc_for で作る（ledger の決まった値を、その時点の値で使う）。
+    書く仕組み（seal_stats）を通さない。本物の sealed/ には書かない。返り値: seq。
+    """
+    global _sealer_test_ledger
+    if _sealer_test_ledger is None:
+        _sealer_test_ledger = _load("sealer_test_ledger_for_collector", _SEALER_TESTS)
+    path = os.path.join(project, "sealed", "ledger.jsonl")
+    data = ledger.read_ledger(path)
+    seq = len(ledger.verify_chain(data)) + 1
+    doc = _sealer_test_ledger.order_doc_for(data, seq, kind)
+    content = ledger.canonical_line(doc) + b"\n"
+    sha = ledger.sha256_hex(content)
+    rel = "sealed/%s-%s.json" % (kind, sha)
+    ledger.write_once(os.path.join(project, rel), content)
+    ledger.append_record(path, kind, [{"path": rel, "role": kind, "sha256": sha}], "", now)
+    stamp.stamp_seq(path, seq, "ots", runner=taf.FakeOts())
+    return seq
+
+
+def gkg_run_docs(project):
+    """写しの封印の記録の gkg-run-start の [(記録, 中身)]。"""
+    data = ledger.read_ledger(os.path.join(project, "sealed", "ledger.jsonl"))
+    return [(r, ledger.read_target_json(project, r, ledger.GKG_RUN_KIND))
+            for r in ledger.verify_chain(data) if r["kind"] == ledger.GKG_RUN_KIND]
 
 
 def pass_exclusion_gate(s, codes):
@@ -114,7 +147,7 @@ class TestExclusionGateFirst(unittest.TestCase):
                 mock.patch.object(ledger, "require_method_access", never), \
                 mock.patch.object(ag, "check_gate", never):
             for mode in ("official", "trial"):
-                with self.assertRaisesRegex(ag.GateError, "除外の規則.*まだ決まっていない"):
+                with self.assertRaisesRegex(ag.GateError, "除外の規則.*stats-order1）が無い"):
                     ag._acquire(mode)
             with mock.patch("sys.stderr"):
                 self.assertEqual(ag.main([]), 1)
@@ -215,25 +248,15 @@ class TestMethodAccessFirst(unittest.TestCase):
 class E2ECase(taf.CopyCase):
     """写しで、手順3（差し替えの通信）と method-access を作ってからコミットする。"""
 
-    DAYS = ("20150302", "20150303")
+    DAYS = ("20150302", "20150303", "20150304")     # 試しの run の3日（封印係が3日ちょうどを求める）
 
     def setUp(self):
         super().setUp()
-        p = mock.patch.object(ag, "_exclusion_gate", pass_exclusion_gate)
-        p.start()
-        self.addCleanup(p.stop)
-        real_exec = ag._exec_module
-
-        def exec_module(name, path, source):
-            # gkg.run_gkg の中の、鎖の上の除外の規則の記録の読み取りだけを差し替える
-            mod = real_exec(name, path, source)
-            if name == "gkg":
-                mod.chain_exclusion_ref = lambda root: dict(EXCL_REF)
-            return mod
-        p = mock.patch.object(ag, "_exec_module", exec_module)
-        p.start()
-        self.addCleanup(p.stop)
+        # T-032：除外の規則の関門（stats-order1）と、run の開始の封印の記録（gkg-run-start）は、
+        # 写しの封印の記録の上で本物を動かす。drand と ots は差し替える
         self.fs_check = lambda v: None
+        self.gdrand = taf.FakeDrand(tg.NOW)
+        self.gots = taf.FakeOts()
         self.zips = {}
         for d in self.DAYS:
             for i in range(3):
@@ -246,6 +269,10 @@ class E2ECase(taf.CopyCase):
         body = ("\n".join(lines) + "\n").encode()
         self.transport = tf.FakeTransport(tf.FakeResponse(body))
         taf.acq._acquire(_test=self.seams())           # 手順3（seq 3・4）
+        # T-032：method-access を書く前の状態に、統計係の順番1・1b（stats-order1・stats-order1b）の
+        # 記録を置く（封印係が「順番1 が無ければ method-access も止まる」を入れても壊れないように）
+        self.order1_seq = add_order_record(self.project, ledger.ORDER1_KIND, taf.NOW)
+        self.order1b_seq = add_order_record(self.project, ledger.ORDER1B_KIND, taf.NOW)
         self.volume = self.make_volume()
         self.gkg_store = os.path.join(self.volume, *gkg.STORE_PARTS)
         os.makedirs(self.gkg_store)
@@ -298,7 +325,8 @@ class E2ECase(taf.CopyCase):
                     transport=self.gtransport, sleep=lambda s: None, clock=self.clock,
                     now=lambda: tg.NOW, log=self.gkg_logs.append,
                     disk_free=lambda p: 100 * 1024 ** 3, check_volume=self.check_volume,
-                    fs_check=self.fs_check)
+                    fs_check=self.fs_check, drand_fetch=self.gdrand, ots_cmd="ots",
+                    ots_runner=self.gots)
         base.update(kw)
         return ag._TestSeams(**base)
 
@@ -336,8 +364,16 @@ class TestEndToEnd(E2ECase):
         self.assertEqual(sorted(self.gtransport.calls), sorted(self.zips))
         man = gkg.read_jsonl(os.path.join(self.project, "data", "manifest", gkg.MANIFEST_NAME))
         self.assertEqual([e["kind"] for e in man],
-                         ["run-start", "run-resume", "day", "day", "run-complete"])
+                         ["run-start", "run-resume"] + ["day"] * len(self.DAYS) + ["run-complete"])
         self.assertEqual(man[0]["store_location"], "LACIE SHARE:/news-stick-data/gkg-method")
+        runs = gkg_run_docs(self.project)                  # T-032：封印の記録に1件
+        self.assertEqual([d["mode"] for _r, d in runs], ["official"])
+        r, d = runs[0]
+        self.assertEqual(man[0]["gkg_run_seq"], r["seq"])
+        self.assertEqual(man[0]["gkg_run_record_sha256"],
+                         ledger.sha256_hex(ledger.canonical_line(r)))
+        self.assertEqual((d["run_id"], d["code_sha256"], d["exclusion_rule_seq"]),
+                         (man[0]["run_id"], man[0]["code_sha256"], man[0]["exclusion_rule_seq"]))
         with open(ENTRY, "rb") as f:
             entry_sha = hashlib.sha256(f.read()).hexdigest()
         self.assertEqual(man[0]["code_sha256"], entry_sha)
@@ -380,8 +416,9 @@ class TestEndToEnd(E2ECase):
     def test_trial_run_then_official(self):
         self.add_method_access()
         out = self.acquire(self.gseams(), mode="trial")
-        self.assertEqual(out["days"], 2)               # 写しの一覧の2日は、どちらも試しの run の日
-        self.assertEqual({c[:8] for c in self.gtransport.calls}, {"20150302", "20150303"})
+        self.assertEqual(out["days"], 3)               # 写しの一覧の3日は、どれも試しの run の日
+        self.assertEqual({c[:8] for c in self.gtransport.calls},
+                         {"20150302", "20150303", "20150304"})
         tm0 = gkg.read_jsonl(os.path.join(self.project, "data", "manifest",
                                           gkg.TRIAL_MANIFEST_NAME))[0]
         self.assertEqual((tm0["official"], tm0["trial"]), (False, True))
@@ -443,7 +480,8 @@ class TestEndToEnd(E2ECase):
     def test_project_root_must_match(self):
         """関門が読んだプロジェクト（本物）と、差し替えの project が違えば止まる。"""
         self.add_method_access()
-        with mock.patch.object(ledger, "require_method_access", return_value={"seq": 5}):
+        with mock.patch.object(ledger, "require_method_access", return_value={"seq": 5}), \
+                mock.patch.object(ag, "_exclusion_gate", pass_exclusion_gate):
             with self.assertRaisesRegex(ag.GateError, "プロジェクトが違う"):
                 ag._acquire(_test=self.gseams())
 
@@ -520,6 +558,102 @@ class TestEndToEndOnFat32(E2ECase):
         self.add_method_access()
         os.rename(self.gkg_store, os.path.join(os.path.dirname(self.gkg_store), "Gkg-Method"))
         self.refuse("大文字と小文字")
+
+
+class TestSealGkgRun(E2ECase):
+    """T-032：試しの run と正式な run の開始を、写しの封印の記録に gkg-run-start として書く。"""
+
+    def change_code(self, tag):
+        """入口のスクリプトを写しの中で変えてコミットする（run_id が変わる）。"""
+        p = os.path.join(self.project, "src", "collector", "acquire_gkg.py")
+        with open(p, "ab") as f:
+            f.write(("# %s\n" % tag).encode())
+        taf.git(self.project, "commit", "-q", "-am", tag)
+
+    def test_two_trial_runs_leave_two_records(self):
+        self.add_method_access()
+        self.acquire(self.gseams(), mode="trial")
+        self.commit_manifest("試しの run 1")
+        self.change_code("試しの run 2 のための変更")
+        self.acquire(self.gseams(), mode="trial")
+        runs = gkg_run_docs(self.project)
+        self.assertEqual([d["mode"] for _r, d in runs], ["trial", "trial"])
+        self.assertNotEqual(runs[0][1]["run_id"], runs[1][1]["run_id"])
+        self.assertEqual(runs[0][1]["trial_days"], ["2015-03-02", "2015-03-03", "2015-03-04"])
+        for _r, d in runs:
+            self.assertEqual(d["exclusion_rule_seq"], self.order1_seq)
+        tm = gkg.read_jsonl(os.path.join(self.project, "data", "manifest", gkg.TRIAL_MANIFEST_NAME))
+        starts = [e for e in tm if e["kind"] == "run-start"]
+        self.assertEqual([e["gkg_run_seq"] for e in starts], [r["seq"] for r, _d in runs])
+        self.assertEqual([e["run_id"] for e in starts], [d["run_id"] for _r, d in runs])
+
+    def test_resume_writes_no_second_record(self):
+        self.add_method_access()
+        calls = []
+
+        def disk_free(p):                              # run-start を書いたあと、日の集計の前に止まる
+            calls.append(p)
+            return 100 * 1024 ** 3 if len(calls) == 1 else 0
+        s = self.gseams(disk_free=disk_free)
+        with self.assertRaises(Exception) as cm:
+            self.acquire(s, mode="trial")
+        self.assertEqual(type(cm.exception).__name__, "RunInterrupted")
+        self.assertEqual(len(gkg_run_docs(self.project)), 1)
+        self.acquire(self.gseams(), mode="trial")
+        self.assertEqual(len(gkg_run_docs(self.project)), 1)
+
+    def test_seal_failure_sends_no_request(self):
+        self.add_method_access()
+        before = self.gsnapshot()
+
+        def broken(url):
+            raise OSError("見本：drand に届かない")
+        for mode in ("trial", "official"):
+            with self.subTest(mode=mode):
+                s = self.gseams(drand_fetch=broken)
+                with self.assertRaises(Exception) as cm:
+                    self.acquire(s, mode)
+                self.assertIn("gkg-run-start を書けなかった", str(cm.exception))
+                self.assertEqual(self.gtransport.calls, [])
+                self.assertEqual(self.gsnapshot(), before)
+                self.assertEqual(gkg_run_docs(self.project), [])
+
+    def test_sealer_gate_stops_without_order1b(self):
+        """順番1b の無い封印の記録では、封印係の関門が drand の前に止め、要求は送らない。"""
+        self.add_method_access()
+        with mock.patch.object(ledger, "ORDER1B_KIND", "stats-order1b-none"):
+            s = self.gseams()
+            with self.assertRaises(Exception) as cm:
+                self.acquire(s, "trial")
+        self.assertIn("gkg-run-start を書けなかった", str(cm.exception))
+        self.assertEqual(self.gtransport.calls, [])
+        self.assertEqual(self.gdrand.urls, [])
+
+    def test_existing_record_is_reused_when_manifest_line_missing(self):
+        """記録を書いたあと run-start の行を書く前に止まった跡：同じ run の記録を新しく書かない。"""
+        self.add_method_access()
+        stop = RuntimeError("見本：run-start の行を書く前に止まる")
+        orig_exec = ag._exec_module
+        calls = []
+
+        def exec_module(name, path, source):
+            mod = orig_exec(name, path, source)
+            if name == "gkg" and not calls:
+                calls.append(1)
+
+                def mark(*a, **k):
+                    raise stop
+                mod.write_volume_mark = mark
+            return mod
+        with mock.patch.object(ag, "_exec_module", exec_module):
+            with self.assertRaises(RuntimeError):
+                self.acquire(self.gseams(), mode="trial")
+        self.assertEqual(len(gkg_run_docs(self.project)), 1)
+        self.acquire(self.gseams(), mode="trial")
+        runs = gkg_run_docs(self.project)
+        self.assertEqual(len(runs), 1)
+        tm = gkg.read_jsonl(os.path.join(self.project, "data", "manifest", gkg.TRIAL_MANIFEST_NAME))
+        self.assertEqual(tm[0]["gkg_run_seq"], runs[0][0]["seq"])
 
 
 class TestCodeScope(unittest.TestCase):
@@ -614,7 +748,7 @@ class TestProductionPath(unittest.TestCase):
         def seams(**kw):
             base = dict(project=tmp, home=tmp, volume=tmp, transport=None, sleep=None,
                         clock=None, now=None, log=None, disk_free=None, check_volume=None,
-                        fs_check=None)
+                        fs_check=None, drand_fetch=None, ots_cmd=None, ots_runner=None)
             base.update(kw)
             return ag._TestSeams(**base)
 

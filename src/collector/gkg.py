@@ -342,6 +342,19 @@
     行を足しても、偽の行は信用しない範囲に入るので使われない（5.2章）。
 
 ------------------------------------------------------------------------
+5.5 run の開始を封印の記録に書く（gkg-run-start。T-032）
+------------------------------------------------------------------------
+    run の最初の実行（run-start の行を書く実行）で、run-start の行を書く前、印のファイルを
+    書く前、GKG への要求を送る前に、start_hook を1回だけ呼ぶ。入口のスクリプトは、封印係の
+    seal_gkg_run.start（src/sealer。docs/verify/periods-seal.md 12章）で封印の記録に
+    gkg-run-start を書く（mode・run_id・code_sha256・filelist_sha256・method_access_seq・
+    trial_days・除外の規則の記録の seq と sha256）。書けなければ（関門で止まった・通信の失敗
+    など）、何も書かずに GkgError で止まり、要求は1件も送らない。
+    run-start の行には、その記録の seq（gkg_run_seq）と、記録の行の正規の形の sha256
+    （gkg_run_record_sha256）を書く。同じ run の再開と、正式な run の2回目の実行では呼ばない。
+    そのため、試しの run の回数は、封印の記録の gkg-run-start（trial）の件数と同じになる。
+
+------------------------------------------------------------------------
 6. 集計の単位と形（ディスクに書く前に集計する。行単位のデータは保存しない）
 ------------------------------------------------------------------------
     15分ファイルごと：文書数（g ごと）と行の件数の内訳。取得の記録と、日の集計の F・FD の行に
@@ -374,12 +387,20 @@
         文中の位置の数は捨てる）。
       - どちらも THEME_RE（英大文字で始まり、英大文字・数字・下線だけ、160字まで）に完全に
         合うものだけを数える。合わないものは件数（theme_tokens_invalid_v1・_v2）だけ数える。
+        名前の辞書（同じ名前のバイト列を使い回すための入れ物）は、テーマ・国・言語・ENG の語で
+        別々にする（T-032。_vocabs）。テーマの辞書には THEME_RE に合った名前だけが入るので、
+        同じプロセスで先に言語の符号や ENG の語を見ても、テーマの数は変わらない。
+      - 同じ文書の同じ欄に同じ名前が2回あっても、v1_docs・v2_docs・v1_or_v2_docs は1回と数える
+        （v2_mentions は回数分）。空の部分（「;;」）は読み飛ばす。
       - 同じテーマかどうかは、こうして取り出した名前のバイト列が完全に一致するかで決める。
       - 限界：V1 と V2 で同じテーマに違う名前が付いている場合（V2 だけの名前・付け方の違い）、
         別々のテーマとして数えられ、v1_or_v2_docs で1つにまとまらない。名前の対応表は使わない。
     S の行の docs_without_any_theme は、V1THEMES にも V2ENHANCEDTHEMES にもテーマが一つも
     付かない文書の数（T-035。欄の手厚さの推移を公開するため）。docs_without_v1_theme・
-    docs_without_v2_theme は、それぞれ片方に一つも付かない文書の数。
+    docs_without_v2_theme は、それぞれ片方に一つも付かない文書の数。形の合わない名前しか
+    付かない欄は、一つも付かない欄と同じに数える。どの組（g）も合わせた日の合計である。
+    docs_without_any_theme ≤ min(docs_without_v1_theme, docs_without_v2_theme) が成り立つ。
+    S の行は、値が 0 の名前を書かない（T-035 の監査 軽-2）。読む側は、無い名前を 0 と読む。
     テーマの数え方（文書の有無か、言及の回数か）は試運転のあとで決めるので、どちらでも
     数えられるように四つとも持つ。
     大きさの見込み（データを見ていないので幅は大きい。根拠は GKG の一般的な性質と、ファイル
@@ -513,6 +534,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+import zlib
 from collections import Counter, defaultdict
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -834,8 +856,20 @@ def _ts_inside_block(ts):
     return DATA_START <= filelist.file_day(t) <= METHOD_BLOCK_END
 
 
+def _vocabs(vocab):
+    """名前の辞書を種類ごとに分けて返す（T-032。T-035 の監査 中-1）。
+
+    テーマ・国・言語・ENG の語で別々の辞書を使う。同じ辞書を使うと、先に言語の符号や ENG の語として
+    入れた文字列が、テーマの欄では THEME_RE の検査を飛ばしてテーマとして数えられ、その日の数字が、
+    同じプロセスで先に処理したファイルに左右される。テーマの辞書には THEME_RE に合った名前だけが入る。
+    """
+    return (vocab.setdefault("theme", {}), vocab.setdefault("country", {}),
+            vocab.setdefault("lang", {}), vocab.setdefault("eng", {}))
+
+
 def add_line(agg, line, file_time_b, vocab):
     """1行を読み、4章の許可リストの値だけを集計に加える。一覧にない欄はここで捨てる。"""
+    tvocab, cvocab, lvocab, evocab = _vocabs(vocab)
     st = agg.stats
     if line.endswith(b"\n"):
         line = line[:-1]
@@ -886,12 +920,12 @@ def add_line(agg, line, file_time_b, vocab):
         for t in v1t.split(b";"):
             if not t:
                 continue
-            c = vocab.get(t)
+            c = tvocab.get(t)
             if c is None:
                 if THEME_RE.fullmatch(t) is None:
                     st["theme_tokens_invalid_v1"] += 1
                     continue
-                c = vocab.setdefault(t, t)
+                c = tvocab.setdefault(t, t)
             s1.add(c)
     m2 = Counter()
     if v2t:
@@ -899,12 +933,12 @@ def add_line(agg, line, file_time_b, vocab):
             if not blk:
                 continue
             t = blk.partition(b",")[0]
-            c = vocab.get(t)
+            c = tvocab.get(t)
             if c is None:
                 if THEME_RE.fullmatch(t) is None:
                     st["theme_tokens_invalid_v2"] += 1
                     continue
-                c = vocab.setdefault(t, t)
+                c = tvocab.setdefault(t, t)
             m2[c] += 1
     s2 = set(m2)
     cs = set()
@@ -918,7 +952,7 @@ def add_line(agg, line, file_time_b, vocab):
                 continue
             cc = parts[V1LOCATION_COUNTRY]
             if COUNTRY_RE.fullmatch(cc):
-                cs.add(vocab.setdefault(cc, cc))
+                cs.add(cvocab.setdefault(cc, cc))
             else:
                 st["country_codes_invalid"] += 1
     lang = NO_LANG
@@ -933,7 +967,7 @@ def add_line(agg, line, file_time_b, vocab):
             val = val.strip()
             if key == b"srclc":
                 if LANG_RE.fullmatch(val):
-                    lang = vocab.setdefault(val, val)
+                    lang = lvocab.setdefault(val, val)
                 else:
                     lang = OTHER
                     st["srclc_other"] += 1
@@ -943,7 +977,7 @@ def add_line(agg, line, file_time_b, vocab):
                     if not tok:
                         continue
                     if ENG_RE.fullmatch(tok):
-                        engs.add(vocab.setdefault(tok, tok))
+                        engs.add(evocab.setdefault(tok, tok))
                     else:
                         st["eng_other_tokens"] += 1
             else:
@@ -1740,9 +1774,9 @@ def _trial_info(paths):
 
 def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, code_sha256,
             mode="official", committed_manifest=None, committed_trial_manifest=None,
-            exclusion_rule=None, transport=urllib_transport, sleep=time.sleep, clock=time.monotonic,
-            now=lambda: datetime.datetime.now(datetime.timezone.utc), log=_stderr_log,
-            disk_free=_disk_free, check_volume=check_volume):
+            exclusion_rule=None, start_hook=None, transport=urllib_transport, sleep=time.sleep,
+            clock=time.monotonic, now=lambda: datetime.datetime.now(datetime.timezone.utc),
+            log=_stderr_log, disk_free=_disk_free, check_volume=check_volume):
     """5章の取得の全体。全部の日が終われば dict を返す。
 
     止まる条件では RunInterrupted。正式な run の最初の実行は、run-start を書いたところで
@@ -1750,6 +1784,9 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
     committed_trial_manifest：HEAD の試しの run のマニフェスト（正式な run だけ。5.1章）。
     exclusion_rule：除外の規則の封印の記録の {"seq", "record_sha256"}（5.3章）。ここでも鎖の上の
       記録と照らす（関門を通らずにこの関数を呼んでも、取得は始まらない）。
+    start_hook(mode=, run_id=, trial_days=)：run の最初の実行で、run-start の行を書く前（要求を
+      送る前）に1回だけ呼ぶ。封印の記録に gkg-run-start を書き、その記録の
+      {"seq", "record_sha256"} を返す（5.5章。T-032）。入口のスクリプトが渡す。無ければ止まる。
     """
     if not re.fullmatch(r"[0-9a-f]{64}", code_sha256 or ""):
         raise GkgError("code_sha256 の形が違う")
@@ -1819,6 +1856,8 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
         if os.path.lexists(log_path):
             raise GkgError("run-start の前なのに、取得の記録が既にある（リードに報告）")
         check_exclusion_record(root, exclusion_rule, None)
+        run_ref = _seal_run_start(start_hook, mode, run_id,
+                                  sorted(plan) if mode == "trial" else None)
         write_volume_mark(paths, run_id, mode)
         size, sha = _log_state(log_path)
         untrusted = []
@@ -1827,7 +1866,8 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
                     store_location=paths["location"],
                     fetch_log_size=size, fetch_log_sha256=sha,
                     exclusion_rule_seq=exclusion_rule["seq"],
-                    exclusion_rule_record_sha256=exclusion_rule["record_sha256"])
+                    exclusion_rule_record_sha256=exclusion_rule["record_sha256"],
+                    gkg_run_seq=run_ref["seq"], gkg_run_record_sha256=run_ref["record_sha256"])
         if mode == "trial":
             head.update(trial=True, trial_days=sorted(plan))
         else:
@@ -1845,6 +1885,26 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
         # kill -9 と停電では書けない（5.2章の限界）
         _write_stop(paths, base, log_path, now)
         raise
+
+
+def _seal_run_start(start_hook, mode, run_id, trial_days):
+    """5.5章（T-032）：封印の記録に gkg-run-start を書く。書けなければ何も書かずに止まる。"""
+    if start_hook is None:
+        raise GkgError("封印の記録（gkg-run-start）に書く仕組みを受け取っていない（入口のスクリプト"
+                       "から実行する）")
+    try:
+        ref = start_hook(mode=mode, run_id=run_id, trial_days=trial_days)
+    except (GkgError, RunInterrupted):
+        raise
+    except Exception as e:
+        raise GkgError("封印の記録に gkg-run-start を書けなかったので、取得を始めない：%s"
+                       % e) from None
+    if (not isinstance(ref, dict) or set(ref) != {"seq", "record_sha256"}
+            or type(ref["seq"]) is not int or ref["seq"] < 1
+            or not isinstance(ref["record_sha256"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", ref["record_sha256"])):
+        raise GkgError("gkg-run-start の記録の seq と sha256 の形が違う")
+    return ref
 
 
 def _write_stop(paths, base, log_path, now):
@@ -2137,17 +2197,36 @@ _F_ATTEMPTS_FIELD = 7        # serialize_day の F の行の attempts の欄（0
 _F_ATTEMPTS_RE = re.compile(rb"\A[0-%d]\Z" % MAX_ATTEMPTS_PER_FILE)
 
 
-def check_existing_day_file(gz, day):
-    """既にある日の集計をそのまま使う前の検査（T-030 軽-A）。合わなければ GkgError で止まる。
+_GZIP_FIXED_HEAD = b"\x1f\x8b\x08\x00\x00\x00\x00\x00"   # 魔法の数・deflate・FLG 0・MTIME 0
 
-    展開した中身に check_output_bytes（使ってよい文字だけ・メールアドレスの形が無い）をかけ、
-    F の行の attempts の欄が 0〜MAX_ATTEMPTS_PER_FILE の1桁の数字であることを確かめる。
+
+def check_existing_day_file(gz, day):
+    """既にある日の集計をそのまま使う前の検査（T-030 軽-A・T-032）。合わなければ GkgError で止まる。
+
+    ファイルのバイト列について（T-032。T-030 の監査 中-1。リードの前回の指示の訂正）：
+      - gzip の頭が、このモジュールが書く形（gzip_bytes）と同じであること：魔法の数 1f 8b、
+        圧縮の方式 8（deflate）、旗（FLG）が 0（FTEXT・FHCRC・FEXTRA・FNAME・FCOMMENT のどれも
+        無い）、時刻（MTIME）が 0。任意の語を入れられる欄（FEXTRA・FNAME・FCOMMENT）を持つ
+        ファイルは、そのまま使わない。
+      - gzip の部分（member）がちょうど1つで、その後ろに何も無いこと（空の部分や任意のバイトを
+        後ろに足したファイルは、そのまま使わない）。
+    展開した中身について：check_output_bytes（使ってよい文字だけ・メールアドレスの形が無い）を
+    かけ、F の行の attempts の欄が 0〜MAX_ATTEMPTS_PER_FILE の1桁の数字であることを確かめる。
     attempts の欄は same_day_except_attempts で比べないので、ここで形を確かめる。
+    この3つで、ファイルの中で任意のバイトを置ける場所（頭の欄・後ろ・中身）がすべて照らされる
+    （deflate の部分は、展開した中身として照らす）。
     """
+    if len(gz) < 18 or gz[:8] != _GZIP_FIXED_HEAD:
+        raise GkgError("%s の既にある日の集計の gzip の頭が、このコードの書く形でない"
+                       "（FNAME・FCOMMENT・FEXTRA などの欄がある。リードに報告）" % day)
+    d = zlib.decompressobj(31)
     try:
-        text = gzip.decompress(gz)
-    except (OSError, EOFError, ValueError):
+        text = d.decompress(gz) + d.flush()
+    except zlib.error:
         raise GkgError("%s の既にある日の集計を展開できない（リードに報告）" % day) from None
+    if not d.eof or d.unused_data:
+        raise GkgError("%s の既にある日の集計の gzip の後ろに、別の部分かバイトがある"
+                       "（リードに報告）" % day)
     check_output_bytes(text, "既にある日の集計")
     for line in text.split(b"\n"):
         if line.startswith(b"F\t"):
