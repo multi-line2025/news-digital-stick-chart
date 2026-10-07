@@ -141,14 +141,14 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py all --rev auto
 - ヘッダが Bitcoin の本当の鎖にあること。5章の `ots verify` か、自分の Bitcoin のノードで確かめる。
 - drand の署名（BLS）。7章の方法で確かめる。
 
-現在の記録（T-017 の時点。seq 1 が `periods`、seq 2 が `candidates`、seq 3 が `acquisition-start`、seq 4 が `acquisition-result`。seq 1・2 は Bitcoin で確定、seq 3・4 は Pending（5章）。`threshold-access` と `method-access` の記録は無い）では、次のように出る。
+現在の記録（T-017 の時点。seq 1 が `periods`、seq 2 が `candidates`、seq 3 が `acquisition-start`、seq 4 が `acquisition-result`。seq 1〜4 はすべて Bitcoin で確定。`threshold-access` と `method-access` の記録は無い）では、次のように出る。
 
 - `anchors`：
   - 「seq 1: Bitcoin で確定（ヘッダの時刻 2026-10-05T21:56:43+00:00 …）」。`sealed/ledger.jsonl.seq000001.bitcoin.ots` の中の高さ 970086・970136・970137 の証明を、`sealed/bitcoin-header-<高さ>.hex` と照合する。最も早いのは高さ 970086（ブロックのハッシュ `00000000000000000000634c077d16d3ea811af7b74f6bbb393ef28421fd0296`）。
   - 「seq 2: Bitcoin で確定（ヘッダの時刻 2026-10-06T10:38:55+00:00 …）」。`sealed/ledger.jsonl.seq000002.bitcoin.ots` の中の高さ 970161・970162・970187 の証明を照合する。最も早いのは高さ 970161（ブロックのハッシュ `00000000000000000000a5912145cd91ef70f4934355505fc03d5d156264256b`）。
-  - 「seq 3: Pending」「seq 4: Pending」。Pending の宛先は1章の4つ。
+  - 「seq 3: Bitcoin で確定（ヘッダの時刻 2026-10-07T14:56:14+00:00 …）」「seq 4: Bitcoin で確定（同じ時刻）」。`sealed/ledger.jsonl.seq000003.bitcoin.ots` と `seq000004.bitcoin.ots` の中の証明は、どちらも高さ 970352（ブロックのハッシュ `000000000000000000000661478887c03e0bfe0eb0a0f1e42a249c9527afd3f2`）だけである。
 - `access`：「threshold-access の記録：なし」。
-- `acquisition`：「acquisition-start seq 3 ← acquisition-result seq 4」。seq 3 の drand の回の公開時刻は 2026-10-07T13:45:09+00:00。seq 3 が Pending のうちは、確定時刻との照合は保留と出る。
+- `acquisition`：「acquisition-start seq 3 ← acquisition-result seq 4」。seq 3 の drand の回の公開時刻は 2026-10-07T13:45:09+00:00 で、seq 3 自身の確定時刻（ヘッダの時刻 2026-10-07T14:56:14+00:00）に2時間を足した時刻より前である（照合に通る）。
 - `method`：「method-access の記録：なし」。
 - `candidates`：「candidates の 1 件目（seq 2）」。出力の sha256 は `027bde541f834a1a6644fe610323376cd26d1e1cbce99ef8fa7cafdf3da39ee5`。倍率 2, 3, 4, 6, 8, 12, 16、判定期間 14, 28, 56 日、組み合わせ 21。「J（判定が読む最後の日のずれ）の最大 56 は、periods の 1 件目の embargo_days 90 以下」。
 - `adopted`：「採用は保留（threshold-access の記録が無いため）」。`periods` の仮の候補は seq 1、`candidates` の仮の候補は seq 2。
@@ -213,7 +213,7 @@ git show <そのコミット>:docs/stats/periods.md | shasum -a 256
 - 確定前の `.ots` では「Pending confirmation in Bitcoin blockchain」と出る。この段階では、カレンダーが受け取ったことしか示せない。しかも、それすら手元では確かめられない（下の「オフラインで偽造した Pending」）。
   - seq 1 の stamp の `.ots`（`ledger.jsonl.seq000001.ots`）は封印の直後のもので、この状態のまま残してある（追記のみ）。2026-10-06 に運営側が upgrade し、確定を加えたものを `ledger.jsonl.seq000001.bitcoin.ots` として別に置いた。中には高さ 970086・970136・970137 の証明がある（カレンダーごとに別のブロック）。最も早いのは高さ 970086、ヘッダの時刻 2026-10-05T21:56:43Z である。
   - seq 2 も同じ形で、stamp の `.ots` を残したまま、2026-10-07 に運営側が upgrade した（T-017）。`ledger.jsonl.seq000002.bitcoin.ots` の中には高さ 970161・970162・970187 の証明がある。最も早いのは高さ 970161、ヘッダの時刻 2026-10-06T10:38:55Z である。
-  - seq 3・4 の `.ots` は封印の直後のもので、Pending である。2026-10-07T14:00Z（UTC）の upgrade では、4つのカレンダーとも「Pending confirmation in Bitcoin blockchain」で、まだ確定していなかった。`seal_bitcoin.py` は、確定していなければ何も書かない。
+  - seq 3・4 も同じ形で upgrade した（T-017）。2026-10-07T14:00Z〜15:31Z（UTC）の upgrade では未確定で、何も書かなかった。15:46Z の upgrade で確定し、`ledger.jsonl.seq000003.bitcoin.ots`・`seq000004.bitcoin.ots` と、高さ 970352 のヘッダ（ヘッダの時刻 2026-10-07T14:56:14Z）を書いた。
 
 ### 確定した時刻を verify.py に渡す（自由な値では通らない）
 
