@@ -4,8 +4,8 @@
 この二つは順番1で封印する。このファイルは封印しない（naive.py・scoring.py の改訂や、封印の対象の
 sha256 の表 docs/stats/seal-order1.md と一緒に直すため）。
 
-実行（プロジェクトのルートで）:
-    PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/stats -v
+実行（プロジェクトのルートで。使う Python は .venv/bin/python に決める。T-024）:
+    PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m unittest discover -s tests/stats -v
 
 データもネットワークも使わない。データはすべてテストの中で作る合成の値。
 """
@@ -662,7 +662,9 @@ def audit_sealed_tests(project, test_files=SEALED_TEST_FILES):
               Python の本体と標準ライブラリ（sys.prefix などの下）と、見張りの sitecustomize.py と
               pyc の置き場だけを数えない。一時のフォルダのほかのファイル（ログを含む）は数える。
               パスは、事象が起きた時点で realpath にしたもの（リンクは指す先になる）。
-      dirs:   一覧を読んだフォルダ（同じく）。
+      dirs:   一覧を読んだフォルダ。プロジェクトの中と見張りの一時のフォルダの中だけを数える（T-024 M-a）。
+              プロジェクトの外のフォルダ（ユーザーや Homebrew の site-packages など。どの Python で
+              流すかで変わる）は数えない。realpath で比べるので、外からプロジェクトの中を指すリンクは中に数える。
       procs:  subprocess.Popen の (引数, cwd, 環境変数の差) の組。Python の実行ファイルは "PYTHON"、
               プロジェクトの中のパスは相対パス。
       forks:  _posixsubprocess.fork_exec の引数の組の数（Popen を通らない起動を見つけるため）。
@@ -713,7 +715,8 @@ def audit_sealed_tests(project, test_files=SEALED_TEST_FILES):
                 out["opens"].add((rel(full), write))
             elif kind == "dir":
                 full = rec[1]
-                if full is None or _under(full, ignore_roots) or _under(full, [pyc_root]):
+                if full is None or not _under(full, [project, tmp]) or _under(full, ignore_roots) \
+                        or _under(full, [pyc_root]):
                     continue
                 out["dirs"].add(rel(full))
             elif kind == "proc":
@@ -891,13 +894,24 @@ class TestSealedTestsReadOnlyTargets(unittest.TestCase):
             if name in caught_by_source:
                 self.assertTrue(probs, name)
 
-    def test_detours_are_caught_by_audit(self):
-        # ソースの検査をすり抜けても、実行の見張りが見つけることを、写しで確かめる。
-        # ソースの検査で止まるものも、実行の見張りで止まるかを並べて確かめる（ctypes と fork_exec を除く。
-        # この二つは、写しの中で実際に呼ぶと環境に依るので、ソースの検査だけで止める）。
-        import shutil
-        import tempfile
-        bodies = dict(self.DETOURS)
+    # 回り道ごとに、実行の見張りが出すはずの問題（audit_problems() の行の頭と、その行に含まれるはずの文字列）。
+    # ソースの検査だけで止まるもの（ctypes、_posixsubprocess の import、os.stat・os.path.exists、環境変数の
+    # 名前の文字列、__dict__）は、audit の事象を出さないか、写しの中で呼ぶと環境に依るので、ここには入れない。
+    AUDIT_EXPECT = {
+        "open_relative": ("開いたファイルが違う", "reviews/T-020.md"),
+        "open_joined": ("開いたファイルが違う", "reviews/T-020.md"),
+        "git_other": ("起動したプロセスが違う", "HEAD:reviews/T-020.md"),
+        "listdir": ("一覧を読んだフォルダ", "reviews"),
+        "link": ("許可しない事象", "os.link"),
+        "other_env": ("起動したプロセスが違う", "PYTHONPATH"),
+        "other_cwd": ("起動したプロセスが違う", "'src'"),
+        "fork_exec_real": ("Popen を通らない起動", "/bin/cat"),
+        "symlink_into_log_dir": ("開いたファイルが違う", "reviews/T-020.md"),
+        "hardlink_into_log_dir": ("許可しない事象", "os.link"),
+    }
+
+    def _audit_bodies(self):
+        bodies = {k: v for k, v in self.DETOURS.items() if k in self.AUDIT_EXPECT}
         bodies["fork_exec_real"] = (
             "from multiprocessing.util import spawnv_passfds\n"
             "r, w = os.pipe()\n"
@@ -920,25 +934,97 @@ class TestSealedTestsReadOnlyTargets(unittest.TestCase):
             "p = os.path.join(d, \"h\")\n"
             "os.link(os.path.join(PROJECT, \"reviews\", \"T-020.md\"), p)\n"
             "data = open(p, \"rb\").read()")
-        skip = {"fork_exec", "spawnv_passfds", "ctypes", "env_conditional", "env_name_joined", "stat",
-                "exists", "dunder"}
-        for name, body in bodies.items():
-            if name in skip:
-                continue
-            with self.subTest(name=name), tempfile.TemporaryDirectory() as d:
-                for rel in ALLOWED_OPENS | {"reviews/T-020.md"}:
-                    os.makedirs(os.path.join(d, os.path.dirname(rel)), exist_ok=True)
-                    shutil.copyfile(os.path.join(PROJECT, rel), os.path.join(d, rel))
+        self.assertEqual(set(bodies), set(self.AUDIT_EXPECT))
+        return bodies
+
+    def test_detours_are_caught_by_audit(self):
+        # T-024 M-c：回り道の無い対照で問題が一つも出ない写しを作り、回り道ごとに、期待する問題が出ることを
+        # 確かめる。写しは、封印の対象のファイル5件と、回り道が読む reviews/T-020.md と、git の履歴の
+        # 1cb463a と 2d23cdf（2d23cdf:reviews/T-020.md の git show に要る）だけを置いたもの
+        # （make_targets_only_copy）。履歴があるので、写しでも封印するテストは通る（rc = 0）。
+        # 回り道ごとに新しい写しを作る（回り道が写しに残すもの（リンクなど）が、ほかの回り道に効かないため）。
+        import tempfile
+
+        def run(body):
+            with tempfile.TemporaryDirectory() as d:
+                make_targets_only_copy(d, extra=("reviews/T-020.md",))
                 path = os.path.join(d, SEALED_TEST_FILES[0])
-                with open(path, encoding="utf-8") as f:
-                    src = f.read()
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(self._with_detour(src, body))
+                if body is not None:
+                    with open(path, encoding="utf-8") as f:
+                        src = f.read()
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(self._with_detour(src, body))
                 out = audit_sealed_tests(d)
-                # 写しは git の履歴を持たないので rc は 0 にならない。rc 以外の違いで見つかることを確かめる。
-                probs = [p for p in audit_problems(out) if not p.startswith("封印するテストが通らない")
-                         and "git" not in p]
-                self.assertTrue(probs, name)
+            return out
+
+        # 対照：回り道の無い写し。問題は一つも出ない（rc も 0）。見張りが働いていること（procs が空でない）。
+        control = run(None)
+        self.assertEqual(audit_problems(control), [])
+        self.assertTrue(control["procs"])
+        # 何もしない本体を足した写しでも、問題は出ない（足し方そのものでは問題が出ないこと）。
+        self.assertEqual(audit_problems(run('data = b"x"')), [])
+        for name, body in self._audit_bodies().items():
+            with self.subTest(name=name):
+                probs = audit_problems(run(body))
+                head, word = self.AUDIT_EXPECT[name]
+                hit = [p for p in probs if p.startswith(head) and word in p]
+                self.assertTrue(hit, (name, probs))
+
+
+def make_targets_only_copy(dst, extra=()):
+    """封印の対象のファイル5件（と extra）と、1cb463a・2d23cdf の git の履歴だけを置いた写しを dst に作る。
+
+    docs/stats/seal-order1.md 2章の項目10の手順と同じ作り方（あちらは HEAD の版を git show で置く。
+    ここでは作業ツリーのファイルを置く）。git の履歴は、プロジェクトから2つの commit を深さ1で取る。
+    ネットワークは使わない（取る元はプロジェクトのフォルダ）。
+    """
+    def git(*args):
+        r = subprocess.run(["git", *args], capture_output=True, cwd=dst)
+        if r.returncode != 0:
+            raise AssertionError("git %s に失敗：%s" % (" ".join(args), r.stderr.decode("utf-8", "replace")))
+    git("init", "-q")
+    git("fetch", "-q", "--depth=1", PROJECT, *ORDER1_HISTORY_COMMITS)
+    for rel in sorted(set(ALLOWED_OPENS) | set(extra)):
+        os.makedirs(os.path.join(dst, os.path.dirname(rel)), exist_ok=True)
+        with open(os.path.join(PROJECT, rel), "rb") as f:
+            data = f.read()
+        with open(os.path.join(dst, rel), "wb") as f:
+            f.write(data)
+
+
+# 封印の対象のうち git の履歴から読むもの（1cb463a:… と 2d23cdf:…）の commit の40桁の ID。
+ORDER1_HISTORY_COMMITS = ("1cb463acfcf15ba315e6c454625ad681e86bbc2a", "2d23cdf6e01de5129fc7b0a5d85e89bf02e892c6")
+
+
+class TestTargetsOnlyCopy(unittest.TestCase):
+    """seal-order1.md 2章の項目10（T-024 M-b）：見張りの環境変数を付けず、対象だけを置いた写しで、
+    封印する二つのテストが通ること。見張りの有無で分岐して対象の外を読む書き方や、対象の外のファイルを
+    読んで通る書き方は、この写しでは失敗する。"""
+
+    def test_sealed_tests_pass_in_targets_only_copy(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            make_targets_only_copy(d)
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ("STATS_AUDIT_LOG", "PYTHONPATH", "PYTHONPYCACHEPREFIX")}
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
+            r = subprocess.run([sys.executable, "-B", "-m", "unittest", *SEALED_TEST_FILES],
+                               capture_output=True, env=env, cwd=d)
+            self.assertEqual(r.returncode, 0, r.stderr.decode("utf-8", "replace")[-3000:])
+            # 写しの中に、置いた5件のほかのファイルができていない（テストは書かない）。
+            found = set()
+            for root, dirs, files in os.walk(d):
+                dirs[:] = [x for x in dirs if not (root == d and x == ".git")]
+                found.update(os.path.relpath(os.path.join(root, x), d) for x in files)
+            self.assertEqual(found, set(ALLOWED_OPENS))
+
+    def test_history_commits_are_seal_targets(self):
+        head, rows = read_handoff_table("seal-targets")
+        targets = {r[0].strip("`") for r in rows}
+        for c in ORDER1_HISTORY_COMMITS:
+            self.assertTrue(any(t.startswith(c[:7] + ":") for t in targets), c)
+            r = subprocess.run(["git", "rev-parse", c[:7]], capture_output=True, text=True, cwd=PROJECT)
+            self.assertEqual(r.stdout.strip(), c)
 
 
 class TestNoDataNoNetwork(unittest.TestCase):

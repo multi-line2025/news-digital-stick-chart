@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """採点計画のうち、一度跳ねたタグの扱いと「対象なし」の週の数え方（T-019）。
 
-文書は docs/stats/tags-naive.md 4章。
+文書は docs/stats/naive-scoring.md 4章（T-022 で tags-naive.md 4章から移した。章と節の番号は同じ）。
 - データは読まない。ネットワークは使わない。現在の日時を読まない。
 - 予言日 t の判断に使うのは、日付 t-1 以前のデータだけ（読む日は t-371 から t-1）。
 
@@ -20,7 +20,7 @@
   "target"          予言の対象
 
 使い方
-  python3 -B src/stats/scoring.py     規則の定数を JSON で出力する
+  .venv/bin/python -B src/stats/scoring.py     規則の定数を JSON で出力する
 """
 
 import datetime

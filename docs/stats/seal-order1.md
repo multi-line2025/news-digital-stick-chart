@@ -1,6 +1,8 @@
-# 順番1の封印：封印係への申し送り（T-022）
+# 順番1の封印：封印係への申し送り（T-022、T-024）
 
-封印の順番と、その理由は `docs/stats/tags-naive.md` 5章にある。この文書は、順番1（除外の規則と入れる規則）を封印するときに、封印係が確かめることと、封印の対象の sha256 をまとめたものである。
+封印の順番と、その理由は `docs/stats/tags-naive.md` 5章にある。この文書は、順番1（除外の規則と入れる規則）を封印するときに、封印係が確かめることと、封印の対象の sha256 をまとめたものである。T-024 で、順番1b（数え方の候補の一覧）の関門の条件を 3章 (3) に足した。
+
+- 手順で使う Python は `.venv/bin/python`（プロジェクトの仮想環境。Homebrew の Python 3.14.2 で作ったもの）に一つに決める（T-024）。テストや出力の結果を見てから、別の Python に替えて流し直さない。
 
 - 統計係は封印しない。記録の種類（kind）の名前と照合の仕組みは、封印係が決める。
 - この文書は順番1の封印の対象ではない。対象の sha256 を書くための申し送りで、対象のどのテストもこの文書を読まない。
@@ -17,16 +19,16 @@
 | `tests/stats/test_exclusion.py` | `245d61ec2539cfacc9b111a2397a2c7a7912e108645d738be4190fd23580ae97` |
 | `src/stats/tagrules.py` | `63b0e005ce85344675651264b4a14453a167a28d56d3333a7503b55db04218ee` |
 | `src/stats/tagrules.py の出力` | `c3a4480b1cb2f034f1598dcee5f6c85bf52e92e94d7b06cc52ccaa4889737b39` |
-| `tests/stats/test_tagrules.py` | `52a63b3425ed9d6cb13a2bd00fd0fb32823939197988892b93a8d190d0098f51` |
-| `docs/stats/tags-naive.md` | `de54364e20ce491a772bb9b487a403e8d11ff9eb2cb9ebd85a01b2de08bb937e` |
+| `tests/stats/test_tagrules.py` | `23ead513f1e4bf413bfc310544db8061ecf24788bc51d359728bb5fa386aa53f` |
+| `docs/stats/tags-naive.md` | `2976c0c05b2023c9c7c48c534d8ed62f1702fd974047b66f2d66d250abdcfcf3` |
 | `1cb463a:src/stats/tagrules.py` | `f7c325cb21bcf39c42e6d785deacbe47eacec7fb2834d2927634e446b62ce57a` |
 | `1cb463a:src/stats/tagrules.py の出力` | `98926edbbbc7ac0375aee97aa7be0b1a5e3fcf3bc4acbadfa99f5d17362f7b8a` |
 | `2d23cdf:reviews/T-020.md` | `0b80ec29a994e04224900b3aafbc56a78d5cd9d4cee6e8d3df6c82a211cf46e7` |
 
 - ファイルの sha256 は、ファイルのバイト列そのもの。
-- 「の出力」は、プロジェクトのルートで `PYTHONDONTWRITEBYTECODE=1 python3 -B src/stats/exclusion.py`（`tagrules.py` も同じ）を引数なしで実行した標準出力のバイト列。
+- 「の出力」は、プロジェクトのルートで `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/stats/exclusion.py`（`tagrules.py` も同じ）を引数なしで実行した標準出力のバイト列。
 - `1cb463a:` と `2d23cdf:` で始まるものは、`git show <commit>:<path>` の標準出力のバイト列。1cb463a の版の出力は、そのファイルを一時のディレクトリに取り出して（`git show 1cb463a:src/stats/tagrules.py > tagrules.py`）、同じように引数なしで実行した標準出力のバイト列。
-- 統計係が計算したときの Python の版：3.14.2（`.venv/bin/python` と `python3` のどちらも）。
+- 統計係が計算したときの Python の版：3.14.2（`.venv/bin/python`）。T-024 で、Homebrew の `python3`（3.14.2）でも10件が同じ値になり、stats のテストがすべて通ることを確かめた。
 - 順番1で封印したあとは、この表も `docs/stats/tags-naive.md` も直さない（tags-naive.md 5章 (2)）。凍結を確かめる根拠は封印の記録で、照らす手順は3章 (1)。
 - 移した `docs/stats/naive-scoring.md`（素朴な予測と採点計画の一部）は、順番1の対象に入れない。最初の threshold-access より前なら改訂できる章で、封印は `naive.py`・`scoring.py` と一緒に順番6〜8で行う。順番1で封印する二つのテストは、この文書を読まない（`test_sealed_tests_read_only_targets`）。
 
@@ -34,21 +36,27 @@
 
 次のどれか一つでも満たさなければ、封印しない。確かめた結果は、封印の記録に入れる。
 
-1. **オーナーの承認を、記録と機械的に照らすこと**：`docs/stats/tags-naive.md` 0章の A（入れる規則を順番1で封印する変更）について、オーナーの承認の発言が reviews/ に記録され、commit されていること。照らし方は、6 の出どころの確認と同じ形にする。
-   - 封印の記録に、承認の出どころを「承認を記録した commit の40桁の ID:reviews/ のファイル名」と「見出しの行から `## ` を除いた全体」で入れる。
-   - その commit の版を `git show` で読み、行の全体が一致する見出しがちょうど一つあり、その節に、承認の発言の原文（`>` で始まる行）があることを確かめる。原文の行も封印の記録に写す。
-   - 0章の B（数え方の候補の一覧）の判断も同じ形で記録する。B の判断が出ていなくても順番1は封印できるが、その場合は「B は判断待ち」と記録に書く。
+1. **オーナーの承認を、記録と機械的に照らすこと**（T-024 で、リードが reviews/T-024.md の「2026-10-08 割り振りの前にリードが決めたこと」の「オーナーの承認の出どころの照らし方」で決めた照らし方に置き換えた）：`docs/stats/tags-naive.md` 0章の A（入れる規則を順番1で封印する変更）と B（数え方の候補の一覧を先に封印する案）について、次を確かめる。見出しでは照らさない（同じ日の同じ見出しが、そのファイルに2つあるため）。
+   - 照らすファイル：`git show 8f0f4ec233acdef6e3d6bd7144fa1523be389308:reviews/T-022.md` の標準出力。commit を40桁で指定する。作業中の reviews/ は読まない。
+   - A：行の全体が `> Kはいま封印していいよ` と一致する行が、ちょうど1つあること。
+   - B：行の全体が `> それでいいです。` と一致する行がちょうど1つあり、その直前の行の全体が `> 2.数え方の候補を先に封印し、最後に全候補のタグの一覧を並べて公開する案でよいか` と一致すること。
+   - 封印の記録に、出どころ（`8f0f4ec233acdef6e3d6bd7144fa1523be389308:reviews/T-022.md`）と、照らした行（A は1行、B は2行）をそのまま写す。
+   - B のうち、候補の中から選ぶ基準も先に封印するか（0章の B (ii)）は判断待ちである。記録に「B (ii) は判断待ち」と書く。順番1は、B (ii) の判断が無くても封印できる。
+   - 封印する二つのテストには、この照らし方を入れていない。入れると、封印するテストが読むもの（`git show 8f0f4ec…:reviews/T-022.md`）と封印の対象の表がそれぞれ一つ増えるが、承認の確認は封印の時点で一度行えば足り、その結果は封印の記録に残るため（統計係の判断。T-024 の割り振りで、足すかどうかは統計係に委ねられた）。
 2. **区分表の取得と method-access がまだ無いこと**：次のすべてを、封印する時点の作業ツリーと履歴で確かめる。
    - 区分表の取得は ledger に acquisition-start を書かない。収集係の `src/collector/themes.py` は、取得の試行と結果を `data/manifest/gdelt-themes.jsonl` に書く（試行の行の `kind` は `attempt`、結果の行は `result`。行の中の `code_path` は `src/collector/themes.py`）。このファイルが作業ツリーに無いこと、または行が一つも無いこと。さらに `git log --all --oneline -- data/manifest/gdelt-themes.jsonl` の出力が空であること（一度でもコミットされていれば、取得を試みたことになる）。
    - `sealed/ledger.jsonl` に、`kind` が `method-access` の記録が一件も無いこと。
    - GKG（手法を作る期間の報道量）の取得も、まだ無いこと。収集係の GKG の取得は、取得の記録を `data/manifest/gdelt-gkg-method.jsonl`（正式の取得）と `data/manifest/gdelt-gkg-trial.jsonl`（試しの run）に書く。この二つのファイルが作業ツリーに無いこと、または行が一つも無いこと。さらに `git log --all --oneline -- data/manifest/gdelt-gkg-method.jsonl data/manifest/gdelt-gkg-trial.jsonl` の出力が空であること。method-access の記録が無いことだけでは、試しの run の取得を見落とすため、マニフェストも直接確かめる。
-   - `sealed/ledger.jsonl` の `acquisition-start` の記録の `fetch.code_path`（記録の最上位の `fetch` の中の `code_path`）が、`src/collector/acquire_filelist.py` 以外のものが無いこと。
-   - 統計係が 2026-10-08 に確かめた時点では、ledger は4件（periods、candidates、acquisition-start（`fetch.code_path` は `src/collector/acquire_filelist.py`）、acquisition-result）で、`data/manifest/` には `gdelt-filelist.jsonl` だけがあり、`gdelt-themes.jsonl`・`gdelt-gkg-method.jsonl`・`gdelt-gkg-trial.jsonl` の履歴は無かった（2026-10-08、差し戻し3回目の時点でも同じ）。封印係は、封印する時点で自分で確かめ直すこと。
+   - `sealed/ledger.jsonl` の `kind` が `acquisition-start` のすべての記録について、次を確かめる。ledger の行そのものには `fetch` は無い。`fetch.code_path` は、行の `targets` が指すファイルの中にある（T-024 M-d で直した。前の版の「記録の最上位の `fetch`」は誤り）。
+     - 行の `targets` の各要素の `path` のファイルを読み、その sha256 を封印係のコードで計算して、要素の `sha256` と一致すること。
+     - そのファイルの JSON の `fetch.code_path` が `src/collector/acquire_filelist.py` であること。
+     - 次のどれかに当たれば拒む（封印しない）：`targets` が無いか空、ファイルが無い、sha256 が合わない、JSON として読めない、`fetch` が無い、`fetch.code_path` が無い、`fetch.code_path` が `src/collector/acquire_filelist.py` でない。
+   - 統計係が 2026-10-08 に確かめた時点では、ledger は4件（periods、candidates、acquisition-start（`targets` のファイル `sealed/acquisition-start-cf4bab28….json` の sha256 は `targets` と一致し、その `fetch.code_path` は `src/collector/acquire_filelist.py`）、acquisition-result）で、`data/manifest/` には `gdelt-filelist.jsonl` だけがあり、`gdelt-themes.jsonl`・`gdelt-gkg-method.jsonl`・`gdelt-gkg-trial.jsonl` の履歴は無かった（2026-10-08、差し戻し3回目の時点でも、T-024 の時点でも同じ）。封印係は、封印する時点で自分で確かめ直すこと。
 3. **作業ツリーがきれいなこと**：封印する時点で `git status --porcelain` の出力が空であること。追跡していないファイルや、コミットしていない変更（ほかの係のものを含む）があれば封印しない。
 4. **commit ID と祖先と Python の版を記録に入れること**：
    - 封印の記録に、封印した時点の HEAD の commit ID を40桁で入れる（`git rev-parse HEAD`。短い ID は使わない）。
    - その commit の祖先に、次の二つの commit があることを確かめる：`git merge-base --is-ancestor 1cb463acfcf15ba315e6c454625ad681e86bbc2a HEAD` と `git merge-base --is-ancestor 2d23cdf6e01de5129fc7b0a5d85e89bf02e892c6 HEAD` が、どちらも0で終わること。短い ID の `1cb463a`・`2d23cdf` がこの40桁の ID を指すことも、`git rev-parse` で確かめる。
-   - 出力を作るのに使った Python の版（`python3 --version` の出力）を入れる。出力の JSON は Python の版で変わらないはずだが、第三者が同じ版で計算し直せるようにするため。
+   - 出力を作るのに使った Python のパス（`.venv/bin/python`）と版（`.venv/bin/python --version` の出力）を入れる。出力の JSON は Python の版で変わらないはずだが、第三者が同じ版で計算し直せるようにするため。
 5. **浅い clone では確かめないこと**：`git rev-parse --is-shallow-repository` が `false` であること。浅い clone では `git show 1cb463a:…` と `git show 2d23cdf:…` が取れず、テストと照合ができない。第三者向けの検証の手順にも、履歴をすべて取る clone が要ると書く（封印係の docs/verify/ への提案）。
 6. **sha256 を自分で計算し直すこと**：上の表の値を写さず、封印係のコードで、1章のバイト列の定義どおりに計算し直す。表の値と一つでも違えば封印しない（その場合は統計係に差し戻す）。封印の記録には、10件の対象の名前と sha256 をすべて入れる。
 7. **出どころの確認は 2d23cdf の版で行うこと**：除外の規則の出力の `owner_choice_source` は `"2d23cdf:reviews/T-020.md 2026-10-08 オーナーの発言（原文のまま記録）"` である。これを、作業中の reviews/T-020.md ではなく、`git show 2d23cdf:reviews/T-020.md` の中身で確かめる。行の全体が `## 2026-10-08 オーナーの発言（原文のまま記録）` に一致する見出しがちょうど一つあり、その節に次の三行があること。
@@ -56,7 +64,16 @@
    - `> 民族、宗教の集団は除外の区分に加える。`
    - `> そのほかこのまま承認の項目は承認します`
 8. **"undecided" の封印を拒むこと**：除外の規則の出力の JSON の `optional_choice_status` が `"decided"` であること。`"undecided"` なら封印しない（`tagrules.py` の出力の中の `exclusion` の欄も同じ）。
-9. **テストが通ること**：封印する commit で `PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/stats` がすべて通ること。この中の `test_sealed_tests_read_only_targets` と `test_sealed_tests_source` が、封印する二つのテストが対象の外を読まないことを確かめる（限界は tags-naive.md 5章 (1) のあと）。`test_doc_is_frozen` が、tags-naive.md が `test_tagrules.py` の定数と同じであることを確かめる。
+9. **テストが通ること**：封印する commit で `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m unittest discover -s tests/stats` がすべて通ること。この中の `test_sealed_tests_read_only_targets` と `test_sealed_tests_source` が、封印する二つのテストが対象の外を読まないことを確かめる（限界は tags-naive.md 5章 (1) のあと）。`test_doc_is_frozen` が、tags-naive.md が `test_tagrules.py` の定数と同じであることを確かめる。
+10. **対象だけを置いた写しで、見張りを付けずに流すこと**（T-024 M-b）：実行の見張りとソースの検査では、許可したモジュールの属性を通る os・sys の使い方、許可した形で読んだ環境変数による分岐、日付による分岐が止まらない（tags-naive.md 5章 (1) の限界）。これを補うため、封印係は次を行い、通らなければ封印しない。
+    - プロジェクトと Git の外に、空のフォルダ `C` を作る（`P` はプロジェクトのルート、`H` は封印する commit の40桁の ID）。
+    - 履歴は、1cb463a と 2d23cdf の参照に要る分だけを置く：`git -C "$C" init -q`、`git -C "$C" fetch -q --depth=1 "$P" 1cb463acfcf15ba315e6c454625ad681e86bbc2a 2d23cdf6e01de5129fc7b0a5d85e89bf02e892c6`。
+    - 封印の対象のうちファイルの5件（`src/stats/exclusion.py`、`src/stats/tagrules.py`、`tests/stats/test_exclusion.py`、`tests/stats/test_tagrules.py`、`docs/stats/tags-naive.md`）だけを、`git -C "$P" show "$H":<path>` で `C` の同じパスに置く。10件のうち残りの5件は、この5件を実行した出力（2件）と、上の履歴から `git show` で読むもの（3件）である。
+    - 見張りの環境変数を付けずに流す：`C` で `env -u STATS_AUDIT_LOG -u PYTHONPATH -u PYTHONPYCACHEPREFIX PYTHONDONTWRITEBYTECODE=1 "$P/.venv/bin/python" -B -m unittest tests/stats/test_exclusion.py tests/stats/test_tagrules.py` がすべて通ること。
+    - 流したあと、`C` の中（`.git` を除く）に、置いた5件のほかのファイルが無いこと。
+    - 結果（テストの件数と OK）と、`C` の中のファイルの一覧を、封印の記録に入れる。
+    - これで見つかるもの：見張りの有無で分岐して対象の外を読む書き方と、対象の外のファイルを読んで通る書き方（写しには無いので失敗する）。見つからないもの：対象の外のファイルが無いときに別の道で通る書き方と、日付による分岐。統計係のテスト `test_sealed_tests_pass_in_targets_only_copy`（`tests/stats/test_t019.py`）が、同じ形の写し（作業ツリーのファイルを置く）で確かめている。
+    - 写しのフォルダの扱い（残すか消すか）は、CLAUDE.md の削除の規則に従う。
 
 **記録の種類（kind）と収集係の関門について（提案。src/collector と src/sealer は統計係の範囲の外）**
 - 収集係の関門（`src/collector/themes.py` の `require_exclusion_rules_sealed`。GKG の取得も同じ関門を使う）は、今は、決まった kind の記録が ledger に1件以上あることだけを確かめ、記録の中身（どの規則を封印したか）を照らさない（themes.py の0章「確かめないこと」）。そのため、`tagrules.py` を含まない記録や、別の版の sha256 の記録でも、関門を通れる。
@@ -68,18 +85,29 @@
 順番1の記録ができたあと、凍結を確かめるのは、封印していないこの表やテスト（`test_seal_targets`）ではなく、ledger の記録である。次の手順で照らす。封印係の検証（docs/verify/）と、統計係・監査係が順番2以降の作業を始める前に、毎回行うことを提案する。
 
 1. `sealed/ledger.jsonl` の鎖と、すべての seq の .ots を、封印係の検証の手順で確かめる（`src/sealer/verify.py`）。
-2. 順番1の記録（kind は封印係が決める）がちょうど一件あることを確かめ、その記録から、10件の対象の名前と sha256、封印した commit の40桁の ID を読む（2章の項目4・6で記録に入れたもの）。
-3. 作業ツリーで、10件の sha256 を計算し直す。`PYTHONDONTWRITEBYTECODE=1 python3 -B src/stats/order1_digests.py` が `{対象の名前: sha256}` の JSON を出す。封印係と第三者は、このスクリプトを使わずに1章のバイト列の定義から計算してもよい（同じ値になる。テスト `test_digest_script_agrees`）。
+2. 順番1の記録（kind は封印係が決める）を ledger から選ぶ。選び方は記録の並びだけで決める：順番1の記録のうち seq が最も大きいもの（最後に封印した版）を読む。新しい版で封印し直した場合（tags-naive.md 2章 (6)、5章 (2)）は順番1の記録が複数になるが、前の版の記録は消えず、CLAUDE.md のとおり版ごとに別々に採点する。順番1の記録が一件も無ければ止める。読んだ記録から、10件の対象の名前と sha256、封印した commit の40桁の ID を読む（2章の項目4・6で記録に入れたもの）。前の版と照らす必要があるとき（前の版で採点するとき）は、その版の記録の seq を指定して同じ手順で照らす。
+3. 作業ツリーで、10件の sha256 を計算し直す。**封印係は、自分のコードで、1章のバイト列の定義どおりに計算する**（T-024 L-c。たとえば `shasum -a 256 <ファイル>`、`git show <commit>:<path> | shasum -a 256`、`PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/stats/exclusion.py | shasum -a 256`、1cb463a の版の出力は一時のフォルダに取り出して実行した出力を `shasum -a 256`）。`src/stats/order1_digests.py` は封印の対象の外にあるので、照合の根拠にしない。使う場合は、自分のコードの値と比べる参考に限る。第三者も同じ。
 4. 3 の10件が、2 の記録の10件と名前も値もすべて一致することを確かめる。一件でも違えば、凍結が破られたか、封印したものと違うコードやテストが作業ツリーにある。その場合は作業を止め、リードに報告する。
    - とくに `tests/stats/test_tagrules.py` の sha256 が一致すれば、その中の定数 `TAGS_NAIVE_SHA256` は封印したときの値である。そのうえで `test_doc_is_frozen` が通れば、`docs/stats/tags-naive.md` は封印したときと同じである。表（この文書）と `test_t019.py` は封印していないので、照合の根拠にしない。
 5. 2 の commit が、今の HEAD の祖先であることを確かめる（`git merge-base --is-ancestor <40桁の ID> HEAD`）。
-6. 封印したテストを流す：`PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest tests/stats/test_exclusion.py tests/stats/test_tagrules.py` がすべて通ること。
+6. 封印したテストを流す：`PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m unittest tests/stats/test_exclusion.py tests/stats/test_tagrules.py` がすべて通ること。
 
 順番1の封印のあとで、規則やテストを直す必要が出た場合は、作業ツリーのファイルを直す前に、新しい版として扱う（tags-naive.md 2章 (6)、5章 (2)）。この表は直さず、新しい版の表を別の文書に作る。
 
-### (2) 順番3と順番5の記録
+### (2) 順番2・3・5の記録
 - 順番3（数え方とのつながり）の記録には、この順番1の記録の seq と sha256 を参照として入れる。入れる規則の定数と式は、順番3で足したり変えたりしない（`docs/stats/tags-naive.md` 5章）。
-- 順番5（タグの一覧の結果）の記録には、順番1と順番3の記録の seq と sha256 を参照として入れる。順番5を始める前に、(1) の照合を行う。
+- 順番2（数え方）の記録には、順番1b の記録の seq と sha256 と、選んだ候補の識別子を入れる。選んだ数え方が、順番1b で封印した候補の一つでなければ封印しない。
+- 順番5（タグの一覧の結果）の記録には、順番1と順番1bと順番3の記録の seq と sha256 を参照として入れる。順番5を始める前に、(1) の照合を行う。順番5の記録には、順番1b で封印した候補のすべての数え方での一覧と N_med・A が入っていること（候補の数と識別子が順番1b の記録と一致すること）を確かめる。
+
+### (3) 順番1b（数え方の候補の一覧）の封印の関門（T-024。0章の B (i) の承認による）
+候補の一覧そのものは、収集係と統計係の別のタスクで作る。ここに書くのは、順番と、封印係が封印の前に確かめる条件だけである。次のどれか一つでも満たさなければ、封印しない。
+1. **method-access と手法を作る期間の報道量の取得がまだ無いこと**：2章の項目2のうち、`sealed/ledger.jsonl` に `kind` が `method-access` の記録が無いこと、GKG のマニフェスト（`data/manifest/gdelt-gkg-method.jsonl`・`data/manifest/gdelt-gkg-trial.jsonl`）が作業ツリーに無いか行が無く、`git log --all --oneline` の履歴も空であること。試しの run の取得も手法を作る期間のデータなので、method-access の記録だけでは見落とすため、マニフェストも直接確かめる。
+2. **候補の一覧が有限で、一つずつ識別子があること**：一覧のファイルの sha256 を封印係のコードで計算して記録に入れる。候補の数と識別子の一覧も記録に入れる。
+3. **候補の一覧へのオーナーの承認が記録と照らせること**：承認の発言を記録した commit の40桁の ID と、承認の引用の行を、2章の項目1と同じ形（commit を指定した `git show` と、行の全体の一致）で照らし、記録に写す。照らす行は、その承認を記録したときにリードが決める。
+4. **選ぶ基準の扱いを記録に書くこと**：0章の B (ii)（候補の中から選ぶ基準も先に封印するか）について、オーナーの判断が出ていれば、その出どころを3と同じ形で記録し、基準を封印する場合は基準も同じ記録に入れる。判断が出ていなければ「B (ii) は判断待ち」と書く。method-access のあとに基準を封印しても、選び出しを防ぐ役には立たない。
+5. **作業ツリーがきれいで、HEAD を40桁で記録すること**：2章の項目3・4と同じ。
+- 順番1との前後は問わない。順番1のあとに封印する場合は、順番1の記録の seq と sha256 を参照として入れる。
+- 収集係の GKG の取得の関門（`require_exclusion_rules_sealed` と同じ形）に、順番1b の記録があることを足すかは、封印係と収集係が決める（統計係の範囲の外。リードへの提案）。
 
 ## 4. 引用
 Data: The GDELT Project (https://www.gdeltproject.org/). This project is not affiliated with or endorsed by the GDELT Project.

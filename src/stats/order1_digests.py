@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """順番1の封印の対象10件の sha256 を、作業ツリーと git の履歴から計算する（T-022）。
 
-docs/stats/seal-order1.md の1章の表と、3章の照合の手順で使う。この表と手順は統計係の提案で、
-封印は封印係が行う。封印係は、このスクリプトに頼らず自分のコードで計算し直す（2章の項目6）。
-このスクリプトは、統計係のテスト（tests/stats/test_t019.py の test_seal_targets）と、封印のあとの
-照合（3章）を、同じバイト列の定義で行うためのもの。
+docs/stats/seal-order1.md の1章の表を作るのに使う。この表は統計係の提案で、封印は封印係が行う。
+このスクリプトは封印の対象の外にある。そのため、封印の前（2章の項目6）も封印のあとの照合（3章 (1) の
+手順3）も、封印係と第三者は、このスクリプトに頼らず、自分のコード（shasum など）で1章のバイト列の定義
+どおりに計算する（T-024 L-c）。このスクリプトの値は、統計係のテスト（tests/stats/test_t019.py の
+test_seal_targets、test_digest_script_agrees）と、自分の計算と比べる参考にだけ使う。
 
 バイト列の定義（seal-order1.md 1章と同じ）
   - ファイル：作業ツリーのファイルのバイト列そのもの。
-  - 「の出力」：プロジェクトのルートで `python3 -B <コード>` を引数なしで実行した標準出力。
+  - 「の出力」：プロジェクトのルートで `.venv/bin/python -B <コード>` を引数なしで実行した標準出力。
   - `<commit>:<path>`：`git show <commit>:<path>` の標準出力。
   - 1cb463a の版の出力：そのファイルを一時のフォルダに取り出し、引数なしで実行した標準出力。
 
@@ -16,7 +17,7 @@ docs/stats/seal-order1.md の1章の表と、3章の照合の手順で使う。�
 1cb463a の版の tagrules.py だけで、終われば消える。
 
 使い方
-  python3 -B src/stats/order1_digests.py
+  .venv/bin/python -B src/stats/order1_digests.py
       {対象の名前: sha256} の JSON（キー順・UTF-8）を出力する
 """
 

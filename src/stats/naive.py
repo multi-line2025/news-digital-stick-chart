@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """素朴な予測（T-019）。直近の報道量・季節性・予定された行事（去年の同じ時期）。
 
-文書は docs/stats/tags-naive.md 3章。
+文書は docs/stats/naive-scoring.md 3章（T-022 で tags-naive.md 3章から移した。章と節の番号は同じ）。
 - データは読まない。ネットワークは使わない。現在の日時を読まない。
 - 予言日 t の特徴量は、日付 t-399 から t-1 のデータだけから計算する（naive_lookback_days()）。
   t 以降の日を読もうとすると止まる（candidates._cached と同じ見張り）。
@@ -27,7 +27,7 @@
   推定はリッジ（RIDGE_LAMBDA、切片にも掛ける）付きのニュートン法で、手順を固定する。
 
 使い方
-  python3 -B src/stats/naive.py      規則の定数と過去分の日数を JSON で出力する
+  .venv/bin/python -B src/stats/naive.py      規則の定数と過去分の日数を JSON で出力する
 """
 
 import datetime
