@@ -812,6 +812,82 @@ class TestDecide(unittest.TestCase):
             self.assertEqual(r.returncode, 3)
 
 
+class TestOrder2Record(unittest.TestCase):
+    """T-038：順番3が参照する順番2の記録の選び方（案(ロ)）と、0件・(a) のとき。"""
+
+    def test_smallest_non_pending_seq(self):
+        recs = [{"seq": 9, "status": "decided", "stop_kind": None},
+                {"seq": 4, "status": "pending", "stop_kind": None},
+                {"seq": 7, "status": "stopped", "stop_kind": "c"},
+                {"seq": 12, "status": "stopped", "stop_kind": "b"}]
+        chosen = counting.select_order2_record(recs)
+        self.assertEqual(chosen["seq"], 7)
+        self.assertTrue(counting.order3_may_seal(chosen))
+        # 並び順に依らない
+        self.assertEqual(counting.select_order2_record(list(reversed(recs)))["seq"], 7)
+
+    def test_zero_records(self):
+        self.assertIsNone(counting.select_order2_record([]))
+        self.assertIsNone(counting.select_order2_record([{"seq": 3, "status": "pending", "stop_kind": None}]))
+        self.assertFalse(counting.order3_may_seal(None))
+
+    def test_timing_stop_blocks_order3(self):
+        recs = [{"seq": 5, "status": "stopped", "stop_kind": "a"},
+                {"seq": 6, "status": "decided", "stop_kind": None}]
+        chosen = counting.select_order2_record(recs)
+        self.assertEqual(chosen["seq"], 5)
+        self.assertFalse(counting.order3_may_seal(chosen))
+
+    def test_bad_records(self):
+        for bad in ([{"seq": 1, "status": "done", "stop_kind": None}],
+                    [{"seq": 1, "status": "stopped", "stop_kind": "z"}],
+                    [{"seq": "1", "status": "decided", "stop_kind": None}],
+                    [{"seq": 1, "status": "decided", "stop_kind": None},
+                     {"seq": 1, "status": "stopped", "stop_kind": "b"}]):
+            with self.assertRaises(ValueError):
+                counting.select_order2_record(bad)
+
+    def test_record_rule_in_definition(self):
+        rec = counting.as_record()
+        self.assertIn("smallest seq", rec["order2_record_rule"])
+        self.assertIn("exception (a)", rec["order2_record_rule"])
+        self.assertEqual(rec["decision_phrases"], [list(x) for x in counting.DECISION_PHRASES])
+        self.assertEqual(rec["owner_approval_1b"], counting.OWNER_APPROVAL_1B)
+
+
+class TestApproval1b(unittest.TestCase):
+    """T-038：順番1b の承認事項へのオーナーの承認の出どころ。"""
+
+    def test_source(self):
+        a = counting.OWNER_APPROVAL_1B
+        r = subprocess.run(["git", "show", "%s:%s" % (a["source_commit"], a["source_path"])],
+                           capture_output=True, cwd=PROJECT)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(counting.approval_line_ok(r.stdout.decode("utf-8")))
+
+    def test_doc_quotes_question_verbatim(self):
+        """counting.md 冒頭の「承認された内容」が、承認の節のリードの問いの文を原文のまま写している（軽-3）。"""
+        a = counting.OWNER_APPROVAL_1B
+        r = subprocess.run(["git", "show", "%s:%s" % (a["source_commit"], a["source_path"])],
+                           capture_output=True, cwd=PROJECT)
+        lines = r.stdout.decode("utf-8").split("\n")
+        i = lines.index(a["heading"])
+        q = [x for x in lines[i:lines.index(a["line"])] if x.startswith("リードの問い：")]
+        self.assertEqual(len(q), 1)
+        with open(DOC, encoding="utf-8") as f:
+            self.assertIn("  > " + q[0] + "\n", f.read())
+
+    def test_rule_rejects(self):
+        a = counting.OWNER_APPROVAL_1B
+        ok = "x\n%s\nq\n%s\n" % (a["heading"], a["line"])
+        self.assertTrue(counting.approval_line_ok(ok))
+        other = "x\n%s\n## 別の節\n%s\n" % (a["heading"], a["line"])          # 別の節の中
+        twice = ok + a["line"] + "\n"                                              # 2つある
+        no_head = "x\n%s\n" % a["line"]
+        for t in (other, twice, no_head):
+            self.assertFalse(counting.approval_line_ok(t))
+
+
 class TestOrder5Status(unittest.TestCase):
     """中-3：順番5で候補が計算できないときの扱い。"""
 

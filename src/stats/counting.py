@@ -125,6 +125,29 @@ DECISION_PHRASES = (
 )
 
 
+# 順番1b の承認事項（候補7つ、参考の基準の案5つ、うまくいかなかったときの行き先、欄の手厚さの公開）への
+# オーナーの承認（2026-10-08。T-038）。照らし方：commit を40桁で指定した reviews/T-036.md で、行の全体が
+# line と一致する行がファイルの中でちょうど1つあり、その行より前で最も近い「## 」の見出しの行の全体が
+# heading と一致し、その見出しの行もファイルの中でちょうど1つあること（counting.md 冒頭）。
+OWNER_APPROVAL_1B = {
+    "source_commit": "a970019c61808738b02629b14f68b3171c4ddd57",
+    "source_path": "reviews/T-036.md",
+    "heading": "## 2026-10-08 オーナーの発言（原文のまま記録。順番1b の承認事項）",
+    "line": "> 承認します",
+}
+
+
+def approval_line_ok(text, approval=None):
+    """OWNER_APPROVAL_1B の照らし方を text（その commit のファイルの中身）に当てはめる。合えば True。"""
+    a = OWNER_APPROVAL_1B if approval is None else approval
+    lines = text.split("\n")
+    if lines.count(a["line"]) != 1 or lines.count(a["heading"]) != 1:
+        return False
+    i = lines.index(a["line"])
+    heads = [j for j in range(i) if lines[j].startswith("## ")]
+    return bool(heads) and lines[heads[-1]] == a["heading"]
+
+
 def official_candidate():
     """OWNER_DECISION の（分子の欄、分母）に当たる候補の識別子。
 
@@ -439,6 +462,48 @@ def fallback_candidate(summaries, bid):
         if usable(summaries, cid):
             return cid
     return None
+
+
+ORDER2_STATUSES = ("decided", "stopped", "pending")
+ORDER2_STOP_KINDS = ("a", "b", "c")     # seal-order1.md 3章 (2) の (a) 時機 (b) decide() (c) コードの sha256
+
+
+def select_order2_record(records):
+    """順番3が参照する順番2の記録を、機械的に一つ選ぶ（T-038。T-036 再提出1回目の監査の中-1。案(ロ)）。
+
+    records：参照する順番1b の記録に対する、順番2の試みの記録の一覧。各要素は
+      {"seq": ledger の seq（整数）, "status": "decided" | "stopped" | "pending",
+       "stop_kind": status が stopped なら "a" | "b" | "c"、ほかは None}
+    status が pending の記録（待つ）は数えない。残りのうち seq が最も小さいものを返す。無ければ None。
+    並び順や中身の良し悪しでは選ばない。
+    """
+    seen = set()
+    chosen = None
+    for r in records:
+        if r.get("status") not in ORDER2_STATUSES:
+            raise ValueError("順番2の記録の status が決まった値でない")
+        if r["status"] == "stopped" and r.get("stop_kind") not in ORDER2_STOP_KINDS:
+            raise ValueError("止まった順番2の記録の stop_kind が決まった値でない")
+        seq = r.get("seq")
+        if type(seq) is not int or seq in seen:
+            raise ValueError("順番2の記録の seq が整数でないか、重なっている")
+        seen.add(seq)
+        if r["status"] == "pending":
+            continue
+        if chosen is None or seq < chosen["seq"]:
+            chosen = r
+    return chosen
+
+
+def order3_may_seal(chosen):
+    """select_order2_record() の結果で順番3を封印してよいか。
+
+    記録が無い（None）とき、(a)（時機の条件を満たさない）で止まった記録のときは False（順番3を封印せず、
+    0件ならリードに報告、(a) ならオーナーが扱いを決める）。それ以外（決まった記録、(b)・(c) で止まった記録）は True。
+    """
+    if chosen is None:
+        return False
+    return not (chosen["status"] == "stopped" and chosen.get("stop_kind") == "a")
 
 
 def order5_candidate_status(cid, totals, missing_days, days):
@@ -801,6 +866,13 @@ def as_record():
         "official_candidate": OFFICIAL_CANDIDATE,
         "official_status": official_status(),
         "owner_decision": dict(OWNER_DECISION),
+        "decision_phrases": [list(x) for x in DECISION_PHRASES],
+        "owner_approval_1b": dict(OWNER_APPROVAL_1B),
+        "order2_record_rule": "among the order 2 records for the referenced order 1b record, ignore status "
+                              "pending; order 3 references the one with the smallest seq (decided or stopped "
+                              "of kind b or c); if there is none, order 3 is not sealed; exception (a): if the "
+                              "chosen record stopped on the timing condition, order 3 is not sealed and the "
+                              "owner decides (select_order2_record, order3_may_seal)",
         "reference_only": "B1-B5 and every candidate other than the official one are references for "
                           "comparison, not official",
         "coverage": "S rows docs_without_v1_theme, docs_without_v2_theme, docs_without_any_theme (0 if absent) "
@@ -824,8 +896,9 @@ def as_record():
             "stop_unfinished": "if the official run has started and R has no run-complete while R has a day row "
                                "or another trial run-start exists -> stopped",
             "stopped": "the stop is recorded and published; it never leads to a new order 1b (the official "
-                       "candidate does not depend on the order 2 input); order 3 references the stopped order 2 "
-                       "record; reference results and coverage come from order 5 instead",
+                       "candidate does not depend on the order 2 input); order 3 references the order 2 record "
+                       "chosen by order2_record_rule (except a stop on the timing condition (a)); reference "
+                       "results and coverage come from order 5 instead",
             "order5": "a non-missing day with zero denominator: official candidate -> order 5 stops and is "
                       "reported; reference candidate -> recorded as not computable with the days, order 5 "
                       "continues (order5_candidate_status)",
