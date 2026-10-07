@@ -524,48 +524,153 @@ def order3_may_seal(chosen):
     return not (chosen["status"] == "stopped" and chosen["stop_kind"] == "a")
 
 
-def order3_gate(order1b_seqs, order2_records, timing_ok):
-    """順番3を封印してよいかと、参照する記録を決める（T-039。T-038 の監査の中-1・中-2。counting.md 4章 (3)）。
+_HEX40_RE = re.compile(r"\A[0-9a-f]{40}\Z")
+
+
+def check_timing_check(tc):
+    """順番3の時点で封印係が時機の条件を確かめた内容（timing_check）の形を確かめる。合わなければ ValueError。
+
+    tc = {"ok": True/False,                       確かめた結果
+          "ref_1b_seq": 整数,                      確かめた順番1b の記録の seq
+          "head": 40桁,                            確かめたときの HEAD
+          "f_set": [{"commit": 40桁, "parents": [40桁, ...]}, ...],
+                                                   確かめた F の集合（seal-order1.md 3章 (2) の時機の条件）。
+                                                   各 commit の ID と親。重なりなし
+          "refs": [{"ref": 参照の名前, "commit": 40桁}, ...],
+                                                   `git for-each-ref` の参照の一覧（名前の重なりなし。空でない）
+          "reason": ok が False なら空でない文字列、True なら None}
+    """
+    keys = ("f_set", "head", "ok", "reason", "ref_1b_seq", "refs")
+    if not isinstance(tc, dict) or tuple(sorted(tc)) != keys:
+        raise ValueError("timing_check のキーが決まった %d 個（%s）でない" % (len(keys), "、".join(keys)))
+    if not isinstance(tc["ok"], bool):
+        raise ValueError("timing_check.ok が True か False でない")
+    if type(tc["ref_1b_seq"]) is not int:
+        raise ValueError("timing_check.ref_1b_seq が整数でない")
+    if not isinstance(tc["head"], str) or not _HEX40_RE.fullmatch(tc["head"]):
+        raise ValueError("timing_check.head が40桁の16進でない")
+    if not isinstance(tc["f_set"], list):
+        raise ValueError("timing_check.f_set が一覧でない")
+    seen = set()
+    for c in tc["f_set"]:
+        if not isinstance(c, dict) or sorted(c) != ["commit", "parents"] \
+                or not isinstance(c["commit"], str) or not _HEX40_RE.fullmatch(c["commit"]) \
+                or not isinstance(c["parents"], list) \
+                or not all(isinstance(x, str) and _HEX40_RE.fullmatch(x) for x in c["parents"]):
+            raise ValueError("timing_check.f_set の要素が {commit: 40桁, parents: [40桁...]} でない")
+        if c["commit"] in seen:
+            raise ValueError("timing_check.f_set の commit が重なっている")
+        seen.add(c["commit"])
+    if not isinstance(tc["refs"], list) or not tc["refs"]:
+        raise ValueError("timing_check.refs が空でない一覧でない")
+    names = set()
+    for r in tc["refs"]:
+        if not isinstance(r, dict) or sorted(r) != ["commit", "ref"] or not isinstance(r["ref"], str) \
+                or not r["ref"] or not isinstance(r["commit"], str) or not _HEX40_RE.fullmatch(r["commit"]):
+            raise ValueError("timing_check.refs の要素が {ref: 名前, commit: 40桁} でない")
+        if r["ref"] in names:
+            raise ValueError("timing_check.refs の名前が重なっている")
+        names.add(r["ref"])
+    if tc["ok"]:
+        if tc["reason"] is not None:
+            raise ValueError("timing_check.ok が True なのに reason がある")
+    elif not isinstance(tc["reason"], str) or not tc["reason"]:
+        raise ValueError("timing_check.ok が False なのに reason が無い")
+
+
+def _check_order3_attempt(r):
+    """前の順番3の試みの記録（ledger に封印係が書いたもの）の形。"""
+    keys = ("may_seal", "ref_1b_seq", "seq", "timing_ok")
+    if not isinstance(r, dict) or tuple(sorted(r)) != keys:
+        raise ValueError("順番3の試みの記録のキーが決まった %d 個（%s）でない" % (len(keys), "、".join(keys)))
+    if type(r["seq"]) is not int or type(r["ref_1b_seq"]) is not int:
+        raise ValueError("順番3の試みの記録の seq・ref_1b_seq が整数でない")
+    if not isinstance(r["may_seal"], bool) or not isinstance(r["timing_ok"], bool):
+        raise ValueError("順番3の試みの記録の may_seal・timing_ok が True か False でない")
+    if r["may_seal"] and not r["timing_ok"]:
+        raise ValueError("順番3の試みの記録で、timing_ok が False なのに may_seal が True")
+
+
+def order3_gate(order1b_seqs, order2_records, timing_check, order3_attempts):
+    """順番3を封印してよいかと、参照する記録を決め、ledger に書く記録の中身を返す（T-039、差し戻し1回目
+    中-A・軽-D。T-038 の監査の中-1・中-2。counting.md 4章 (3)）。
 
     order1b_seqs：順番3の時点の ledger にある、順番1b の kind の記録の seq の一覧。
     order2_records：順番2の試みの記録の一覧。各要素は select_order2_record() の形に、
       "ref_1b_seq"（その記録が参照した順番1b の記録の seq）を足したもの。
-    timing_ok：封印係が、順番3の時点で、参照する順番1b の記録について時機の条件（seal-order1.md 3章 (2)。
-      ledger の seq と git の親子の関係だけで決まる）を確かめ直した結果（True / False）。
+    timing_check：封印係が、順番3の時点で、参照する順番1b の記録について時機の条件（seal-order1.md 3章 (2)。
+      ledger の seq と git の親子の関係だけで決まる）を確かめ直した内容（check_timing_check() の形）。
+      真偽値だけでなく、確かめた F の集合・HEAD・参照の一覧を組で受け取り、記録に写す。
+    order3_attempts：これまでの順番3の試みの記録（封印係が ledger に書いたもの）の一覧。各要素は
+      {"seq", "ref_1b_seq", "may_seal", "timing_ok"}。
     規則：
       1. 参照する順番1b の記録は、order1b_seqs の最大の seq（順番2と同じ決め方）。無ければ封印しない。
       2. 順番2の記録は、ref_1b_seq がその seq のものだけを数える。
-      3. timing_ok が False なら封印しない（順番2のあとで (a) の破れが判明した場合も、ここで止まる）。
-      4. 2 の記録の中に、(a) で止まった記録が一つでもあれば封印しない（seq の大小によらない）。
-      5. 2 の記録から select_order2_record() で選ぶ。無ければ封印しない。
-    戻り値：{"may_seal", "ref_1b_seq", "chosen", "reason"}。
+      3. timing_check の ref_1b_seq が 1 と違えば ValueError（別の1b を確かめた内容を使わない）。
+      4. order3_attempts の中に、1 の seq について timing_ok が False の記録が一つでもあれば封印しない
+         （(a) の破れを一度記録したら、以後は恒久に止まる。あとで参照を消して条件が通っても戻さない）。
+      5. timing_check.ok が False なら封印しない。
+      6. 2 の記録の中に、(a) で止まった記録が一つでもあれば封印しない（seq の大小によらない）。
+      7. 2 の記録から select_order2_record() で選ぶ。無ければ封印しない。
+    つじつまの合わない入力（ref_1b_seq がどの順番1b の記録にも無い順番2の記録・試みの記録、参照した
+    順番1b の記録より seq が小さい順番2の記録・試みの記録、seq の重なり）は ValueError。
+    戻り値：{"may_seal", "ref_1b_seq", "chosen", "reason", "record"}。record は、通った場合も止まった
+      場合も、封印係がこの試みの記録として ledger に書く中身（counting.md 4章 (3)）：
+      {"may_seal", "reason", "ref_1b_seq", "chosen_order2_seq", "timing_check"}。
     """
     if not isinstance(order1b_seqs, list) or not all(type(x) is int for x in order1b_seqs) \
             or len(set(order1b_seqs)) != len(order1b_seqs):
         raise ValueError("order1b_seqs が、重ならない整数の一覧でない")
-    if not isinstance(timing_ok, bool):
-        raise ValueError("timing_ok が True か False でない")
-    if not isinstance(order2_records, list):
-        raise ValueError("order2_records が一覧でない")
+    if not isinstance(order2_records, list) or not isinstance(order3_attempts, list):
+        raise ValueError("order2_records・order3_attempts が一覧でない")
+    check_timing_check(timing_check)
+    known = set(order1b_seqs)
+    seqs = set(order1b_seqs)
     for r in order2_records:
         _check_order2_record(r)
         if type(r.get("ref_1b_seq")) is not int:
             raise ValueError("順番2の記録の ref_1b_seq が整数でない")
+        if r["ref_1b_seq"] not in known:
+            raise ValueError("順番2の記録の ref_1b_seq %d が、どの順番1b の記録にも無い" % r["ref_1b_seq"])
+        if r["seq"] <= r["ref_1b_seq"]:
+            raise ValueError("順番2の記録の seq %d が、参照した順番1b の記録の seq 以下" % r["seq"])
+        if r["seq"] in seqs:
+            raise ValueError("seq %d が重なっている" % r["seq"])
+        seqs.add(r["seq"])
+    for r in order3_attempts:
+        _check_order3_attempt(r)
+        if r["ref_1b_seq"] not in known:
+            raise ValueError("順番3の試みの記録の ref_1b_seq %d が、どの順番1b の記録にも無い" % r["ref_1b_seq"])
+        if r["seq"] <= r["ref_1b_seq"]:
+            raise ValueError("順番3の試みの記録の seq %d が、参照した順番1b の記録の seq 以下" % r["seq"])
+        if r["seq"] in seqs:
+            raise ValueError("seq %d が重なっている" % r["seq"])
+        seqs.add(r["seq"])
 
     def result(ok, ref, chosen, reason):
-        return {"may_seal": ok, "ref_1b_seq": ref, "chosen": chosen, "reason": reason}
+        rec = {"may_seal": ok, "reason": reason, "ref_1b_seq": ref,
+               "chosen_order2_seq": None if chosen is None else chosen["seq"],
+               "timing_check": timing_check}
+        return {"may_seal": ok, "ref_1b_seq": ref, "chosen": chosen, "reason": reason, "record": rec}
 
     if not order1b_seqs:
         return result(False, None, None, "順番1b の記録が無い")
     ref = max(order1b_seqs)
+    if timing_check["ref_1b_seq"] != ref:
+        raise ValueError("timing_check.ref_1b_seq %d が、参照する順番1b の記録の seq %d と違う"
+                         % (timing_check["ref_1b_seq"], ref))
+    if any(r["ref_1b_seq"] == ref and not r["timing_ok"] for r in order3_attempts):
+        return result(False, ref, None, "(a) 前の順番3の試みで、時機の条件の破れが記録されている（恒久に止まる）")
+    if not timing_check["ok"]:
+        return result(False, ref, None, "(a) 参照する順番1b の記録が時機の条件を満たさない（順番3の時点で確かめ直した）: "
+                      + timing_check["reason"])
     mine = [r for r in order2_records if r["ref_1b_seq"] == ref]
-    if not timing_ok:
-        return result(False, ref, None, "(a) 参照する順番1b の記録が時機の条件を満たさない（順番3の時点で確かめ直した）")
     if any(r["status"] == "stopped" and r["stop_kind"] == "a" for r in mine):
         return result(False, ref, None, "(a) 時機の条件で止まった順番2の記録がある")
-    chosen = select_order2_record(mine)
+    chosen = select_order2_record([{k: r[k] for k in ("seq", "status", "stop_kind")} for r in mine])
     if chosen is None:
         return result(False, ref, None, "参照する順番1b の記録に対する順番2の記録が無い")
+    chosen = next(r for r in mine if r["seq"] == chosen["seq"])
     return result(True, ref, chosen, None)
 
 
@@ -936,17 +1041,23 @@ def as_record():
         "owner_approval_1b": dict(OWNER_APPROVAL_1B),
         "order3_gate": "order 3 references the order 1b record with the largest seq at the time of order 3 (same "
                        "rule as order 2) and counts only order 2 records that reference it; the sealer rechecks the "
-                       "timing condition (a) for that order 1b record at order 3; if it fails, or any of those "
-                       "order 2 records stopped on (a), order 3 is not sealed; otherwise order2_record_rule "
-                       "(order3_gate)",
-        "outside_owner_approval": "order2_record_rule and order3_gate are details added after the owner's "
-                                  "approval of order 1b (T-038, T-039, by the lead's assignment); they are not "
-                                  "part of what the owner approved",
+                       "timing condition (a) for that order 1b record at order 3 and passes what it checked (F set "
+                       "with parents, HEAD, git for-each-ref refs); every order 3 attempt, stopped or passed, is "
+                       "recorded in the ledger with that content; once an attempt recorded a broken timing "
+                       "condition, order 3 stays stopped for that order 1b record; if any of the order 2 records "
+                       "stopped on (a), order 3 is not sealed; otherwise order2_record_rule (order3_gate)",
+        "outside_owner_approval": "details added after the owner's approval of order 1b by the lead's assignment "
+                                  "(T-038, T-039), not part of what the owner approved: the smallest-seq rule for "
+                                  "order 2 records, the largest-seq rule for the referenced order 1b record, "
+                                  "counting only order 2 records whose ref_1b_seq is that record, rechecking the "
+                                  "timing condition at order 3, and recording every order 3 attempt. Stopping, "
+                                  "publishing and leaving the decision to the owner when the timing condition is "
+                                  "broken is part of the approval",
         "order2_record_rule": "among the order 2 records for the referenced order 1b record, ignore status "
-                              "pending; order 3 references the one with the smallest seq (decided or stopped "
-                              "of kind b or c); if there is none, order 3 is not sealed; exception (a): if the "
-                              "chosen record stopped on the timing condition, order 3 is not sealed and the "
-                              "owner decides (select_order2_record, order3_may_seal)",
+                              "pending; order 3 references the one with the smallest seq (decided, or stopped "
+                              "of kind b or c); if there is none, order 3 is not sealed; if any of those records "
+                              "stopped on the timing condition (a), whatever its seq, order 3 is not sealed and "
+                              "the owner decides (select_order2_record, order3_gate)",
         "reference_only": "B1-B5 and every candidate other than the official one are references for "
                           "comparison, not official",
         "coverage": "S rows docs_without_v1_theme, docs_without_v2_theme, docs_without_any_theme (0 if absent) "

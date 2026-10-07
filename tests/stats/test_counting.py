@@ -863,60 +863,129 @@ class TestOrder2Record(unittest.TestCase):
     def test_record_rule_in_definition(self):
         rec = counting.as_record()
         self.assertIn("smallest seq", rec["order2_record_rule"])
-        self.assertIn("exception (a)", rec["order2_record_rule"])
+        self.assertIn("timing condition (a)", rec["order2_record_rule"])
         self.assertEqual(rec["decision_phrases"], [list(x) for x in counting.DECISION_PHRASES])
         self.assertEqual(rec["owner_approval_1b"], counting.OWNER_APPROVAL_1B)
         self.assertIn("largest seq", rec["order3_gate"])
         self.assertIn("rechecks the timing condition", rec["order3_gate"])
+        self.assertIn("every order 3 attempt, stopped or passed, is recorded", rec["order3_gate"])
         self.assertIn("not part of what the owner approved", rec["outside_owner_approval"])
+        self.assertIn("is part of the approval", rec["outside_owner_approval"])
+        self.assertIn("whatever its seq", rec["order2_record_rule"])
 
 
 def rec2(seq, status, ref, stop_kind=None):
     return {"seq": seq, "status": status, "stop_kind": stop_kind, "ref_1b_seq": ref}
 
 
+H1, H2, H3 = "1" * 40, "2" * 40, "3" * 40
+
+
+def tcheck(ref, ok=True, reason=None):
+    """封印係が順番3の時点で時機の条件を確かめた内容（作り物）。"""
+    return {"ok": ok, "ref_1b_seq": ref, "head": H3,
+            "f_set": [{"commit": H2, "parents": [H1]}],
+            "refs": [{"ref": "refs/heads/main", "commit": H3}],
+            "reason": reason if not ok else None}
+
+
+def att(seq, ref, timing_ok, may_seal=False):
+    return {"seq": seq, "ref_1b_seq": ref, "timing_ok": timing_ok, "may_seal": may_seal}
+
+
 class TestOrder3Gate(unittest.TestCase):
-    """T-039：順番3の関門（T-038 の監査の中-1・中-2）。"""
+    """T-039：順番3の関門（T-038 の監査の中-1・中-2、T-039 差し戻し1回目 中-A・軽-D）。"""
 
     def test_normal(self):
-        g = counting.order3_gate([3], [rec2(8, "pending", 3), rec2(9, "decided", 3)], True)
+        g = counting.order3_gate([3], [rec2(8, "pending", 3), rec2(9, "decided", 3)], tcheck(3), [])
         self.assertEqual((g["may_seal"], g["ref_1b_seq"], g["chosen"]["seq"]), (True, 3, 9))
+        # 通った場合も、ledger に書く記録の中身を返す（確かめた内容を写す）
+        self.assertEqual(g["record"], {"may_seal": True, "reason": None, "ref_1b_seq": 3,
+                                       "chosen_order2_seq": 9, "timing_check": tcheck(3)})
 
     def test_timing_found_later(self):
-        """中-1：順番2は決まった記録でも、順番3の時点で (a) の破れが判明すれば止まる。"""
-        g = counting.order3_gate([3], [rec2(9, "decided", 3)], False)
+        """中-1：順番2は決まった記録でも、順番3の時点で (a) の破れが判明すれば止まり、その内容を記録に返す。"""
+        tc = tcheck(3, ok=False, reason="F の commit の親に1b の行が無い")
+        g = counting.order3_gate([3], [rec2(9, "decided", 3)], tc, [])
         self.assertFalse(g["may_seal"])
         self.assertIn("(a)", g["reason"])
+        self.assertEqual(g["record"]["timing_check"], tc)
+        self.assertIsNone(g["record"]["chosen_order2_seq"])
+
+    def test_timing_break_is_permanent(self):
+        """中-A：(a) の破れを一度記録したら、あとで確かめ直して通っても止まったまま。"""
+        g = counting.order3_gate([3], [rec2(9, "decided", 3)], tcheck(3), [att(10, 3, False)])
+        self.assertFalse(g["may_seal"])
+        self.assertIn("恒久", g["reason"])
+        # ほかの理由で止まった試み（timing_ok は True）は、あとの試みを止めない
+        g = counting.order3_gate([3], [rec2(9, "decided", 3)], tcheck(3), [att(10, 3, True)])
+        self.assertTrue(g["may_seal"])
 
     def test_a_record_with_larger_seq_blocks(self):
-        """中-1：(a) で止まった記録が、seq の小さい決まった記録のあとにあっても止まる。"""
-        g = counting.order3_gate([3], [rec2(9, "decided", 3), rec2(12, "stopped", 3, "a")], True)
+        g = counting.order3_gate([3], [rec2(9, "decided", 3), rec2(12, "stopped", 3, "a")], tcheck(3), [])
         self.assertFalse(g["may_seal"])
 
     def test_reference_is_largest_1b(self):
-        """中-2：順番2のあとに順番1b の新しい版が封印されると、参照する1b はそちらになり、その1b に対する
-        順番2の記録が無いので止まる。古い1b に対する記録は数えない。"""
         recs = [rec2(9, "decided", 3)]
-        g = counting.order3_gate([3, 15], recs, True)
+        g = counting.order3_gate([3, 15], recs, tcheck(15), [])
         self.assertEqual((g["may_seal"], g["ref_1b_seq"]), (False, 15))
-        g = counting.order3_gate([15, 3], recs + [rec2(20, "stopped", 15, "b")], True)
+        g = counting.order3_gate([15, 3], recs + [rec2(20, "stopped", 15, "b")], tcheck(15), [])
         self.assertEqual((g["may_seal"], g["chosen"]["seq"]), (True, 20))
-        # 古い1b に対する (a) の記録は、新しい1b の判断に入れない
-        g = counting.order3_gate([3, 15], [rec2(9, "stopped", 3, "a"), rec2(20, "decided", 15)], True)
+        g = counting.order3_gate([3, 15], [rec2(9, "stopped", 3, "a"), rec2(20, "decided", 15)], tcheck(15), [])
+        self.assertTrue(g["may_seal"])
+        # 古い1b の (a) の試みは、新しい1b を止めない
+        g = counting.order3_gate([3, 15], [rec2(20, "decided", 15)], tcheck(15), [att(10, 3, False)])
         self.assertTrue(g["may_seal"])
 
     def test_no_records_or_no_1b(self):
-        self.assertFalse(counting.order3_gate([3], [], True)["may_seal"])
-        self.assertFalse(counting.order3_gate([3], [rec2(8, "pending", 3)], True)["may_seal"])
-        self.assertFalse(counting.order3_gate([], [rec2(9, "decided", 3)], True)["may_seal"])
+        self.assertFalse(counting.order3_gate([3], [], tcheck(3), [])["may_seal"])
+        self.assertFalse(counting.order3_gate([3], [rec2(8, "pending", 3)], tcheck(3), [])["may_seal"])
+        self.assertFalse(counting.order3_gate([], [], tcheck(3), [])["may_seal"])
 
-    def test_bad_inputs(self):
-        for args in (([3, 3], [], True), (["3"], [], True), ([3], [], "yes"), ([3], "x", True),
-                     ([3], [{"seq": 9, "status": "decided", "stop_kind": None}], True),
-                     ([3], [rec2(9, "decided", "3")], True),
-                     ([3], [rec2(9, "stopped", 3, "z")], True)):
+    def test_timing_check_must_match_reference(self):
+        with self.assertRaises(ValueError):
+            counting.order3_gate([3, 15], [], tcheck(3), [])
+
+    def test_inconsistent_inputs(self):
+        """軽-D：つじつまの合わない入力は ValueError。"""
+        bad = (
+            ([3], [rec2(9, "stopped", 7, "a")], tcheck(3), []),          # ref_1b_seq がどの1b にも無い
+            ([3], [rec2(2, "decided", 3)], tcheck(3), []),               # 参照した1b より seq が小さい
+            ([3], [], tcheck(3), [att(9, 7, False)]),                     # 試みの ref_1b_seq がどの1b にも無い
+            ([3], [], tcheck(3), [att(2, 3, False)]),                     # 試みの seq が1b より小さい
+            ([3], [rec2(9, "decided", 3)], tcheck(3), [att(9, 3, True)]), # seq の重なり
+            ([3], [rec2(3, "decided", 3)], tcheck(3), []),               # 1b と seq が重なる
+            ([3], [], tcheck(3), [att(9, 3, False, may_seal=True)]),      # 破れなのに通った試み
+        )
+        for args in bad:
             with self.assertRaises(ValueError, msg=args):
                 counting.order3_gate(*args)
+
+    def test_bad_inputs(self):
+        for args in (([3, 3], [], tcheck(3), []), (["3"], [], tcheck(3), []), ([3], "x", tcheck(3), []),
+                     ([3], [], True, []), ([3], [], tcheck(3), "x"),
+                     ([3], [{"seq": 9, "status": "decided", "stop_kind": None}], tcheck(3), []),
+                     ([3], [rec2(9, "decided", "3")], tcheck(3), []),
+                     ([3], [rec2(9, "stopped", 3, "z")], tcheck(3), [])):
+            with self.assertRaises(ValueError, msg=args):
+                counting.order3_gate(*args)
+
+    def test_timing_check_shape(self):
+        good = tcheck(3)
+        counting.check_timing_check(good)
+        variants = [
+            dict(good, ok="yes"), dict(good, head="x"), dict(good, f_set="x"),
+            dict(good, f_set=[{"commit": H2}]), dict(good, f_set=[{"commit": H2, "parents": ["z"]}]),
+            dict(good, f_set=[{"commit": H2, "parents": []}, {"commit": H2, "parents": []}]),
+            dict(good, refs=[]), dict(good, refs=[{"ref": "", "commit": H3}]),
+            dict(good, refs=[{"ref": "a", "commit": H3}, {"ref": "a", "commit": H2}]),
+            dict(good, reason="x"), dict(good, ok=False, reason=None), dict(good, ref_1b_seq="3"),
+            {k: v for k, v in good.items() if k != "refs"},
+        ]
+        for v in variants:
+            with self.assertRaises(ValueError, msg=v):
+                counting.check_timing_check(v)
+        counting.check_timing_check(dict(good, f_set=[]))      # F の集合が空なのはありうる
 
 
 class TestApproval1b(unittest.TestCase):
