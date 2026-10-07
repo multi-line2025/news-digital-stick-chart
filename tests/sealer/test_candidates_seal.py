@@ -32,7 +32,7 @@ PROJECT = tl.PROJECT
 FAKE_CANDIDATES = """import json, sys
 doc = {"threshold_multipliers": [2, 3], "horizon_days": [14, 28],
        "combinations": [[2, 14], [3, 14], [2, 28], [3, 28]], "combination_count": 4,
-       "note": %r}
+       "last_read_offset_days": {"14": 14, "28": 28}, "note": %r}
 sys.stdout.write(json.dumps(doc, sort_keys=True, indent=2) + "\\n")
 """
 

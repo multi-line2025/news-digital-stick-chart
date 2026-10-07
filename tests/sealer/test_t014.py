@@ -270,7 +270,7 @@ class TestMethodAccessVerify(Case):
 
 class TestMethodGate(Case):
     def gate(self):
-        return ledger.require_method_access(_test_root=self.root)
+        return self.method_gate()
 
     def test_stops_until_record_then_passes(self):
         self.seal()
@@ -361,7 +361,7 @@ class TestMethodGate(Case):
 
 class TestThresholdGateCandidates(Case):
     def gate(self):
-        return ledger.require_threshold_access(_test_root=self.root)
+        return self.threshold_gate()
 
     def test_passes_with_candidates_before(self):
         self.seal()
@@ -486,31 +486,26 @@ class TestRedirect(unittest.TestCase):
 
 class TestGateRoot(Case):
     def test_signatures_take_no_root(self):
+        """関門は引数を一つも取らない（T-017。テスト用の root の引数も外した）。"""
         for fn in (ledger.require_threshold_access, ledger.require_method_access):
-            params = inspect.signature(fn).parameters
-            self.assertEqual(list(params), ["_test_root"], fn.__name__)
-            self.assertEqual(params["_test_root"].kind, inspect.Parameter.KEYWORD_ONLY)
+            self.assertEqual(list(inspect.signature(fn).parameters), [], fn.__name__)
             with self.assertRaises(TypeError):
                 fn(self.root)                      # 位置で root を渡すことはできない
+            with self.assertRaises(TypeError):
+                fn(_test_root=self.root)           # 名前で渡すこともできない
 
     def test_project_root_is_this_repository(self):
         self.assertEqual(os.path.realpath(ledger.PROJECT_ROOT), os.path.realpath(PROJECT))
 
-    def test_test_root_outside_temp_is_refused(self):
-        for bad in (PROJECT, "/", os.path.realpath(tempfile.gettempdir())):
-            with self.assertRaisesRegex(ledger.ThresholdAccessRequired, "テスト用"):
-                ledger.require_threshold_access(_test_root=bad)
-            with self.assertRaisesRegex(ledger.MethodAccessRequired, "テスト用"):
-                ledger.require_method_access(_test_root=bad)
-
     def test_default_reads_project_not_a_fake_folder(self):
-        """偽の記録で関門が通る仮のプロジェクトがあっても、引数なしの関門は本物を読む。"""
+        """偽の記録で関門が通る仮のプロジェクトがあっても、差し替えない関門は本物を読む。"""
         self.seal()
         self.step3(T0 + H)
         self.method(T0 + 3 * H)
         self.access(T0 + 4 * H)
-        ledger.require_method_access(_test_root=self.root)
-        ledger.require_threshold_access(_test_root=self.root)
+        self.method_gate()
+        self.threshold_gate()
+        self.assertEqual(os.path.realpath(ledger.PROJECT_ROOT), os.path.realpath(PROJECT))
         real = ledger.verify_chain(ledger.read_ledger(
             os.path.join(PROJECT, "sealed", "ledger.jsonl")))
         kinds = {r["kind"] for r in real}

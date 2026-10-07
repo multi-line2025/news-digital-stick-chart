@@ -18,6 +18,8 @@
         upgrade（.bitcoin.ots が既にあれば飛ばす）と、その中のすべての高さの header をまとめて行う。
 
 ヘッダを書く前に確かめること（どれかが通らなければ書かない）
+  0. sealed/ と記録のファイルの実体がプロジェクトの下にあること（T-017。ledger.check_sealed_inside。
+     confirm の upgrade の前にも確かめる）
   1. 記録の鎖と、すべての .ots の対象・Pending の宛先（ledger.check_anchors）
   2. sealed/ の .ots のどれかに、高さ H の Bitcoin の証明があること（無い高さのヘッダを置くと、
      verify.py が失敗にするため）
@@ -55,6 +57,7 @@ def header_name(height):
 
 
 def _anchors(project):
+    ledger.check_sealed_inside(project)    # T-017：sealed/ が別の場所を指していないこと
     sealed = os.path.join(project, "sealed")
     data = ledger.read_ledger(os.path.join(sealed, "ledger.jsonl"))
     ledger.verify_chain(data)
@@ -93,6 +96,7 @@ def write_header(project, height, header_fetch, min_work_bits=otsfile.MIN_WORK_B
 def confirm(project, seq, ots_cmd, header_fetch, runner=subprocess.run,
             min_work_bits=otsfile.MIN_WORK_BITS):
     """upgrade と header をまとめて行う。返り値: (.bitcoin.ots のパス か None, [書いたヘッダのパス])。"""
+    ledger.check_sealed_inside(project)    # T-017
     sealed = os.path.join(project, "sealed")
     ledger_path = os.path.join(sealed, "ledger.jsonl")
     dst = os.path.join(sealed, ledger.ots_name(seq, bitcoin=True))

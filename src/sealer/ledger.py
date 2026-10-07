@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""封印の記録（追記のみ）の中核。T-005、T-007、T-008、T-009、T-013、T-014。
+"""封印の記録（追記のみ）の中核。T-005、T-007、T-008、T-009、T-013、T-014、T-017。
 
 記録のファイル（既定は sealed/ledger.jsonl）は JSON Lines で、1 行が 1 件の記録。
 標準ライブラリだけを使う。ネットワークは使わない。
@@ -657,6 +657,85 @@ def check_candidates_order(records):
     return cut
 
 
+# ---------------------------------------------------------------- J とエンバーゴ（T-017）
+
+
+def candidates_max_j(doc):
+    """candidates の出力の J（判定が読む最後の日のずれ）の最大値。T-017（T-014 の監査 軽4）。
+
+    出力の last_read_offset_days は {判定期間 H の文字列: その J}。キーが horizon_days と
+    ちょうど一致し、各 J が整数で H 以上であること（判定は t+H まで読むので J < H はありえない）を
+    確かめる。今の候補では J = H で、最大は 56。
+    """
+    check_candidates_output(doc)
+    hs = doc["horizon_days"]
+    js = doc.get("last_read_offset_days")
+    if not isinstance(js, dict) or sorted(js) != sorted(str(h) for h in hs):
+        raise LedgerError("candidates の出力の last_read_offset_days のキーが、horizon_days と一致しない")
+    for h in hs:
+        j = js[str(h)]
+        if type(j) is not int or j < h:
+            raise LedgerError("candidates の出力の last_read_offset_days[%d] が、%d 以上の整数でない"
+                              % (h, h))
+    return max(js.values())
+
+
+def periods_embargo_days(doc):
+    """periods の出力の rules.embargo_days（正の整数）。"""
+    v = doc.get("rules", {}).get("embargo_days") if isinstance(doc, dict) else None
+    if type(v) is not int or v < 1:
+        raise LedgerError("periods の出力に rules.embargo_days（正の整数）が無い")
+    return v
+
+
+def check_horizon_embargo(records, read_json):
+    """candidates の J の最大 ≤ periods の embargo_days かを確かめる。T-017（T-014 の監査 軽4）。
+
+    read_json(記録, role) は、記録の対象のファイルを sha256 を照合して JSON で返す関数。
+    - J の最大は、すべての candidates の記録の出力の J の最大（candidates_max_j）。
+    - エンバーゴは、periods の 1 件目（最初に封印した版）の出力の rules.embargo_days。
+    - J の最大 ≤ エンバーゴなら、区切りは作り直さなくてよく、periods-triggers は求めない。
+    - 超えたときに限り、periods-triggers の記録を求める。期限は、最初の method-access と最初の
+      threshold-access のうち早い方（docs/stats/periods.md 8章 (2)：J は手順4の前、かつ期限より
+      前に追記する）。その期限より seq が小さい periods-triggers の記録のどれかの
+      last_read_offset_days が、J の最大以上でなければ LedgerError。期限の記録がまだ無ければ保留。
+    返り値: {"j_max", "embargo", "status", "deadline", "triggers"}。status は
+      "no-candidates"（candidates が無い）、"within"（超えていない）、"ok"（超えていて、
+      periods-triggers がある）、"pending"（超えているが、期限の記録がまだ無い）。
+    """
+    cands = [r for r in records if r["kind"] == CANDIDATES_KIND]
+    out = {"j_max": None, "embargo": None, "status": "no-candidates", "deadline": None,
+           "triggers": None}
+    if not cands:
+        return out
+    out["j_max"] = max(candidates_max_j(read_json(r, "output")) for r in cands)
+    versions = records_of_kind(records, PERIODS_KIND)
+    if not versions:
+        raise LedgerError("periods の記録が無い")
+    out["embargo"] = periods_embargo_days(read_json(versions[0][1], "output"))
+    if out["j_max"] <= out["embargo"]:
+        out["status"] = "within"
+        return out
+    marks = [r for r in records if r["kind"] in (METHOD_ACCESS_KIND, THRESHOLD_ACCESS_KIND)]
+    if not marks:
+        out["status"] = "pending"
+        return out
+    deadline = marks[0]
+    out["deadline"] = deadline
+    for r in records:
+        if r["kind"] != TRIGGERS_KIND or r["seq"] >= deadline["seq"]:
+            continue
+        j = triggers_values(read_json(r, "triggers"))["last_read_offset_days"]
+        if j is not None and j >= out["j_max"]:
+            out["status"], out["triggers"] = "ok", r
+            return out
+    raise LedgerError("candidates の J の最大 %d が、periods の 1 件目の embargo_days %d を超えている。"
+                      "%s の記録（seq %d）より前に、last_read_offset_days が %d 以上の "
+                      "periods-triggers の記録が要る" % (out["j_max"], out["embargo"],
+                                                       deadline["kind"], deadline["seq"],
+                                                       out["j_max"]))
+
+
 # ---------------------------------------------------------------- 手順4の開始（method-access。T-014）
 
 METHOD_BLOCK = "method"
@@ -996,9 +1075,38 @@ def write_once(path, content):
 
 # ---------------------------------------------------------------- 関門（T-009、T-014）
 
-# 関門が読むプロジェクトのルート。このファイルの場所から決まり、外からは変えられない
+# 関門が読むプロジェクトのルート。このファイルの場所から決まり、引数では変えられない
 # （T-014。T-009 の監査 軽2：偽の記録を置いた別のフォルダを指せば関門が通ってしまうため）。
+# T-017（T-014 の監査 軽1）：関門は引数を一つも取らない（以前のテスト用の root の引数は外した）。
+# テストは、この変数をテストの中で差し替えて仮のプロジェクトを読ませる。src/ の下に、
+# この変数を書き換えるコードと、テスト用の root の引数の名前が無いことは、テストで確かめる
+# （tests/sealer/test_t017.py）。同じ Python の中でモジュールの変数を書き換えることは
+# 防げない（posixpath の os を置き換えるのと同じく、言語の上の限界）。
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def check_sealed_inside(project):
+    """project/sealed と project/sealed/ledger.jsonl の実体が、project の実体の下にあるか。
+
+    T-017（T-015 の監査 軽1・軽5 の sealer の側）。sealed/ やその中の記録をシンボリックリンクに
+    して、別の場所の記録を読ませたり、別の場所に追記させたりすることを止める。
+    確かめること：realpath(project/sealed) が realpath(project) の下（それ自身ではない）にあり、
+    realpath(project/sealed/ledger.jsonl) が realpath(project/sealed) の下にあること。
+    記録のファイルがまだ無いときは、sealed/ の検査だけをする。返り値: realpath(project)。
+    限界：検査のあとで置き換えられること（検査と使用のあいだの競合）は防げない。
+    """
+    root = os.path.realpath(project)
+    sealed = os.path.realpath(os.path.join(project, "sealed"))
+    if os.path.commonpath([root, sealed]) != root or sealed == root:
+        raise LedgerError("sealed/ の実体（%s）が、プロジェクトの実体（%s）の下に無い。"
+                          "シンボリックリンクで別の場所を指している" % (sealed, root))
+    led = os.path.join(project, "sealed", "ledger.jsonl")
+    if os.path.lexists(led):
+        real = os.path.realpath(led)
+        if os.path.commonpath([sealed, real]) != sealed or real == sealed:
+            raise LedgerError("sealed/ledger.jsonl の実体（%s）が、sealed/ の実体（%s）の下に無い。"
+                              "シンボリックリンクで別の場所を指している" % (real, sealed))
+    return root
 
 
 class ThresholdAccessRequired(LedgerError):
@@ -1009,22 +1117,12 @@ class MethodAccessRequired(LedgerError):
     """method-access の記録が鎖に無い（または検証に通らない）ので、先に進まない。T-014。"""
 
 
-def _gate_root(test_root):
-    """関門が読むルート。test_root はテスト用で、一時的なディレクトリの中だけを受け付ける。
+def _gate_root():
+    """関門が読むルート。PROJECT_ROOT（このファイルの場所から決まる）だけで、引数は無い。
 
-    関門の root は PROJECT_ROOT に固定する。test_root を渡せるのはテストだけで、システムの
-    一時的なディレクトリ（tempfile.gettempdir()）の下でなければ止める。本番のコードは
-    引数を渡さない。
+    sealed/ がプロジェクトの下にあること（check_sealed_inside）も確かめる。
     """
-    if test_root is None:
-        return PROJECT_ROOT
-    import tempfile
-    tmp = os.path.realpath(tempfile.gettempdir())
-    real = os.path.realpath(test_root)
-    if os.path.commonpath([tmp, real]) != tmp or real == tmp:
-        raise LedgerError("関門の _test_root はテスト用で、一時的なディレクトリ（%s）の下だけを"
-                          "受け付ける: %s" % (tmp, test_root))
-    return real
+    return check_sealed_inside(PROJECT_ROOT)
 
 
 def _load_for_gate(root):
@@ -1049,10 +1147,10 @@ def check_candidates_ready(root, records, before_seq):
         check_candidates_output(read_target_json(root, r, "output"))
 
 
-def require_threshold_access(*, _test_root=None):
+def require_threshold_access():
     """閾値を決める期間の区画（2020-12-15 以降）のデータに触れるコードが、最初に呼ぶ関門。
 
-    引数は渡さない（root はプロジェクトのルートに固定。_test_root はテスト用だけ）。
+    引数は取らない（root はプロジェクトのルート PROJECT_ROOT に固定。T-017）。
     鎖に threshold-access の記録があり、検証に通るときだけ、その最初の記録を返す。
     そうでなければ ThresholdAccessRequired で止める。確かめること：
       - 記録の鎖が正しく、すべての seq に、その seq 自身の .ots があること
@@ -1061,6 +1159,9 @@ def require_threshold_access(*, _test_root=None):
       - 中身の block_start が、periods の 1 件目の出力の閾値の期間の始まりと一致すること
       - 候補の順序（T-014）：最初の threshold-access より前に candidates の記録が 1 件以上
         あり、すべての candidates が最初の acquisition-start より前にあり、形の照合に通ること
+      - J とエンバーゴ（T-017）：check_horizon_embargo。candidates の J の最大が periods の
+        embargo_days を超えるときだけ、期限より前に periods-triggers の記録があること
+      - sealed/ と記録のファイルの実体が、プロジェクトの下にあること（check_sealed_inside）
     記録が無ければ、先に src/sealer/seal_access.py で threshold-access を追記する。
 
     限界：この関門を呼ばずにデータに触れるコードを書くこと、関門を飛ばして触れることは、
@@ -1070,7 +1171,7 @@ def require_threshold_access(*, _test_root=None):
     ためのもので、証明ではない。
     """
     try:
-        root = _gate_root(_test_root)
+        root = _gate_root()
         data, records = _load_for_gate(root)
         rec = first_threshold_access(records)
         if rec is None:
@@ -1085,6 +1186,7 @@ def require_threshold_access(*, _test_root=None):
             raise LedgerError("threshold-access（seq %d）の block_start %s が、periods の 1 件目の"
                               "閾値の期間の始まり %s と一致しない" % (rec["seq"], got, want))
         check_candidates_ready(root, records, rec["seq"])
+        check_horizon_embargo(records, lambda r, role: read_target_json(root, r, role))
     except ThresholdAccessRequired:
         raise
     except LedgerError as e:
@@ -1092,10 +1194,10 @@ def require_threshold_access(*, _test_root=None):
     return rec
 
 
-def require_method_access(*, _test_root=None):
+def require_method_access():
     """手法を作る期間の区画のデータそのもの（試運転の手順4）に触れるコードが、最初に呼ぶ関門。T-014。
 
-    引数は渡さない（root はプロジェクトのルートに固定。_test_root はテスト用だけ）。
+    引数は取らない（root はプロジェクトのルート PROJECT_ROOT に固定。T-017）。
     鎖に method-access の記録があり、検証に通るときだけ、その最初の記録を返す。
     そうでなければ MethodAccessRequired で止める。確かめること：
       - 記録の鎖が正しく、すべての seq に、その seq 自身の .ots があること
@@ -1104,6 +1206,8 @@ def require_method_access(*, _test_root=None):
       - 前提：その記録より前に candidates と acquisition-result の記録があること
         （check_method_access_order）。acquisition-start と result の対応が正しいこと
       - 候補の順序：candidates が最初の acquisition-start より前にあり、形の照合に通ること
+      - J とエンバーゴ（T-017）：check_horizon_embargo（require_threshold_access と同じ）
+      - sealed/ と記録のファイルの実体が、プロジェクトの下にあること（check_sealed_inside）
     記録が無ければ、先に src/sealer/seal_method.py で method-access を追記する。
 
     限界：require_threshold_access と同じ。この関門を呼ばずにデータに触れること、関門の前に
@@ -1112,7 +1216,7 @@ def require_method_access(*, _test_root=None):
     ためのもので、証明ではない。
     """
     try:
-        root = _gate_root(_test_root)
+        root = _gate_root()
         data, records = _load_for_gate(root)
         check_method_access_order(records)
         rec = None
@@ -1134,6 +1238,7 @@ def require_method_access(*, _test_root=None):
                     r, read_target_json(root, r, ACQ_RESULT_KIND))[0]
         check_acquisition_pairs(records, refs)
         check_candidates_ready(root, records, rec["seq"])
+        check_horizon_embargo(records, lambda r, role: read_target_json(root, r, role))
     except MethodAccessRequired:
         raise
     except LedgerError as e:

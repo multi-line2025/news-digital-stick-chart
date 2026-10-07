@@ -13,6 +13,7 @@ sealed/ には書かない。
 許可していないカレンダーの Pending を返す upgrade、照合に通らないヘッダ。
 """
 
+import contextlib
 import datetime
 import hashlib
 import json
@@ -117,7 +118,30 @@ def copy_sealer(root):
                 f.write(data)
 
 
+@contextlib.contextmanager
+def gate_project(root):
+    """関門が読むルート（ledger.PROJECT_ROOT）を、テストの中だけ仮のプロジェクトに差し替える。
+
+    T-017（T-014 の監査 軽1）。関門は引数を取らないので、テストはこの形でだけ仮のプロジェクトを
+    読ませる。抜けるときに必ず元に戻す。TMPDIR には左右されない。
+    """
+    old = ledger.PROJECT_ROOT
+    ledger.PROJECT_ROOT = root
+    try:
+        yield
+    finally:
+        ledger.PROJECT_ROOT = old
+
+
 class WriterCase(tl.SealCase):
+    def threshold_gate(self):
+        with gate_project(self.root):
+            return ledger.require_threshold_access()
+
+    def method_gate(self):
+        with gate_project(self.root):
+            return ledger.require_method_access()
+
     def setUp(self):
         super().setUp()
         os.makedirs(os.path.join(self.root, "src", "collector"))
@@ -365,18 +389,18 @@ class TestGate(WriterCase):
     def test_gate_stops_without_record_and_passes_with_it(self):
         self.seal()
         with self.assertRaisesRegex(ledger.ThresholdAccessRequired, "threshold-access の記録が鎖に無い"):
-            ledger.require_threshold_access(_test_root=self.root)
+            self.threshold_gate()
         # 取得の記録（start・result）は関門を開けない。
         s, _r, _o = self.start(T0 + H)
         self.result(T0 + 2 * H, s["seq"])
         with self.assertRaises(ledger.ThresholdAccessRequired):
-            ledger.require_threshold_access(_test_root=self.root)
+            self.threshold_gate()
         rec, _rel, _o = self.access(T0 + 3 * H)
-        self.assertEqual(ledger.require_threshold_access(_test_root=self.root), rec)
+        self.assertEqual(self.threshold_gate(), rec)
 
     def test_gate_stops_on_empty_ledger(self):
         with self.assertRaises(ledger.ThresholdAccessRequired):
-            ledger.require_threshold_access(_test_root=self.root)
+            self.threshold_gate()
 
     def test_gate_is_a_ledger_error(self):
         self.assertTrue(issubclass(ledger.ThresholdAccessRequired, ledger.LedgerError))
@@ -387,21 +411,21 @@ class TestGate(WriterCase):
         with open(os.path.join(self.root, rel), "ab") as f:
             f.write(b" ")
         with self.assertRaisesRegex(ledger.ThresholdAccessRequired, "一致しない"):
-            ledger.require_threshold_access(_test_root=self.root)
+            self.threshold_gate()
 
     def test_gate_stops_when_access_ots_missing(self):
         self.seal()
         rec, _rel, ots_path = self.access(T0 + H)
         os.rename(ots_path, os.path.join(self.root, "moved.ots"))
         with self.assertRaisesRegex(ledger.ThresholdAccessRequired, "時刻証明"):
-            ledger.require_threshold_access(_test_root=self.root)
+            self.threshold_gate()
 
     def test_gate_stops_on_record_not_written_by_mechanism(self):
         """仕組みを通さずに、block_start の違う threshold-access を足しても関門は開かない。"""
         self.seal()
         self.add_access(T0 + H, 30_000_000, block_start="2021-01-01")
         with self.assertRaisesRegex(ledger.ThresholdAccessRequired, "block_start"):
-            ledger.require_threshold_access(_test_root=self.root)
+            self.threshold_gate()
 
     def test_gate_stops_on_broken_chain(self):
         self.seal()
@@ -412,7 +436,7 @@ class TestGate(WriterCase):
         with open(self.ledger, "wb") as f:
             f.write(b"\n".join(lines))
         with self.assertRaises(ledger.ThresholdAccessRequired):
-            ledger.require_threshold_access(_test_root=self.root)
+            self.threshold_gate()
 
     def test_gate_cli(self):
         """gate の CLI は --root を受け付けず、コードの置き場のプロジェクトを読む（T-014）。

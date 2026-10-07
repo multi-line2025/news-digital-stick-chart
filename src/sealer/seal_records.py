@@ -7,18 +7,21 @@ docs/verify/periods-seal.md 7章、ledger.py の check_drand_record・acquisitio
 check_acquisition_pairs と同じ。
 
 手順（この順で行い、途中で失敗したら、それより後のことはしない）
-  1. 今の記録の鎖と、すべての seq の .ots を検証する。ots が実行できることを確かめる。
+  1. sealed/ と記録のファイルの実体がプロジェクトの下にあること（T-017。ledger.check_sealed_inside）、
+     今の記録の鎖と、すべての seq の .ots を検証する。ots が実行できることを確かめる。
   2. 中身（JSON）を作る。drand を使う種類では、ここで drand の最新の回を取る（1 の後なので、
      回はできるだけ追記の直前のものになる）。ledger_head は 1 で読んだ記録から作る。
   3. 追記する行を作り、「今の記録 + その行」に対して、検証（verify.py）と同じ照合をする。
        - 鎖（kind が許可リストにあること、正規の形、seq、prev_hash）
        - 中身の kind が記録の kind と同じこと
        - threshold-access：ledger_head、drand、block_start（periods の 1 件目の閾値の期間の始まり）、
-         その前に candidates の記録があり、候補の順序の照合に通ること（T-014）
+         その前に candidates の記録があり、候補の順序の照合に通ること（T-014）、
+         J の最大が embargo_days を超えるなら、その前に periods-triggers があること（T-017）
        - acquisition-start：ledger_head、drand、step = 3、fetch（取得のコードのパスと sha256）、
          その前に candidates の記録があること（T-014。check_candidates_order）
        - method-access：ledger_head、drand、step = 4、区画（periods の 1 件目の method の区画）、
-         その前に candidates と acquisition-result の記録があること（T-014）
+         その前に candidates と acquisition-result の記録があること（T-014）、
+         J の最大が embargo_days を超えるなら、その前に periods-triggers があること（T-017）
        - acquisition-result：start_seq・kept_rows_sha256 の形、start が実在し、result が後にあり、
          一つの start に result が一つだけであること
      どれかが通らなければ、何も書かずに止める。
@@ -58,6 +61,7 @@ def _paths(project):
 
 def load_checked(project, ots_cmd, runner=subprocess.run):
     """手順 1。(記録のバイト列, 記録の一覧) を返す。"""
+    ledger.check_sealed_inside(project)    # T-017：sealed/ が別の場所を指していないこと
     sealed, ledger_path = _paths(project)
     data = ledger.read_ledger(ledger_path)
     records = ledger.verify_chain(data)
@@ -88,6 +92,12 @@ def result_refs(project, records, extra=None):
     return refs
 
 
+def _check_j(project, records_after):
+    """J の最大が periods の embargo_days を超えるなら、期限より前に periods-triggers が要る（T-017）。"""
+    ledger.check_horizon_embargo(records_after,
+                                 lambda r, role: ledger.read_target_json(project, r, role))
+
+
 def check_new(project, data_after, records_after, rec, doc):
     """手順 3。追記した後の記録に対して、新しい記録の照合をする。"""
     kind = rec["kind"]
@@ -102,6 +112,7 @@ def check_new(project, data_after, records_after, rec, doc):
         if ledger.threshold_access_block_start(doc) != want:
             raise ledger.LedgerError("block_start が periods の 1 件目の閾値の期間の始まりと一致しない")
         ledger.check_candidates_ready(project, records_after, rec["seq"])
+        _check_j(project, records_after)
     elif kind == ledger.ACQ_START_KIND:
         ledger.acquisition_start_fields(doc)
         ledger.check_candidates_order(records_after)
@@ -109,6 +120,7 @@ def check_new(project, data_after, records_after, rec, doc):
         ledger.check_method_access_doc(project, records_after, rec, doc)
         ledger.check_method_access_order(records_after)
         ledger.check_acquisition_pairs(records_after, result_refs(project, records_after))
+        _check_j(project, records_after)
     else:
         ledger.check_acquisition_pairs(records_after,
                                        result_refs(project, records_after, extra=(rec, doc)))

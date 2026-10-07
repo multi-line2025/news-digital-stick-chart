@@ -257,21 +257,46 @@ class TestDocProcedure(unittest.TestCase):
         return lambda data, seq: tl.drand_doc(kind, 30_000_000,
                                               head=ledger.expected_ledger_head(data, seq))
 
+    def _kinds(self):
+        data = ledger.read_ledger(os.path.join(self.clone, "sealed", "ledger.jsonl"))
+        return [r["kind"] for r in ledger.verify_chain(data)]
+
     def test_method_access_needs_result_before_it(self):
-        """T-014：method-access は、前に acquisition-result があれば手順が通り、無ければ失敗する。"""
-        start = self._append_doc("acquisition-start", self._drand("acquisition-start"))
+        """T-014：method-access は、前に acquisition-result があれば手順が通り、無ければ失敗する。
+
+        T-017：本物の記録に acquisition-result（試運転の手順3）が入った後は、複製の末尾に足す
+        だけでは「result の無い method-access」を作れない。そのときは、その場合を飛ばし、
+        区画の違う method-access（periods の 1 件目の method の区画と一致しない）で失敗を確かめる。
+        """
         base = os.path.join(self.tmp, "base")
         shutil.copytree(self.clone, base)
-        # acquisition-result の無いまま method-access を足す → 失敗
-        self._append_doc("method-access", self._drand("method-access"))
+        if ledger.ACQ_RESULT_KIND not in self._kinds():
+            self._append_doc("acquisition-start", self._drand("acquisition-start"))
+            shutil.rmtree(base)
+            shutil.copytree(self.clone, base)
+            # acquisition-result の無いまま method-access を足す → 失敗
+            self._append_doc("method-access", self._drand("method-access"))
+            self.git("add", "-A")
+            self.git("commit", "-q", "-m", "method without result")
+            self.assertProcedureFails()
+            shutil.rmtree(self.clone)
+            shutil.copytree(base, self.clone)
+            data = ledger.read_ledger(os.path.join(self.clone, "sealed", "ledger.jsonl"))
+            start = [r["seq"] for r in ledger.verify_chain(data)
+                     if r["kind"] == ledger.ACQ_START_KIND][-1]
+            self._append_doc("acquisition-result", lambda d, s: {
+                "kind": "acquisition-result", "start_seq": start, "kept_rows_sha256": "e" * 64})
+            shutil.rmtree(base)
+            shutil.copytree(self.clone, base)
+        # 区画の違う method-access → 失敗
+        wrong = self._drand("method-access")
+        self._append_doc("method-access", lambda d, s: dict(wrong(d, s), block_end="2020-12-31"))
         self.git("add", "-A")
-        self.git("commit", "-q", "-m", "method without result")
+        self.git("commit", "-q", "-m", "method with wrong block")
         self.assertProcedureFails()
-        # 作り直す：result を足してから method-access → 通る
+        # 作り直す：正しい method-access → 通る
         shutil.rmtree(self.clone)
         shutil.copytree(base, self.clone)
-        self._append_doc("acquisition-result", lambda d, s: {
-            "kind": "acquisition-result", "start_seq": start, "kept_rows_sha256": "e" * 64})
         m = self._append_doc("method-access", self._drand("method-access"))
         self.git("add", "-A")
         self.git("commit", "-q", "-m", "step 3 and method")

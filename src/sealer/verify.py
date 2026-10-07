@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""封印の記録の検証（第三者向け）。T-005、T-007、T-008、T-013、T-014。
+"""封印の記録の検証（第三者向け）。T-005、T-007、T-008、T-013、T-014、T-017。
 
 標準ライブラリと git だけを使う。ネットワークは使わない。手順は docs/verify/periods-seal.md。
 
@@ -10,7 +10,8 @@
                                                        Pending の宛先が許可した 4 つか
     python3 -B src/sealer/verify.py targets [--rev R]  対象のファイルの sha256 の照合
     python3 -B src/sealer/verify.py access             threshold-access の記録の ledger_head・drand の回・
-                                                       block_start
+                                                       block_start、最初の threshold-access より前に
+                                                       candidates があること（T-017）
     python3 -B src/sealer/verify.py acquisition        acquisition-start の ledger_head と drand の回、
                                                        acquisition-result との対応、
                                                        start の前に candidates があること（T-014）
@@ -19,7 +20,9 @@
                                                        acquisition-result があること（T-014）
     python3 -B src/sealer/verify.py periods            区画の境目と deadline_status の照合
     python3 -B src/sealer/verify.py candidates         閾値と判定期間の候補の記録の形・出力の形、
-                                                       最初の acquisition-start より前にあること（T-013）
+                                                       最初の acquisition-start より前にあること（T-013）、
+                                                       J の最大 ≤ periods の embargo_days。超えたときだけ
+                                                       期限より前の periods-triggers を求める（T-017）
     python3 -B src/sealer/verify.py adopted            採用される版（鎖の順番で決める）
     python3 -B src/sealer/verify.py all [--rev R]      上のすべて
 
@@ -122,6 +125,7 @@ class State:
 
     def __init__(self, root, header_args, ots_dirs=()):
         self.root = root
+        ledger.check_sealed_inside(root)     # T-017：sealed/ が別の場所を指していないこと
         self.sealed = os.path.join(root, "sealed")
         self.ots_dirs = [os.path.abspath(d) for d in ots_dirs or ()]
         self.data = ledger.read_ledger(os.path.join(root, LEDGER_REL))
@@ -274,6 +278,12 @@ def cmd_access(st, _a):
               % (r["seq"], r["seq"] - 1, got))
         _print_drand(r, t, state, own)
     if recs:
+        # T-017（T-014 の監査 軽2）：関門（require_threshold_access）と同じ候補の順序の照合。
+        # 最初の threshold-access より前に candidates が 1 件以上あり、すべての candidates が
+        # 最初の acquisition-start より前にあり、形の照合に通ること。
+        ledger.check_candidates_ready(st.root, st.records, recs[0]["seq"])
+        print("  最初の threshold-access（seq %d）より前に candidates の記録がある"
+              % recs[0]["seq"])
         print(ledger.DRAND_NOT_VERIFIED)
 
 
@@ -388,6 +398,18 @@ def cmd_candidates(st, _a):
         else:
             print("      最初の acquisition-start（seq %d）より前" % cut["seq"])
     print("candidates の記録は、すべて最初の acquisition-start の記録より前にある。")
+    hz = ledger.check_horizon_embargo(st.records, st.file_json)
+    if hz["status"] == "within":
+        print("J（判定が読む最後の日のずれ）の最大 %d は、periods の 1 件目の embargo_days %d 以下。"
+              "区切りの作り直しは要らず、periods-triggers は求めない。" % (hz["j_max"], hz["embargo"]))
+    elif hz["status"] == "ok":
+        print("J の最大 %d が embargo_days %d を超える。%s（seq %d）より前の periods-triggers"
+              "（seq %d）の last_read_offset_days が %d 以上" % (
+                  hz["j_max"], hz["embargo"], hz["deadline"]["kind"], hz["deadline"]["seq"],
+                  hz["triggers"]["seq"], hz["j_max"]))
+    else:
+        print("保留：J の最大 %d が embargo_days %d を超える。method-access・threshold-access の"
+              "記録がまだ無いので、periods-triggers の照合を保留" % (hz["j_max"], hz["embargo"]))
 
 
 def cmd_adopted(st, _a):

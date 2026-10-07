@@ -854,18 +854,22 @@ blocks = %r
 trig = {"last_read_offset_days": None, "naive_history_days": None,
         "network_window_days": None, "same_week_years": None}
 status = None
+embargo = 90
 if "--move" in sys.argv:
     blocks[1] = ["threshold", "2020-12-20", "2023-11-06"]
 if "--j120" in sys.argv:
     trig["last_read_offset_days"] = 120
+    embargo = 120
     status = sys.argv[-1]
 print(json.dumps({"deadline_status": status, "rebuild_triggers": trig,
+    "rules": {"embargo_days": embargo},
     "periods": [{"name": n, "block_start": s, "block_end": e} for n, s, e in blocks]}))
 """ % ([list(b) for b in V1],)
 
 
 CAND_OUTPUT = {"threshold_multipliers": [2, 3], "horizon_days": [14, 28],
-               "combinations": [[2, 14], [2, 28], [3, 14], [3, 28]], "combination_count": 4}
+               "combinations": [[2, 14], [2, 28], [3, 14], [3, 28]], "combination_count": 4,
+               "last_read_offset_days": {"14": 14, "28": 28}}
 
 
 def run_verify(root, *args):
@@ -943,7 +947,7 @@ class SealCase(unittest.TestCase):
                                 self._drand_doc(ledger.METHOD_ACCESS_KIND, round_no, head, **kw),
                                 now)
 
-    def add_cand(self, now):
+    def add_cand(self, now, output=None):
         """candidates の記録を、書く仕組みを通さずに足す（T-014。acquisition-start の前提）。
         対象の 4 つのファイルが無ければ仮のものを作り、形の照合に通る出力を書く。"""
         for rel, _role in ledger.CANDIDATES_SOURCES:
@@ -952,7 +956,7 @@ class SealCase(unittest.TestCase):
                 os.makedirs(os.path.dirname(full), exist_ok=True)
                 with open(full, "w") as f:
                     f.write("# %s\n" % rel)
-        out = (json.dumps(CAND_OUTPUT, sort_keys=True, indent=2) + "\n").encode()
+        out = (json.dumps(output or CAND_OUTPUT, sort_keys=True, indent=2) + "\n").encode()
         sha = ledger.sha256_hex(out)
         rel = ledger.candidates_output_rel(sha)
         ledger.write_once(os.path.join(self.root, rel), out)
@@ -1068,11 +1072,12 @@ class TestSealPeriods(SealCase):
         args = ["--j120", "before_deadline"]
         sha = ledger.sha256_hex(seal_periods.run_periods(self.root, args))
         self.seal(args=args, sha=sha, now=T0 + 2 * H)
+        self.add_cand(T0 + 2 * H + H / 2)        # T-017：threshold-access の前に candidates が要る
         self.add_access(T0 + 3 * H, 30_000_000)
         r = run_verify(self.root, "all")
         self.assertEqual(r.returncode, 0, r.stderr.decode())
         text = r.stdout.decode()
-        self.assertIn("区切り：最初の threshold-access の記録 = seq 4", text)
+        self.assertIn("区切り：最初の threshold-access の記録 = seq 5", text)
         self.assertIn("periods: 採用 = seq 3（2 件目", text)
         self.assertIn("periods-triggers: 採用 = seq 2（1 件目", text)
         self.assertIn("ヘッダが本当の鎖にあることは、この検査では確かめていない", text)
@@ -1131,6 +1136,7 @@ class TestSealPeriods(SealCase):
 
     def test_after_deadline_claim_after_access_passes(self):
         self.seal()
+        self.add_cand(T0 + H / 2)                # T-017：threshold-access の前に candidates が要る
         self.add_access(T0 + H, 30_000_000)
         self.seal_triggers(T0 + 2 * H, last_read_offset_days=120)
         args = ["--j120", "after_deadline"]
@@ -1139,7 +1145,7 @@ class TestSealPeriods(SealCase):
         r = run_verify(self.root, "all")
         self.assertEqual(r.returncode, 0, r.stderr.decode())
         self.assertIn("記録から決まる値 after_deadline", r.stdout.decode())
-        self.assertIn("periods-triggers: seq 2 より前に記録が無い", r.stdout.decode())
+        self.assertIn("periods-triggers: seq 3 より前に記録が無い", r.stdout.decode())
 
     def test_ledger_head_mismatch_fails_in_verify(self):
         for add, cmd in ((self.add_access, "access"), (self.add_start, "acquisition")):
@@ -1262,8 +1268,10 @@ def adoption_lines(text):
 
 
 class TestAuditRepro(SealCase):
-    """seq 1 periods、seq 2 periods、seq 3 periods-triggers、seq 4 threshold-access、seq 5 periods。
-    どの操作でも、採用は periods = seq 2、periods-triggers = seq 3 のまま。"""
+    """seq 1 periods、seq 2 periods、seq 3 periods-triggers、seq 4 candidates、
+    seq 5 threshold-access、seq 6 periods。
+    どの操作でも、採用は periods = seq 2、periods-triggers = seq 3 のまま。
+    T-017：threshold-access の前に candidates が要る（verify access の照合）ので seq 4 に足した。"""
 
     ACQ_ROUND = 30_000_000   # 公開時刻は 2026 年の夏。下の確定時刻（T0 以後）より前。
 
@@ -1271,6 +1279,7 @@ class TestAuditRepro(SealCase):
         self.seal()
         self.seal(now=T0 + H)
         self.seal_triggers(T0 + 2 * H, last_read_offset_days=120)
+        self.add_cand(T0 + 2 * H + H / 2)
         self.add_access(T0 + 3 * H, round_no)
         args = ["--j120", "before_deadline"]
         sha = ledger.sha256_hex(seal_periods.run_periods(self.root, args))
@@ -1307,24 +1316,24 @@ class TestAuditRepro(SealCase):
         self.build()
         out = self.verify_all()
         self.assertAdoption(out)
-        self.assertIn("seq 5 は threshold-access の記録より後なので、採用しない", out)
+        self.assertIn("seq 6 は threshold-access の記録より後なので、採用しない", out)
         self.assertIn("確定時刻との照合は保留", out)
 
     def test_withheld_upgrade_of_seq2_does_not_change_adoption(self):
         """R-1：seq 2 の upgrade を出す場合と出さない場合で、採用が同じ。"""
         self.build()
-        full = self.verify_all(*self.confirm([1, 2, 3, 4, 5]))
+        full = self.verify_all(*self.confirm([1, 2, 3, 4, 5, 6]))
         os.rename(os.path.join(self.sealed, ledger.ots_name(2, bitcoin=True)),
                   os.path.join(self.root, "withheld.ots"))
-        withheld = self.verify_all(*self.headers_for([1, 3, 4, 5]))
+        withheld = self.verify_all(*self.headers_for([1, 3, 4, 5, 6]))
         self.assertIn("seq 2: Pending", withheld)
         self.assertNotIn("seq 2: Pending", full)
         self.assertEqual(self.assertAdoption(full), self.assertAdoption(withheld))
         # 後の seq だけ確定、前の seq は Pending、の組み合わせでも同じ。
         for name in os.listdir(self.sealed):
-            if name.endswith(".bitcoin.ots") and "seq000005" not in name:
+            if name.endswith(".bitcoin.ots") and "seq000006" not in name:
                 os.rename(os.path.join(self.sealed, name), os.path.join(self.root, name))
-        only5 = self.verify_all(*self.headers_for([5]))
+        only5 = self.verify_all(*self.headers_for([6]))
         self.assertEqual(self.assertAdoption(full), self.assertAdoption(only5))
 
     def headers_for(self, seqs):
@@ -1374,7 +1383,7 @@ class TestAuditRepro(SealCase):
             self.setUp()
             self.build(rnd)
             pending = self.verify_all()
-            confirmed = self.verify_all(*self.confirm([1, 2, 3, 4, 5]))
+            confirmed = self.verify_all(*self.confirm([1, 2, 3, 4, 5, 6]))
             self.assertIn("この記録は、drand の回の公開時刻より後に作られ", confirmed)
             results.append(self.assertAdoption(pending))
             results.append(self.assertAdoption(confirmed))
@@ -1385,22 +1394,22 @@ class TestAuditRepro(SealCase):
         late_round = 40_000_000   # 公開時刻は 2027 年。
         self.build(late_round)
         self.assertAdoption(self.verify_all())   # Pending のうちは照合を保留
-        args = self.confirm([4])
+        args = self.confirm([5])
         code, _out, err = run_verify_inproc(self.root, "all", *args)
         self.assertEqual(code, 1)
         self.assertIn("より前でない", err)
 
     def test_drand_slack_end_to_end(self):
-        """seq 4 の確定時刻（ヘッダの時刻）T0 + 10H に対し、回の公開時刻が 1 時間後なら通り、
+        """seq 5（threshold-access）の確定時刻（ヘッダの時刻）T0 + 11H に対し、回の公開時刻が 1 時間後なら通り、
         3 時間後なら失敗する。"""
-        own = T0 + 6 * H + 4 * H
+        own = T0 + 6 * H + 5 * H
         genesis, period = ledger.DRAND_CHAINS[QUICKNET]
         for delta, ok in ((H, True), (3 * H, False)):
             self.tearDown()
             self.setUp()
             rnd = int((own + delta).timestamp() - genesis) // period + 1
             self.build(rnd)
-            code, out, err = run_verify_inproc(self.root, "all", *self.confirm([4]))
+            code, out, err = run_verify_inproc(self.root, "all", *self.confirm([5]))
             if ok:
                 self.assertEqual(code, 0, err)
                 self.assertAdoption(out)
@@ -1414,10 +1423,10 @@ class TestAuditRepro(SealCase):
         base = self.assertAdoption(self.verify_all())
         ext = os.path.join(self.root, "my-upgrades")
         os.mkdir(ext)
-        args = self.confirm([1, 4], directory=ext)
+        args = self.confirm([1, 5], directory=ext)
         out = self.verify_all(*args, ots_dirs=[ext])
         self.assertIn("seq 1: Bitcoin で確定", out)
-        self.assertIn("seq 4: Bitcoin で確定", out)
+        self.assertIn("seq 5: Bitcoin で確定", out)
         self.assertIn("my-upgrades", out)
         self.assertEqual(self.assertAdoption(out), base)
         # 読ませたディレクトリの .ots の対象が違えば失敗。
