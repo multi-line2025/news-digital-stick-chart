@@ -32,6 +32,7 @@ import inspect
 import json
 import os
 import pwd
+import re
 import shutil
 import socket
 import subprocess
@@ -189,11 +190,37 @@ def pristine_copy():
         dst = os.path.join(base, "proj")
         shutil.copytree(PROJECT, dst, symlinks=True, ignore=shutil.ignore_patterns(
             ".git", ".venv", "__pycache__", ".DS_Store", ".claude"))
+        rollback_to_before_step3(dst)
         git(dst, "init", "-q")
         git(dst, "add", "-A")
         git(dst, "commit", "-q", "-m", "写し")
         _PRISTINE["base"], _PRISTINE["path"] = base, dst
     return _PRISTINE["path"]
+
+
+def rollback_to_before_step3(dst):
+    """写しを、T-016（手順3の本番の取得）より前の状態に戻す（T-018）。
+
+    本物の記録には T-016 の seq 3・4 があるので、そのままでは手順3の取得をもう一度通せない。
+    写しの中だけで、periods（seq 1）と candidates（seq 2）より後の記録の行・中身・.ots を外し、
+    ファイル一覧のマニフェストを空にする。本物には触れない。
+    """
+    sealed = os.path.join(dst, "sealed")
+    path = os.path.join(sealed, "ledger.jsonl")
+    with open(path, "rb") as f:
+        lines = f.read().splitlines(keepends=True)
+    kinds = [json.loads(l)["kind"] for l in lines]
+    keep = 0
+    while keep < len(kinds) and kinds[keep] in ("periods", "candidates"):
+        keep += 1
+    with open(path, "wb") as f:
+        f.write(b"".join(lines[:keep]))
+    for name in os.listdir(sealed):
+        m = re.match(r"ledger\.jsonl\.seq(\d{6})(\.bitcoin)?\.ots\Z", name)
+        if (m and int(m.group(1)) > keep) or name.startswith(("acquisition-", "method-access-",
+                                                              "threshold-access-")):
+            os.remove(os.path.join(sealed, name))
+    open(os.path.join(dst, "data", "manifest", "gdelt-filelist.jsonl"), "wb").close()
 
 
 def tearDownModule():
@@ -287,6 +314,8 @@ class TestGate(CopyCase):
         with open(path, "wb") as f:
             f.write(lines[0])  # periods（seq 1）だけ
         self.move_out("sealed/ledger.jsonl.seq000002.ots")
+        if os.path.exists(os.path.join(self.project, "sealed", "ledger.jsonl.seq000002.bitcoin.ots")):
+            self.move_out("sealed/ledger.jsonl.seq000002.bitcoin.ots")
         git(self.project, "add", "-A")
         git(self.project, "commit", "-q", "-m", "candidates の無い記録")
         self.refuse("candidates")
@@ -375,7 +404,7 @@ class TestGate(CopyCase):
 
     def test_not_a_git_worktree_refused(self):
         os.rename(os.path.join(self.project, ".git"), os.path.join(self.tmp, "dotgit"))
-        self.refuse("git status が失敗")
+        self.refuse("Git の作業ツリーでない")
 
     def test_each_condition_alone(self):
         """4つの条件のうち1つだけを欠いた写しを作り、それぞれで止まることを確かめる。"""
@@ -622,9 +651,10 @@ class TestAdapter(CopyCase):
 
 class TestCodeScope(unittest.TestCase):
     def test_pins_match_current_files(self):
-        """PINNED_SHA256 が、今の filelist.py と privacy_scan.py の sha256 と一致する。"""
+        """PINNED_SHA256 が、今の filelist.py・privacy_scan.py・codegate.py の sha256 と一致する。"""
         self.assertEqual([r for r, _ in acq.PINNED_SHA256],
-                         ["src/collector/filelist.py", "src/collector/privacy_scan.py"])
+                         ["src/collector/filelist.py", "src/collector/privacy_scan.py",
+                          "src/collector/codegate.py"])
         for rel, want in acq.PINNED_SHA256:
             self.assertEqual(sha_file(os.path.join(PROJECT, rel)), want, rel)
 
@@ -743,6 +773,109 @@ class TestProductionPath(unittest.TestCase):
                            env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
         self.assertEqual(r.returncode, 2, r.stderr.decode(errors="replace"))
         self.assertEqual(r.stdout, b"")
+
+
+class TestGateHardening(CopyCase):
+    """T-015 の監査 軽1・軽2・軽5 への対応（T-018。codegate.py）。"""
+
+    def refuse(self, pattern, seams=None):
+        before = self.snapshot()
+        with self.assertRaises(acq.GateError) as cm:
+            acq._acquire(_test=seams or self.seams())
+        self.assertRegex(str(cm.exception), pattern)
+        self.assert_nothing_written(before)
+
+    def test_skip_worktree_and_assume_unchanged_refused(self):
+        rel = "src/sealer/seal_acquisition.py"
+        p = os.path.join(self.project, rel)
+        for flag in ("--skip-worktree", "--assume-unchanged"):
+            with self.subTest(flag=flag):
+                git(self.project, "update-index", flag, rel)
+                with open(p, "rb") as f:
+                    orig = f.read()
+                with open(p, "ab") as f:
+                    f.write(b"# hidden\n")
+                # git status には出ない
+                self.assertEqual(git(self.project, "status", "--porcelain", "--", rel), b"")
+                self.refuse("skip-worktree か assume-unchanged")
+                with open(p, "wb") as f:
+                    f.write(orig)
+                git(self.project, "update-index", flag.replace("--", "--no-"), rel)
+        acq.check_gate(self.seams())
+
+    def test_ignored_files_refused(self):
+        d = os.path.join(self.project, "src", "sealer", "__pycache__")
+        os.makedirs(d)
+        with open(os.path.join(d, "ledger.cpython-314.pyc"), "wb") as f:
+            f.write(b"x")
+        self.refuse("無視されるファイル")
+        shutil.rmtree(d)
+        acq.check_gate(self.seams())
+
+    def test_git_env_is_not_inherited(self):
+        """GIT_DIR・GIT_WORK_TREE・GIT_INDEX_FILE で別の場所を指しても、写しの .git を見る。"""
+        other = os.path.join(self.tmp, "other")
+        os.makedirs(other)
+        git(other, "init", "-q")
+        with open(os.path.join(self.project, "src", "sealer", "z.py"), "wb") as f:
+            f.write(b"x\n")
+        env = {"GIT_DIR": os.path.join(other, ".git"), "GIT_WORK_TREE": other,
+               "GIT_INDEX_FILE": os.path.join(other, ".git", "index")}
+        with mock.patch.dict(os.environ, env):
+            self.refuse("未コミットの変更")
+
+    def test_dot_git_must_be_a_real_directory(self):
+        real = os.path.join(self.tmp, "realgit")
+        os.rename(os.path.join(self.project, ".git"), real)
+        with open(os.path.join(self.project, ".git"), "w") as f:
+            f.write("gitdir: %s\n" % real)
+        self.refuse("Git の作業ツリーでない")
+        os.remove(os.path.join(self.project, ".git"))
+        os.symlink(real, os.path.join(self.project, ".git"))
+        self.refuse("Git の作業ツリーでない")
+
+    def _link(self, rel):
+        target = os.path.join(self.tmp, "elsewhere-" + rel.replace("/", "-"))
+        src = os.path.join(self.project, rel)
+        shutil.copytree(src, target, symlinks=True)
+        shutil.rmtree(src)
+        os.symlink(target, src)
+        return target
+
+    def test_test_seams_reject_linked_sealed_and_manifest(self):
+        """軽1：写しの sealed/・data/manifest/ がリンクなら、差し替えを受け付けない。"""
+        for rel in ("sealed", "data/manifest"):
+            with self.subTest(rel=rel):
+                self.setUp()
+                self._link(rel)
+                with self.assertRaises(ValueError):
+                    acq._acquire(_test=self.seams())
+        self.setUp()
+        acq._checked_test_seams(self.seams())
+
+    def test_gate_rejects_linked_project_dirs(self):
+        """軽5：本番と同じ関門（check_gate）も、sealed/・data/manifest/ のリンクで止まる。"""
+        for rel in ("sealed", "data/manifest"):
+            with self.subTest(rel=rel):
+                self.setUp()
+                self._link(rel)
+                git(self.project, "add", "-A")
+                git(self.project, "commit", "-q", "-m", "link")
+                with self.assertRaises(acq.GateError):
+                    acq.check_gate(self.seams())
+
+    def test_codegate_pinned_and_executed_from_checked_bytes(self):
+        p = os.path.join(self.project, acq.CODEGATE_REL)
+        with open(p, "ab") as f:
+            f.write(b"# changed\n")
+        git(self.project, "commit", "-q", "-am", "変える")
+        self.refuse("固定した値と違う")
+
+    def test_docstring_no_longer_overclaims(self):
+        doc = " ".join(acq.__doc__.split())
+        self.assertNotIn("環境変数も読まない", doc)
+        self.assertNotIn("本物の sealed/・ data/manifest・保存先に書くことはできない", doc)
+        self.assertIn("os.environ を読まない", doc)
 
 
 class TestNoNetworkGuard(unittest.TestCase):

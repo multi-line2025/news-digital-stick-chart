@@ -1,0 +1,1177 @@
+#!/usr/bin/env python3
+"""手法を作る期間の GKG 2.1 の15分ファイルを取得し、ディスクに書く前に集計する（T-018。試運転の手順4）。
+
+データ出典
+    Data: The GDELT Project (https://www.gdeltproject.org/). This project is not
+    affiliated with or endorsed by the GDELT Project.
+    データ出典：GDELT Project（https://www.gdeltproject.org/）。本プロジェクトは
+    GDELT Project と提携・承認の関係にありません。
+
+このモジュールは、実際の取得をまだ一度も行っていない（T-018 はコードとテストだけ）。取得の実行は
+入口のスクリプト acquire_gkg.py から行う（オーナーの承認のあとの別のタスク）。このモジュールを
+直接実行しても取得はしない。
+
+------------------------------------------------------------------------
+1. 対象のファイル
+------------------------------------------------------------------------
+    ファイル一覧：T-016 で取得した本体（~/Desktop/news-stick-data/gdelt-filelist/ の下。名前は
+    data/manifest/gdelt-filelist.jsonl の1行から決まる）。入口のスクリプトが、マニフェストの
+    sha256、封印の記録の acquisition-result の kept_rows_sha256、読んだバイト列の sha256 の3つが
+    一致することを確かめてから渡す（load_filelist_rows）。
+    選ぶ規則（select_files）
+      - file_type が gkg の行だけ。
+      - ファイルの日は filelist.file_day（filelist.py 4章の規則。T-010 の申し送りで共通にした）。
+      - DATA_START（2015-03-02）≦ ファイルの日 ≦ METHOD_BLOCK_END（2020-12-14）。
+        DATA_START より前の行（一覧には 2015-02-18〜2015-03-01 の行が残っている。T-016 の監査
+        軽1）は、ここで除く。どちらの値も src/stats/periods.py の値とテストで照合する。
+      - 同じ file_time の行が二つ以上あり、大きさか md5 が食い違う場合は、どれを取るかを決め
+        られないので取得せず、結果 failed（理由 ambiguous_listing）として記録する。まったく同じ
+        行の重なりは1本として扱う。
+    ファイルの URL は https://data.gdeltproject.org/gdeltv2/<file_time>.gkg.csv.zip に固定
+    （validate_gkg_url。ホスト・スキーム・パスの形を完全一致で照合する。リダイレクトと
+    プロキシは使わない）。
+    英語の流れだけである点に注意：ファイル一覧（masterfilelist.txt）には翻訳の流れ
+    （*.translation.gkg.csv.zip。masterfilelist-translation.txt に載る）が入っていない。
+    そのため、取得するファイルの行には翻訳の印 T がほとんど付かず、SRCLC（元の言語）も
+    ほとんど空になる見込みである。翻訳の流れを加えるかは、別のタスクで決める。
+
+------------------------------------------------------------------------
+2. 待ち時間・再試行・打ち切り（CLAUDE.md「待ち時間と再試行の上限をコードに明記する」）
+------------------------------------------------------------------------
+    GDELT は data.gdeltproject.org の一括ファイルについて、速度制限・待ち時間・再試行の
+    公式の値を公表していない（T-001 で確認した範囲）。下の値は、このプロジェクトが控えめに
+    決めた値であり、公式の値ではない。
+      MIN_REQUEST_INTERVAL_SECONDS   1.0   要求を送り始める間隔の下限（前の要求の開始から）。
+                                           要求は1本ずつ順に送り、同時に二つ以上は送らない
+      REQUEST_TIMEOUT_SECONDS        60    接続と、1回の読み込みごとの待ちの上限
+      ATTEMPT_DEADLINE_SECONDS       900   1回の試行（ダウンロード全体）の上限
+      MAX_ATTEMPTS_PER_FILE          3     1本のファイルの試行の回数の上限（最初の1回を含む）
+      RETRY_WAIT_SECONDS             (30, 120)  2回目・3回目の試行の前に待つ秒数
+      MAX_RETRY_AFTER_SECONDS        900   Retry-After がこれを超えたら、待たずにそのファイルを
+                                           打ち切る
+      MAX_CONSECUTIVE_TRANSIENT_FAILURES  5    一時的な失敗（通信の失敗・時間切れ・429・5xx）で
+                                           終わったファイルが続けてこの本数になったら、取得の
+                                           全体を止める（相手か手元の通信が止まっている）
+      MAX_INTERRUPTS_PER_FILE         2    同じファイルを interrupted（取り直す印）にする回数の
+                                           上限（5章）
+      MAX_CONSECUTIVE_FORMAT_FAILURES    10    形式の失敗（md5 は合うのに zip や行の形が想定と
+                                           違う）が続けてこの本数になったら、全体を止める
+                                           （コードとデータの形が合っていない）
+    値の理由
+      - 1秒に1件を超えない間隔で、1本ずつ順に取る。ブラウザで1つずつ落とすのと同じ程度の
+        負荷にとどめるため。ファイルは平均で約 9 MB あり、多くの場合、ダウンロードそのものに
+        1秒以上かかるので、この間隔で実際に待つことは少ない。
+      - 再試行は、相手の一時的な不調（5xx・429）と通信の切れだけを対象にし、待ち時間を
+        30秒・120秒と延ばす。404・403・410 は再試行しない（ファイルが無いことは、何度
+        取り直しても変わらない）。
+      - md5 か大きさが一覧と合わない場合は、途中で切れた可能性があるので再試行する
+        （上の回数の内）。
+    再試行するかどうかは、上の規則だけで決まる。コードの外で、特定のファイルを選んで手で
+    取り直す口は無い（docs/stats/candidates.md 3章 (5)。5章も見ること）。
+
+------------------------------------------------------------------------
+3. 受け取りの上限（T-001 の案：圧縮 200MB、展開後 1GB）と、一時ファイルを作らないこと
+------------------------------------------------------------------------
+      MAX_ZIP_BYTES        200,000,000    応答の本体（zip）の長さの上限。超えたら読むのを
+                                          やめ、そのファイルは failed（too_large）
+      MAX_UNZIPPED_BYTES 1,000,000,000    展開した中身の長さの上限。zip の中の申告の大きさと、
+                                          実際に展開した長さの両方で確かめる
+      MAX_LINE_BYTES        16,777,216    1行の長さの上限。超えた行は読み飛ばし、件数だけ数える
+    zip はメモリの上（io.BytesIO）で開き、中身は1行ずつ展開して読む。zip も展開した中身も、
+    ディスクにも一時ファイルにも書かない（GitHub Actions の上でも同じ。このモジュールは
+    tempfile を使わない）。zip の中のファイルは1つだけで、名前が <file_time>.gkg.csv（大文字
+    小文字は問わない）でなければ形式の失敗とする。
+
+------------------------------------------------------------------------
+4. 項目の一覧（許可リスト。T-001 の6章）と、メモリの上で捨てるもの
+------------------------------------------------------------------------
+    GKG 2.1 の1行はタブ区切りの27欄（GKG_COLUMNS）。欄の数が27でない行は捨てて件数だけ数える。
+    残すのは次の7欄の、さらに決まった部分だけである（add_line）。行を27欄に分けた直後に、
+    この7欄の値だけを取り出し、残りの20欄を指す名前を消す。
+      GKGRECORDID                  頭の14桁の時刻と、翻訳の印 T（あるか無いか）だけ。
+                                   通し番号は使わない
+      V2.1DATE                     ファイルの時刻と同じか・0か・別の14桁か・形が違うかの件数だけ
+      V2SOURCECOLLECTIONIDENTIFIER 1〜2桁の数字。形が違えば X
+      V1THEMES                     テーマの名前だけ（セミコロン区切り）
+      V2ENHANCEDTHEMES             テーマの名前だけ（各ブロックの最初の欄。文中の位置は捨てる）
+      V1LOCATIONS                  各ブロックの CountryCode（3番目の欄。FIPS の2文字）だけ。
+                                   種別・地名・ADM1・緯度・経度・FeatureID は捨てる
+      V2.1TRANSLATIONINFO          SRCLC（3文字の小文字。形が違えば OTHER、無ければ -）と、
+                                   ENG のうち既知の書式（ENG_TOKEN_PATTERNS）に完全に合う部分
+                                   だけ。合わない部分は OTHER の件数として数えるだけ
+    捨てる欄（一覧に入れない）：V2SOURCECOMMONNAME、V2DOCUMENTIDENTIFIER（記事の URL）、
+    V1COUNTS、V2.1COUNTS、V2ENHANCEDLOCATIONS、V1PERSONS・V2ENHANCEDPERSONS（人物名）、
+    V1ORGANIZATIONS・V2ENHANCEDORGANIZATIONS（組織名）、V1.5TONE、V2.1ENHANCEDDATES、V2GCAM、
+    画像・動画・SNS の欄、V2.1QUOTATIONS、V2.1ALLNAMES、V2.1AMOUNTS、V2EXTRASXML。
+    残す値も、形を正規表現で確かめる（テーマの名前は英大文字・数字・下線だけ、160字まで）。
+    形が合わない値は捨てて件数だけ数える。そのため、捨てた欄の中身が、形の合わない値として
+    紛れ込むこともない。
+    文書の「組」（以下 g）：V2SOURCECOLLECTIONIDENTIFIER の値に、翻訳の印があれば T を付けた
+    もの（例 "1"、"1T"、"2"）。分母と数え方は試運転のあとで決めるので、どの集計も g ごとに
+    分けて持ち、あとで組を選んで足せるようにする。
+    行の時刻：GKGRECORDID の時刻がファイルの時刻と違う行は件数を数える。その時刻が手法を
+    作る期間の外（ファイルの日の規則で DATA_START より前か METHOD_BLOCK_END より後）なら、
+    その行は集計に入れずに捨てる。行はファイルの日に入れる（行の時刻では日を決めない）。
+
+------------------------------------------------------------------------
+5. 取得の記録、取り直し、途中で止まったとき
+------------------------------------------------------------------------
+    run_id：入口のスクリプトの sha256 の先頭16桁。コードが同じなら同じ run_id になり、
+    途中で止まった取得を続きから再開する。コードを変えると別の run_id になり、最初から
+    取り直すことになる（前の run のファイルと記録は消さずに残り、マニフェストにも残る）。
+    取得の記録（保存先の gkg-<run_id>-fetch-log.jsonl。Git の外。追記のみ）
+      15分ファイル1本につき、結果が決まるたびに1行を追記する。項目：file_time、listed_md5、
+      listed_size（一覧の値）、sha256（受け取った zip のバイト列。成功したときだけ）、result
+      （ok / failed / interrupted）、reason、attempts、transient、docs（g ごとの文書数）、stats
+      （行の件数の内訳）、finished_at、run_id。欠けたファイル（failed）も必ず1行書く。
+    取り直しの規則（コードに固定。手で取り直す口は無い）
+      - 1本のファイルの中の再試行は2章の値だけ。
+      - failed になったファイルは、再開しても取り直さない。結果はそのまま。
+      - 取り直すのは次の二つだけで、どちらも人が個々のファイルを選ぶものではない。
+        (a) 2章の「続けて失敗したら全体を止める」で止まったとき、その連続した失敗の
+            ファイルを interrupted として記録する。再開すると、interrupted のファイルは
+            取り直す。同じファイルが interrupted になるのは MAX_INTERRUPTS_PER_FILE（2）回
+            まで。上限に達したファイルの一時的な失敗は、連続の数に入れず、failed のまま
+            確定する（同じファイルで止まり続けないため）。
+            一時的な失敗が続いている途中で日が変わった場合、前の日の集計はまだ書かない
+            （続きで止まる条件に達したら、日をまたいだ失敗も interrupted にして取り直せる
+            ようにするため）。連続が途切れた時点（成功か、一時的でない結果）で、待たせた日を
+            順に書く。最後の日のあとは、連続の途中でも書く。
+        (b) その日の集計を書く前に止まった日（停電・Ctrl-C・ディスクの残りの不足など）は、
+            再開のときにその日の ok のファイルを取り直して集計し直す（集計はファイルに
+            書いていないため）。failed のファイルは取り直さない。
+      - 取得が全部の日について終わったら、マニフェストに run-complete を書く。そのあとは、
+        同じ run_id で取得を始めようとしても止まる。
+    いつ再開するかは人が決める。この余地は、(a)(b) に当たるファイルだけに限られ、記録には
+    すべての試行と時刻が残る。手法を作る期間の欠けた日の一覧は、モデルより前に封印する
+    （candidates.md 3章 (5)）ので、再開はその封印より前にだけ行う。
+    止まる条件（RunInterrupted。入口のスクリプトは終了コード 3）
+      - 2章の連続した失敗の上限に達した
+      - 保存先のディスクの空きが MIN_FREE_DISK_BYTES（10 GiB）を下回った（日の集計を書く前に
+        確かめる）
+      - 1日分のテーマの組の種類が MAX_PAIR_KEYS（合わせて4千万）を超えた（メモリの上限。
+        切り捨てて続けることはしない。集計の形を見直すかはリードが決める）
+
+------------------------------------------------------------------------
+6. 集計の単位と形（ディスクに書く前に集計する。行単位のデータは保存しない）
+------------------------------------------------------------------------
+    15分ファイルごと：文書数（g ごと）と行の件数の内訳。取得の記録と、日の集計の F・FD の行に
+    書く。
+    日ごと（その日の取得できたファイルの合計）：下の表。1日につき1つのファイル
+    gkg-<run_id>-day-<YYYYMMDD>.tsv.gz（gzip、mtime は 0。中身はタブ区切りの ASCII）。
+      #   形式の名前と版、日付
+      F   file_time result reason listed_md5 listed_size sha256 attempts docs
+      FD  file_time g docs
+      V   id theme                    （その日に出たテーマの名前と、その日の中だけの番号）
+      D   g docs                      （文書数。比率の分母の候補）
+      T   g theme_id v1_docs v2_docs v2_mentions
+      C   g theme_id country v1_docs v2_docs v2_mentions   （テーマ×国）
+      L   g theme_id lang v1_docs v2_docs v2_mentions      （テーマ×言語）
+      P1  g theme_id_a theme_id_b docs  （V1THEMES の組。a < b、文書の数）
+      P2  g theme_id_a theme_id_b docs  （V2ENHANCEDTHEMES の名前の組）
+      NC  g country docs ・ NL g lang docs ・ E g eng_token docs
+      S   name value                  （行の件数の内訳の合計。OTHER の件数を含む）
+    v1_docs は V1THEMES にそのテーマがある文書の数、v2_docs は V2ENHANCEDTHEMES にある文書の
+    数、v2_mentions は V2ENHANCEDTHEMES の言及の回数（同じ文書で複数回なら回数分）。
+    テーマの数え方（文書の有無か、言及の回数か）は試運転のあとで決めるので、どちらでも
+    数えられるように三つとも持つ。
+    大きさの見込み（データを見ていないので幅は大きい。根拠は GKG の一般的な性質と、ファイル
+    一覧の大きさ）
+      - 対象は 198,226 本、圧縮で約 1.79 TB（一覧の size_bytes の合計）。1本あたり約 9 MB、
+        1日あたり約 0.85 GB の zip。
+      - 1日の文書数は 10万〜20万、1文書のテーマは V1 で 10〜50 種類と見込む。
+      - T・L：1日に数千〜2万行。C：1日に 10万〜100万行。
+      - P1・P2（共起の網）：1文書の組は n(n−1)/2 で、1日の組の種類は 200万〜1,000万と見込む。
+        1行は約 20 バイト（テーマは番号で書く）で、gzip で 4〜6 分の1になるとして、1日 10〜
+        100 MB、全体で 20〜200 GB。保存先のディスクの空き（2026-10-07 の時点で約 71 GB）を
+        超えうる。そのため 5章のとおり、ディスクの空きが 10 GiB を下回ったら止まる。
+      - メモリ：組1種類あたり約 110 バイト（Counter の項目と tuple）。1日 1,000万種類で
+        約 1.1 GB（P1・P2 で約 2.2 GB）。上限 MAX_PAIR_KEYS（4千万、約 4.4 GB）で止まる。
+    本番の取得の最初の数日で実際の大きさを測り、見込みを超える場合は、止まったところで
+    リードに報告する（組を週ごとにまとめる、P2 をやめるなど、形の見直しは別のタスク）。
+
+------------------------------------------------------------------------
+7. 書くもの・書く前の検査
+------------------------------------------------------------------------
+    保存先：<home>/Desktop/news-stick-data/gkg-method（Git の外。オーナーが前もって作る。この
+    モジュールはフォルダを作らない）。日の集計と取得の記録だけを書く。
+    マニフェスト：<root>/data/manifest/gdelt-gkg-method.jsonl に追記する（過去の行は書き換えない）。
+      run-start   取得の最初の要求より前に1回（run_id、code_sha256、filelist_sha256、
+                  method_access_seq、選んだファイルと日の数、started_at）
+      run-resume  再開のたび
+      day         日の集計を書くたび（file_name、sha256、files_listed・ok・failed、docs）
+      run-complete 全部の日が終わったとき（取得の記録のファイル名と sha256）
+    書く前に、中身（日の集計・取得の記録の行・マニフェストの行）を privacy_scan.find_in_bytes で
+    調べ、メールアドレスの形の文字列があれば書かずに止まる。日の集計は、使ってよい文字
+    （英数字・下線・タブ・改行・ハイフン・点・空白・#）だけでできていることも確かめる。
+    ログ（標準エラー）には、日付・file_time・結果の種類・件数だけを出し、行の中身は出さない。
+    ファイルを削除する処理は無い。
+
+外部のライブラリは使わない（Python 3 の標準ライブラリだけ）。
+"""
+
+import datetime
+import gzip
+import hashlib
+import http.client
+import importlib.util
+import io
+import itertools
+import json
+import os
+import re
+import shutil
+import socket
+import stat
+import sys
+import time
+import urllib.error
+import urllib.request
+import zipfile
+from collections import Counter, defaultdict
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load_sibling(name):
+    spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, name + ".py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+filelist = _load_sibling("filelist")
+privacy_scan = filelist.privacy_scan
+
+# ---------------------------------------------------------------------------
+# 1章：期間と対象
+# ---------------------------------------------------------------------------
+
+DATA_START = datetime.date(2015, 3, 2)
+METHOD_BLOCK_END = datetime.date(2020, 12, 14)
+METHOD_BLOCK = (DATA_START.isoformat(), METHOD_BLOCK_END.isoformat())
+
+ALLOWED_HOST = "data.gdeltproject.org"
+GKG_URL_FMT = "https://data.gdeltproject.org/gdeltv2/%s.gkg.csv.zip"
+_GKG_URL_RE = re.compile(r"\Ahttps://data\.gdeltproject\.org/gdeltv2/(\d{14})\.gkg\.csv\.zip\Z")
+FILELIST_FIELDS = ("file_time", "file_type", "size_bytes", "md5")
+FILELIST_MANIFEST = "gdelt-filelist.jsonl"
+FILELIST_STORE_PARTS = ("Desktop", "news-stick-data", "gdelt-filelist")
+
+# ---------------------------------------------------------------------------
+# 2章・3章：待ち時間・再試行・上限（公式の値は無い。このプロジェクトが決めた値）
+# ---------------------------------------------------------------------------
+
+MIN_REQUEST_INTERVAL_SECONDS = 1.0
+REQUEST_TIMEOUT_SECONDS = 60
+ATTEMPT_DEADLINE_SECONDS = 900
+MAX_ATTEMPTS_PER_FILE = 3
+RETRY_WAIT_SECONDS = (30, 120)
+MAX_RETRY_AFTER_SECONDS = 900
+MAX_CONSECUTIVE_TRANSIENT_FAILURES = 5
+MAX_CONSECUTIVE_FORMAT_FAILURES = 10
+MAX_INTERRUPTS_PER_FILE = 2
+RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+FINAL_STATUSES = frozenset({403, 404, 410})
+READ_ERRORS = (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError,
+               http.client.HTTPException, OSError)
+USER_AGENT = "news-digital-stick-chart-collector/0"
+
+MAX_ZIP_BYTES = 200_000_000
+MAX_UNZIPPED_BYTES = 1_000_000_000
+MAX_LINE_BYTES = 16 * 1024 * 1024
+READ_CHUNK_BYTES = 1 << 20
+MIN_FREE_DISK_BYTES = 10 * 1024 ** 3
+MAX_PAIR_KEYS = 40_000_000
+
+# ---------------------------------------------------------------------------
+# 4章：GKG 2.1 の欄と、残す値の形
+# ---------------------------------------------------------------------------
+
+GKG_COLUMNS = (
+    "GKGRECORDID", "V2.1DATE", "V2SOURCECOLLECTIONIDENTIFIER", "V2SOURCECOMMONNAME",
+    "V2DOCUMENTIDENTIFIER", "V1COUNTS", "V2.1COUNTS", "V1THEMES", "V2ENHANCEDTHEMES",
+    "V1LOCATIONS", "V2ENHANCEDLOCATIONS", "V1PERSONS", "V2ENHANCEDPERSONS", "V1ORGANIZATIONS",
+    "V2ENHANCEDORGANIZATIONS", "V1.5TONE", "V2.1ENHANCEDDATES", "V2GCAM", "V2.1SHARINGIMAGE",
+    "V2.1RELATEDIMAGES", "V2.1SOCIALIMAGEEMBEDS", "V2.1SOCIALVIDEOEMBEDS", "V2.1QUOTATIONS",
+    "V2.1ALLNAMES", "V2.1AMOUNTS", "V2.1TRANSLATIONINFO", "V2EXTRASXML",
+)
+N_COLUMNS = len(GKG_COLUMNS)
+KEPT_COLUMNS = ("GKGRECORDID", "V2.1DATE", "V2SOURCECOLLECTIONIDENTIFIER", "V1THEMES",
+                "V2ENHANCEDTHEMES", "V1LOCATIONS", "V2.1TRANSLATIONINFO")
+_I = {name: i for i, name in enumerate(GKG_COLUMNS)}
+I_ID, I_D21, I_COLL = _I["GKGRECORDID"], _I["V2.1DATE"], _I["V2SOURCECOLLECTIONIDENTIFIER"]
+I_V1T, I_V2T, I_V1LOC = _I["V1THEMES"], _I["V2ENHANCEDTHEMES"], _I["V1LOCATIONS"]
+I_TINFO = _I["V2.1TRANSLATIONINFO"]
+V1LOCATION_FIELDS = 7      # Type#FullName#CountryCode#ADM1Code#Lat#Long#FeatureID
+V1LOCATION_COUNTRY = 2
+
+_ID_RE = re.compile(rb"(\d{14})-(T?)\d{1,12}")
+_D14_RE = re.compile(rb"\d{14}")
+_COLL_RE = re.compile(rb"[0-9]{1,2}")
+THEME_RE = re.compile(rb"[A-Z][A-Z0-9_]{0,159}")
+COUNTRY_RE = re.compile(rb"[A-Z]{2}")
+LANG_RE = re.compile(rb"[a-z]{3}")
+ENG_TOKEN_PATTERNS = (
+    rb"GT-[A-Z]{3} [0-9]{1,3}(?:\.[0-9]{1,3}){0,3}",   # GDELT Translingual の言語別のモデル
+    rb"Moses [0-9]{1,3}(?:\.[0-9]{1,3}){0,3}",          # Moses の版
+    rb"MosesCore Europarl [a-z]{2}-[a-z]{2}",          # Moses のモデル
+    rb"Stanford PKU",                                  # 中国語の分かち書き
+)
+ENG_RE = re.compile(b"(?:" + b"|".join(ENG_TOKEN_PATTERNS) + b")")
+NO_LANG = b"-"
+OTHER = b"OTHER"
+BAD_COLL = b"X"
+
+# 日の集計に使ってよい文字（7章）
+OUTPUT_ALPHABET = frozenset(
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_\t\n-. #")
+DAY_FORMAT = b"gkg-day\t1"
+DAY_TABLES = ("t1", "t2", "t2m", "c1", "c2", "c2m", "l1", "l2", "l2m", "p1", "p2",
+              "nc", "nl", "eng")
+
+STORE_PARTS = ("Desktop", "news-stick-data", "gkg-method")
+STORE_LOCATION_NAME = "~/" + "/".join(STORE_PARTS)
+MANIFEST_DIR_PARTS = ("data", "manifest")
+MANIFEST_NAME = "gdelt-gkg-method.jsonl"
+CODE_REL = "src/collector/acquire_gkg.py"
+_RUN_ID_RE = re.compile(r"\A[0-9a-f]{16}\Z")
+
+
+class GkgError(Exception):
+    """取得・保存の失敗。文には、行の中身・応答の中身・手元のパスを入れない。"""
+
+
+class GkgFormatError(Exception):
+    """1本のファイルの形式の失敗。文は理由の短い名前だけ。"""
+
+
+class RunInterrupted(Exception):
+    """5章の止まる条件。再開できる（同じ run_id）。"""
+
+
+# ---------------------------------------------------------------------------
+# URL と通信
+# ---------------------------------------------------------------------------
+
+def gkg_url(file_time):
+    url = GKG_URL_FMT % file_time
+    validate_gkg_url(url)
+    return url
+
+
+def validate_gkg_url(url):
+    if not isinstance(url, str) or not _GKG_URL_RE.match(url):
+        raise GkgError("GKG のファイルの URL が決めた形でない")
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def build_opener():
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+
+
+def urllib_transport(url, timeout):
+    """既定の通信。応答（.status、.headers.get、.read(n)、.close()）を返す。4xx・5xx も応答として返す。"""
+    validate_gkg_url(url)
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT,
+                                               "Accept-Encoding": "identity"})
+    try:
+        return build_opener().open(req, timeout=timeout)
+    except urllib.error.HTTPError as e:
+        return e
+
+
+class Pacer:
+    """要求を送り始める間隔を MIN_REQUEST_INTERVAL_SECONDS 以上にする。"""
+
+    def __init__(self, clock, sleep):
+        self.clock, self.sleep, self.last = clock, sleep, None
+
+    def wait(self):
+        if self.last is not None:
+            gap = self.last + MIN_REQUEST_INTERVAL_SECONDS - self.clock()
+            if gap > 0:
+                self.sleep(gap)
+        self.last = self.clock()
+
+
+def _retry_after(resp):
+    try:
+        v = resp.headers.get("Retry-After")
+    except Exception:
+        return None
+    if v is None:
+        return None
+    v = str(v).strip()
+    return int(v) if v.isdigit() else None
+
+
+def _read_body(resp, clock, deadline):
+    buf = bytearray()
+    while True:
+        if clock() > deadline:
+            raise TimeoutError("attempt deadline")
+        chunk = resp.read(READ_CHUNK_BYTES)
+        if not chunk:
+            return bytes(buf)
+        buf += chunk
+        if len(buf) > MAX_ZIP_BYTES:
+            raise GkgFormatError("too_large")
+
+
+class FetchResult:
+    __slots__ = ("result", "reason", "transient", "data", "attempts")
+
+    def __init__(self, result, reason, transient, data, attempts):
+        self.result, self.reason, self.transient = result, reason, transient
+        self.data, self.attempts = data, attempts
+
+
+def fetch_file(entry, transport, sleep, clock, pacer, log):
+    """1本の zip を取得する（2章の規則）。返り値 FetchResult。data は成功したときだけ。"""
+    url = gkg_url(entry["file_time"])
+    reason, transient = "none", False
+    for attempt in range(1, MAX_ATTEMPTS_PER_FILE + 1):
+        wait = None
+        resp = None
+        pacer.wait()
+        try:
+            resp = transport(url, REQUEST_TIMEOUT_SECONDS)
+            status = getattr(resp, "status", None)
+            if status is None:
+                status = getattr(resp, "code", None)
+            if status == 200:
+                enc = resp.headers.get("Content-Encoding")
+                if enc not in (None, "", "identity"):
+                    return FetchResult("failed", "content_encoding", False, None, attempt)
+                data = _read_body(resp, clock, clock() + ATTEMPT_DEADLINE_SECONDS)
+                if len(data) != entry["size"]:
+                    reason, transient = "size_mismatch", False
+                elif hashlib.md5(data).hexdigest() != entry["md5"]:
+                    reason, transient = "md5_mismatch", False
+                else:
+                    return FetchResult("ok", "", False, data, attempt)
+            elif isinstance(status, int) and status in RETRY_STATUSES:
+                reason, transient = "http_%d" % status, True
+                ra = _retry_after(resp)
+                if ra is not None and ra > MAX_RETRY_AFTER_SECONDS:
+                    return FetchResult("failed", "retry_after_too_long", True, None, attempt)
+                wait = ra
+            elif isinstance(status, int) and status in FINAL_STATUSES:
+                return FetchResult("failed", "http_%d" % status, False, None, attempt)
+            else:
+                return FetchResult("failed", "http_%s" % status, False, None, attempt)
+        except GkgFormatError as e:
+            return FetchResult("failed", str(e), False, None, attempt)
+        except READ_ERRORS as e:
+            reason, transient = "network_%s" % type(e).__name__, True
+        finally:
+            if resp is not None:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+        if attempt == MAX_ATTEMPTS_PER_FILE:
+            break
+        base = RETRY_WAIT_SECONDS[attempt - 1]
+        wait = base if wait is None else max(base, wait)
+        log("%s：%s。%d 秒待って再試行する（%d/%d）"
+            % (entry["file_time"], reason, wait, attempt + 1, MAX_ATTEMPTS_PER_FILE))
+        sleep(wait)
+    return FetchResult("failed", reason, transient, None, MAX_ATTEMPTS_PER_FILE)
+
+
+# ---------------------------------------------------------------------------
+# 4章：行の読み取りと、メモリの上での集計
+# ---------------------------------------------------------------------------
+
+class Agg:
+    """集計の入れ物（15分ファイル1本分、または1日分）。行そのものは持たない。"""
+
+    def __init__(self):
+        self.docs = Counter()                      # g -> 文書数
+        self.tables = {name: defaultdict(Counter) for name in DAY_TABLES}
+        self.stats = Counter()
+
+    def merge(self, other):
+        self.docs.update(other.docs)
+        for name in DAY_TABLES:
+            mine = self.tables[name]
+            for g, c in other.tables[name].items():
+                mine[g].update(c)
+        self.stats.update(other.stats)
+
+    def pair_keys(self):
+        return sum(len(c) for name in ("p1", "p2") for c in self.tables[name].values())
+
+
+def _ts_inside_block(ts):
+    """14桁の時刻（bytes）のファイルの日が、DATA_START〜METHOD_BLOCK_END の中なら True。"""
+    t = filelist.parse_file_time(ts)
+    if t is None:
+        return False
+    return DATA_START <= filelist.file_day(t) <= METHOD_BLOCK_END
+
+
+def add_line(agg, line, file_time_b, vocab):
+    """1行を読み、4章の許可リストの値だけを集計に加える。一覧にない欄はここで捨てる。"""
+    st = agg.stats
+    st["rows"] += 1
+    if line.endswith(b"\n"):
+        line = line[:-1]
+    if line.endswith(b"\r"):
+        line = line[:-1]
+    if not line:
+        st["rows_empty"] += 1
+        return
+    f = line.split(b"\t")
+    if len(f) != N_COLUMNS:
+        st["rows_bad_columns"] += 1
+        return
+    rid, d21, coll = f[I_ID], f[I_D21], f[I_COLL]
+    v1t, v2t, v1loc, tinfo = f[I_V1T], f[I_V2T], f[I_V1LOC], f[I_TINFO]
+    del f, line                                    # 残りの20欄は、ここで手放す
+    m = _ID_RE.fullmatch(rid)
+    if m is None:
+        st["rows_bad_id"] += 1
+        return
+    ts, tmark = m.group(1), m.group(2)
+    if ts != file_time_b:
+        st["rows_id_time_differs"] += 1
+        if not _ts_inside_block(ts):
+            st["rows_id_time_outside_block"] += 1
+            return
+    if d21 == file_time_b:
+        st["d21_same_as_file"] += 1
+    elif d21 == b"0":
+        st["d21_zero"] += 1
+    elif _D14_RE.fullmatch(d21):
+        st["d21_other"] += 1
+    else:
+        st["d21_invalid"] += 1
+    g = (coll if _COLL_RE.fullmatch(coll) else BAD_COLL) + tmark
+    if tmark:
+        st["docs_translated_mark"] += 1
+
+    s1 = set()
+    if v1t:
+        for t in v1t.split(b";"):
+            if not t:
+                continue
+            c = vocab.get(t)
+            if c is None:
+                if THEME_RE.fullmatch(t) is None:
+                    st["theme_tokens_invalid_v1"] += 1
+                    continue
+                c = vocab.setdefault(t, t)
+            s1.add(c)
+    m2 = Counter()
+    if v2t:
+        for blk in v2t.split(b";"):
+            if not blk:
+                continue
+            t = blk.partition(b",")[0]
+            c = vocab.get(t)
+            if c is None:
+                if THEME_RE.fullmatch(t) is None:
+                    st["theme_tokens_invalid_v2"] += 1
+                    continue
+                c = vocab.setdefault(t, t)
+            m2[c] += 1
+    s2 = set(m2)
+    cs = set()
+    if v1loc:
+        for blk in v1loc.split(b";"):
+            if not blk:
+                continue
+            parts = blk.split(b"#")
+            if len(parts) != V1LOCATION_FIELDS:
+                st["location_blocks_invalid"] += 1
+                continue
+            cc = parts[V1LOCATION_COUNTRY]
+            if COUNTRY_RE.fullmatch(cc):
+                cs.add(vocab.setdefault(cc, cc))
+            else:
+                st["country_codes_invalid"] += 1
+    lang = NO_LANG
+    engs = set()
+    if tinfo:
+        for part in tinfo.split(b";"):
+            part = part.strip()
+            if not part:
+                continue
+            key, _sep, val = part.partition(b":")
+            key = key.strip().lower()
+            val = val.strip()
+            if key == b"srclc":
+                if LANG_RE.fullmatch(val):
+                    lang = vocab.setdefault(val, val)
+                else:
+                    lang = OTHER
+                    st["srclc_other"] += 1
+            elif key == b"eng":
+                for tok in val.split(b"/"):
+                    tok = tok.strip()
+                    if not tok:
+                        continue
+                    if ENG_RE.fullmatch(tok):
+                        engs.add(vocab.setdefault(tok, tok))
+                    else:
+                        st["eng_other_tokens"] += 1
+            else:
+                st["translationinfo_other_parts"] += 1
+
+    agg.docs[g] += 1
+    T = agg.tables
+    if not s1:
+        st["docs_without_v1_theme"] += 1
+    if not s2:
+        st["docs_without_v2_theme"] += 1
+    if not cs:
+        st["docs_without_country"] += 1
+    T["t1"][g].update(s1)
+    T["t2"][g].update(s2)
+    T["t2m"][g].update(m2)
+    if cs:
+        T["c1"][g].update((t, c) for t in s1 for c in cs)
+        T["c2"][g].update((t, c) for t in s2 for c in cs)
+        T["c2m"][g].update({(t, c): n for t, n in m2.items() for c in cs})
+        T["nc"][g].update(cs)
+    T["l1"][g].update((t, lang) for t in s1)
+    T["l2"][g].update((t, lang) for t in s2)
+    T["l2m"][g].update({(t, lang): n for t, n in m2.items()})
+    T["nl"][g][lang] += 1
+    if len(s1) > 1:
+        T["p1"][g].update(itertools.combinations(sorted(s1), 2))
+    if len(s2) > 1:
+        T["p2"][g].update(itertools.combinations(sorted(s2), 2))
+    if engs:
+        T["eng"][g].update(engs)
+
+
+def aggregate_zip(data, file_time, vocab):
+    """メモリの上の zip を1行ずつ展開して集計する（3章・4章）。形が違えば GkgFormatError。"""
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+        infos = zf.infolist()
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, ValueError, EOFError):
+        raise GkgFormatError("zip") from None
+    if len(infos) != 1:
+        raise GkgFormatError("zip_members")
+    info = infos[0]
+    if info.is_dir() or info.filename.lower() != (file_time + ".gkg.csv"):
+        raise GkgFormatError("zip_member_name")
+    if info.flag_bits & 0x1:
+        raise GkgFormatError("zip_encrypted")
+    if info.file_size > MAX_UNZIPPED_BYTES:
+        raise GkgFormatError("too_large_unzipped")
+    ftb = file_time.encode("ascii")
+    agg = Agg()
+    total = 0
+    try:
+        with zf.open(info) as fp:
+            while True:
+                line = fp.readline(MAX_LINE_BYTES + 1)
+                if not line:
+                    break
+                total += len(line)
+                if total > MAX_UNZIPPED_BYTES:
+                    raise GkgFormatError("too_large_unzipped")
+                if len(line) > MAX_LINE_BYTES and not line.endswith(b"\n"):
+                    while line and not line.endswith(b"\n"):
+                        line = fp.readline(MAX_LINE_BYTES + 1)
+                        total += len(line)
+                        if total > MAX_UNZIPPED_BYTES:
+                            raise GkgFormatError("too_large_unzipped")
+                    agg.stats["rows"] += 1
+                    agg.stats["rows_too_long"] += 1
+                    continue
+                add_line(agg, line, ftb, vocab)
+    except (zipfile.BadZipFile, EOFError, ValueError, OSError, NotImplementedError):
+        raise GkgFormatError("zip_read") from None
+    return agg
+
+
+# ---------------------------------------------------------------------------
+# 1章：ファイル一覧の読み取りと、対象の選び方
+# ---------------------------------------------------------------------------
+
+def parse_filelist(data):
+    """T-016 の本体（見出しつきの TSV）を読み、(file_time, file_type, size, md5) の list を返す。"""
+    lines = data.split(b"\n")
+    if lines[-1] != b"" or lines[0] != "\t".join(FILELIST_FIELDS).encode("ascii"):
+        raise GkgError("ファイル一覧の見出しか終わりの形が違う")
+    out = []
+    for raw in lines[1:-1]:
+        f = raw.split(b"\t")
+        if (len(f) != 4 or not re.fullmatch(rb"\d{14}", f[0])
+                or f[1] not in (b"export", b"mentions", b"gkg")
+                or not re.fullmatch(rb"[0-9]{1,15}", f[2])
+                or not re.fullmatch(rb"[0-9a-f]{32}", f[3])):
+            raise GkgError("ファイル一覧に形の違う行がある")
+        out.append((f[0].decode(), f[1].decode(), int(f[2]), f[3].decode()))
+    return out
+
+
+def select_files(rows):
+    """1章の規則。返り値：{日付の文字列: [entry, ...]}（日付の順、各日は file_time の順）。
+
+    entry = {"file_time", "size", "md5", "ambiguous"}。
+    """
+    by_time = {}
+    for ft, kind, size, md5 in rows:
+        if kind != "gkg":
+            continue
+        t = filelist.parse_file_time(ft)
+        if t is None:
+            continue
+        day = filelist.file_day(t)
+        if not (DATA_START <= day <= METHOD_BLOCK_END):
+            continue
+        by_time.setdefault(ft, (day, set()))[1].add((size, md5))
+    days = {}
+    for ft in sorted(by_time):
+        day, variants = by_time[ft]
+        (size, md5) = sorted(variants)[0]
+        days.setdefault(day.isoformat(), []).append(
+            {"file_time": ft, "size": size, "md5": md5, "ambiguous": len(variants) > 1})
+    return dict(sorted(days.items()))
+
+
+# ---------------------------------------------------------------------------
+# 7章：保存先とマニフェスト
+# ---------------------------------------------------------------------------
+
+def _inside_git_worktree(path_real):
+    d = path_real
+    while True:
+        if os.path.lexists(os.path.join(d, ".git")):
+            return True
+        parent = os.path.dirname(d)
+        if parent == d:
+            return False
+        d = parent
+
+
+def resolve_paths(root, home):
+    """保存先（Git の外）とマニフェストの場所を確かめて返す。フォルダは作らない。"""
+    root_real = os.path.realpath(root)
+    for depth in (1, 2, 3):
+        d = os.path.join(home, *STORE_PARTS[:depth])
+        try:
+            st = os.lstat(d)
+        except OSError:
+            raise GkgError("保存先のフォルダ %s が無い（オーナーが前もって作る）"
+                           % ("~/" + "/".join(STORE_PARTS[:depth]))) from None
+        if depth >= 2 and not stat.S_ISDIR(st.st_mode):
+            raise GkgError("保存先 %s が、シンボリックリンクかフォルダでない"
+                           % ("~/" + "/".join(STORE_PARTS[:depth])))
+    store_real = os.path.realpath(os.path.join(home, *STORE_PARTS))
+    if store_real == root_real or store_real.startswith(root_real + os.sep):
+        raise GkgError("保存先がプロジェクトの下にある（Git の外に置く）")
+    if _inside_git_worktree(store_real):
+        raise GkgError("保存先が Git の作業ツリーの中にある（Git の外に置く）")
+    mdir = os.path.join(root, *MANIFEST_DIR_PARTS)
+    for parts in (MANIFEST_DIR_PARTS[:1], MANIFEST_DIR_PARTS):
+        p = os.path.join(root, *parts)
+        if os.path.islink(p) or not os.path.isdir(p):
+            raise GkgError("マニフェストのフォルダが、リンクかフォルダでない")
+    if os.path.realpath(mdir) != os.path.join(root_real, *MANIFEST_DIR_PARTS):
+        raise GkgError("マニフェストのフォルダの実際の場所がプロジェクトの下でない")
+    return {"store": store_real, "manifest": os.path.join(root_real, *MANIFEST_DIR_PARTS,
+                                                          MANIFEST_NAME)}
+
+
+def _open_append(path):
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o644)
+    except OSError:
+        raise GkgError("追記するファイルを開けない（シンボリックリンクなど）") from None
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        os.close(fd)
+        raise GkgError("追記するファイルが通常のファイルでない")
+    if st.st_size and os.pread(fd, 1, st.st_size - 1) != b"\n":
+        os.close(fd)
+        raise GkgError("追記するファイルの最後の行に改行が無い")
+    return fd
+
+
+def _write_all(fd, data):
+    view = memoryview(data)
+    while view:
+        n = os.write(fd, view)
+        view = view[n:]
+
+
+def _check_no_address(data, what):
+    if privacy_scan.find_in_bytes(data):
+        raise GkgError("%s にメールアドレスの形の文字列があるので書かずに止まる" % what)
+
+
+def append_jsonl(path, obj, what):
+    line = (json.dumps(obj, sort_keys=True, ensure_ascii=True) + "\n").encode("ascii")
+    _check_no_address(line, what)
+    fd = _open_append(path)
+    try:
+        _write_all(fd, line)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def read_jsonl(path):
+    """無ければ空の list。O_NOFOLLOW で読む。"""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return []
+    except OSError:
+        raise GkgError("記録のファイルを開けない（シンボリックリンクなど）") from None
+    with os.fdopen(fd, "rb") as f:
+        data = f.read()
+    out = []
+    for raw in data.splitlines():
+        if raw.strip():
+            try:
+                out.append(json.loads(raw))
+            except ValueError:
+                raise GkgError("記録のファイルに JSON でない行がある") from None
+    return out
+
+
+def write_new_file(store, name, data):
+    """保存先に新しいファイルを書く。同じ名前があれば、中身が同じときだけ書かずに認める。"""
+    path = os.path.join(store, name)
+    sha = hashlib.sha256(data).hexdigest()
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o644)
+    except FileExistsError:
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError:
+            raise GkgError("同じ名前のものがあり、通常のファイルとして開けない") from None
+        with os.fdopen(fd, "rb") as f:
+            old = f.read()
+        if hashlib.sha256(old).hexdigest() != sha:
+            raise GkgError("同じ名前で中身の違うファイルが既にある（上書きしない。リードに報告）")
+        return sha
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            raise GkgError("書いたものが通常のファイルでない")
+        _write_all(fd, data)
+        os.fsync(fd)
+        os.lseek(fd, 0, os.SEEK_SET)
+        h = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            h.update(chunk)
+        if h.hexdigest() != sha:
+            raise GkgError("書いたファイルの sha256 が一致しない")
+    finally:
+        os.close(fd)
+    return sha
+
+
+# ---------------------------------------------------------------------------
+# 6章：日の集計の書き方
+# ---------------------------------------------------------------------------
+
+def _b(n):
+    return b"%d" % n
+
+
+def serialize_day(day, agg, files):
+    """6章の形のバイト列（gzip の前）。行の順はすべて決まった並べ方。"""
+    out = [b"#\t" + DAY_FORMAT + b"\t" + day.encode("ascii")]
+    for f in files:
+        out.append(b"\t".join([b"F", f["file_time"].encode(), f["result"].encode(),
+                               (f["reason"] or "-").encode(), f["md5"].encode(),
+                               _b(f["size"]), (f["sha256"] or "-").encode(),
+                               _b(f["attempts"]), _b(sum(f["docs"].values()))]))
+    for f in files:
+        for g in sorted(f["docs"]):
+            out.append(b"\t".join([b"FD", f["file_time"].encode(), g.encode(),
+                                   _b(f["docs"][g])]))
+    T = agg.tables
+    names = set()
+    for key in ("t1", "t2"):
+        for c in T[key].values():
+            names.update(c)
+    ids = {t: i for i, t in enumerate(sorted(names))}
+    for t, i in sorted(ids.items(), key=lambda x: x[1]):
+        out.append(b"V\t" + _b(i) + b"\t" + t)
+    for g in sorted(agg.docs):
+        out.append(b"D\t" + g + b"\t" + _b(agg.docs[g]))
+    groups = sorted(set(agg.docs))
+    for g in groups:
+        t1, t2, t2m = T["t1"].get(g, {}), T["t2"].get(g, {}), T["t2m"].get(g, {})
+        for t in sorted(set(t1) | set(t2), key=ids.get):
+            out.append(b"\t".join([b"T", g, _b(ids[t]), _b(t1.get(t, 0)), _b(t2.get(t, 0)),
+                                   _b(t2m.get(t, 0))]))
+    for tag, k1, k2, km in ((b"C", "c1", "c2", "c2m"), (b"L", "l1", "l2", "l2m")):
+        for g in groups:
+            a, b, m = T[k1].get(g, {}), T[k2].get(g, {}), T[km].get(g, {})
+            for t, x in sorted(set(a) | set(b), key=lambda k: (ids[k[0]], k[1])):
+                out.append(b"\t".join([tag, g, _b(ids[t]), x, _b(a.get((t, x), 0)),
+                                       _b(b.get((t, x), 0)), _b(m.get((t, x), 0))]))
+    for tag, key in ((b"P1", "p1"), (b"P2", "p2")):
+        for g in groups:
+            c = T[key].get(g, {})
+            for (a, b2), n in sorted(((ids[a], ids[b2]), n) for (a, b2), n in c.items()):
+                out.append(b"\t".join([tag, g, _b(a), _b(b2), _b(n)]))
+    for tag, key in ((b"NC", "nc"), (b"NL", "nl"), (b"E", "eng")):
+        for g in groups:
+            for x, n in sorted(T[key].get(g, {}).items()):
+                out.append(b"\t".join([tag, g, x, _b(n)]))
+    for name, n in sorted(agg.stats.items()):
+        out.append(b"S\t" + name.encode("ascii") + b"\t" + _b(n))
+    return b"\n".join(out) + b"\n"
+
+
+def check_output_bytes(data, what):
+    """7章：使ってよい文字だけか、メールアドレスの形が無いかを確かめる。"""
+    if data.translate(None, bytes(OUTPUT_ALPHABET)):
+        raise GkgError("%s に、使ってよい文字の外の文字がある" % what)
+    _check_no_address(data, what)
+
+
+def gzip_bytes(data):
+    return gzip.compress(data, compresslevel=6, mtime=0)
+
+
+def day_file_name(run_id, day):
+    return "gkg-%s-day-%s.tsv.gz" % (run_id, day.replace("-", ""))
+
+
+def fetch_log_name(run_id):
+    return "gkg-%s-fetch-log.jsonl" % run_id
+
+
+# ---------------------------------------------------------------------------
+# 5章：取得の全体
+# ---------------------------------------------------------------------------
+
+def _iso(dt):
+    return dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _stderr_log(msg):
+    print("gkg: " + msg, file=sys.stderr)
+
+
+def _disk_free(path):
+    return shutil.disk_usage(path).free
+
+
+def run_gkg(*, root, home, filelist_rows, filelist_sha256, method_access_seq, code_sha256,
+            transport=urllib_transport, sleep=time.sleep, clock=time.monotonic,
+            now=lambda: datetime.datetime.now(datetime.timezone.utc), log=_stderr_log,
+            disk_free=_disk_free):
+    """5章の取得の全体。全部の日が終われば dict を返す。止まる条件では RunInterrupted。"""
+    if not re.fullmatch(r"[0-9a-f]{64}", code_sha256 or ""):
+        raise GkgError("code_sha256 の形が違う")
+    run_id = code_sha256[:16]
+    paths = resolve_paths(root, home)
+    plan = select_files(filelist_rows)
+    if not plan:
+        raise GkgError("対象のファイルが1本も無い")
+    manifest = read_jsonl(paths["manifest"])
+    mine = [e for e in manifest if e.get("run_id") == run_id]
+    if any(e.get("kind") == "run-complete" for e in mine):
+        raise GkgError("この run_id の取得は完了している（取り直さない）")
+    start = [e for e in mine if e.get("kind") == "run-start"]
+    n_files = sum(len(v) for v in plan.values())
+    base = {"run_id": run_id, "code_path": CODE_REL, "code_sha256": code_sha256,
+            "filelist_sha256": filelist_sha256, "method_access_seq": method_access_seq}
+    if start:
+        s0 = start[0]
+        for k in ("code_sha256", "filelist_sha256", "method_access_seq"):
+            if s0.get(k) != base[k]:
+                raise GkgError("再開しようとした run の %s が、最初の run-start と違う" % k)
+        if disk_free(paths["store"]) < MIN_FREE_DISK_BYTES:
+            raise RunInterrupted("保存先のディスクの空きが足りない")
+        append_jsonl(paths["manifest"], dict(base, kind="run-resume", at=_iso(now())),
+                     "マニフェストの行")
+    else:
+        if disk_free(paths["store"]) < MIN_FREE_DISK_BYTES:
+            raise RunInterrupted("保存先のディスクの空きが足りない")
+        append_jsonl(paths["manifest"], dict(base, kind="run-start", started_at=_iso(now()),
+                                             files_selected=n_files, days=len(plan),
+                                             block_start=METHOD_BLOCK[0],
+                                             block_end=METHOD_BLOCK[1],
+                                             store_location=STORE_LOCATION_NAME),
+                     "マニフェストの行")
+    done_days = {e["day"] for e in mine if e.get("kind") == "day"}
+    log_path = os.path.join(paths["store"], fetch_log_name(run_id))
+    latest = {}
+    for e in read_jsonl(log_path):
+        if e.get("run_id") == run_id and "file_time" in e:
+            latest[e["file_time"]] = e
+    interrupts = Counter()
+    for e in read_jsonl(log_path):
+        if e.get("run_id") == run_id and "file_time" in e:
+            if e.get("result") == "interrupted":
+                interrupts[e["file_time"]] += 1
+    state = {"transient": [], "format": 0, "interrupts": interrupts}
+    pacer = Pacer(clock, sleep)
+    vocab = {}
+    totals = Counter()
+    pending = []
+
+    def flush():
+        while pending:
+            day, n_listed, day_agg, files = pending.pop(0)
+            info = _write_day(day, day_agg, files, run_id, paths, disk_free)
+            dline = dict(base, kind="day", day=day, file_name=info["file_name"],
+                         sha256=info["sha256"], files_listed=n_listed,
+                         files_ok=info["ok"], files_failed=info["failed"], docs=info["docs"],
+                         written_at=_iso(now()), store_location=STORE_LOCATION_NAME)
+            append_jsonl(paths["manifest"], dline, "マニフェストの行")
+            log("%s：ok %d・failed %d・文書 %d" % (day, info["ok"], info["failed"],
+                                                 info["docs"]))
+
+    for day, entries in plan.items():
+        if day in done_days:
+            continue
+        day_agg, files = _run_day(day, entries, latest, state, pacer, vocab, log_path, run_id,
+                                  transport, sleep, clock, now, log)
+        pending.append((day, len(entries), day_agg, files))
+        # 一時的な失敗が続いている途中なら、その日はまだ書かない（続きで止まる条件に達したら、
+        # 続いた失敗のファイルを日をまたいでも interrupted にして取り直せるようにするため）
+        if not state["transient"]:
+            flush()
+    flush()
+    for e in read_jsonl(paths["manifest"]):
+        if e.get("run_id") == run_id and e.get("kind") == "day":
+            totals["days"] += 1
+            totals["files_ok"] += e["files_ok"]
+            totals["files_failed"] += e["files_failed"]
+    if totals["days"] != len(plan):
+        raise GkgError("マニフェストの day の行の数が、日の数と合わない")
+    try:
+        fd = os.open(log_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        raise GkgError("取得の記録を開けない") from None
+    with os.fdopen(fd, "rb") as f:
+        log_sha = hashlib.sha256(f.read()).hexdigest()
+    done = dict(base, kind="run-complete", completed_at=_iso(now()), days=totals["days"],
+                files_ok=totals["files_ok"], files_failed=totals["files_failed"],
+                fetch_log_file=fetch_log_name(run_id), fetch_log_sha256=log_sha,
+                store_location=STORE_LOCATION_NAME)
+    append_jsonl(paths["manifest"], done, "マニフェストの行")
+    return done
+
+
+def _log_file(log_path, run_id, entry, result, reason, transient, attempts, sha, docs, stats,
+              now):
+    rec = {"run_id": run_id, "file_time": entry["file_time"], "listed_md5": entry["md5"],
+           "listed_size": entry["size"], "result": result, "reason": reason,
+           "transient": transient, "attempts": attempts, "sha256": sha,
+           "docs": {g.decode() if isinstance(g, bytes) else g: n for g, n in sorted(docs.items())},
+           "stats": dict(sorted(stats.items())), "finished_at": _iso(now())}
+    append_jsonl(log_path, rec, "取得の記録の行")
+    return rec
+
+
+def _run_day(day, entries, latest, state, pacer, vocab, log_path, run_id, transport, sleep,
+             clock, now, log):
+    """1日分のファイルを取得して集計する（書かない）。返り値: (日の集計, ファイルの一覧)。"""
+    day_agg = Agg()
+    files = []
+    for entry in entries:
+        prev = latest.get(entry["file_time"])
+        if prev is not None and prev.get("result") == "failed":
+            files.append({"file_time": entry["file_time"], "result": "failed",
+                          "reason": prev.get("reason") or "-", "md5": entry["md5"],
+                          "size": entry["size"], "sha256": None,
+                          "attempts": prev.get("attempts", 0), "docs": {}})
+            continue
+        if entry["ambiguous"]:
+            rec = _log_file(log_path, run_id, entry, "failed", "ambiguous_listing", False, 0,
+                            None, {}, {}, now)
+            latest[entry["file_time"]] = rec
+            files.append({"file_time": entry["file_time"], "result": "failed",
+                          "reason": "ambiguous_listing", "md5": entry["md5"],
+                          "size": entry["size"], "sha256": None, "attempts": 0, "docs": {}})
+            continue
+        fr = fetch_file(entry, transport, sleep, clock, pacer, log)
+        sha, agg, reason = None, None, fr.reason
+        if fr.result == "ok":
+            sha = hashlib.sha256(fr.data).hexdigest()
+            try:
+                agg = aggregate_zip(fr.data, entry["file_time"], vocab)
+            except GkgFormatError as e:
+                reason = "format_%s" % e
+            fr.data = None
+        if agg is not None:
+            state["transient"] = []
+            state["format"] = 0
+            day_agg.merge(agg)
+            if day_agg.pair_keys() > MAX_PAIR_KEYS:
+                raise RunInterrupted("1日分のテーマの組の種類が上限を超えた（%s）" % day)
+            docs = {g.decode(): n for g, n in agg.docs.items()}
+            rec = _log_file(log_path, run_id, entry, "ok", "", False, fr.attempts, sha,
+                            docs, agg.stats, now)
+            files.append({"file_time": entry["file_time"], "result": "ok", "reason": "",
+                          "md5": entry["md5"], "size": entry["size"], "sha256": sha,
+                          "attempts": fr.attempts, "docs": docs})
+        else:
+            transient = fr.result != "ok" and fr.transient
+            rec = _log_file(log_path, run_id, entry, "failed", reason, transient, fr.attempts,
+                            sha, {}, {}, now)
+            log("%s：failed（%s）" % (entry["file_time"], reason))
+            files.append({"file_time": entry["file_time"], "result": "failed", "reason": reason,
+                          "md5": entry["md5"], "size": entry["size"], "sha256": sha,
+                          "attempts": fr.attempts, "docs": {}})
+            if transient and state["interrupts"][entry["file_time"]] < MAX_INTERRUPTS_PER_FILE:
+                state["transient"].append(entry)
+                state["format"] = 0
+            elif reason.startswith("format_"):
+                state["transient"] = []
+                state["format"] += 1
+            else:
+                state["transient"] = []
+                state["format"] = 0
+            if len(state["transient"]) >= MAX_CONSECUTIVE_TRANSIENT_FAILURES:
+                for e in state["transient"]:
+                    state["interrupts"][e["file_time"]] += 1
+                    latest[e["file_time"]] = _log_file(log_path, run_id, e, "interrupted",
+                                                       "consecutive_transient_failures", True,
+                                                       0, None, {}, {}, now)
+                raise RunInterrupted("一時的な失敗が %d 本続いたので止めた（再開できる）"
+                                     % MAX_CONSECUTIVE_TRANSIENT_FAILURES)
+            if state["format"] >= MAX_CONSECUTIVE_FORMAT_FAILURES:
+                raise RunInterrupted("形式の失敗が %d 本続いたので止めた。コードとデータの形が"
+                                     "合っていない（リードに報告）"
+                                     % MAX_CONSECUTIVE_FORMAT_FAILURES)
+        latest[entry["file_time"]] = rec
+    return day_agg, files
+
+
+def _write_day(day, day_agg, files, run_id, paths, disk_free):
+    data = serialize_day(day, day_agg, files)
+    check_output_bytes(data, "日の集計")
+    if disk_free(paths["store"]) < MIN_FREE_DISK_BYTES:
+        raise RunInterrupted("保存先のディスクの空きが足りない（%s の集計を書く前）" % day)
+    name = day_file_name(run_id, day)
+    sha = write_new_file(paths["store"], name, gzip_bytes(data))
+    ok = sum(1 for f in files if f["result"] == "ok")
+    return {"file_name": name, "sha256": sha, "ok": ok, "failed": len(files) - ok,
+            "docs": sum(day_agg.docs.values())}
+
+
+if __name__ == "__main__":
+    print("このモジュールはライブラリとしてだけ使う。取得は入口のスクリプト "
+          "src/collector/acquire_gkg.py から行う（手順は src/collector/README.md）。",
+          file=sys.stderr)
+    sys.exit(2)

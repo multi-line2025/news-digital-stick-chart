@@ -1,13 +1,17 @@
-# 収集係のコード（src/collector）：試運転の手順3 ファイル一覧の取得の手順書（T-015）
+# 収集係のコード（src/collector）：試運転の手順3・手順4 の取得の手順書（T-015、T-018）
 
 データ出典：GDELT Project（https://www.gdeltproject.org/）。本プロジェクトは GDELT Project と提携・承認の関係にありません。
 Data: The GDELT Project (https://www.gdeltproject.org/).
 
 | ファイル | 役割 |
 |---|---|
-| `acquire_filelist.py` | 入口のスクリプト。関門、封印の仕組みにつなぐアダプタ、取得のコードの sha256 の固定 |
-| `filelist.py` | 一覧の取得、2020-12-15 以降の行の破棄、項目の絞り込み、保存、マニフェストの追記 |
-| `privacy_scan.py` | メールアドレスの形の文字列の検査（filelist.py が書く前に使う。コミットの前と後にも実行する） |
+| `acquire_filelist.py` | 手順3の入口のスクリプト。関門、封印の仕組みにつなぐアダプタ、取得のコードの sha256 の固定 |
+| `filelist.py` | 一覧の取得、2020-12-15 以降の行の破棄、項目の絞り込み、保存、マニフェストの追記。ファイルの日の規則（4章）は gkg.py も使う |
+| `codegate.py` | 入口のスクリプトが共通に使う関門の部品（git を環境変数なしで動かす、未コミット・無視されるファイル・skip-worktree の検査、sealed/・data/manifest のリンクの検査）。T-018 |
+| `acquire_gkg.py` | 手順4の入口のスクリプト。最初に `ledger.require_method_access()` を引数なしで呼び、関門のあとで gkg.py を動かす。T-018。まだ実行していない |
+| `gkg.py` | 手法を作る期間の GKG 2.1 の取得、メモリの上での欄の破棄と集計、日ごとの集計の保存、取得の記録とマニフェスト。T-018 |
+| `themes.py` | テーマの区分表の取得（件数の欄を捨てる）。T-018 ではコードだけで、取得元の URL は未定。取得は統計係の除外の規則の封印のあとの別のタスク |
+| `privacy_scan.py` | メールアドレスの形の文字列の検査（filelist.py・gkg.py・themes.py が書く前に使う。コミットの前と後にも実行する） |
 
 細かい決まりは、各ファイルの docstring に書いてある。この文書は、実行の手順と限界をまとめる。
 
@@ -41,11 +45,12 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/collector/acquire_filelist.py
 
 動きの順番（`acquire_filelist.py` の docstring に詳しく書いた）。
 
-1. 関門（ネットワークを使わない）。次の4つのどれかが欠ければ、何も書かずに終了コード 1 で止まる。
+1. 関門（ネットワークを使わない）。次の5つのどれかが欠ければ、何も書かずに終了コード 1 で止まる（T-018 で (4) を強め、(5) を加えた）。
    - periods と candidates の記録があり、記録の鎖と .ots が検証に通る
    - 区切りの封印（periods）の時刻証明が Bitcoin で確定している
    - 保存先の2段のフォルダがある
-   - 取得のコードに未コミットの変更が無い。filelist.py と privacy_scan.py の sha256 が、入口のスクリプトに固定した値と一致する
+   - 取得のコードに未コミットの変更・無視されるファイル・skip-worktree などの印が無い（git は環境変数を受け継がずに実行する）。filelist.py・privacy_scan.py・codegate.py の sha256 が、入口のスクリプトに固定した値と一致する
+   - sealed/・data/・data/manifest/ がシンボリックリンクでなく、プロジェクトの下にある
 2. `seal_acquisition.start`：drand の最新の回を取り、`acquisition-start` を記録に追記し、`.ots` を作る（通信あり）。
 3. 一覧を取得する（通信あり）。2020-12-15 以降の行はメモリの上で捨てる。本体を保存先に書き、`data/manifest/gdelt-filelist.jsonl` に1行追記する。
 4. `seal_acquisition.result`：`acquisition-result` を記録に追記し、`.ots` を作る（通信あり）。
@@ -107,3 +112,36 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/collector -v
 
 - `tests/collector/test_acquire_filelist.py`：関門（どれか1つが欠ければ止まる）、アダプタの順番と sha256 の照合、本番の経路で差し替えを受け付けないこと。プロジェクトの写しを一時的なディレクトリに作り、その中で封印の記録まで通して動かす（drand と ots は差し替え）。本物の `sealed/`・`data/manifest`・`~/Desktop/news-stick-data` には書かない。
 - `tests/collector/test_filelist.py`：取得の本体。子プロセスの見張り（`filelist_child.py`）は、filelist.py を読み込む前に audit hook を入れ、許すイベントの一覧に無いイベントを止める。
+
+## 6. 手順4：手法を作る期間の GKG の取得（T-018 でコードとテスト。実行は別のタスク）
+
+細かい決まりは `gkg.py`・`acquire_gkg.py`・`codegate.py` の docstring にある。ここには実行の手順だけを書く。
+
+実行の前にオーナー（と封印係）がすること
+1. 保存先のフォルダを作る：`mkdir ~/Desktop/news-stick-data/gkg-method`（シンボリックリンクにしない。スクリプトは作らない）。
+2. 封印係が `src/sealer/seal_method.py seal` で method-access を追記し、コミットする（無ければ関門で止まる）。
+3. `src/collector`・`src/sealer` に未コミットの変更・無視されるファイル（`__pycache__` など）・skip-worktree の印が無いこと。
+4. 通信の承認：data.gdeltproject.org の `/gdeltv2/<14桁>.gkg.csv.zip` だけ。198,226 本、約 1.79 TB。
+5. ディスクの空き：日の集計は全体で 20〜200 GB の見込み（`gkg.py` 6章）。空きが 10 GiB を下回ると止まる。
+
+実行するコマンド（プロジェクトのルートで。引数は受け付けない）
+
+```sh
+env -u GIT_DIR -u GIT_WORK_TREE -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 \
+    .venv/bin/python -I -B src/collector/acquire_gkg.py
+```
+
+- 終了コード 0：全部の日が終わった。1：関門で止まった（何も書いていない）。3：止まる条件で止まった（同じコードでもう一度実行すると続きから。再開は、手法を作る期間の欠けた日の一覧の封印より前にだけ行う）。
+- 書くもの：`~/Desktop/news-stick-data/gkg-method/` の日の集計と取得の記録（Git の外）、`data/manifest/gdelt-gkg-method.jsonl`（Git に入れる）。
+- 実行のあと：マニフェストをコミットする。前と後に `privacy_scan.py` と `--all-history` を実行する。ファイルは消さない。
+
+## 7. テスト（手順4・区分表・関門。ネットワークを使わない）
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/collector -v
+```
+
+- `tests/collector/test_gkg.py`：欄を捨てること（目印を入れた欄がどのファイルとログにも出ない）、集計、DATA_START より前の除外、欠けたファイルの記録、再試行の上限、止まる条件と再開の規則、一時ファイルを作らないこと。
+- `tests/collector/test_acquire_gkg.py`：最初に引数なしの関門を呼ぶこと、写しの上で手順3と method-access を作ってからの通しの動き、関門の各条件。
+- `tests/collector/test_themes.py`：区分表の件数の欄を捨てること、見出しの無い形で止まること、1回だけの取得。
+- `tests/collector/test_acquire_filelist.py` の `TestGateHardening`：T-015 の監査 軽1・軽2・軽5 の対応。

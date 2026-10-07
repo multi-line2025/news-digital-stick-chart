@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""試運転の手順3：GDELT のファイル一覧を取得する入口のスクリプト（T-015。実行は T-016）。
+"""試運転の手順3：GDELT のファイル一覧を取得する入口のスクリプト（T-015。実行は T-016。関門の
+強化は T-018）。
 
 データ出典
     Data: The GDELT Project (https://www.gdeltproject.org/). This project is not
@@ -22,12 +23,20 @@
              照合して確かめる（ledger.confirmed_times。ヘッダが本当の鎖にあることは確かめない）
          (3) 保存先のフォルダ <home>/Desktop/news-stick-data と、その下の gdelt-filelist の2段が、
              どちらもシンボリックリンクでない既にあるフォルダである（このスクリプトは作らない）
-         (4) 作業ツリーに、取得のコードの未コミットの変更が無い。
+         (4) 作業ツリーに、取得のコードの未コミットの変更が無い（T-018 で codegate.py に移し、
+             T-015 の監査 軽2 の抜け道を塞いだ）。
+             - codegate.py の sha256 が PINNED_SHA256 と一致する（読み込む前に確かめ、確かめた
+               バイト列そのものを実行する）
              - src/collector と src/sealer の下に、git status で出る変更（未追跡のファイルを
-               含む）が無い
-             - 入口のスクリプト・filelist.py・privacy_scan.py の中身が、HEAD のコミットの中身と
-               同じ
+               含む）、無視されるファイル（.pyc など）、skip-worktree・assume-unchanged の印の
+               付いたファイルが無い。git は、呼び出し元の環境変数（GIT_DIR など）を受け継がず、
+               --git-dir=<project>/.git と --work-tree=<project> を付けて実行する
+             - 入口のスクリプト・filelist.py・privacy_scan.py・codegate.py の中身が、HEAD の
+               コミットの中身と同じ
              - filelist.py と privacy_scan.py の sha256 が、下の PINNED_SHA256 と一致する
+         (5) sealed/、data/、data/manifest/ が、シンボリックリンクでない既にあるフォルダで、
+             実際の場所がプロジェクトの下である（T-015 の監査 軽1・軽5。本番でも、テストの
+             差し替えでも同じ検査を通す）
     2. filelist.py を読み込む。関門で sha256 を照合したバイト列そのものを実行する
        （照合のあとでファイルが差し替えられても、照合していないものは実行しない）。
     3. filelist.run_acquisition を、下のアダプタにつないで1回だけ動かす。
@@ -46,7 +55,13 @@
 
 固定するもの（本番では差し替えを受け付けない。T-010 の監査 中3）
     - main() は引数を1つも受け付けない（何か渡せば終了コード 2 で、何もしない）。
-      環境変数も読まない（このファイルは os.environ を使わない）。
+      このファイルのコードは os.environ を読まない。ただし、環境変数の影響がまったく無い
+      わけではない（T-015 の監査 軽2）。
+        - git には環境変数を渡さない（codegate.GIT_ENV の固定の値だけを渡す）。
+        - Python の処理系そのものは、PYTHONPATH などの環境変数を読む。そのため、実行は
+          README のとおり `env -u PYTHONPATH ... python -I -B` の形で行う（-I は PYTHON* の
+          環境変数と利用者の site-packages を無視する）。
+        - ots のクライアントには、呼び出し元の環境変数がそのまま渡る（src/sealer/stamp.py）。
     - プロジェクトのルート PROJECT：このファイルの置き場所から決める。
     - 保存先：<home>/Desktop/news-stick-data/gdelt-filelist（filelist.FIXED_STORE_PARTS）。
       home は環境変数 HOME ではなく、利用者のデータベース（pwd.getpwuid(os.getuid())）から
@@ -58,22 +73,30 @@
     テストのための差し替えは、_acquire(_test=_TestSeams(...)) からだけ渡せる。main() は
     _acquire() を引数なしで呼ぶだけなので、本番の経路からは渡せない。さらに _TestSeams の
     project と home は、システムの一時的なディレクトリ（tempfile.gettempdir()）の下でなければ
-    拒む。本物のプロジェクトとホームはその外にあるので、差し替えを使って本物の sealed/・
-    data/manifest・保存先に書くことはできない（ledger._gate_root と同じ考え方）。
+    拒み、本物のプロジェクト・ホームそのものも拒む（ledger._gate_root と同じ考え方）。
+    T-015 の監査 軽1 のとおり、それだけでは、写しの中の sealed/ や data/manifest を本物への
+    シンボリックリンクにすれば本物に書けた。T-018 で、関門 (5) と _checked_test_seams に、
+    sealed/・data/・data/manifest/ がリンクでなく、実際の場所が写しの下であることの検査を
+    加えた。残る限界：確かめたあとで、同じ利用者の別のプロセスがフォルダを差し替える競合は
+    防げない。また、TMPDIR を変えれば「一時的なディレクトリ」の場所も変わる（T-014 の監査
+    軽1 と同じ）。
 
 取得のコードのハッシュの範囲（T-009 の監査 M-2）：入口のスクリプトに、ほかの2つを固定する
     封印の記録（acquisition-start の fetch）に入るのは、code_path = CODE_REL（このファイル）と、
     その sha256 の1組だけである（ledger.acquisition_start_fields が決めた形。T-014 でも同じ）。
-    そこで、このファイルの中に filelist.py と privacy_scan.py の sha256 を PINNED_SHA256 として
-    書き、関門で照合する。このファイルの sha256 が決まれば PINNED_SHA256 の値も決まるので、
-    封印の記録の sha256 1つで、取得のコードの3つのファイルがすべて決まる。
+    そこで、このファイルの中に filelist.py・privacy_scan.py・codegate.py の sha256 を
+    PINNED_SHA256 として書き、関門で照合する。このファイルの sha256 が決まれば PINNED_SHA256 の
+    値も決まるので、封印の記録の sha256 1つで、取得のコードの4つのファイルがすべて決まる
+    （T-016 の本番の取得の時点では codegate.py は無く、3つだった。その時点の版は Git の履歴に
+    ある）。
     HEAD のコミットのハッシュを記録する案は採らなかった。理由：
       - acquisition-start の中身の形（fetch のキーは code_path と code_sha256 だけ）に、
         コミットのハッシュを入れる場所が無い。形を変えるのは封印係の範囲である。
       - マニフェストにコミットのハッシュを書いても、マニフェストは取得の後に書くので、
         取得の前に封印したことにならない。
     第三者は、封印の記録の code_sha256 と一致する acquire_filelist.py を履歴から探し、その中の
-    PINNED_SHA256 と、同じコミットの filelist.py・privacy_scan.py の sha256 を照らせばよい。
+    PINNED_SHA256 と、同じコミットの filelist.py・privacy_scan.py（T-018 以降は codegate.py も）の
+    sha256 を照らせばよい。
     この範囲に入らないもの：src/sealer の封印の仕組み（関門 (4) で、未コミットの変更が無い
     ことだけを確かめる）、Python の処理系と標準ライブラリ、ots のクライアント。
 
@@ -90,7 +113,7 @@ source_url の扱い
 限界
     - 関門は、正直な運用で手順を飛ばす誤りを防ぐためのもので、証明ではない。このスクリプトを
       使わずに取得することは、記録からは検出できない（docs/verify/periods-seal.md 7章）。
-    - ファイルの差し替えの競合について。filelist.py は、関門で照合したバイト列そのものを
+    - ファイルの差し替えの競合について。filelist.py と codegate.py は、照合したバイト列そのものを
       実行する。privacy_scan.py は filelist.py が自分でファイルから読み込むので、関門の照合と
       読み込みのあいだに差し替えられうる。そこで、読み込みの後に3つのファイルを読み直し、
       関門で照合したバイト列と同じかを確かめる（_recheck_code）。そのあと封印の記録を書く
@@ -126,12 +149,14 @@ import stamp  # noqa: E402
 CODE_REL = "src/collector/acquire_filelist.py"
 FILELIST_REL = "src/collector/filelist.py"
 PRIVACY_SCAN_REL = "src/collector/privacy_scan.py"
+CODEGATE_REL = "src/collector/codegate.py"
 
-# 取得のコードのうち、このファイル以外の2つの sha256（上の「ハッシュの範囲」）。
-# filelist.py か privacy_scan.py を変えたら、ここも直してコミットする（テストが照合する）。
+# 取得のコードのうち、このファイル以外の3つの sha256（上の「ハッシュの範囲」）。
+# filelist.py・privacy_scan.py・codegate.py を変えたら、ここも直してコミットする（テストが照合する）。
 PINNED_SHA256 = (
     (FILELIST_REL, "afd7a9dd47bc052a691e1a4cd558b211f4d72cf1ce1f451fa9f3016540cd04a7"),
     (PRIVACY_SCAN_REL, "68d8836d56489ca5df9f2f55e24a2642ebf3aa14afdc2e0120577c7b6c6cb887"),
+    (CODEGATE_REL, "945adb339c6c38585d331546d61c940a1862d53f7f94e3db8aec63da4ce107c4"),
 )
 
 # 関門 (4)：未コミットの変更が無いことを確かめるフォルダ。
@@ -139,7 +164,6 @@ CLEAN_PATHS = ("src/collector", "src/sealer")
 # 関門 (3)：保存先の2段（filelist.FIXED_STORE_PARTS の後ろの2つ。テストが照合する）。
 STORE_PARTS = ("Desktop", "news-stick-data", "gdelt-filelist")
 HEADER_FILE_RE = re.compile(r"\Abitcoin-header-(\d+)\.hex\Z")
-GIT_TIMEOUT_SECONDS = 60
 
 
 class GateError(Exception):
@@ -212,6 +236,12 @@ def _checked_test_seams(t):
         raise ValueError("テストの project が本物のプロジェクトを指している")
     if os.path.realpath(t.home) == os.path.realpath(production_home()):
         raise ValueError("テストの home が本物のホームを指している")
+    # T-015 の監査 軽1：写しの中の書き込み先が、リンクで写しの外（本物など）を指していないこと
+    for parts in (("sealed",), ("data",), ("data", "manifest")):
+        p = os.path.join(t.project, *parts)
+        if os.path.islink(p) or not _under_tmp(os.path.realpath(p)):
+            raise ValueError("テストの project の %s が、リンクか一時的なディレクトリの外を指す"
+                             % "/".join(parts))
     return t
 
 
@@ -219,29 +249,23 @@ def _checked_test_seams(t):
 # 関門
 # ---------------------------------------------------------------------------
 
-def _git(project, *args):
-    r = subprocess.run(["git", "-C", project] + list(args), capture_output=True,
-                       timeout=GIT_TIMEOUT_SECONDS)
-    return r.returncode, r.stdout
-
-
-def _committed_bytes(project, rel):
-    """rel の作業ツリーの中身。HEAD のコミットの中身と同じでなければ GateError。"""
-    full = os.path.join(project, rel)
+def _load_codegate(project):
+    """codegate.py を読み、PINNED_SHA256 と照合してから、そのバイト列を実行する。"""
+    path = os.path.join(project, CODEGATE_REL)
     try:
-        st = os.lstat(full)
+        st = os.lstat(path)
     except OSError:
-        raise GateError("取得のコードが無い: %s" % rel) from None
+        raise GateError("取得のコードが無い: %s" % CODEGATE_REL) from None
     if not stat.S_ISREG(st.st_mode):
-        raise GateError("取得のコードが通常のファイルでない: %s" % rel)
-    with open(full, "rb") as f:
-        work = f.read()
-    code, head = _git(project, "show", "HEAD:%s" % rel)
-    if code != 0:
-        raise GateError("取得のコードが HEAD のコミットに無い: %s" % rel)
-    if head != work:
-        raise GateError("取得のコードが HEAD のコミットの中身と違う: %s" % rel)
-    return work
+        raise GateError("取得のコードが通常のファイルでない: %s" % CODEGATE_REL)
+    with open(path, "rb") as f:
+        source = f.read()
+    if _sha256(source) != dict(PINNED_SHA256)[CODEGATE_REL]:
+        raise GateError("%s の sha256 が、入口のスクリプトに固定した値と違う" % CODEGATE_REL)
+    mod = types.ModuleType("codegate")
+    mod.__file__ = path
+    exec(compile(source, path, "exec"), mod.__dict__)
+    return mod, source
 
 
 def _check_records(project):
@@ -296,16 +320,18 @@ def _check_store(home):
 
 
 def _check_code(project):
-    """関門 (4)。返り値: {rel: バイト列}（入口・filelist・privacy_scan）。"""
-    code, out = _git(project, "status", "--porcelain=v1", "-z", "--untracked-files=all",
-                     "--", *CLEAN_PATHS)
-    if code != 0:
-        raise GateError("git status が失敗した（Git の作業ツリーでない）")
-    if out:
-        names = sorted({e[3:].decode("utf-8", "replace") for e in out.split(b"\0") if e})
-        raise GateError("取得のコードに未コミットの変更がある: %s" % ", ".join(names))
-    codes = {rel: _committed_bytes(project, rel)
-             for rel in (CODE_REL, FILELIST_REL, PRIVACY_SCAN_REL)}
+    """関門 (4)(5)。返り値: {rel: バイト列}（入口・filelist・privacy_scan・codegate）。"""
+    cg, cg_source = _load_codegate(project)
+    try:
+        codes = cg.check_clean(project, CLEAN_PATHS,
+                               (CODE_REL, FILELIST_REL, PRIVACY_SCAN_REL, CODEGATE_REL))
+        cg.check_project_dirs(project)
+    except cg.CodeGateError as e:
+        raise GateError(str(e)) from None
+    except (OSError, subprocess.SubprocessError):
+        raise GateError("git status が失敗した（Git の作業ツリーでない）") from None
+    if codes[CODEGATE_REL] != cg_source:
+        raise GateError("関門のあいだに取得のコードが変わった: %s" % CODEGATE_REL)
     for rel, want in PINNED_SHA256:
         if _sha256(codes[rel]) != want:
             raise GateError("%s の sha256 が、入口のスクリプトに固定した値と違う" % rel)
@@ -313,7 +339,7 @@ def _check_code(project):
 
 
 def check_gate(s):
-    """関門の4つ。通れば dict を返し、どれかが欠ければ GateError（何も書かない）。"""
+    """関門の (1)〜(5)。通れば dict を返し、どれかが欠ければ GateError（何も書かない）。"""
     periods, cands, confirmed = _check_records(s.project)
     _check_store(s.home)
     codes = _check_code(s.project)
