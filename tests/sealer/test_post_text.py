@@ -11,11 +11,14 @@
 - 壊した記録（書き換え・切り詰め・コミットしていない変更）では投稿文を作らないこと
 - 手順書の塊を、文書のとおりファイルに保存し、-e を付けずに bash と zsh で実行する（S-1）。
   壊した複製・違う投稿の値では終了コード 1 で止まり、どの検査が合わないかを出すこと
-- 投稿の一覧を投稿の決まり（すべての記録を recorded_at から 24 時間以内。seq 1〜4 は決まりの前の
-  例外）と照らすこと（M-2。2026-10-08 オーナー決定）
+- 投稿の一覧を投稿の決まり（すべての記録を recorded_at から 24 時間以内。seq 1・2 は決まりの前の
+  例外）と照らすこと（M-2。2026-10-08 オーナー決定。T-034 で例外を seq 1・2 に正した）
+- 最初の投稿（アカウントと投稿は手順書から読む）を照らし、seq 3・4 が決まりを守っていること（T-034）
+- 投稿の ID から時刻を計算すること、遅れの上限の値の形、recorded_at と確定時刻の照合、保留（T-034）
 """
 
 import contextlib
+import datetime
 import io
 import os
 import re
@@ -296,6 +299,56 @@ class TestRealLedger(unittest.TestCase):
             with self.assertRaises(post_text.PostError):
                 post_text.build(PROJECT, bad)
 
+    def test_first_post_follows_rule(self):
+        """T-034：最初の投稿（手順書 4.2。ID から 2026-10-07T18:24:30.169Z）を照らす。seq 3・4 は
+        決まりの中（約 4.66 時間）、seq 1・2 は決まりの前の例外。アカウントと投稿は手順書から読む。"""
+        account = doc_fixed(PROJECT, "account")
+        posts = post_text.parse_posts(doc_fixed(PROJECT, "first"))
+        self.assertEqual(len(posts), 1)
+        _n, when, seq, h, acc = posts[0]
+        self.assertEqual(post_text._iso(when), "2026-10-07T18:24:30.169Z")
+        self.assertEqual((seq, acc), (4, account))
+        data = subprocess.run(["git", "-C", PROJECT, "show", "HEAD:sealed/ledger.jsonl"],
+                              check=True, capture_output=True).stdout
+        self.assertEqual(h, ledger.prefix_digest(data, 4))
+        # 手順書の 4.2 の投稿文は、post_text の seq 4 の文と同じ
+        with open(os.path.join(PROJECT, DOC_REL), encoding="utf-8") as f:
+            doc = f.read()
+        self.assertIn("\n".join("  " + l for l in post_text.build(PROJECT, 4)[0].split("\n")), doc)
+        out = io.StringIO()
+        bad = post_text.check_posts(PROJECT, posts, account=account,
+                                    now=ledger.parse_time("2026-12-31T00:00:00Z"), out=out)
+        self.assertEqual(bad, [], out.getvalue())
+        text = out.getvalue()
+        for k in (1, 2):
+            self.assertRegex(text, r"seq %d: 最初に投稿された時刻 2026-10-07T18:24:30\.169Z.*例外" % k)
+        self.assertRegex(text, r"seq 3: 最初に投稿された時刻 2026-10-07T18:24:30\.169Z、遅れ 4\.66 時間.*"
+                               r"上限 24 時間の中")
+        self.assertRegex(text, r"seq 4: 最初に投稿された時刻 2026-10-07T18:24:30\.169Z、遅れ 4\.65 時間.*"
+                               r"上限 24 時間の中")
+        # 同じ投稿が 24 時間を超えて遅れていれば、seq 3・4 は合わない（例外は seq 1・2 だけ）
+        late = [(1, when + datetime.timedelta(hours=20), 4, h, acc)]
+        bad = post_text.check_posts(PROJECT, late, account=account, out=io.StringIO(),
+                                    now=ledger.parse_time("2026-12-31T00:00:00Z"))
+        self.assertEqual([b.split(":")[0] for b in bad], ["seq 3", "seq 4"])
+
+    def test_real_recorded_at_before_headers(self):
+        """本物の記録では、どの seq の recorded_at も確定時刻 + 3 時間より前。"""
+        st = post_text.verify.State(PROJECT, None)
+        self.assertEqual(post_text.check_recorded_vs_btc(st.records, st.times), [])
+
+    def test_build_stops_when_recorded_after_header(self):
+        real = post_text.verify.State
+
+        def fake(root, headers):
+            st = real(root, headers)
+            st.times = dict(st.times)
+            st.times[1] = ledger.parse_time(st.records[0]["recorded_at"]) - datetime.timedelta(hours=4)
+            return st
+        with mock.patch.object(post_text.verify, "State", side_effect=fake):
+            with self.assertRaisesRegex(post_text.PostError, "seq 1: recorded_at"):
+                post_text.build(PROJECT)
+
     def test_cli_both_pythons(self):
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
         outs = []
@@ -370,112 +423,230 @@ class TestSyntheticLedger(tl.LedgerCase):
             post_text.build(self.base)
 
 
-# ---------------------------------------------------------------- 照らす手順（第三者）
+# ---------------------------------------------------------------- 投稿の一覧と投稿の決まり（M-2、T-034）
 
 
-# ---------------------------------------------------------------- 投稿の一覧と投稿の決まり（M-2）
+def doc_fixed(root, tag):
+    """手順書の `<!-- x-post:<tag> -->` の直後の塊の中身（1 行）。アカウントと最初の投稿は、手順書に
+    だけ書き、テストはそこから読む（承認は手順書に書くことへのもの）。"""
+    with open(os.path.join(root, DOC_REL), encoding="utf-8") as f:
+        m = re.search(r"<!-- x-post:%s -->\n```\n(.*?)\n```" % re.escape(tag), f.read(), re.S)
+    return m.group(1).strip()
 
 
 def post_line(when, seq, h):
     return "%s %d %s" % (ledger.format_time(when), seq, h)
 
 
+def x_url(account, when):
+    """時刻 when の投稿の ID を作り、URL にする（仮の投稿。ID の下位 22 ビットは 0）。"""
+    ms = int(round(when.timestamp() * 1000))
+    return "https://x.com/%s/status/%d" % (account, (ms - post_text.X_EPOCH_MS) << 22)
+
+
+class TestXId(unittest.TestCase):
+    def test_first_post_id_time(self):
+        url = doc_fixed(PROJECT, "first").split()[0]
+        m = post_text.X_URL_RE.match(url)
+        self.assertEqual(m.group(1), doc_fixed(PROJECT, "account"))
+        t = post_text.x_id_time(m.group(2))
+        self.assertEqual(post_text._iso(t), "2026-10-07T18:24:30.169Z")
+        self.assertEqual((int(m.group(2)) >> 22) + 1288834974657, 1791397470169)
+
+    def test_round_trip(self):
+        when = ledger.parse_time("2026-10-08T01:02:03Z")
+        m = post_text.X_URL_RE.match(x_url("someone", when))
+        self.assertEqual(post_text.x_id_time(m.group(2)), when)
+
+    def test_small_id_rejected(self):
+        with self.assertRaises(post_text.PostError):
+            post_text.x_id_time(12345)
+
+    def test_url_forms(self):
+        ok = ("https://x.com/a_b/status/2107899885177704739",
+              "https://twitter.com/a/status/2107899885177704739?s=20")
+        for u in ok:
+            self.assertIsNotNone(post_text.X_URL_RE.match(u), u)
+        for u in ("http://x.com/a/status/1", "https://x.com/a/status/abc",
+                  "https://x.com/a-b/status/2107899885177704739", "https://evil.com/a/status/1"):
+            self.assertIsNone(post_text.X_URL_RE.match(u), u)
+
+
+class TestMaxDelay(unittest.TestCase):
+    def test_rejects_nan_inf_negative(self):
+        for v in ("nan", "inf", "-inf", "-1", "abc", None, "NaN"):
+            with self.subTest(v=v):
+                with self.assertRaises(post_text.PostError):
+                    post_text.check_max_delay(v)
+
+    def test_accepts_finite(self):
+        self.assertEqual(post_text.check_max_delay("24"), 24)
+        self.assertEqual(post_text.check_max_delay(0), 0)
+        self.assertEqual(post_text.check_max_delay("1.5"), 1.5)
+
+
+class TestRecordedVsBtc(unittest.TestCase):
+    def test_slack_is_three_hours(self):
+        self.assertEqual(post_text.RECORDED_AT_HEADER_SLACK, datetime.timedelta(hours=3))
+
+    def test_check(self):
+        recs = [{"seq": 1, "recorded_at": "2026-10-07T13:00:00Z"},
+                {"seq": 2, "recorded_at": "2026-10-07T16:00:00Z"},
+                {"seq": 3, "recorded_at": "2026-10-07T16:00:01Z"}]
+        hdr = ledger.parse_time("2026-10-07T13:00:00Z")
+        times = {1: hdr, 2: hdr, 3: hdr}
+        bad = post_text.check_recorded_vs_btc(recs, times)
+        self.assertEqual(len(bad), 1)
+        self.assertIn("seq 3", bad[0])
+        self.assertEqual(post_text.check_recorded_vs_btc(recs, {}), [])   # 未確定なら照らさない
+
+
 class TestCheckPosts(tl.LedgerCase):
-    """仮の記録 6 件（seq k の recorded_at は T0 + (k−1) 時間）で、投稿の決まりを照らす。"""
+    """仮の記録 6 件：seq 1 は T0、seq 2 は T0+30 時間、seq 3〜6 は T0+48〜51 時間。"""
+
+    OFFSETS = (0, 30, 48, 49, 50, 51)
 
     def setUp(self):
         super().setUp()
-        self.add(n=6)
+        for off in self.OFFSETS:
+            self.add(start=off)
         for s in range(1, 7):
             self.stamp(s)
         self.d = self.data()
 
     def rec(self, seq):
-        return tl.T0 + (seq - 1) * tl.H
+        return tl.T0 + self.OFFSETS[seq - 1] * tl.H
 
     def h(self, seq):
         return ledger.prefix_digest(self.d, seq)
 
-    def check(self, lines, **kw):
+    def check(self, lines, now=None, **kw):
         out = io.StringIO()
-        bad = post_text.check_posts(self.base, post_text.parse_posts("\n".join(lines)), out=out, **kw)
+        posts = post_text.parse_posts("\n".join(lines))
+        bad = post_text.check_posts(self.base, posts, now=now or self.rec(6) + 1000 * tl.H,
+                                    out=out, **kw)
         return bad, out.getvalue()
-
-    def good(self):
-        return [post_line(self.rec(4) + 100 * tl.H, 4, self.h(4)),
-                post_line(self.rec(5) + 23 * tl.H, 5, self.h(5)),
-                post_line(self.rec(6) + tl.H, 6, self.h(6))]
 
     def test_rule_constants(self):
         self.assertEqual(post_text.RULE_MAX_DELAY_HOURS, 24)
-        self.assertEqual(post_text.PRE_RULE_LAST_SEQ, 4)
+        self.assertEqual(post_text.PRE_RULE_LAST_SEQ, 2)
 
-    def test_rule_followed_passes(self):
-        bad, out = self.check(self.good())
+    def test_one_head_post_covers_all(self):
+        bad, out = self.check([post_line(self.rec(6) + tl.H, 6, self.h(6))])
         self.assertEqual(bad, [])
-        self.assertIn("seq 4: 決まりができる前の記録なので", out)
-        self.assertIn("自分の投稿が無い seq: 1, 2, 3", out)
+        self.assertIn("seq 1: 最初に投稿された時刻", out)
+        self.assertIn("決まりの前の例外なので", out)
+        self.assertIn("seq 3: 最初に投稿された時刻", out)
+        self.assertRegex(out, r"seq 3: .*遅れ 4\.00 時間.*上限 24 時間の中")
 
-    def test_seq_1_to_4_late_is_exempt(self):
-        lines = self.good() + [post_line(self.rec(2) + 1000 * tl.H, 2, self.h(2))]
-        self.assertEqual(self.check(lines)[0], [])
+    def test_seq1_2_exempt_but_seq3_judged(self):
+        """M-a：seq 3 は決まりの対象（例外は seq 1・2 だけ）。"""
+        bad, out = self.check([post_line(self.rec(3) + 25 * tl.H, 6, self.h(6))])
+        self.assertEqual(len(bad), 1, bad)
+        self.assertIn("seq 3", bad[0])
+        self.assertIn("上限 24 時間を超える", bad[0])
+        self.assertRegex(out, r"seq 1: .*遅れ 73\.00 時間.*例外")
+        self.assertRegex(out, r"seq 4: .*遅れ 24\.00 時間.*上限 24 時間の中")   # ちょうど 24 は中
 
-    def test_late_seq5_fails(self):
-        lines = self.good()
-        lines[1] = post_line(self.rec(5) + 25 * tl.H, 5, self.h(5))
-        bad, _ = self.check(lines)
-        self.assertEqual(len(bad), 1)
-        self.assertIn("seq 5", bad[0])
-        self.assertIn("24", bad[0])
+    def test_late_seq4_fails(self):
+        """T-029 では seq 4 を 1 年後に投稿しても「守っている」になった（M-a）。今は合わない。"""
+        bad, _ = self.check([post_line(self.rec(4) + 365 * 24 * tl.H, 4, self.h(4)),
+                             post_line(self.rec(6) + 365 * 24 * tl.H, 6, self.h(6))])
+        self.assertTrue(any(b.startswith("seq 3") for b in bad), bad)
+        self.assertTrue(any(b.startswith("seq 4") for b in bad), bad)
 
-    def test_exactly_24_hours_passes(self):
-        lines = self.good()
-        lines[1] = post_line(self.rec(5) + 24 * tl.H, 5, self.h(5))
-        self.assertEqual(self.check(lines)[0], [])
+    def test_later_post_covers_earlier_seq(self):
+        bad, out = self.check([post_line(self.rec(4) + tl.H, 4, self.h(4)),
+                               post_line(self.rec(6) + tl.H, 6, self.h(6))])
+        self.assertEqual(bad, [])
+        self.assertRegex(out, r"seq 5: .*遅れ 2\.00 時間")
 
-    def test_earliest_post_counts(self):
-        lines = self.good() + [post_line(self.rec(5) + 30 * tl.H, 5, self.h(5))]
-        self.assertEqual(self.check(lines)[0], [])
+    def test_earliest_covering_post_counts(self):
+        bad, _ = self.check([post_line(self.rec(6) + 30 * tl.H, 6, self.h(6)),
+                             post_line(self.rec(6) + tl.H, 6, self.h(6))])
+        self.assertEqual(bad, [])
 
-    def test_missing_seq5_fails(self):
-        bad, _ = self.check([self.good()[0], self.good()[2]])
-        self.assertTrue(any("seq 5 に自分の投稿が無い" in b for b in bad), bad)
+    def test_pending_before_deadline(self):
+        """L-c：24 時間たっていない seq は保留（合わないとしない）。"""
+        lines = [post_line(self.rec(5) + 0.5 * tl.H, 5, self.h(5))]
+        bad, out = self.check(lines, now=self.rec(6) + 23 * tl.H)
+        self.assertEqual(bad, [])
+        self.assertIn("seq 6: 保留", out)
+        self.assertIn("保留の seq: 6", out)
+        bad, out = self.check(lines, now=self.rec(6) + 25 * tl.H)
+        self.assertEqual(len(bad), 1, bad)
+        self.assertIn("seq 6: 投稿が無い", bad[0])
+        self.assertIn("期限を過ぎた", bad[0])
 
-    def test_missing_seq4_fails(self):
-        bad, _ = self.check(self.good()[1:])
-        self.assertTrue(any("seq 4 に自分の投稿が無い" in b for b in bad), bad)
+    def test_no_valid_post_fails_exempt_too(self):
+        bad, _ = self.check([post_line(self.rec(6) + tl.H, 6, "0" * 64)])
+        self.assertTrue(any(b.startswith("seq 1: 投稿が無い") for b in bad), bad)
 
-    def test_wrong_hash_fails_and_is_not_counted(self):
-        lines = self.good()
-        lines[1] = post_line(self.rec(5) + tl.H, 5, self.h(4))
-        bad, _ = self.check(lines)
+    def test_wrong_hash_fails(self):
+        bad, _ = self.check([post_line(self.rec(6) + tl.H, 6, self.h(6)),
+                             post_line(self.rec(5) + tl.H, 5, self.h(4))])
         self.assertTrue(any("ハッシュ" in b for b in bad), bad)
-        self.assertTrue(any("seq 5 に自分の投稿が無い" in b for b in bad), bad)
 
     def test_post_before_recorded_at_fails(self):
-        lines = self.good()
-        lines[2] = post_line(self.rec(6) - tl.H, 6, self.h(6))
-        bad, _ = self.check(lines)
+        bad, _ = self.check([post_line(self.rec(6) - tl.H, 6, self.h(6))])
         self.assertTrue(any("recorded_at より前" in b for b in bad), bad)
 
     def test_seq_beyond_ledger_fails(self):
-        bad, _ = self.check(self.good() + [post_line(self.rec(6) + tl.H, 7, "b" * 64)])
+        bad, _ = self.check([post_line(self.rec(6) + tl.H, 6, self.h(6)),
+                             post_line(self.rec(6) + tl.H, 7, "b" * 64)])
         self.assertTrue(any("記録は 6 件しかない" in b for b in bad), bad)
 
     def test_broken_ledger_fails(self):
-        lines = self.lines()
-        self.write_lines(lines[:5])
-        bad, _ = self.check(self.good())
+        self.write_lines(self.lines()[:5])
+        bad, _ = self.check([post_line(self.rec(6) + tl.H, 6, self.h(6))])
         self.assertTrue(bad and "検証に失敗" in bad[0], bad)
 
+    def test_account(self):
+        url = x_url("Dummy_Acct", self.rec(6) + tl.H)
+        line = "%s 6 %s" % (url, self.h(6))
+        self.assertEqual(self.check([line], account="dummy_acct")[0], [])      # 大文字小文字は区別しない
+        bad, _ = self.check([line], account="OtherAcct")
+        self.assertTrue(any("照らす対象の @OtherAcct でない" in b for b in bad), bad)
+        bad, out = self.check([post_line(self.rec(6) + tl.H, 6, self.h(6))], account="OtherAcct")
+        self.assertEqual(bad, [])
+        self.assertIn("アカウントは照らしていない", out)
+
+    def test_id_time_used(self):
+        url = x_url("a", self.rec(3) + 25 * tl.H)
+        bad, _ = self.check(["%s 6 %s" % (url, self.h(6))])
+        self.assertTrue(any(b.startswith("seq 3") for b in bad), bad)
+
+    def test_other_max_delay_is_reported(self):
+        _bad, out = self.check([post_line(self.rec(6) + tl.H, 6, self.h(6))], max_delay_hours="48")
+        self.assertIn("決まりと違う値で照らした", out)
+        _bad, out = self.check([post_line(self.rec(6) + tl.H, 6, self.h(6))])
+        self.assertNotIn("決まりと違う値", out)
+        for v in ("nan", "inf", "-1"):
+            with self.assertRaises(post_text.PostError):
+                self.check([post_line(self.rec(6) + tl.H, 6, self.h(6))], max_delay_hours=v)
+
+    def test_recorded_after_header_fails(self):
+        """L-b：recorded_at が確定時刻 + 3 時間より後なら合わない（確定時刻は差し替えて試す）。"""
+        real = post_text.verify.State
+
+        def fake(root, headers):
+            st = real(root, headers)
+            st.times = {4: self.rec(4) - 4 * tl.H}
+            return st
+        with mock.patch.object(post_text.verify, "State", side_effect=fake):
+            bad, _ = self.check([post_line(self.rec(6) + tl.H, 6, self.h(6))])
+        self.assertTrue(any("seq 4: recorded_at" in b for b in bad), bad)
+
     def test_btc_delay_only_when_given(self):
-        # 仮の記録は Bitcoin で未確定なので、確定時刻からの判定は掛からない
-        self.assertEqual(self.check(self.good(), max_delay_after_btc_hours=0)[0], [])
+        self.assertEqual(self.check([post_line(self.rec(6) + tl.H, 6, self.h(6))],
+                                    max_delay_after_btc_hours=0)[0], [])
 
     def test_parse_errors(self):
-        for text in ("", "# だけ", "2026-10-08T00:00:00Z 4", "2026-10-08 00:00:00 4 " + "a" * 64,
-                     "2026-10-08T00:00:00Z ４ " + "a" * 64, "2026-10-08T00:00:00Z 4 " + "A" * 64,
-                     "٢026-10-08T00:00:00Z 4 " + "a" * 64):
+        h = "a" * 64
+        for text in ("", "# だけ", "2026-10-08T00:00:00Z 4", "2026-10-08 00:00:00 4 " + h,
+                     "2026-10-08T00:00:00Z ４ " + h, "2026-10-08T00:00:00Z 4 " + "A" * 64,
+                     "٢026-10-08T00:00:00Z 4 " + h, "https://x.com/a/status/12 4 " + h,
+                     "https://example.org/a/status/2107899885177704739 4 " + h):
             with self.subTest(text=text):
                 with self.assertRaises(post_text.PostError):
                     post_text.parse_posts(text)
@@ -483,25 +654,25 @@ class TestCheckPosts(tl.LedgerCase):
     def test_cli(self):
         path = os.path.join(self.base, "posts.txt")
         with open(path, "w", encoding="utf-8") as f:
-            f.write("# 一覧\n" + "\n".join(self.good()[1:]) + "\n")
+            f.write("# 一覧\n" + post_line(self.rec(6) + tl.H, 6, "0" * 64) + "\n")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = post_text.main(["check-posts", path, "--root", self.base])
         self.assertEqual(code, 1)
-        self.assertIn("合わない: seq 4 に自分の投稿が無い", out.getvalue())
+        self.assertIn("合わない:", out.getvalue())
         with open(path, "w", encoding="utf-8") as f:
-            f.write("\n".join(self.good()) + "\n")
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            code = post_text.main(["check-posts", path, "--root", self.base])
-        self.assertEqual(code, 0, out.getvalue())
-        self.assertIn("投稿の一覧と記録は合う", out.getvalue())
+            f.write(post_line(self.rec(6) + tl.H, 6, self.h(6)) + "\n")
+        for extra, want in (([], 0), (["--max-delay-hours", "nan"], 1),
+                            (["--max-delay-hours", "-3"], 1), (["--account", "x"], 0)):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = post_text.main(["check-posts", path, "--root", self.base] + extra)
+            self.assertEqual(code, want, (extra, out.getvalue()))
 
-    def test_cli_cannot_change_exception_or_required_seq(self):
-        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            post_text.main(["check-posts", "x", "--require-every-seq-from", "9"])
-        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            post_text.main(["check-posts", "x", "--delay-exempt-through", "9"])
+    def test_cli_cannot_change_exception(self):
+        for opt in ("--require-every-seq-from", "--delay-exempt-through", "--pre-rule-last-seq"):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                post_text.main(["check-posts", "x", opt, "9"])
 
 
 # ---------------------------------------------------------------- 照らす手順（第三者）
@@ -677,7 +848,7 @@ class TestDocProcedure(unittest.TestCase):
     def write_posts(self, lines):
         path = os.path.join(self.tmp, "posts.txt")
         with open(path, "w", encoding="utf-8") as f:
-            f.write("# <投稿の時刻 UTC> <seq> <64 桁>\n" + "\n".join(lines) + "\n")
+            f.write("# <投稿の URL> <seq> <64 桁>\n" + "\n".join(lines) + "\n")
         return path
 
     def run_list(self, lines):
@@ -694,21 +865,33 @@ class TestDocProcedure(unittest.TestCase):
             self.assertIn(text, out, sh)
             self.assertNotIn("守っている", out, sh)
 
-    def seq4_line(self):
-        return "2026-10-09T00:00:00Z 4 " + ledger.prefix_digest(ledger.read_ledger(self.ledger_path()), 4)
+    def first_line(self):
+        return doc_fixed(self.clone, "first")
 
-    def test_list_first_post_is_exception(self):
-        """seq 4 の投稿は 24 時間を過ぎていても、決まりの前の例外として通る。seq 1〜3 は要らない。"""
+    def test_list_first_post_ok(self):
+        """最初の投稿（手順書 4.2）は、決まりを守っている（seq 3・4 は約 4.66 時間）。"""
         if int(self.post["SEQ"]) != 4:
-            self.skipTest("記録が 4 件のときの例外を試す")
-        self.assertListOk([self.seq4_line()])
+            self.skipTest("記録が 4 件のときの最初の投稿を試す")
+        for sh, code, out in self.run_list([self.first_line()]):
+            self.assertEqual(code, 0, "%s: %s" % (sh, out))
+            self.assertIn("投稿の決まりを守っている", out, sh)
+            self.assertRegex(out, r"seq 3: .*遅れ 4\.66 時間.*上限 24 時間の中")
+            self.assertRegex(out, r"seq 4: .*遅れ 4\.65 時間.*上限 24 時間の中")
 
-    def test_list_missing_seq4_fails(self):
-        h2 = ledger.prefix_digest(ledger.read_ledger(self.ledger_path()), 2)
-        self.assertListFails(["2026-10-09T00:00:00Z 2 " + h2], "seq 4 に自分の投稿が無い")
+    def test_list_other_account_fails(self):
+        url, seq, h = self.first_line().split()
+        other = url.replace("/" + doc_fixed(self.clone, "account") + "/", "/SomeoneElse/")
+        self.assertListFails(["%s %s %s" % (other, seq, h)], "照らす対象の @")
+
+    def test_list_late_seq4_fails(self):
+        """T-029 では「守っている」になった、24 時間を過ぎた seq 4 の投稿（M-a）。"""
+        h4 = ledger.prefix_digest(ledger.read_ledger(self.ledger_path()), 4)
+        late = x_url(doc_fixed(self.clone, "account"), ledger.parse_time("2026-10-09T00:00:00Z"))
+        self.assertListFails(["%s 4 %s" % (late, h4)], "上限 24 時間を超える")
 
     def test_list_wrong_hash_fails(self):
-        self.assertListFails(["2026-10-09T00:00:00Z 4 " + "0" * 64], "ハッシュ")
+        url, seq, _h = self.first_line().split()
+        self.assertListFails(["%s %s %s" % (url, seq, "0" * 64)], "ハッシュ")
 
     def test_list_missing_file_fails(self):
         for sh, code, out in self.run_script(1, POSTS=os.path.join(self.tmp, "無い.txt")):
@@ -718,14 +901,22 @@ class TestDocProcedure(unittest.TestCase):
     def test_list_seq5_rule(self):
         if int(self.post["SEQ"]) != 4:
             self.skipTest("記録が 4 件のときに仮の seq 5 を足して試す")
-        rec5 = ledger.parse_time("2026-10-08T06:00:00Z")
+        acc = doc_fixed(self.clone, "account")
+        rec5 = ledger.parse_time("2026-10-07T14:00:00Z")
         n = self.append_fake_record(rec5)
         h5 = ledger.prefix_digest(ledger.read_ledger(self.ledger_path()), n)
-        ok5 = "%s %d %s" % (ledger.format_time(rec5 + 23 * tl.H), n, h5)
-        late5 = "%s %d %s" % (ledger.format_time(rec5 + 25 * tl.H), n, h5)
-        self.assertListOk([self.seq4_line(), ok5])
-        self.assertListFails([self.seq4_line(), late5], "上限 24")
-        self.assertListFails([self.seq4_line()], "seq 5 に自分の投稿が無い")
+        ok5 = "%s %d %s" % (x_url(acc, rec5 + 23 * tl.H), n, h5)
+        late5 = "%s %d %s" % (x_url(acc, rec5 + 25 * tl.H), n, h5)
+        self.assertListOk([self.first_line(), ok5])
+        self.assertListFails([self.first_line(), late5], "上限 24 時間を超える")
+        # seq 5 の投稿が無いとき：今が recorded_at から 24 時間の中なら保留、過ぎていれば合わない
+        now = datetime.datetime.now(datetime.timezone.utc)
+        if now - rec5 <= datetime.timedelta(hours=24):
+            for sh, code, out in self.run_list([self.first_line()]):
+                self.assertEqual(code, 0, "%s: %s" % (sh, out))
+                self.assertIn("seq 5: 保留", out, sh)
+        else:
+            self.assertListFails([self.first_line()], "seq 5: 投稿が無い")
 
 
 if __name__ == "__main__":

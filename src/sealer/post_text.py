@@ -10,9 +10,9 @@
     終了コード 0: 投稿文を出した  1: 止めた（理由は標準エラー）  2: 引数の誤り
 
     PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/post_text.py check-posts <投稿の一覧のファイル>
-        [--max-delay-hours H] [--max-delay-after-btc-hours H]
-    第三者が、X の投稿の一覧を記録と照らす（T-029 差し戻し1回目の M-2）。既定の値は投稿の決まり
-    （すべての記録を recorded_at から 24 時間以内。seq 1〜4 は決まりの前の例外）。check_posts の注記。
+        [--account A] [--max-delay-hours H] [--max-delay-after-btc-hours H]
+    第三者が、X の投稿の一覧を記録と照らす（T-029 差し戻し1回目の M-2、T-034）。既定の値は投稿の決まり
+    （すべての記録を recorded_at から 24 時間以内。seq 1・2 は決まりの前の例外）。check_posts の注記。
     終了コード 0: すべて合う  1: 合わないものがある（どれが、なぜ、を標準出力に出す）  2: 引数の誤り
 
 投稿はオーナーの明示の承認（reviews/ に原文で記録）のあとに限る（T-029 差し戻し1回目の M-1）。
@@ -34,6 +34,8 @@
 
 止める条件（どれか一つでも当たれば、投稿文を出さずに終了コード 1）
     - verify.State の検査（鎖・各 seq の .ots・ヘッダの照合）に通らない
+    - どれかの seq の recorded_at が、その seq の最も早い確定時刻（ヘッダの時刻）+ 3 時間より後
+      （check_recorded_vs_btc。T-034）
     - sealed/ にコミットしていない変更がある（投稿したハッシュを、公開されたリポジトリの
       記録と照らせなくなるため）。Git のリポジトリでない場合も止める
     - 文が決まった形（TEMPLATE_RE）に合わない
@@ -296,6 +298,9 @@ def head_facts(root, seq=None):
     if not (isinstance(seq, int) and 1 <= seq <= len(st.records)):
         raise PostError("seq %r の記録は無い（記録は %d 件）" % (seq, len(st.records)))
     last = st.records[seq - 1]
+    bad = check_recorded_vs_btc(st.records, st.times)
+    if bad:
+        raise PostError("; ".join(bad))
     found = sorted((when, height) for s, height, when, _b in st.detail if s == seq)
     return {"seq": seq,
             "hash": ledger.prefix_digest(st.data, seq),
@@ -341,23 +346,51 @@ def build(root, seq=None):
 
 # ---------------------------------------------------------------- 投稿の一覧を照らす（第三者）
 
-POST_LINE_RE = re.compile(r"\A([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z) "
-                          r"([1-9][0-9]*) ([0-9a-f]{64})\Z")
+# X の投稿の ID（snowflake）は、上位のビット（ID を 22 ビット右へずらした値）が、起点からのミリ秒の
+# 時刻である。起点は 1288834974657（2010-11-04T01:42:54.657Z）。ネットワークを使わずに、ID から
+# 投稿の時刻を計算できる（T-034）。
+X_EPOCH_MS = 1288834974657
+X_URL_RE = re.compile(r"\Ahttps://(?:x|twitter)\.com/([A-Za-z0-9_]{1,15})/status/([1-9][0-9]{0,19})"
+                      r"(?:\?[^\s]*)?\Z")
+TIME_TOKEN_RE = re.compile(r"\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
+SEQ_RE = re.compile(r"\A[1-9][0-9]*\Z")
+
+
+def x_id_time(status_id):
+    """X の投稿の ID から、投稿の時刻（UTC、ミリ秒まで）を計算する。"""
+    status_id = int(status_id)
+    if status_id < (1 << 22):
+        raise PostError("投稿の ID が小さすぎる（時刻を含む形でない）")
+    ms = (status_id >> 22) + X_EPOCH_MS
+    return datetime.datetime.fromtimestamp(ms / 1000.0, datetime.timezone.utc).replace(
+        microsecond=(ms % 1000) * 1000)
 
 
 def parse_posts(text):
-    """投稿の一覧を読む。1 行に 1 件で「<投稿の時刻 UTC> <seq> <64 桁>」。# で始まる行と空行は飛ばす。
-    返り値: [(行番号, 投稿の時刻, seq, ハッシュ)]。形が違う行があれば PostError。"""
+    """投稿の一覧を読む。1 行に 1 件で「<投稿の URL か時刻> <seq> <64 桁>」。# で始まる行と空行は飛ばす。
+
+    投稿の URL（https://x.com/<アカウント>/status/<ID>）を書けば、時刻は ID から計算し、
+    アカウントも照らせる。時刻（YYYY-MM-DDTHH:MM:SSZ、UTC）を書いた行は、アカウントを照らせない。
+    返り値: [(行番号, 投稿の時刻, seq, ハッシュ, アカウント か None)]。形が違う行があれば PostError。
+    """
     out = []
     for n, line in enumerate(text.split("\n"), 1):
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        m = POST_LINE_RE.match(line)
-        if not m:
-            raise PostError("投稿の一覧の %d 行目の形が違う（<投稿の時刻 YYYY-MM-DDTHH:MM:SSZ> <seq> "
+        parts = line.split()
+        if (len(parts) != 3 or not SEQ_RE.match(parts[1]) or not ledger.HEX64.match(parts[2])):
+            raise PostError("投稿の一覧の %d 行目の形が違う（<投稿の URL か時刻> <seq> "
                             "<64 桁の小文字の16進>）" % n)
-        out.append((n, ledger.parse_time(m.group(1)), int(m.group(2)), m.group(3)))
+        m = X_URL_RE.match(parts[0])
+        if m:
+            when, account = x_id_time(m.group(2)), m.group(1)
+        elif TIME_TOKEN_RE.match(parts[0]):
+            when, account = ledger.parse_time(parts[0]), None
+        else:
+            raise PostError("投稿の一覧の %d 行目の 1 つ目が、投稿の URL（https://x.com/<アカウント>/"
+                            "status/<ID>）でも時刻（YYYY-MM-DDTHH:MM:SSZ）でもない" % n)
+        out.append((n, when, int(parts[1]), parts[2], account))
     if not out:
         raise PostError("投稿の一覧が空")
     return out
@@ -367,51 +400,100 @@ def _hours(td):
     return td.total_seconds() / 3600.0
 
 
-# 投稿の決まり（2026-10-08 オーナー決定。CLAUDE.md「公開前の検査」、reviews/T-029.md の最後の節）。
+def _iso(t):
+    return t.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+# 投稿の決まり（2026-10-08 オーナー決定。CLAUDE.md「公開前の検査」、reviews/T-029.md）。
 # 封印の記録を書き足すたびに、すべての記録を、recorded_at から 24 時間以内に投稿する。
 RULE_MAX_DELAY_HOURS = 24
-# 決まりができる前の記録（seq 1〜4）は例外。最初の投稿は seq 4 の 1 件で、seq 1〜4 をまとめて
-# 固定する（そのハッシュは先頭 4 行を含む）。
-#   - seq 1〜3 には自分の投稿を求めない（seq 4 の投稿のハッシュが、その行を含む）。
-#   - seq 1〜4 は遅れの判定から外す（決まりができた時点で、すでに 24 時間を過ぎていたため）。
-#   - seq 4 には自分の投稿を求める（最初の投稿）。
-# この値は、記録の件数や投稿の結果から変わらない定数である（人が選べないようにするため）。
-PRE_RULE_LAST_SEQ = 4
+# 決まりの前の例外（T-034。T-029 の監査 M-a）。決まりを決めた時点（コミット 80f7edd、
+# 2026-10-07T17:57:02Z）で recorded_at から 24 時間を過ぎていたのは seq 1（2026-10-05T21:41:03Z）と
+# seq 2（2026-10-06T09:58:57Z）だけである。seq 3（2026-10-07T13:45:11Z）と seq 4（13:45:22Z）は、
+# 約 4 時間しかたっていなかったので、決まりの対象である。T-029 では例外を seq 1〜4 としていたが、
+# それはリードが「seq 1〜4 は既に 24 時間を過ぎている」と伝えた事実の誤りによる。
+# seq 1・2 は遅れの判定から外す（投稿に含まれていることは求める）。この値は定数で、引数では変えられない。
+PRE_RULE_LAST_SEQ = 2
+# recorded_at（申告）と、その seq の .ots の最も早い確定時刻（ヘッダの時刻）の比較の余裕（T-034。
+# T-029 の監査 L-b）。記録は stamp の前に書くので、recorded_at は確定時刻より前のはずである。
+# ヘッダの時刻は、実際に掘られた時刻より前（直近 11 ブロックの中央値を 1 秒でも超えればよいので、
+# 1 時間ほど前になりうる）にも、後（ノードは 2 時間先までを受け入れる）にもなりうる。そのため 3 時間の
+# 余裕を取り、recorded_at がヘッダの時刻 + 3 時間より後なら、記録の時刻の申告が合わないとして止める。
+RECORDED_AT_HEADER_SLACK = datetime.timedelta(hours=3)
+
+
+def check_recorded_vs_btc(records, times, slack=RECORDED_AT_HEADER_SLACK):
+    """recorded_at が、その seq の最も早い確定時刻 + slack より後の seq の一覧（合わないもの）。"""
+    bad = []
+    for r in records:
+        t = times.get(r["seq"])
+        if t is not None and ledger.parse_time(r["recorded_at"]) > t + slack:
+            bad.append("seq %d: recorded_at %s が、Bitcoin の確定時刻（ヘッダ）%s + %d 時間より後"
+                       "（記録の時刻の申告が合わない）"
+                       % (r["seq"], r["recorded_at"], _iso(t), slack.total_seconds() // 3600))
+    return bad
+
+
+def check_max_delay(value):
+    """遅れの上限の値の形。有限で 0 以上の数だけを受け付ける（T-034。T-029 の監査 L-a）。"""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        raise PostError("遅れの上限が数でない") from None
+    if v != v or v in (float("inf"), float("-inf")) or v < 0:
+        raise PostError("遅れの上限は、有限で 0 以上の数でなければならない（nan・inf・負の数は使えない）")
+    return int(v) if v.is_integer() else v
 
 
 def check_posts(root, posts, max_delay_hours=RULE_MAX_DELAY_HOURS, max_delay_after_btc_hours=None,
-                require_every_seq_from=PRE_RULE_LAST_SEQ, delay_exempt_through=PRE_RULE_LAST_SEQ,
-                out=None):
-    """投稿の一覧を、記録と照らす。T-029 差し戻し1回目の M-2。既定の値は投稿の決まり。
+                account=None, now=None, out=None):
+    """投稿の一覧を、記録と投稿の決まりに照らす。T-029 の M-2、T-034。既定の値は投稿の決まり。
 
-    すべての投稿について
-      - seq が記録の件数以下で、投稿のハッシュが記録の先頭 seq 行の sha256 と同じこと
+    投稿ごとに
+      - account を渡したときは、URL で書いた投稿のアカウントがそれと同じこと（大文字小文字は区別しない）。
+        時刻で書いた投稿は、アカウントを照らせないことを表示する
+      - seq が記録の件数以下で、ハッシュが記録の先頭 seq 行の sha256 と同じこと
       - 投稿の時刻が、その seq の recorded_at（申告）より後であること
-      - 遅れ（投稿の時刻 − recorded_at）と、Bitcoin の確定時刻（ヘッダの時刻）との差を出す
-    seq ごとに（同じ seq の投稿が二つ以上あれば、ハッシュの合う最も早い投稿で）
-      - require_every_seq_from 以降の seq には、自分の投稿が要る（既定 4：seq 4 からすべて）
-      - delay_exempt_through より後の seq は、遅れが max_delay_hours 以下であること（既定 24 時間。
-        seq 1〜4 は例外として判定しない）
-      - max_delay_after_btc_hours を渡したときは、投稿 − 最も早い確定時刻 もその値以下（決まりには無い。
-        既定は判定しない）
-    None を渡した値は判定しない。検証（verify.State）に通らなければ失敗。
-    返り値: 合わなかった項目の一覧（空なら全部合う）。
+    seq k ごとに
+      - 投稿された時刻 = seq k 以上の投稿（ハッシュの合うもの）のうち最も早い時刻。先頭 m 行の
+        ハッシュは、k ≤ m のすべての行を固定するため
+      - seq 1・2（PRE_RULE_LAST_SEQ まで）は、決まりの前の例外として遅れを判定しない。投稿されて
+        いることは求める
+      - seq 3 以降：投稿されていれば、遅れ（投稿 − recorded_at）が max_delay_hours 以下であること。
+        投稿されていなければ、now − recorded_at が max_delay_hours 以下なら「保留」（まだ期限の前）、
+        超えていれば合わない（T-029 の監査 L-c）
+      - max_delay_after_btc_hours を渡したときは、投稿 − 最も早い確定時刻 もその値以下（決まりには無い）
+    記録全体について
+      - recorded_at が、その seq の最も早い確定時刻 + 3 時間より後でないこと（check_recorded_vs_btc）
+    検証（verify.State）に通らなければ失敗。返り値: 合わなかった項目の一覧（空なら全部合う）。
     """
     w = (out or sys.stdout).write
-    w("照らす値：遅れの上限 %s 時間（seq %s より後）、自分の投稿が要る seq %s 以降、確定時刻からの上限 %s\n"
-      % ("なし" if max_delay_hours is None else max_delay_hours,
-         "なし" if delay_exempt_through is None else delay_exempt_through,
-         "なし" if require_every_seq_from is None else require_every_seq_from,
-         "なし" if max_delay_after_btc_hours is None else "%s 時間" % max_delay_after_btc_hours))
+    max_delay_hours = check_max_delay(max_delay_hours)
+    if max_delay_after_btc_hours is not None:
+        max_delay_after_btc_hours = check_max_delay(max_delay_after_btc_hours)
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    w("照らす値：遅れの上限 %s 時間（seq %d より後）、確定時刻からの上限 %s、照らすアカウント %s、"
+      "今の時刻 %s\n"
+      % (max_delay_hours, PRE_RULE_LAST_SEQ,
+         "なし" if max_delay_after_btc_hours is None else "%s 時間" % max_delay_after_btc_hours,
+         "@" + account if account else "なし", _iso(now)))
+    if max_delay_hours != RULE_MAX_DELAY_HOURS:
+        w("注意：遅れの上限が決まりの値（%d 時間）と違う。決まりと違う値で照らした\n" % RULE_MAX_DELAY_HOURS)
     try:
         st = verify.State(root, None)
     except ledger.LedgerError as e:
         return ["記録の検証に失敗した: %s" % e]
     n = len(st.records)
-    bad = []
-    first = {}
-    for lineno, when, seq, h in posts:
-        label = "一覧の %d 行目（seq %d）" % (lineno, seq)
+    bad = check_recorded_vs_btc(st.records, st.times)
+    valid = []
+    for lineno, when, seq, h, acc in posts:
+        label = "一覧の %d 行目（seq %d、投稿 %s）" % (lineno, seq, _iso(when))
+        if account is not None:
+            if acc is None:
+                w("%s: 時刻で書いた行なので、アカウントは照らしていない\n" % label)
+            elif acc.lower() != account.lower():
+                bad.append("%s: 投稿のアカウント @%s は、照らす対象の @%s でない" % (label, acc, account))
+                continue
         if seq > n:
             bad.append("%s: 記録は %d 件しかない（末尾が切り詰められたか、別の系列）" % (label, n))
             continue
@@ -420,60 +502,68 @@ def check_posts(root, posts, max_delay_hours=RULE_MAX_DELAY_HOURS, max_delay_aft
             bad.append("%s: 投稿のハッシュが、記録の先頭 %d 行の sha256 %s と違う" % (label, seq, got))
             continue
         rec_at = ledger.parse_time(st.records[seq - 1]["recorded_at"])
-        btc = st.times.get(seq)
-        w("%s: ハッシュは合う。投稿 − recorded_at = %.2f 時間。%s\n"
-          % (label, _hours(when - rec_at),
-             "投稿 − 確定時刻（ヘッダ）= %.2f 時間" % _hours(when - btc) if btc
-             else "Bitcoin で未確定"))
         if when < rec_at:
             bad.append("%s: 投稿の時刻が recorded_at より前（記録の時刻の申告と合わない）" % label)
-        if seq not in first or when < first[seq]:
-            first[seq] = when
-    for seq in sorted(first):
-        when = first[seq]
-        rec_at = ledger.parse_time(st.records[seq - 1]["recorded_at"])
-        exempt = delay_exempt_through is not None and seq <= delay_exempt_through
-        d = _hours(when - rec_at)
-        if exempt:
-            w("seq %d: 決まりができる前の記録なので、遅れ（%.2f 時間）は判定しない\n" % (seq, d))
-        elif max_delay_hours is not None and d > max_delay_hours:
-            bad.append("seq %d: 最も早い投稿の遅れ %.2f 時間が上限 %s 時間を超える" % (seq, d, max_delay_hours))
-        btc = st.times.get(seq)
-        if (max_delay_after_btc_hours is not None and btc
-                and _hours(when - btc) > max_delay_after_btc_hours):
-            bad.append("seq %d: 確定時刻からの遅れ %.2f 時間が上限 %s 時間を超える"
-                       % (seq, _hours(when - btc), max_delay_after_btc_hours))
-    missing = [s for s in range(1, n + 1) if s not in first]
-    w("記録は %d 件。自分の投稿がある seq: %s。自分の投稿が無い seq: %s\n"
-      % (n, ", ".join(map(str, sorted(first))) or "なし", ", ".join(map(str, missing)) or "なし"))
-    if require_every_seq_from is not None:
-        need = [s for s in missing if s >= require_every_seq_from]
-        if need:
-            bad.append("seq %s に自分の投稿が無い（seq %d 以降はすべての記録の投稿が要る）"
-                       % (", ".join(map(str, need)), require_every_seq_from))
+            continue
+        w("%s: ハッシュは合う\n" % label)
+        valid.append((when, seq))
+    pending = []
+    for r in st.records:
+        k = r["seq"]
+        rec_at = ledger.parse_time(r["recorded_at"])
+        covering = [when for when, seq in valid if seq >= k]
+        btc = st.times.get(k)
+        if covering:
+            first = min(covering)
+            d = _hours(first - rec_at)
+            msg = "seq %d: 最初に投稿された時刻 %s、遅れ %.2f 時間" % (k, _iso(first), d)
+            if btc:
+                msg += "、確定時刻（ヘッダ）からは %.2f 時間" % _hours(first - btc)
+            if k <= PRE_RULE_LAST_SEQ:
+                w(msg + "。決まりの前の例外なので、遅れは判定しない\n")
+            elif d > max_delay_hours:
+                bad.append(msg + "。上限 %s 時間を超える" % max_delay_hours)
+            else:
+                w(msg + "。上限 %s 時間の中\n" % max_delay_hours)
+            if (max_delay_after_btc_hours is not None and btc
+                    and _hours(first - btc) > max_delay_after_btc_hours):
+                bad.append("seq %d: 確定時刻からの遅れ %.2f 時間が上限 %s 時間を超える"
+                           % (k, _hours(first - btc), max_delay_after_btc_hours))
+        elif k > PRE_RULE_LAST_SEQ and _hours(now - rec_at) <= max_delay_hours:
+            pending.append(k)
+            w("seq %d: 保留。まだ投稿が無いが、recorded_at から %.2f 時間で、期限（%s 時間）の前\n"
+              % (k, _hours(now - rec_at), max_delay_hours))
+        else:
+            bad.append("seq %d: 投稿が無い（この seq 以上の投稿でハッシュの合うものが一覧に無い）%s"
+                       % (k, "" if k <= PRE_RULE_LAST_SEQ else
+                          "。recorded_at から %.2f 時間で、期限を過ぎた" % _hours(now - rec_at)))
+    w("記録は %d 件。保留の seq: %s\n" % (n, ", ".join(map(str, pending)) or "なし"))
     return bad
 
 
 def main_check_posts(argv):
     p = argparse.ArgumentParser(prog="post_text.py check-posts",
                                 description="X の投稿の一覧を記録と照らす（第三者向け）。既定の値は投稿の決まり")
-    p.add_argument("posts", help="投稿の一覧のファイル（1 行に「<投稿の時刻 UTC> <seq> <64 桁>」）")
+    p.add_argument("posts", help="投稿の一覧のファイル（1 行に「<投稿の URL か時刻> <seq> <64 桁>」）")
     p.add_argument("--root", default=os.getcwd(), help="リポジトリのルート（既定は今の場所）")
-    p.add_argument("--max-delay-hours", type=float, default=RULE_MAX_DELAY_HOURS,
-                   help="遅れの上限（既定 24。決まりの値）")
-    p.add_argument("--max-delay-after-btc-hours", type=float, default=None,
+    p.add_argument("--account", default=None,
+                   help="照らす対象の X のアカウント（@ を除く）。docs/verify/x-post.md に固定したもの")
+    p.add_argument("--max-delay-hours", default=str(RULE_MAX_DELAY_HOURS),
+                   help="遅れの上限（既定 24。決まりの値。有限で 0 以上）")
+    p.add_argument("--max-delay-after-btc-hours", default=None,
                    help="確定時刻からの遅れの上限（既定は判定しない。決まりには無い）")
     a = p.parse_args(argv)
     try:
         with open(a.posts, encoding="utf-8") as f:
             posts = parse_posts(f.read())
+        bad = check_posts(os.path.abspath(a.root), posts, a.max_delay_hours,
+                          a.max_delay_after_btc_hours, a.account)
     except (OSError, UnicodeDecodeError) as e:
         print("合わない: 投稿の一覧を読めない: %s" % type(e).__name__)
         return 1
     except PostError as e:
         print("合わない: %s" % e)
         return 1
-    bad = check_posts(os.path.abspath(a.root), posts, a.max_delay_hours, a.max_delay_after_btc_hours)
     for b in bad:
         print("合わない: %s" % b)
     if bad:
