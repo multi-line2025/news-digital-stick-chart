@@ -1002,9 +1002,20 @@ def make_targets_only_copy(dst, extra=()):
 ORDER1_HISTORY_COMMITS = ("1cb463acfcf15ba315e6c454625ad681e86bbc2a", "2d23cdf6e01de5129fc7b0a5d85e89bf02e892c6")
 
 
-# 限界に当たる書き方（docs/stats/tags-naive.md 5章 (1) の限界）を ast で探す（T-025 L3）。
+# 限界に当たる書き方（docs/stats/tags-naive.md 5章 (1) の限界）を ast で探す（T-025 L3、差し戻し1回目 中3）。
 _LIMIT_VIA_ATTRS = frozenset({"os", "_os", "sys", "_sys", "environ", "modules"})
-_LIMIT_CLOCK_ATTRS = frozenset({"today", "now", "utcnow", "time"})
+# 日付・時刻を読む属性。固定の値から作る fromisoformat などは入れない。
+_LIMIT_CLOCK_ATTRS = frozenset({"today", "now", "utcnow", "time", "time_ns", "monotonic", "monotonic_ns",
+                                "perf_counter", "perf_counter_ns", "process_time", "localtime", "gmtime",
+                                "ctime", "fromtimestamp", "utcfromtimestamp"})
+
+
+def _is_dict_environ_call(node):
+    """node が dict(os.environ, ...)（最初の引数が os.environ）の呼び出しか。"""
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "dict"
+            and len(node.args) >= 1 and isinstance(node.args[0], ast.Attribute)
+            and node.args[0].attr == "environ" and isinstance(node.args[0].value, ast.Name)
+            and node.args[0].value.id == "os")
 
 
 def limit_pattern_problems(source):
@@ -1012,9 +1023,15 @@ def limit_pattern_problems(source):
 
     - os・sys 以外の名前から、os・_os・sys・_sys・environ・modules に至る属性の参照
       （unittest.loader.os.stat、random._os、exclusion.sys.modules など）
-    - today・now・utcnow・time の属性（日付・時刻による分岐の材料）
-    - os.environ を、子プロセスに渡す dict(os.environ, ...) の最初の引数の外で使うこと、または
-      dict(os.environ, ...) の戻り値から値を読むこと（.get や添字。環境変数による分岐の材料）
+    - 日付・時刻を読む属性（today、now、time、monotonic、fromtimestamp など。_LIMIT_CLOCK_ATTRS）
+    - os.environ の使い方。許すのは次の形だけで、ほかはすべて問題とする。
+      * os.environ は dict(os.environ, ...) の最初の引数としてだけ現れる。
+      * dict(os.environ, ...) の結果は、(a) 呼び出しのキーワード引数 env= の値に直接書くか、
+        (b) 一つの名前への単純な代入（env = dict(os.environ, ...)）の右辺に書く。
+      * (b) の名前は、ファイルの中で、その代入のほかに代入されず、読み出しはすべて
+        呼び出しのキーワード引数 env= の値そのもの（env=env）である。
+      これで、env.get(...)、env[...]、"X" in env、len(dict(os.environ))、for k in dict(os.environ)、
+      str(dict(os.environ)) のように、環境変数の値や名前を読む書き方は、すべて問題になる。
     """
     tree = ast.parse(source)
     parents = {}
@@ -1022,6 +1039,7 @@ def limit_pattern_problems(source):
         for child in ast.iter_child_nodes(node):
             parents[child] = node
     problems = []
+    env_names = {}   # dict(os.environ, ...) を入れた名前 → 代入の数
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute):
             if node.attr in _LIMIT_CLOCK_ATTRS:
@@ -1035,15 +1053,28 @@ def limit_pattern_problems(source):
                     problems.append("%s を通る %s（%d行）" % (root, node.attr, node.lineno))
                 elif root == "os" and node.attr == "environ":
                     call = parents.get(node)
-                    ok = (isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == "dict"
-                          and call.args and call.args[0] is node)
-                    if ok:
-                        user = parents.get(call)
-                        # dict(os.environ, ...) は、変数に入れるか、関数の引数に渡すだけを許す。
-                        if isinstance(user, (ast.Attribute, ast.Subscript)):
-                            ok = False
-                    if not ok:
+                    if not (_is_dict_environ_call(call) and call.args[0] is node):
                         problems.append("os.environ の読み方（%d行）" % node.lineno)
+        if _is_dict_environ_call(node):
+            user = parents.get(node)
+            if isinstance(user, ast.keyword) and user.arg == "env" and isinstance(parents.get(user), ast.Call):
+                continue
+            if (isinstance(user, ast.Assign) and user.value is node and len(user.targets) == 1
+                    and isinstance(user.targets[0], ast.Name)):
+                env_names[user.targets[0].id] = env_names.get(user.targets[0].id, 0) + 1
+                continue
+            problems.append("dict(os.environ, ...) の使い方（%d行）" % node.lineno)
+    for name, count in sorted(env_names.items()):
+        stores = [n for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id == name
+                  and isinstance(n.ctx, (ast.Store, ast.Del))]
+        if len(stores) != count:
+            problems.append("名前 %s に dict(os.environ, ...) のほかの代入がある" % name)
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Load):
+                user = parents.get(n)
+                if not (isinstance(user, ast.keyword) and user.arg == "env" and user.value is n
+                        and isinstance(parents.get(user), ast.Call)):
+                    problems.append("名前 %s の読み方（%d行）" % (name, n.lineno))
     return problems
 
 
@@ -1056,11 +1087,31 @@ class TestSealedTestsLimitPatterns(unittest.TestCase):
         "exclusion.sys.modules": 'y = "sitecustomize" in exclusion.sys.modules',
         "date.today": 'y = datetime.date.today()',
         "datetime.now": 'y = datetime.datetime.now()',
+        "fromtimestamp": 'y = datetime.date.fromtimestamp(0)',
         "dict_environ_get": 'y = dict(os.environ).get("A")',
         "dict_environ_args_get": 'y = dict(os.environ, A="1").get("B")',
         "environ_direct": 'y = os.environ.get("A")',
         "environ_subscript": 'y = os.environ["A"]',
         "dict_environ_subscript": 'y = dict(os.environ)["A"]',
+        # 差し戻し1回目で監査係が示した書き方（scratchpad の t025_probe.py）
+        "var_get": 'env = dict(os.environ, A="1")\nif env.get("B"):\n    pass',
+        "var_sub": 'env = dict(os.environ, A="1")\ny = env["B"]',
+        "in_compare": 'y = "B" in dict(os.environ, A="1")',
+        "len": 'y = len(dict(os.environ))',
+        "iter": 'for k in dict(os.environ):\n    pass',
+        "str_call": 'y = "B" in str(dict(os.environ))',
+        # 名前に入れたものを、env= 以外で読むもの・別の値を代入し直すもの
+        "var_in": 'env = dict(os.environ, A="1")\ny = "B" in env',
+        "var_len": 'env = dict(os.environ, A="1")\ny = len(env)',
+        "var_iter": 'env = dict(os.environ, A="1")\nfor k in env:\n    pass',
+        "var_str": 'env = dict(os.environ, A="1")\ny = str(env)',
+        "var_alias": 'env = dict(os.environ, A="1")\ne2 = env',
+        "var_other_kw": 'env = dict(os.environ, A="1")\nf(x=env)',
+        "var_positional": 'env = dict(os.environ, A="1")\nf(env)',
+        "var_reassigned": 'env = dict(os.environ, A="1")\nenv = {"A": "1"}\nsubprocess.run(["x"], env=env)',
+        "two_targets": 'env = e2 = dict(os.environ, A="1")',
+        "unpack": 'env, e2 = dict(os.environ, A="1"), 1',
+        "other_kw_direct": 'f(x=dict(os.environ, A="1"))',
     }
 
     def test_sealed_tests_have_no_limit_patterns(self):
@@ -1069,7 +1120,9 @@ class TestSealedTestsLimitPatterns(unittest.TestCase):
                 self.assertEqual(limit_pattern_problems(f.read()), [], rel)
 
     def test_limit_pattern_check_catches_controls(self):
-        allowed = 'env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")\nsubprocess.run(["x"], env=dict(os.environ, A="1"))\n'
+        allowed = ('env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")\n'
+                   'r = subprocess.run(["x"], capture_output=True, env=env)\n'
+                   'subprocess.run(["x"], env=dict(os.environ, A="1"))\n')
         self.assertEqual(limit_pattern_problems(allowed), [])
         for name, body in self.CONTROLS.items():
             with self.subTest(name=name):
