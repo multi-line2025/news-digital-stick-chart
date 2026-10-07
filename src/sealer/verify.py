@@ -19,8 +19,9 @@
                                                        drand の回・区画、その前に candidates と
                                                        acquisition-result があること（T-014）
     python3 -B src/sealer/verify.py stats-order        統計係の順番1・順番1b（stats-order1・stats-order1b。T-037）の
-                                                       中身の形・ledger_head と位置（method-access と区分表の取得
-                                                       より前、それらの前に順番1、gkg-run-start の前に順番1b）
+                                                       中身・ledger_head・数（順番1 は 1 件）・位置（method-access より
+                                                       前、gkg-run-start の前に順番1b）と、区分表の取得との前後
+                                                       （git の履歴：マニフェストに行が入った commit の親に順番1）
     python3 -B src/sealer/verify.py gkg-runs           GKG の取得の run の開始（gkg-run-start。T-031）の
                                                        ledger_head・drand・中身・順序。試しの run の回数と、
                                                        各 run の run_id・code_sha256・日を並べる
@@ -420,32 +421,53 @@ def cmd_acquisition(st, _a):
 
 
 def cmd_stats_order(st, _a):
-    """統計係の順番1・順番1b の記録の照合と一覧。T-037。"""
+    """統計係の順番1・順番1b の記録の照合と一覧。T-037（差し戻し1回目で改めた）。"""
     got = ledger.check_stats_order(st.records, st.file_json)
     if not got["order1"] and not got["order1b"]:
-        print("stats-order1・stats-order1b の記録：なし（照合するものが無い）")
+        print("stats-order1・stats-order1b の記録：なし")
     for r in got["order1"]:
         doc = st.file_json(r, ledger.ORDER1_KIND)
         ledger.check_ledger_head(st.data, r, doc)
         targets = ledger.check_order1_doc(r, doc)
-        print("  stats-order1 seq %d（順番1）: HEAD %s、%s、対象 %d 件、承認 %s、tests/stats %s"
+        print("  stats-order1 seq %d（順番1）: HEAD %s、%s、対象 %d 件（名前は決まった 10 件）、承認 %s、"
+              "tests/stats %s、対象だけの写し %s"
               % (r["seq"], doc["head"], doc["python"]["version"], len(targets),
-                 "・".join(a["item"] for a in doc["approvals"]), doc["checks"]["stats_tests"]))
-        for name in sorted(targets):
+                 "・".join(a["item"] for a in doc["approvals"]), doc["checks"]["stats_tests"],
+                 doc["checks"]["targets_only_copy"]["tests"]))
+        for name in ledger.ORDER1_TARGET_NAMES:
             print("      %s  %s" % (targets[name], name))
     for r in got["order1b"]:
         doc = st.file_json(r, ledger.ORDER1B_KIND)
         ledger.check_ledger_head(st.data, r, doc)
         files = ledger.check_order1b_doc(r, doc)
-        print("  stats-order1b seq %d（順番1b）: HEAD %s、ファイル %d 件、承認 %s、順番1 の参照 %s"
-              % (r["seq"], doc["head"], len(files), "・".join(a["item"] for a in doc["approvals"]),
+        c = doc["counting"]
+        print("  stats-order1b seq %d（順番1b）: HEAD %s、候補 %s、基準の案 %s、正式な数え方 %s（%s）、"
+              "counting.py の出力 %s、順番1 の参照 %s"
+              % (r["seq"], doc["head"], ",".join(c["candidate_ids"]), ",".join(c["criteria_ids"]),
+                 c["official_candidate"], c["official_status"], c["output_sha256"],
                  "無し" if doc["order1_ref"] is None else "seq %d" % doc["order1_ref"]["seq"]))
         for path in sorted(files):
             print("      %s  %s" % (files[path], path))
     o1 = ledger.first_order1(st.records)
-    print("除外の規則の kind（%s）の最初の記録：%s。順番1・1b は最初の method-access と区分表の取得より前、"
-          "それらの前に順番1、最初の gkg-run-start の前に順番1b（あるものすべて照合した）。"
-          % (ledger.ORDER1_KIND, "無し" if o1 is None else "seq %d" % o1["seq"]))
+    print("除外の規則の kind（%s）の記録：%s（1 件だけ）。順番1・1b は最初の method-access より前、"
+          "最初の gkg-run-start の前に順番1b。" % (ledger.ORDER1_KIND, "無し" if o1 is None else "seq %d" % o1["seq"]))
+    # 区分表の取得は ledger に書かれないので、git の履歴とマニフェストで照らす（差し戻し1回目 中1）
+    repo = Repo(st.root)
+    try:
+        repo.git("rev-parse", "--git-dir")
+    except ledger.LedgerError:
+        print("git の履歴が無いので、区分表の取得との前後は照合していない（--rev auto には git の履歴が要る）")
+        return
+    n = ledger.check_order1_before_themes(st.records, repo.git)
+    mpath = os.path.join(st.root, ledger.THEMES_MANIFEST)
+    body = None
+    if os.path.isfile(mpath) and not os.path.islink(mpath):
+        with open(mpath, "rb") as f:
+            body = f.read()
+    rows = ledger.check_themes_manifest_refs(st.records, body)
+    print("区分表の取得（%s）：行のある commit %d 件。どれも、親の sealed/ledger.jsonl に stats-order1 の行がある。"
+          "作業ツリーのマニフェストの %d 行の exclusion_rule_seq と sha256 は stats-order1 の記録と一致する。"
+          % (ledger.THEMES_MANIFEST, n, rows))
 
 
 def cmd_method(st, _a):

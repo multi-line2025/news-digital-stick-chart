@@ -27,10 +27,11 @@ check_acquisition_pairs と同じ。
        - gkg-run-start（T-031）：ledger_head、drand、step = 4、中身の 13 個のキーと値
          （ledger.check_gkg_run_doc）、順序（method-access より後、official は 1 件だけ、
          trial は official より前だけ。ledger.check_gkg_runs）
-       - stats-order1・stats-order1b（T-037）：ledger_head、中身の形（ledger.check_order1_doc・
-         check_order1b_doc）。どの種類でも、順番1・1b の位置の照合（ledger.check_stats_order：
-         順番1・1b は最初の method-access と区分表の取得より前、区分表の取得と method-access の前に
-         順番1、gkg-run-start の前に順番1b）
+       - stats-order1・stats-order1b（T-037）：ledger_head。どの種類でも、順番1・1b の照合
+         （ledger.check_stats_order：順番1 は 1 件だけ、中身が check_order1_doc・check_order1b_doc に
+         通る、順番1・1b は最初の method-access より前、gkg-run-start の前に順番1b）。
+         method-access の前に順番1 は求めない（収集係のテストを直すタスクのあと）。区分表の取得は
+         ledger に書かれないので、その前後は verify.py stats-order が git の履歴で照らす
        - acquisition-result：start_seq・kept_rows_sha256 の形、start が実在し、result が後にあり、
          一つの start に result が一つだけであること
      どれかが通らなければ、何も書かずに止める。
@@ -130,7 +131,7 @@ def check_new(project, data_after, records_after, rec, doc):
     if not isinstance(doc, dict) or doc.get("kind") != kind:
         raise ledger.LedgerError("中身の kind が記録の kind と一致しない")
     read = _reader(project, rec, doc)
-    # T-037：順番1・1b の位置と、それが前に要る記録（区分表の取得・method-access・gkg-run-start）
+    # T-037：順番1・1b の数・中身・位置（method-access より前、gkg-run-start の前に順番1b）
     ledger.check_stats_order(records_after, read)
     if kind in (ledger.ORDER1_KIND, ledger.ORDER1B_KIND):
         ledger.check_ledger_head(data_after, rec, doc)

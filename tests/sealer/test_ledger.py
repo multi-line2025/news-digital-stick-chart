@@ -905,27 +905,38 @@ def run_verify(root, *args):
 
 
 def order_doc_for(data, seq, kind, **over):
-    """順番1・1b の中身（形の照合に通る仮のもの。T-037）。data は今の記録のバイト列、seq は足す行の seq。
-    書く仕組み（seal_stats）を通さない。"""
-    common = {"kind": kind, "head": "a" * 40, "ancestors": ["b" * 40],
+    """順番1・1b の中身（照合に通る仮のもの。T-037）。data は今の記録のバイト列、seq は足す行の seq。
+    書く仕組み（seal_stats）を通さない。決まった値（ledger.ORDER1_* と OWNER_DECISION）は、呼んだ
+    時点の ledger の値を使う（テストが差し替えたときもそれに合う）。"""
+    common = {"kind": kind, "head": "a" * 40,
               "python": {"path": ".venv/bin/python", "version": "Python 3.14.2"},
-              "approvals": [{"item": "A", "source": "c" * 40 + ":reviews/T-022.md",
-                             "lines": ["> Kはいま封印していいよ"]}],
               "ledger_head": ledger.expected_ledger_head(data, seq)}
     if kind == ledger.ORDER1_KIND:
         common.update({
-            "targets": [{"name": n, "sha256": "d" * 64} for n in ledger.ORDER1_REQUIRED_NAMES],
-            "owner_choice": {"source": "e" * 40 + ":reviews/T-020.md", "heading": "## h",
-                             "lines": ["> x"]},
+            "ancestors": sorted(ledger.ORDER1_ANCESTORS.values()),
+            "targets": [{"name": n, "sha256": "d" * 64} for n in ledger.ORDER1_TARGET_NAMES],
+            "approvals": ledger.expected_order1_approvals(),
+            "owner_choice": ledger.expected_owner_choice(),
             "checks": {"acquisition_starts": [], "gkg_manifests_absent": True,
                        "method_access_absent": True, "not_shallow": True,
                        "optional_choice_status": "decided", "stats_tests": "OK (1 tests)",
+                       "targets_only_copy": {"tests": "OK (2 tests)",
+                                             "files": sorted(ledger.order1_copy_files())},
                        "themes_manifest_absent": True, "worktree_clean": True}})
     else:
-        common.update({"files": [{"path": "docs/stats/counting.md", "sha256": "f" * 64}],
-                       "order1_ref": None,
-                       "checks": {"gkg_manifests_absent": True, "method_access_absent": True,
-                                  "not_shallow": True, "worktree_clean": True}})
+        commit, path, line, prefix, phrases = ledger.OWNER_DECISION
+        common.update({
+            "ancestors": ["b" * 40],
+            "files": [{"path": p, "sha256": "f" * 64} for p in ledger.ORDER1B_REQUIRED_FILES],
+            "approvals": [ledger.expected_order1_approvals()[2]],
+            "counting": {"candidate_ids": ["C1", "C7"], "criteria_ids": ["B1"],
+                         "official_candidate": "C7", "official_status": "decided",
+                         "output_sha256": "e" * 64,
+                         "owner_decision": {"source": "%s:%s" % (commit, path), "source_line": line,
+                                            "decision_line": prefix + "、".join(phrases)}},
+            "order1_ref": None,
+            "checks": {"gkg_manifests_absent": True, "method_access_absent": True,
+                       "not_shallow": True, "worktree_clean": True}})
     common.update(over)
     return common
 

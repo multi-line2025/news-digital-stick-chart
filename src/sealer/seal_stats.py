@@ -16,40 +16,51 @@ kind は二つ（ledger.ORDER1_KIND = "stats-order1"、ledger.ORDER1B_KIND = "st
     rec, rel, ots_path = seal_stats.seal_order1(project, now, ots_cmd)
     rec, rel, ots_path = seal_stats.seal_order1b(project, files, approvals, now, ots_cmd)
 
-    files      順番1b の封印の対象のファイルの、ルートからの相対パスの list（候補の一覧・基準の案・
-               コードなど。HEAD に含まれ、作業ツリーと同じであること）
+    files      順番1b の封印の対象のファイルの、ルートからの相対パスの list。ledger.ORDER1B_REQUIRED_FILES
+               （counting.md・counting.py・test_counting.py・seal-order1.md）を必ず含むこと（無ければ止める）。
+               HEAD に含まれ、作業ツリーと同じであること
     approvals  オーナーの承認の照らし方の list。各要素は {"item": 名前, "commit": 40 桁, "path": パス,
                "lines": [行, ...]}。lines の最後の行が、その commit の版のファイルにちょうど 1 行あり、
                その前の行が lines の前の行と順に一致すること（seal-order1.md 2章の項目1 と同じ形）
 
 順番1 で確かめること（seal-order1.md 2章。番号は 2章の項目）
-  1  承認 A・B・B (ii) の行を、40 桁の commit の版の reviews/ で照らす（ORDER1_APPROVALS）
+  0  stats-order1 の記録がまだ無い（順番1 は 1 件だけ。T-037 の差し戻し1回目 中5）
+  1  承認 A・B・B (ii) の行を、40 桁の commit の版の reviews/ で照らす（ledger.ORDER1_APPROVALS）
   2  区分表の取得のマニフェスト（data/manifest/gdelt-themes.jsonl）と GKG のマニフェスト
      （gdelt-gkg-method.jsonl・gdelt-gkg-trial.jsonl）が、作業ツリーに無いか行が無く、
      `git log --all` の履歴も空。ledger に method-access が無い。すべての acquisition-start の
      targets のファイルの sha256 が合い、fetch.code_path が src/collector/acquire_filelist.py
   3  作業ツリーがきれい（git status --porcelain が空。追跡していないファイルも含む）
-  4  HEAD の 40 桁、祖先（ORDER1_ANCESTORS の 4 つ。短い ID がその 40 桁を指すことも）、
+  4  HEAD の 40 桁、祖先（ledger.ORDER1_ANCESTORS の 4 つ。短い ID がその 40 桁を指すことも）、
      Python のパスと版（.venv/bin/python に固定）
   5  浅い clone でない
-  6  10 件の sha256 を、このコードで 1章のバイト列の定義どおりに計算し直し、
-     docs/stats/seal-order1.md（HEAD の版）の表と照らす。一つでも違えば書かない
-  7  2d23cdf の版の reviews/T-020.md の見出しと三行（OWNER_CHOICE）。除外の規則の出力の
+  6  10 件（名前は ledger.ORDER1_TARGET_NAMES に固定。表の行がちょうどこの 10 件であること）の
+     sha256 を、このコードで 1章のバイト列の定義どおりに計算し直し、docs/stats/seal-order1.md
+     （HEAD の版）の表と照らす。一つでも違えば書かない
+  7  2d23cdf の版の reviews/T-020.md の見出しと三行（ledger.OWNER_CHOICE）。除外の規則の出力の
      owner_choice_source が決まった文字列であること
   8  除外の規則の出力の optional_choice_status と、tagrules.py の出力の exclusion の
      optional_choice_status が "decided"（"undecided" なら書かない）
   9  `.venv/bin/python -B -m unittest discover -s tests/stats` がすべて通る
-  確かめないこと：項目10（対象だけを置いた写しで流すこと）。プロジェクトと Git の外にフォルダを
-  作り、あとで消すことになる（CLAUDE.md の削除の規則）ので、この仕組みでは行わない。封印の前に
-  手で行い、結果をリードに報告する（docs/verify/periods-seal.md 13章）。
-順番1b で確かめること（seal-order1.md 3章 (3)）
+  10 対象だけを置いた写し（tempfile の一時フォルダ。終われば自動で消える）に、HEAD の版の 5 件と、
+     1cb463a・2d23cdf の履歴（深さ 1 の fetch）だけを置き、見張りの環境変数を付けずに
+     ORDER1_SEALED_TESTS を流して通ること。流したあと、写しの中のファイルが置いた 5 件だけであること。
+     結果（件数とファイルの一覧）を checks.targets_only_copy に入れる（T-037 の差し戻し1回目 中4）
+  最後に、HEAD と作業ツリーがはじめと同じことを、書く直前にもう一度確かめる（軽3）。
+  子のプロセスには、PYTHON で始まる環境変数と STATS_AUDIT_LOG を渡さない（軽2）。
+順番1b で確かめること（seal-order1.md 3章 (3)、docs/stats/counting.md 0章 (1)・7章）
   1  method-access が無い。GKG のマニフェストが無いか行が無く、履歴も空
-  2・4・6  files の各ファイルが HEAD に含まれ、作業ツリーと同じ。sha256 をこのコードで計算する
-  3  approvals の照らし方。B (ii)（ORDER1_APPROVALS の 3 つめ）も必ず照らす
+  2・4・6  files（ORDER1B_REQUIRED_FILES を含む）の各ファイルが HEAD に含まれ、作業ツリーと同じ。
+     sha256 をこのコードで計算する。counting.py を引数なしで実行し、出力の sha256、候補の識別子
+     （candidates の id）、基準の案の識別子（criteria_ids）、正式な数え方（official_candidate。
+     official_status が "decided" で、候補の中にあること）を記録に入れる
+  3  approvals の照らし方。B (ii)（ledger.ORDER1_APPROVALS の 3 つめ）も必ず照らす。
+     正式な数え方の出どころ（ledger.OWNER_DECISION）：9c85f58 の reviews/T-028.md で、オーナーの
+     発言の行がちょうど 1 行、「- 決定：正式に使う数え方は、」で始まる行がちょうど 1 行で、その行に
+     二つの語句を含むこと。counting.py の出力の owner_decision が同じ出どころであること
   5  作業ツリーがきれい、HEAD の 40 桁、浅い clone でない
-  順番1 の記録があれば、その最後の記録の seq と行の sha256 を order1_ref に入れる
+  順番1 の記録があれば、その seq と行の sha256 を order1_ref に入れる
   確かめないこと：項目0（試しの run の作りを直すタスクの合格。reviews/ の記録でリードが確かめる）。
-  候補の数・識別子、正式な基準の指定など、中身の細部（統計係が T-036 で作り直している最中）。
 
 CLI（プロジェクトのルートで。ots の通信を使うので .venv の python で実行する）
     PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_stats.py order1
@@ -77,32 +88,9 @@ PROJECT = os.path.dirname(os.path.dirname(HERE))
 PYTHON_REL = ".venv/bin/python"
 TABLE_DOC = "docs/stats/seal-order1.md"
 TABLE_MARKER = "<!-- table:seal-targets -->"
-THEMES_MANIFEST = "data/manifest/gdelt-themes.jsonl"
+THEMES_MANIFEST = ledger.THEMES_MANIFEST
 GKG_MANIFESTS = ("data/manifest/gdelt-gkg-method.jsonl", "data/manifest/gdelt-gkg-trial.jsonl")
 OUTPUT_SUFFIX = " の出力"
-
-# seal-order1.md 2章の項目4：祖先でなければならない commit（短い ID → 40 桁）
-ORDER1_ANCESTORS = {
-    "1cb463a": "1cb463acfcf15ba315e6c454625ad681e86bbc2a",
-    "2d23cdf": "2d23cdf6e01de5129fc7b0a5d85e89bf02e892c6",
-    "8f0f4ec": "8f0f4ec233acdef6e3d6bd7144fa1523be389308",
-    "0f98e62": "0f98e62b2810011c269efdd5836bd7cf3a5d5fce",
-}
-# seal-order1.md 2章の項目1：(名前, commit, パス, 行)
-ORDER1_APPROVALS = (
-    ("A", "8f0f4ec233acdef6e3d6bd7144fa1523be389308", "reviews/T-022.md",
-     ("> Kはいま封印していいよ",)),
-    ("B", "8f0f4ec233acdef6e3d6bd7144fa1523be389308", "reviews/T-022.md",
-     ("> 2.数え方の候補を先に封印し、最後に全候補のタグの一覧を並べて公開する案でよいか",
-      "> それでいいです。")),
-    ("B (ii)", "0f98e62b2810011c269efdd5836bd7cf3a5d5fce", "reviews/T-024.md",
-     ("> いいよ、正式に扱う基準は一つに絞ろう。",)),
-)
-# seal-order1.md 2章の項目7
-OWNER_CHOICE = ("2d23cdf6e01de5129fc7b0a5d85e89bf02e892c6", "reviews/T-020.md",
-                "## 2026-10-08 オーナーの発言（原文のまま記録）",
-                ("> 病名は案B", "> 民族、宗教の集団は除外の区分に加える。",
-                 "> そのほかこのまま承認の項目は承認します"))
 OWNER_CHOICE_SOURCE = "2d23cdf:reviews/T-020.md 2026-10-08 オーナーの発言（原文のまま記録）"
 EXCLUSION_SCRIPT = "src/stats/exclusion.py"
 TAGRULES_SCRIPT = "src/stats/tagrules.py"
@@ -131,6 +119,12 @@ def git_state(project):
     return head
 
 
+def recheck_state(project, head):
+    """書く直前に、HEAD と作業ツリーがはじめと同じことを確かめる（T-037 の差し戻し1回目 軽3）。"""
+    if git_state(project) != head:
+        raise ledger.LedgerError("確かめているあいだに HEAD が変わった。封印しない")
+
+
 def check_ancestor(project, full, short=None):
     if short is not None:
         got = _git(project, "rev-parse", "--verify", "-q", short + "^{commit}", check=False)
@@ -147,12 +141,21 @@ def git_show(project, commit, path):
     return r.stdout
 
 
+def child_env():
+    """子のプロセスの環境変数（T-037 の差し戻し1回目 軽2）。PYTHON で始まるもの（PYTHONPATH・
+    PYTHONPYCACHEPREFIX・PYTHONHOME など）と STATS_AUDIT_LOG を除き、PYTHONDONTWRITEBYTECODE=1 だけを足す。"""
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("PYTHON") and k != "STATS_AUDIT_LOG"}
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
+
+
 def python_info(project):
     """2章の項目4：Python のパス（.venv/bin/python に固定）と版。返り値: (絶対パス, 記録する dict)。"""
     full = os.path.join(project, PYTHON_REL)
     if not os.path.exists(full):
         raise ledger.LedgerError("%s が無い。封印しない" % PYTHON_REL)
-    r = subprocess.run([full, "--version"], capture_output=True)
+    r = subprocess.run([full, "--version"], capture_output=True, env=child_env())
     version = (r.stdout or r.stderr).decode().strip()
     if r.returncode != 0 or not version.startswith("Python "):
         raise ledger.LedgerError("%s --version が失敗した" % PYTHON_REL)
@@ -160,16 +163,30 @@ def python_info(project):
 
 
 def run_script(python, cwd, script):
-    """PYTHONDONTWRITEBYTECODE=1 python -B script（引数なし）の標準出力のバイト列。"""
-    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
-    r = subprocess.run([python, "-B", script], cwd=cwd, capture_output=True, env=env,
+    """python -B script（引数なし）の標準出力のバイト列。"""
+    r = subprocess.run([python, "-B", script], cwd=cwd, capture_output=True, env=child_env(),
                        timeout=STATS_TIMEOUT_SECONDS)
     if r.returncode != 0:
         raise ledger.LedgerError("%s の実行が失敗した（終了コード %d）" % (script, r.returncode))
     return r.stdout
 
 
+def run_unittest(python, cwd, args, what):
+    """python -B -m unittest args を流し、すべて通れば "OK (N tests)" を返す。"""
+    r = subprocess.run([python, "-B", "-m", "unittest"] + list(args), cwd=cwd, capture_output=True,
+                       env=child_env(), timeout=STATS_TIMEOUT_SECONDS)
+    err = r.stderr.decode("utf-8", "replace")
+    m = re.search(r"^Ran (\d+) tests? ", err, re.M)
+    if r.returncode != 0 or m is None or not re.search(r"^OK", err, re.M):
+        raise ledger.LedgerError("%s が通らない。封印しない" % what)
+    return "OK (%s tests)" % m.group(1)
+
+
 # ---------------------------------------------------------------- 承認と出どころ
+
+
+def _lines_of(project, commit, path):
+    return git_show(project, commit, path).decode("utf-8").split("\n")
 
 
 def check_approval(project, item, commit, path, lines):
@@ -178,7 +195,7 @@ def check_approval(project, item, commit, path, lines):
     if not ledger.HEX40.match(commit):
         raise ledger.LedgerError("承認 %s の commit が 40 桁でない" % item)
     check_ancestor(project, commit)
-    text = git_show(project, commit, path).decode("utf-8").split("\n")
+    text = _lines_of(project, commit, path)
     lines = list(lines)
     idx = [i for i, l in enumerate(text) if l == lines[-1]]
     if len(idx) != 1:
@@ -193,8 +210,8 @@ def check_approval(project, item, commit, path, lines):
 
 def check_owner_choice(project):
     """2章の項目7。返り値: 記録に入れる dict。"""
-    commit, path, heading, lines = OWNER_CHOICE
-    text = git_show(project, commit, path).decode("utf-8").split("\n")
+    commit, path, heading, lines = ledger.OWNER_CHOICE
+    text = _lines_of(project, commit, path)
     idx = [i for i, l in enumerate(text) if l == heading]
     if len(idx) != 1:
         raise ledger.LedgerError("%s:%s の見出し %r が %d 個ある（ちょうど 1 個でない）"
@@ -207,14 +224,35 @@ def check_owner_choice(project):
     missing = [l for l in lines if l not in section]
     if missing:
         raise ledger.LedgerError("%s:%s の見出しの節に、行 %s が無い" % (commit, path, missing))
-    return {"source": "%s:%s" % (commit, path), "heading": heading, "lines": list(lines)}
+    return ledger.expected_owner_choice()
+
+
+def check_owner_decision(project):
+    """順番1b：正式な数え方の出どころ（ledger.OWNER_DECISION。counting.md 0章 (1)）。
+    返り値: 記録に入れる dict（{source, source_line, decision_line}）。"""
+    commit, path, source_line, prefix, phrases = ledger.OWNER_DECISION
+    check_ancestor(project, commit)
+    text = _lines_of(project, commit, path)
+    n = sum(1 for l in text if l == source_line)
+    if n != 1:
+        raise ledger.LedgerError("%s:%s で、オーナーの発言の行 %r が %d 行ある（ちょうど 1 行でない）"
+                                 % (commit, path, source_line, n))
+    dec = [l for l in text if l.startswith(prefix)]
+    if len(dec) != 1:
+        raise ledger.LedgerError("%s:%s で、%r で始まる行が %d 行ある（ちょうど 1 行でない）"
+                                 % (commit, path, prefix, len(dec)))
+    missing = [p for p in phrases if p not in dec[0]]
+    if missing:
+        raise ledger.LedgerError("%s:%s の「決定：」の行に、語句 %s が無い" % (commit, path, missing))
+    return {"source": "%s:%s" % (commit, path), "source_line": source_line, "decision_line": dec[0]}
 
 
 # ---------------------------------------------------------------- 10 件の sha256
 
 
 def read_table(project, head):
-    """HEAD の版の docs/stats/seal-order1.md の表。返り値: [(名前, sha256)]。"""
+    """HEAD の版の docs/stats/seal-order1.md の表。返り値: [(名前, sha256)]。名前がちょうど
+    ledger.ORDER1_TARGET_NAMES の 10 件でなければ止める（T-037 の差し戻し1回目 中3）。"""
     text = git_show(project, head, TABLE_DOC).decode("utf-8").split("\n")
     if TABLE_MARKER not in text:
         raise ledger.LedgerError("%s に表の印 %s が無い" % (TABLE_DOC, TABLE_MARKER))
@@ -227,8 +265,10 @@ def read_table(project, head):
         m = re.match(r"\A\| `([^`]+)` \| `([0-9a-f]{64})` \|\Z", l)
         if m:
             rows.append((m.group(1), m.group(2)))
-    if not rows:
-        raise ledger.LedgerError("%s の表に行が無い" % TABLE_DOC)
+    names = [n for n, _ in rows]
+    if sorted(names) != sorted(ledger.ORDER1_TARGET_NAMES) or len(set(names)) != len(names):
+        raise ledger.LedgerError("%s の表の対象が、決まった 10 件（ledger.ORDER1_TARGET_NAMES）とちょうど一致"
+                                 "しない。封印しない" % TABLE_DOC)
     return rows
 
 
@@ -239,7 +279,7 @@ def target_bytes(project, python, name):
     m = re.match(r"\A([0-9a-f]{7,40}):(.+)\Z", base)
     if m:
         short, path = m.groups()
-        full = ORDER1_ANCESTORS.get(short)
+        full = ledger.ORDER1_ANCESTORS.get(short)
         if full is None:
             raise ledger.LedgerError("対象 %s の commit %s が、決まった祖先の一覧に無い" % (name, short))
         data = git_show(project, full, path)
@@ -257,6 +297,32 @@ def target_bytes(project, python, name):
         return run_script(python, project, base)
     with open(os.path.join(project, path), "rb") as f:
         return f.read()
+
+
+def targets_only_copy(project, python, head):
+    """2章の項目10。tempfile の一時フォルダ（終われば消える）に、HEAD の版の 5 件と、履歴から読む
+    commit（深さ 1）だけを置き、ledger.ORDER1_SEALED_TESTS を見張りなしで流す。返り値: 記録に入れる dict。"""
+    files = sorted(ledger.order1_copy_files())
+    with tempfile.TemporaryDirectory() as c:
+        def git(*args):
+            r = subprocess.run(["git", "-C", c] + list(args), capture_output=True)
+            if r.returncode != 0:
+                raise ledger.LedgerError("写しの git %s が失敗した" % " ".join(args[:2]))
+        git("init", "-q")
+        git("fetch", "-q", "--depth=1", project, *ledger.order1_history_commits())
+        for rel in files:
+            os.makedirs(os.path.join(c, os.path.dirname(rel)), exist_ok=True)
+            with open(os.path.join(c, rel), "wb") as f:
+                f.write(git_show(project, head, rel))
+        tests = run_unittest(python, c, ledger.ORDER1_SEALED_TESTS, "対象だけを置いた写しのテスト")
+        found = []
+        for root, dirs, names in os.walk(c):
+            dirs[:] = [d for d in dirs if not (root == c and d == ".git")]
+            found += [os.path.relpath(os.path.join(root, n), c) for n in names]
+        if sorted(found) != files:
+            raise ledger.LedgerError("対象だけを置いた写しに、置いた 5 件のほかのファイルがある（%s）。封印しない"
+                                     % ", ".join(sorted(set(found) - set(files))))
+    return {"tests": tests, "files": files}
 
 
 # ---------------------------------------------------------------- まだ無いことの確認
@@ -300,17 +366,7 @@ def acquisition_starts_ok(project, records):
 
 def run_stats_tests(project, python):
     """2章の項目9。返り値: 記録に入れる文字列（"OK (N tests)"）。"""
-    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
-    env.pop("STATS_AUDIT_LOG", None)
-    r = subprocess.run([python, "-B", "-m", "unittest", "discover", "-s", "tests/stats"], cwd=project,
-                       capture_output=True, env=env, timeout=STATS_TIMEOUT_SECONDS)
-    err = r.stderr.decode("utf-8", "replace")
-    m = re.search(r"^Ran (\d+) tests? ", err, re.M)
-    if r.returncode != 0 or m is None or not re.search(r"^OK", err, re.M):
-        raise ledger.LedgerError("tests/stats が通らない。封印しない")
-    if _git(project, "status", "--porcelain").stdout.strip():
-        raise ledger.LedgerError("tests/stats を流したあと、作業ツリーがきれいでない。封印しない")
-    return "OK (%s tests)" % m.group(1)
+    return run_unittest(python, project, ["discover", "-s", "tests/stats"], "tests/stats")
 
 
 # ---------------------------------------------------------------- 書く入口
@@ -318,16 +374,20 @@ def run_stats_tests(project, python):
 
 def seal_order1(project, now, ots_cmd, runner=subprocess.run):
     """stats-order1 を 1 件追記する。返り値: (記録, 中身のパス, .ots のパス か None)。"""
+    project = os.path.abspath(project)        # 軽4：相対パスでも同じに動く
     data, records = seal_records.load_checked(project, ots_cmd, runner=runner)
+    if ledger.first_order1(records) is not None:
+        raise ledger.LedgerError("stats-order1 の記録が既にある。順番1 は 1 件だけ（新しい版の扱いは別に決める）。"
+                                 "封印しない")
     head = git_state(project)
     checks = {"worktree_clean": True, "not_shallow": True}
     checks["method_access_absent"] = no_method_access(records)
     checks["themes_manifest_absent"] = manifest_absent(project, THEMES_MANIFEST)
     checks["gkg_manifests_absent"] = all(manifest_absent(project, p) for p in GKG_MANIFESTS)
     checks["acquisition_starts"] = acquisition_starts_ok(project, records)
-    for short, full in sorted(ORDER1_ANCESTORS.items()):
+    for short, full in sorted(ledger.ORDER1_ANCESTORS.items()):
         check_ancestor(project, full, short)
-    approvals = [check_approval(project, *a) for a in ORDER1_APPROVALS]
+    approvals = [check_approval(project, *a) for a in ledger.ORDER1_APPROVALS]
     owner = check_owner_choice(project)
     python, py = python_info(project)
     targets = []
@@ -351,10 +411,12 @@ def seal_order1(project, now, ots_cmd, runner=subprocess.run):
                                  % OWNER_CHOICE_SOURCE)
     checks["optional_choice_status"] = "decided"
     checks["stats_tests"] = run_stats_tests(project, python)
+    checks["targets_only_copy"] = targets_only_copy(project, python, head)
+    recheck_state(project, head)
     doc = {
         "kind": ledger.ORDER1_KIND,
         "head": head,
-        "ancestors": [ORDER1_ANCESTORS[k] for k in sorted(ORDER1_ANCESTORS)],
+        "ancestors": sorted(ledger.ORDER1_ANCESTORS.values()),
         "python": py,
         "targets": targets,
         "approvals": approvals,
@@ -362,24 +424,51 @@ def seal_order1(project, now, ots_cmd, runner=subprocess.run):
         "checks": checks,
         "ledger_head": ledger.expected_ledger_head(data, len(records) + 1),
     }
-    n = len(ledger.records_of_kind(records, ledger.ORDER1_KIND)) + 1
     note = ("統計係の順番1（除外の規則と入れる規則）の封印（docs/stats/seal-order1.md）。stats-order1 の "
-            "%d 件目。HEAD %s。" % (n, head))
+            "1 件目。HEAD %s。" % head)
     return seal_records.write_doc_record(project, ledger.ORDER1_KIND, doc, data, note, now, ots_cmd,
                                          runner=runner)
 
 
+def counting_summary(project, python):
+    """順番1b：counting.py を引数なしで実行した出力から、記録に入れるもの（counting.md 7章）。"""
+    out = run_script(python, project, ledger.COUNTING_SCRIPT)
+    try:
+        d = json.loads(out.decode("utf-8"))
+        cands = [c["id"] for c in d["candidates"]]
+        crit = list(d["criteria_ids"])
+        official, status, od = d["official_candidate"], d["official_status"], d["owner_decision"]
+    except (UnicodeDecodeError, ValueError, KeyError, TypeError):
+        raise ledger.LedgerError("%s の出力から、候補・基準の案・正式な数え方を読めない。封印しない"
+                                 % ledger.COUNTING_SCRIPT) from None
+    if status != "decided" or official not in cands:
+        raise ledger.LedgerError("%s の出力の正式な数え方が決まっていない（official_status %r、"
+                                 "official_candidate %r）。封印しない" % (ledger.COUNTING_SCRIPT, status, official))
+    commit, path, source_line, prefix, _phrases = ledger.OWNER_DECISION
+    if not isinstance(od, dict) or (od.get("source_commit"), od.get("source_path"), od.get("source_line"),
+                                    od.get("decision_line_prefix")) != (commit, path, source_line, prefix):
+        raise ledger.LedgerError("%s の出力の owner_decision の出どころが、決まった出どころ（ledger.OWNER_DECISION）"
+                                 "と違う。封印しない" % ledger.COUNTING_SCRIPT)
+    return {"candidate_ids": cands, "criteria_ids": crit, "official_candidate": official,
+            "official_status": status, "output_sha256": ledger.sha256_hex(out),
+            "owner_decision": check_owner_decision(project)}
+
+
 def seal_order1b(project, files, approvals, now, ots_cmd, runner=subprocess.run):
     """stats-order1b を 1 件追記する。返り値: (記録, 中身のパス, .ots のパス か None)。"""
+    project = os.path.abspath(project)
     data, records = seal_records.load_checked(project, ots_cmd, runner=runner)
     head = git_state(project)
     checks = {"worktree_clean": True, "not_shallow": True}
     checks["method_access_absent"] = no_method_access(records)
     checks["gkg_manifests_absent"] = all(manifest_absent(project, p) for p in GKG_MANIFESTS)
-    if not files:
-        raise ledger.LedgerError("files が空。封印しない")
+    missing = [f for f in ledger.ORDER1B_REQUIRED_FILES if f not in files]
+    if missing:
+        raise ledger.LedgerError("files に、必ず入れるファイル %s が無い（ledger.ORDER1B_REQUIRED_FILES）。封印しない"
+                                 % "、".join(missing))
+    paths = list(dict.fromkeys(files))
     out_files = []
-    for rel in files:
+    for rel in paths:
         path, _ = ledger.acquisition_start_fields({"fetch": {"code_path": rel, "code_sha256": "0" * 64}})
         full = os.path.join(project, path)
         if os.path.islink(full) or not os.path.isfile(full):
@@ -392,21 +481,22 @@ def seal_order1b(project, files, approvals, now, ots_cmd, runner=subprocess.run)
             raise ledger.LedgerError("%s が HEAD の中身と違う。封印しない" % path)
         out_files.append({"path": path, "sha256": ledger.sha256_hex(work)})
     given = [(a["item"], a["commit"], a["path"], tuple(a["lines"])) for a in approvals]
-    checked = [check_approval(project, *a) for a in given + [ORDER1_APPROVALS[2]]]
-    _python, py = python_info(project)
-    last = None
-    for r in records:
-        if r["kind"] == ledger.ORDER1_KIND:
-            last = r
-    ref = None if last is None else {"seq": last["seq"],
-                                     "record_sha256": ledger.sha256_hex(ledger.canonical_line(last))}
+    bii = ledger.ORDER1_APPROVALS[2]
+    checked = [check_approval(project, *a) for a in given + [bii]]
+    python, py = python_info(project)
+    counting = counting_summary(project, python)
+    o1 = ledger.first_order1(records)
+    ref = None if o1 is None else {"seq": o1["seq"],
+                                   "record_sha256": ledger.sha256_hex(ledger.canonical_line(o1))}
+    recheck_state(project, head)
     doc = {
         "kind": ledger.ORDER1B_KIND,
         "head": head,
-        "ancestors": sorted({a[1] for a in given + [ORDER1_APPROVALS[2]]}),
+        "ancestors": sorted({a[1] for a in given + [bii]} | {ledger.OWNER_DECISION[0]}),
         "python": py,
         "files": out_files,
         "approvals": checked,
+        "counting": counting,
         "order1_ref": ref,
         "checks": checks,
         "ledger_head": ledger.expected_ledger_head(data, len(records) + 1),
@@ -423,8 +513,8 @@ def main(argv=None):
     sub = p.add_subparsers(dest="action", required=True)
     o1 = sub.add_parser("order1", allow_abbrev=False)
     o1b = sub.add_parser("order1b", allow_abbrev=False)
-    o1b.add_argument("--file", action="append", required=True)
-    o1b.add_argument("--approvals-json", required=True)
+    o1b.add_argument("--file", action="append", default=[])
+    o1b.add_argument("--approvals-json", default=None)
     for q in (o1, o1b):
         q.add_argument("--ots", default=stamp.DEFAULT_OTS)
     a = p.parse_args(argv)
@@ -433,8 +523,10 @@ def main(argv=None):
         if a.action == "order1":
             rec, rel, ots_path = seal_order1(PROJECT, now, a.ots)
         else:
-            with open(a.approvals_json, encoding="utf-8") as f:
-                approvals = json.load(f)
+            approvals = []
+            if a.approvals_json is not None:
+                with open(a.approvals_json, encoding="utf-8") as f:
+                    approvals = json.load(f)
             rec, rel, ots_path = seal_order1b(PROJECT, a.file, approvals, now, a.ots)
     except ledger.LedgerError as e:
         print("失敗: %s" % e, file=sys.stderr)

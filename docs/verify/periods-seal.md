@@ -826,29 +826,36 @@ grep -n '"kind":"gkg-run-start"' sealed/ledger.jsonl | cut -d: -f1 || true
 
 ## 13. 統計係の順番1・順番1b の封印（stats-order1・stats-order1b。T-037）
 
-統計係の順番1（除外の規則と入れる規則。封印の対象10件）と順番1b（数え方の候補と基準の案）を、データに触れる前に封印する記録である（docs/stats/seal-order1.md）。採用の区切りには使わない。
+統計係の順番1（除外の規則と入れる規則。封印の対象10件）と順番1b（数え方の候補と基準の案）を、データに触れる前に封印する記録である（docs/stats/seal-order1.md、docs/stats/counting.md 7章）。採用の区切りには使わない。
 
 ### 二つの kind にした理由
 
 一つの kind に「順番」の欄を持たせず、`stats-order1` と `stats-order1b` の二つにした。理由（前提 → 結論）：
-- 前提：収集係の関門（`themes.require_exclusion_rules_sealed`）と `gkg-run-start` の `exclusion_rule_seq` は、「除外の規則の kind の最初の記録」を指す（src/collector/README.md 6.5.3）。前提：順番1b は順番1 と前後を問わず封印できる（seal-order1.md 3章 (3)）。結論：kind を一つにすると、その kind の最初の記録が順番1b になりうるので、「最初の記録」が除外の規則を指すとは限らなくなる。二つに分ければ、`stats-order1` の最初の記録が、常に最初に封印した除外の規則である。
-- 前提：前に要る位置が違う（順番1 は区分表の取得と `method-access` の前に必須、順番1b は最初の `gkg-run-start` の前に必須）。前提：封印の前に確かめることと中身の形も違う。結論：kind で分けると、位置の照合と中身の照合を kind ごとに一つの規則で書ける。
+- 前提：収集係の関門（`themes.require_exclusion_rules_sealed`）と `gkg-run-start` の `exclusion_rule_seq` は、「除外の規則の kind の記録」を指す（src/collector/README.md 6.5.3）。前提：順番1b は順番1 と前後を問わず封印できる（seal-order1.md 3章 (3)）。結論：kind を一つにすると、その kind の最初の記録が順番1b になりうるので、「最初の記録」が除外の規則を指すとは限らなくなる。二つに分ければ、`stats-order1` の記録が常に除外の規則である。
+- 前提：前に要る位置と、封印の前に確かめることと、中身の形が違う。結論：kind で分けると、それぞれを kind ごとに一つの規則で書ける。
+
+### stats-order1 は1件だけ（T-037 の差し戻し1回目 中5）
+
+- `stats-order1` の記録は1件に限る。2件目は、書く仕組み（`seal_stats.seal_order1`）が書く前に止め、書く仕組みを飛ばして足しても、`verify.py stats-order` と `all`、関門、ほかの書く仕組みが止まる（`ledger.check_stats_order`）。
+- 理由：「どの順番1 か」が、場所によって最初（収集係の README 6.5.3、gkg-run-start の `exclusion_rule_seq`）と最後（seal-order1.md 3章 (1) の照らし方）で食い違わないようにするため。1件なら、最初と最後は同じ記録である。
+- 規則を直す必要が出たときの新しい版の扱い（tags-naive.md 2章 (6)、5章 (2)）は、別に決める。それまでは2件目を書けない。
 
 ### 記録の形
 
 `stats-order1` の中身（`sealed/stats-order1-<sha256>.json`。キーはこの9個だけ：`ancestors`・`approvals`・`checks`・`head`・`kind`・`ledger_head`・`owner_choice`・`python`・`targets`）：
-- `head`：封印した時点の HEAD の40桁。`ancestors`：祖先であることを確かめた commit の40桁（1cb463a・2d23cdf・8f0f4ec・0f98e62）。
+- `head`：封印した時点の HEAD の40桁。`ancestors`：祖先であることを確かめた commit の40桁（`ledger.ORDER1_ANCESTORS` の4つ。1cb463a・2d23cdf・8f0f4ec・0f98e62）。
 - `python`：`{"path": ".venv/bin/python", "version": "Python 3.14.2"}` の形。
-- `targets`：対象の名前と sha256（`[{"name", "sha256"}]`。10件。少なくとも `src/stats/exclusion.py`・`src/stats/tagrules.py` とそれぞれの出力が入っていること）。
-- `approvals`：承認の照らし方（`[{"item", "source", "lines"}]`。A・B・B (ii)。`source` は `<40桁>:<パス>`、`lines` は照らした行をそのまま）。
-- `owner_choice`：2d23cdf の版の reviews/T-020.md の見出しと三行（`{"source", "heading", "lines"}`）。
-- `checks`：`worktree_clean`・`not_shallow`・`method_access_absent`・`themes_manifest_absent`・`gkg_manifests_absent`（どれも true）、`optional_choice_status`（"decided"）、`acquisition_starts`（照らした acquisition-start の一覧）、`stats_tests`（"OK (N tests)"）。
+- `targets`：対象の名前と sha256（`[{"name", "sha256"}]`）。名前は `ledger.ORDER1_TARGET_NAMES` の10件にちょうど一致しなければならない（T-037 の差し戻し1回目 中3。seal-order1.md 1章の表の「対象」の列と同じ文字列。表の行が足りなくても多くても、書く仕組みは止まる）。
+- `approvals`：承認の照らし方（`[{"item", "source", "lines"}]`）。`ledger.ORDER1_APPROVALS` の A・B・B (ii) と同じでなければならない。
+- `owner_choice`：2d23cdf の版の reviews/T-020.md の見出しと三行（`{"source", "heading", "lines"}`。`ledger.OWNER_CHOICE`）。
+- `checks`：`worktree_clean`・`not_shallow`・`method_access_absent`・`themes_manifest_absent`・`gkg_manifests_absent`（どれも true）、`optional_choice_status`（"decided"）、`acquisition_starts`（照らした acquisition-start の一覧）、`stats_tests`（"OK (N tests)"）、`targets_only_copy`（`{"tests": "OK (N tests)", "files": [写しに置いた5件]}`。下の項目10）。
 - `ledger_head`：この行を足す前の記録の先頭 seq 行の sha256。
 
-`stats-order1b` の中身（キーはこの9個だけ：`ancestors`・`approvals`・`checks`・`files`・`head`・`kind`・`ledger_head`・`order1_ref`・`python`）：
-- `files`：封印の対象のファイルのパスと sha256（`[{"path", "sha256"}]`）。順番1b の中身の細部は統計係が作り直している最中（T-036 予定）なので、一般的な形にした。
-- `approvals`：呼ぶ側が渡す承認の照らし方と、B (ii) の照らし方（必ず入れる）。
-- `order1_ref`：順番1 の記録があれば、その最後の記録の `{"seq", "record_sha256"}`。無ければ null。
+`stats-order1b` の中身（キーはこの10個だけ：`ancestors`・`approvals`・`checks`・`counting`・`files`・`head`・`kind`・`ledger_head`・`order1_ref`・`python`）：
+- `files`：封印の対象のファイルのパスと sha256（`[{"path", "sha256"}]`）。`ledger.ORDER1B_REQUIRED_FILES`（`docs/stats/counting.md`・`src/stats/counting.py`・`tests/stats/test_counting.py`・`docs/stats/seal-order1.md`）を必ず含む（T-037 の差し戻し1回目 中2）。
+- `counting`（キーはこの6個：`candidate_ids`・`criteria_ids`・`official_candidate`・`official_status`・`output_sha256`・`owner_decision`）：`PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/stats/counting.py` を引数なしで実行した出力から、候補の識別子（C1〜C7）、参考の基準の案の識別子（B1〜B5）、正式な数え方（C7。`official_status` が "decided" で、候補の中にあること）、出力の sha256。`owner_decision` は、正式な数え方の出どころの照らし方（`{"source", "source_line", "decision_line"}`。`ledger.OWNER_DECISION`：`9c85f58f054a679b8e5f40fcd7adbb17536f6366:reviews/T-028.md` で、オーナーの発言の行がちょうど1行、`- 決定：正式に使う数え方は、` で始まる行がちょうど1行で、その行に `V1 か V2 の少なくとも一方` と `同じ数え方の全テーマの合計` の両方を含むこと。counting.md 0章 (1)）。
+- `approvals`：呼ぶ側が渡す承認の照らし方（候補の一覧などへのオーナーの承認。照らす行は、承認を記録したときにリードが決める）と、B (ii) の照らし方（必ず入れる）。
+- `order1_ref`：順番1 の記録があれば、その `{"seq", "record_sha256"}`。無ければ null。
 - `checks`：`worktree_clean`・`not_shallow`・`method_access_absent`・`gkg_manifests_absent`（どれも true）。
 
 ### 書く仕組みが、書く前に確かめること（`src/sealer/seal_stats.py`）
@@ -859,16 +866,21 @@ rec, rel, ots_path = seal_stats.seal_order1(project, now, ots_cmd)
 rec, rel, ots_path = seal_stats.seal_order1b(project, files, approvals, now, ots_cmd)
 ```
 
-- `seal_stats.seal_order1` は、seal-order1.md 2章の項目1〜9 を確かめる。作業ツリーがきれい（追跡していないファイルも無い）、浅い clone でない、祖先、承認の行、出どころの見出しと三行、10件の sha256 を自分で計算し直して表（HEAD の版の seal-order1.md）と照らす、"undecided" を拒む、区分表と GKG のマニフェストが作業ツリーにも履歴にも無い、`method-access` が無い、すべての `acquisition-start` のコードが `src/collector/acquire_filelist.py`、`tests/stats` が通る。一つでも通らなければ何も書かない。
-- 項目10（対象だけを置いた写しで流すこと）は、この仕組みでは行わない。プロジェクトと Git の外にフォルダを作り、あとで消すことになる（CLAUDE.md の削除の規則）ため。封印の前に手で行い、結果をリードに報告する。
-- `seal_stats.seal_order1b` は、3章 (3) の項目1・2・3・5・6 を確かめる（`method-access` と GKG の跡が無い、ファイルが HEAD に含まれ作業ツリーと同じ、承認の行、作業ツリーがきれい、浅い clone でない）。項目0（試しの run の作りを直すタスクの合格）と、候補の数や正式な基準の指定などの細部は、この仕組みでは確かめない。
+- `seal_stats.seal_order1` は、seal-order1.md 2章の項目1〜10 を確かめる。`stats-order1` がまだ無い、作業ツリーがきれい（追跡していないファイルも無い）、浅い clone でない、祖先、承認の行、出どころの見出しと三行、10件の sha256 を自分で計算し直して表（HEAD の版の seal-order1.md）と照らす、"undecided" を拒む、区分表と GKG のマニフェストが作業ツリーにも履歴にも無い、`method-access` が無い、すべての `acquisition-start` のコードが `src/collector/acquire_filelist.py`、`tests/stats` が通る。一つでも通らなければ何も書かない。
+- **項目10（対象だけを置いた写し。T-037 の差し戻し1回目 中4）**：tempfile の一時フォルダ（終わると自動で消える）に、HEAD の版の5件（`ledger.order1_copy_files()`）と、1cb463a・2d23cdf の履歴（深さ1の fetch。取る元はプロジェクトのフォルダで、ネットワークは使わない）だけを置き、見張りの環境変数を付けずに `tests/stats/test_exclusion.py`・`tests/stats/test_tagrules.py` を流す。通ること、流したあとに写しの中のファイルが置いた5件だけであることを確かめ、結果を `checks.targets_only_copy` に入れる。統計係のテスト `test_sealed_tests_pass_in_targets_only_copy` と同じ形である。
+- 子のプロセスには、`PYTHON` で始まる環境変数（`PYTHONPATH`・`PYTHONPYCACHEPREFIX`・`PYTHONHOME` など）と `STATS_AUDIT_LOG` を渡さず、`PYTHONDONTWRITEBYTECODE=1` だけを足す（軽2）。書く直前に、HEAD と作業ツリーがはじめと同じことをもう一度確かめる（軽3）。`project` は絶対パスにしてから使う（軽4）。
+- `seal_stats.seal_order1b` は、3章 (3) の項目1・2・3・4・5・6 を確かめる。`method-access` と GKG の跡が無い、`ORDER1B_REQUIRED_FILES` を含むファイルが HEAD に含まれ作業ツリーと同じ、`counting.py` の出力の正式な数え方が "decided"、出力の `owner_decision` の出どころが `ledger.OWNER_DECISION` と同じ、出どころの2行、承認の行（B (ii) を含む）、作業ツリーがきれい、浅い clone でない。項目0（試しの run の作りを直すタスクの合格）は確かめない（reviews/ の記録でリードが確かめる）。
 
-### 位置の照合（`ledger.check_stats_order`。書く仕組み・`method-access` の関門・`verify.py stats-order` と `all`）
+### 位置の照合
 
-- `stats-order1`・`stats-order1b` の記録は、最初の `method-access` と、最初の区分表の取得（`acquisition-start` のうち `fetch.code_path` が `src/collector/themes.py` のもの）より前にある。
-- 最初の区分表の取得の前に、`stats-order1` の記録がある。`seal_acquisition.py start --code src/collector/themes.py` は、無ければ drand の前に止まる。
-- **限界（T-037 でリードに報告）：`method-access` の前に `stats-order1` を求めることはしていない。** 求めると、収集係のテスト（`tests/collector/test_acquire_gkg.py` の `E2ECase`）が、順番1 の無い写しに `seal_method.seal` で `method-access` を書くので、通らなくなるため（収集係のフォルダは封印係の範囲の外）。そのため、順番1 より前に `method-access` を書くことは止まらない。その場合、順番1 は `method-access` の後に書けず（seal-order1.md 2章の項目2。書く仕組みも verify も止まる）、`gkg-run-start` も書けないので、手法を作る期間の GKG の取得には進めない（追記のみの記録が先へ進めなくなる）。収集係のテストを直したあとで、`ledger.check_stats_order` の照合に `method-access` を足すことを提案した。
-- 最初の `gkg-run-start` の前に、`stats-order1b` の記録がある。`seal_gkg_run.start` は、`stats-order1` か `stats-order1b` が無ければ drand の前に止まる。
+- `ledger.check_stats_order`（書く仕組みのすべて、`method-access` の関門、`seal_gkg_run` の drand の前、`verify.py stats-order` と `all`）：`stats-order1` は1件だけ、各記録の中身が上の照合に通る、`stats-order1`・`stats-order1b` は最初の `method-access` より前、最初の `gkg-run-start` の前に `stats-order1b`。
+- **区分表の取得は ledger に記録を書かない**（T-037 の差し戻し1回目 中1。初回の版は「acquisition-start のうち区分表のもの」を照らしていたが、その道は本物の流れに無かった）。収集係の `src/collector/themes.py` は、試行と結果を `data/manifest/gdelt-themes.jsonl` に書く。そのため、区分表の取得との前後は git の履歴で照らす（`ledger.check_order1_before_themes`。`verify.py stats-order` と `all`）：
+  - F = `git log --all --full-history --format=%H -- data/manifest/gdelt-themes.jsonl` の commit のうち、その版のマニフェストに空でない行があるもの（集合として扱い、並び順と時刻は使わない）。
+  - F のどの commit についても、その親（`git rev-parse <C>^@`）のうち少なくとも一つの版の `sealed/ledger.jsonl` に、`stats-order1` の記録の行（正規の形のバイト列）がある。F が空でないのに `stats-order1` が無いとき、親の無い commit が F にあるときも失敗する（seal-order1.md 3章 (2) と同じ考え方）。
+  - 作業ツリーのマニフェストの各行の `exclusion_rule_seq`・`exclusion_rule_record_sha256` が、`stats-order1` の記録の seq と行の sha256 と一致する（`ledger.check_themes_manifest_refs`）。
+  - git の履歴が無いところ（`.git` の無い写し）では、この照合を行わず、そう表示する。`--rev auto` は git の履歴を要るので、第三者は履歴のある clone で確かめる。
+  - 書く仕組みの側は、`seal_order1` が、区分表のマニフェストが作業ツリーにも履歴にも無いことを確かめる（2章の項目2）。
+- **`method-access` の前に `stats-order1` を求めることは、まだしていない**（リードの指示。収集係のテスト `tests/collector/test_acquire_gkg.py` の `E2ECase` が、順番1 の無い写しに `method-access` を書くため。収集係のテストを直すタスクのあとに入れる）。そのため、順番1 より前に `method-access` を書くことは止まらない。その場合、順番1 は書けず（2章の項目2）、`gkg-run-start` も書けないので、追記のみの記録が先へ進めなくなる。
 
 ### 確かめるコマンド
 
@@ -878,11 +890,15 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py stats-order
 grep -n '"kind":"stats-order1' sealed/ledger.jsonl | cut -d: -f1 || true
 ```
 
-- 記録の10件の sha256 を作業ツリーで計算し直して照らす手順は、docs/stats/seal-order1.md 3章 (1) のとおり（`shasum -a 256 <ファイル>`、`git show <commit>:<path> | shasum -a 256`、`PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/stats/exclusion.py | shasum -a 256` など）。
+- 記録の10件の sha256 を作業ツリーで計算し直して照らす手順は、docs/stats/seal-order1.md 3章 (1) のとおり（`shasum -a 256 <ファイル>`、`git show <commit>:<path> | shasum -a 256`、`PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/stats/exclusion.py | shasum -a 256` など）。順番1b の `counting.output_sha256` は `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/stats/counting.py | shasum -a 256` と照らす。
+
+### 順番2 への申し送り（統計係の T-036 の監査の軽-4）
+
+- 順番2 の記録で、待つ（pending）・止まった（stopped）・封印した結果を区別するときは、**待つ記録は kind ではなく status で区別する**。kind を分けると、「順番2 の記録が何件あるか」「どの記録を参照するか」の規則（seal-order1.md 3章 (2)）が kind ごとに分かれ、数え方が自己申告に近くなるため。順番2 の kind は、順番2 を封印するタスクで決める。
 
 ### 収集係への申し送り（src/collector は封印係の範囲の外）
 
 - `themes.EXCLUSION_RULE_KIND` に入れる値は `"stats-order1"`（`ledger.ORDER1_KIND`）。
-- 関門が照らす記録は、その kind の最初の記録（`ledger.first_order1(records)`。README 6.5.3 と同じ）。
-- 記録の中身は `ledger.read_target_json(root, rec, "stats-order1")` で読める（sha256 を照らしたうえで JSON を返す）。`ledger.check_order1_doc(rec, doc)` が形を照らし、`{対象の名前: sha256}` を返す。名前は docs/stats/seal-order1.md 1章の表の「対象」の列と同じ文字列である。
-- この dict を、収集係が持つ10件の名前と sha256 と比べれば、記録の中身（どの規則を封印したか）を照らせる。
+- 関門が照らす記録は `ledger.first_order1(records)`（`stats-order1` は1件だけなので、その1件）。
+- 記録の中身は `ledger.read_target_json(root, rec, "stats-order1")` で読める（sha256 を照らしたうえで JSON を返す）。`ledger.check_order1_doc(rec, doc)` が中身を照らし、`{対象の名前: sha256}` を返す。名前は `ledger.ORDER1_TARGET_NAMES`（seal-order1.md 1章の表の「対象」の列）と同じ文字列なので、収集係が持つ10件と比べれば、どの規則を封印したかを照らせる。
+- 区分表のマニフェストの各行の `exclusion_rule_seq`・`exclusion_rule_record_sha256` は、verify が上のとおり照らす。区分表の取得のコミットは、`stats-order1` の記録を含む commit の後に作る。

@@ -1138,19 +1138,84 @@ def check_gkg_run_common(runs):
 
 ORDER_KINDS = (ORDER1_KIND, ORDER1B_KIND)
 HEX40 = re.compile(r"\A[0-9a-f]{40}\Z")
-THEMES_CODE_PATH = "src/collector/themes.py"          # 区分表の取得のコード
+THEMES_MANIFEST = "data/manifest/gdelt-themes.jsonl"   # 区分表の取得のマニフェスト（収集係）
 FILELIST_CODE_PATH = "src/collector/acquire_filelist.py"
-# 順番1の記録に、少なくとも入っていなければならない対象（docs/stats/seal-order1.md 2章の申し送り）
-ORDER1_REQUIRED_NAMES = ("src/stats/exclusion.py", "src/stats/exclusion.py の出力",
-                         "src/stats/tagrules.py", "src/stats/tagrules.py の出力")
+
+# ---- 順番1（docs/stats/seal-order1.md 1章・2章）。値はこのコードに固定する。書く仕組み
+# （seal_stats）と verify が同じ値で照らす（T-037 の差し戻し1回目 中3・軽5）。
+# 祖先でなければならない commit（短い ID → 40 桁）。2章の項目4
+ORDER1_ANCESTORS = {
+    "1cb463a": "1cb463acfcf15ba315e6c454625ad681e86bbc2a",
+    "2d23cdf": "2d23cdf6e01de5129fc7b0a5d85e89bf02e892c6",
+    "8f0f4ec": "8f0f4ec233acdef6e3d6bd7144fa1523be389308",
+    "0f98e62": "0f98e62b2810011c269efdd5836bd7cf3a5d5fce",
+}
+# 封印の対象の 10 件の名前（1章の表の「対象」の列と同じ文字列）。ちょうどこの 10 件でなければならない
+ORDER1_TARGET_NAMES = (
+    "src/stats/exclusion.py", "src/stats/exclusion.py の出力", "tests/stats/test_exclusion.py",
+    "src/stats/tagrules.py", "src/stats/tagrules.py の出力", "tests/stats/test_tagrules.py",
+    "docs/stats/tags-naive.md", "1cb463a:src/stats/tagrules.py", "1cb463a:src/stats/tagrules.py の出力",
+    "2d23cdf:reviews/T-020.md",
+)
+# 2章の項目10：対象だけを置いた写しで流すテスト
+ORDER1_SEALED_TESTS = ("tests/stats/test_exclusion.py", "tests/stats/test_tagrules.py")
+# 2章の項目1：(名前, commit, パス, 行)
+ORDER1_APPROVALS = (
+    ("A", "8f0f4ec233acdef6e3d6bd7144fa1523be389308", "reviews/T-022.md",
+     ("> Kはいま封印していいよ",)),
+    ("B", "8f0f4ec233acdef6e3d6bd7144fa1523be389308", "reviews/T-022.md",
+     ("> 2.数え方の候補を先に封印し、最後に全候補のタグの一覧を並べて公開する案でよいか",
+      "> それでいいです。")),
+    ("B (ii)", "0f98e62b2810011c269efdd5836bd7cf3a5d5fce", "reviews/T-024.md",
+     ("> いいよ、正式に扱う基準は一つに絞ろう。",)),
+)
+# 2章の項目7
+OWNER_CHOICE = ("2d23cdf6e01de5129fc7b0a5d85e89bf02e892c6", "reviews/T-020.md",
+                "## 2026-10-08 オーナーの発言（原文のまま記録）",
+                ("> 病名は案B", "> 民族、宗教の集団は除外の区分に加える。",
+                 "> そのほかこのまま承認の項目は承認します"))
+
+# ---- 順番1b（docs/stats/seal-order1.md 3章 (3)、docs/stats/counting.md 0章 (1)・7章。T-037 の差し戻し1回目 中2）
+ORDER1B_REQUIRED_FILES = ("docs/stats/counting.md", "src/stats/counting.py", "tests/stats/test_counting.py",
+                          "docs/stats/seal-order1.md")
+COUNTING_SCRIPT = "src/stats/counting.py"
+# 正式な数え方の出どころ（counting.md 0章 (1)）：commit、パス、オーナーの発言の行（行の全体が一致する行が
+# ちょうど 1 つ）、「決定：」の行の先頭（先頭が一致する行がちょうど 1 つ）と、その行に含まれる語句
+OWNER_DECISION = ("9c85f58f054a679b8e5f40fcd7adbb17536f6366", "reviews/T-028.md",
+                  "> 作り方2を、新しい候補として加え、正式に使う数え方にしよう",
+                  "- 決定：正式に使う数え方は、",
+                  ("V1 か V2 の少なくとも一方", "同じ数え方の全テーマの合計"))
+
 ORDER1_DOC_KEYS = ("ancestors", "approvals", "checks", "head", "kind", "ledger_head",
                    "owner_choice", "python", "targets")
-ORDER1B_DOC_KEYS = ("ancestors", "approvals", "checks", "files", "head", "kind", "ledger_head",
-                    "order1_ref", "python")
+ORDER1B_DOC_KEYS = ("ancestors", "approvals", "checks", "counting", "files", "head", "kind",
+                    "ledger_head", "order1_ref", "python")
 ORDER1_CHECK_KEYS = ("acquisition_starts", "gkg_manifests_absent", "method_access_absent",
-                     "not_shallow", "optional_choice_status", "stats_tests", "themes_manifest_absent",
-                     "worktree_clean")
+                     "not_shallow", "optional_choice_status", "stats_tests", "targets_only_copy",
+                     "themes_manifest_absent", "worktree_clean")
 ORDER1B_CHECK_KEYS = ("gkg_manifests_absent", "method_access_absent", "not_shallow", "worktree_clean")
+COUNTING_KEYS = ("candidate_ids", "criteria_ids", "official_candidate", "official_status",
+                 "output_sha256", "owner_decision")
+
+
+def order1_copy_files():
+    """対象のうち、作業ツリーのファイルのもの（写しに置く 5 件。2章の項目10）。"""
+    return tuple(n for n in ORDER1_TARGET_NAMES if ":" not in n and not n.endswith(" の出力"))
+
+
+def order1_history_commits():
+    """対象のうち git の履歴から読むものの commit の 40 桁（写しに取る。2章の項目10）。"""
+    shorts = sorted({n.split(":", 1)[0] for n in ORDER1_TARGET_NAMES if ":" in n})
+    return tuple(ORDER1_ANCESTORS[s] for s in shorts)
+
+
+def expected_order1_approvals():
+    return [{"item": a[0], "source": "%s:%s" % (a[1], a[2]), "lines": list(a[3])} for a in ORDER1_APPROVALS]
+
+
+def expected_owner_choice():
+    return {"source": "%s:%s" % (OWNER_CHOICE[0], OWNER_CHOICE[1]), "heading": OWNER_CHOICE[2],
+            "lines": list(OWNER_CHOICE[3])}
 
 
 def check_ledger_head(data, record, doc):
@@ -1180,8 +1245,18 @@ def _check_approvals(approvals, what):
             raise LedgerError("%s の approvals の lines が空でない文字列の一覧でない" % what)
 
 
+def _check_python(py, what):
+    if not isinstance(py, dict) or sorted(py) != ["path", "version"] or py.get("path") != ".venv/bin/python" \
+            or not isinstance(py.get("version"), str) or not py["version"].startswith("Python "):
+        raise LedgerError("%s の python が {path: .venv/bin/python, version: Python …} でない" % what)
+
+
 def check_order1_doc(record, doc):
-    """stats-order1 の中身の形を照合する（ledger_head は check_ledger_head）。T-037。
+    """stats-order1 の中身を照合する（ledger_head は check_ledger_head）。T-037。
+    形に加えて、中身が決まった値と一致することを確かめる（差し戻し1回目 中3・軽5）：
+    対象の名前がちょうど ORDER1_TARGET_NAMES の 10 件、ancestors が ORDER1_ANCESTORS の 40 桁、
+    approvals が ORDER1_APPROVALS、owner_choice が OWNER_CHOICE と同じ、checks の値、
+    targets_only_copy のファイルが order1_copy_files() と同じ。
     返り値: {対象の名前: sha256}。"""
     what = "seq %d の stats-order1" % record["seq"]
     _check_doc_kind(record, doc)
@@ -1189,17 +1264,12 @@ def check_order1_doc(record, doc):
         raise LedgerError("%s の中身のキーが、決まった %d 個（%s）と一致しない"
                           % (what, len(ORDER1_DOC_KEYS), "、".join(ORDER1_DOC_KEYS)))
     _check_hex(doc["head"], HEX40, what + " の head")
-    if not isinstance(doc["ancestors"], list) or not doc["ancestors"]:
-        raise LedgerError("%s の ancestors が空でない一覧でない" % what)
-    for c in doc["ancestors"]:
-        _check_hex(c, HEX40, what + " の ancestors")
-    py = doc["python"]
-    if not isinstance(py, dict) or sorted(py) != ["path", "version"] \
-            or not all(isinstance(v, str) and v for v in py.values()):
-        raise LedgerError("%s の python のキーが path・version でない" % what)
+    if doc["ancestors"] != sorted(ORDER1_ANCESTORS.values()):
+        raise LedgerError("%s の ancestors が、決まった 4 つの commit と一致しない" % what)
+    _check_python(doc["python"], what)
     targets = doc["targets"]
-    if not isinstance(targets, list) or not targets:
-        raise LedgerError("%s の targets が空でない一覧でない" % what)
+    if not isinstance(targets, list):
+        raise LedgerError("%s の targets が一覧でない" % what)
     out = {}
     for t in targets:
         if not isinstance(t, dict) or sorted(t) != ["name", "sha256"] or not isinstance(t["name"], str):
@@ -1208,13 +1278,17 @@ def check_order1_doc(record, doc):
         if t["name"] in out:
             raise LedgerError("%s の targets の名前 %s が重なる" % (what, t["name"]))
         out[t["name"]] = t["sha256"]
-    missing = [n for n in ORDER1_REQUIRED_NAMES if n not in out]
-    if missing:
-        raise LedgerError("%s の targets に %s が無い" % (what, "、".join(missing)))
+    if sorted(out) != sorted(ORDER1_TARGET_NAMES):
+        raise LedgerError("%s の targets の名前が、決まった 10 件（ledger.ORDER1_TARGET_NAMES）とちょうど一致"
+                          "しない（足りない %s、多い %s）"
+                          % (what, sorted(set(ORDER1_TARGET_NAMES) - set(out)) or "なし",
+                             sorted(set(out) - set(ORDER1_TARGET_NAMES)) or "なし"))
     _check_approvals(doc["approvals"], what)
-    oc = doc["owner_choice"]
-    if not isinstance(oc, dict) or sorted(oc) != ["heading", "lines", "source"]:
-        raise LedgerError("%s の owner_choice のキーが heading・lines・source でない" % what)
+    if doc["approvals"] != expected_order1_approvals():
+        raise LedgerError("%s の approvals が、決まった照らし方（A・B・B (ii)）と一致しない" % what)
+    if doc["owner_choice"] != expected_owner_choice():
+        raise LedgerError("%s の owner_choice が、決まった出どころ（2d23cdf の reviews/T-020.md）と一致しない"
+                          % what)
     checks = doc["checks"]
     if not isinstance(checks, dict) or tuple(sorted(checks)) != ORDER1_CHECK_KEYS:
         raise LedgerError("%s の checks のキーが、決まった %d 個と一致しない" % (what, len(ORDER1_CHECK_KEYS)))
@@ -1224,24 +1298,35 @@ def check_order1_doc(record, doc):
             raise LedgerError("%s の checks.%s が true でない" % (what, k))
     if checks["optional_choice_status"] != "decided":
         raise LedgerError("%s の checks.optional_choice_status が decided でない" % what)
+    for k in ("stats_tests",):
+        if not isinstance(checks[k], str) or not re.match(r"\AOK \(\d+ tests\)\Z", checks[k]):
+            raise LedgerError("%s の checks.%s が「OK (N tests)」でない" % (what, k))
+    copy = checks["targets_only_copy"]
+    if not isinstance(copy, dict) or sorted(copy) != ["files", "tests"] \
+            or not isinstance(copy["tests"], str) or not re.match(r"\AOK \(\d+ tests\)\Z", copy["tests"]) \
+            or copy["files"] != sorted(order1_copy_files()):
+        raise LedgerError("%s の checks.targets_only_copy が {tests: OK (N tests), files: 決まった 5 件} でない"
+                          % what)
     return out
 
 
 def check_order1b_doc(record, doc):
-    """stats-order1b の中身の形を照合する（ledger_head は check_ledger_head）。T-037。
-    返り値: {パス: sha256}。順番1b の細部（候補の数や基準の識別子）は統計係が作り直している最中
-    （T-036 予定）なので、ここではパスと sha256 の一覧と、承認の照らし方の形だけを照合する。"""
+    """stats-order1b の中身を照合する（ledger_head は check_ledger_head）。T-037。
+    差し戻し1回目 中2：files に ORDER1B_REQUIRED_FILES があること、counting に候補と基準の案の識別子・
+    正式な数え方（official_status が decided で、候補の中にある）・counting.py の出力の sha256・
+    OWNER_DECISION の出どころの 2 行があること、approvals に B (ii) があること。
+    返り値: {パス: sha256}。"""
     what = "seq %d の stats-order1b" % record["seq"]
     _check_doc_kind(record, doc)
     if not isinstance(doc, dict) or tuple(sorted(doc)) != ORDER1B_DOC_KEYS:
         raise LedgerError("%s の中身のキーが、決まった %d 個（%s）と一致しない"
                           % (what, len(ORDER1B_DOC_KEYS), "、".join(ORDER1B_DOC_KEYS)))
     _check_hex(doc["head"], HEX40, what + " の head")
-    for c in doc["ancestors"] if isinstance(doc["ancestors"], list) else [None]:
+    if not isinstance(doc["ancestors"], list) or not doc["ancestors"]:
+        raise LedgerError("%s の ancestors が空でない一覧でない" % what)
+    for c in doc["ancestors"]:
         _check_hex(c, HEX40, what + " の ancestors")
-    py = doc["python"]
-    if not isinstance(py, dict) or sorted(py) != ["path", "version"]:
-        raise LedgerError("%s の python のキーが path・version でない" % what)
+    _check_python(doc["python"], what)
     files = doc["files"]
     if not isinstance(files, list) or not files:
         raise LedgerError("%s の files が空でない一覧でない" % what)
@@ -1253,7 +1338,34 @@ def check_order1b_doc(record, doc):
         if f["path"] in out:
             raise LedgerError("%s の files のパス %s が重なる" % (what, f["path"]))
         out[f["path"]] = f["sha256"]
+    missing = [p for p in ORDER1B_REQUIRED_FILES if p not in out]
+    if missing:
+        raise LedgerError("%s の files に、必ず入れるファイル %s が無い" % (what, "、".join(missing)))
     _check_approvals(doc["approvals"], what)
+    bii = expected_order1_approvals()[2]
+    if bii not in doc["approvals"]:
+        raise LedgerError("%s の approvals に B (ii) の照らし方が無い" % what)
+    c = doc["counting"]
+    if not isinstance(c, dict) or tuple(sorted(c)) != COUNTING_KEYS:
+        raise LedgerError("%s の counting のキーが、決まった %d 個（%s）と一致しない"
+                          % (what, len(COUNTING_KEYS), "、".join(COUNTING_KEYS)))
+    for k in ("candidate_ids", "criteria_ids"):
+        ids = c[k]
+        if not isinstance(ids, list) or not ids or len(set(ids)) != len(ids) \
+                or not all(isinstance(x, str) and x for x in ids):
+            raise LedgerError("%s の counting.%s が、重ならない識別子の空でない一覧でない" % (what, k))
+    if c["official_status"] != "decided" or c["official_candidate"] not in c["candidate_ids"]:
+        raise LedgerError("%s の counting の正式な数え方が決まっていない（official_status が decided で、"
+                          "official_candidate が候補の中にあること）" % what)
+    _check_hex(c["output_sha256"], HEX64, what + " の counting.output_sha256")
+    od = c["owner_decision"]
+    want_src = "%s:%s" % (OWNER_DECISION[0], OWNER_DECISION[1])
+    if not isinstance(od, dict) or sorted(od) != ["decision_line", "source", "source_line"] \
+            or od["source"] != want_src or od["source_line"] != OWNER_DECISION[2] \
+            or not isinstance(od["decision_line"], str) or not od["decision_line"].startswith(OWNER_DECISION[3]) \
+            or not all(p in od["decision_line"] for p in OWNER_DECISION[4]):
+        raise LedgerError("%s の counting.owner_decision が、決まった出どころ（%s の発言の行と「決定：」の行）と"
+                          "一致しない" % (what, want_src))
     ref = doc["order1_ref"]
     if ref is not None and (not isinstance(ref, dict) or sorted(ref) != ["record_sha256", "seq"]):
         raise LedgerError("%s の order1_ref が null か {seq, record_sha256} でない" % what)
@@ -1265,53 +1377,121 @@ def check_order1b_doc(record, doc):
     return out
 
 
-def themes_acquisition_starts(records, read_json):
-    """acquisition-start のうち、区分表の取得のもの（fetch.code_path が THEMES_CODE_PATH）。"""
-    out = []
-    for r in records:
-        if r["kind"] == ACQ_START_KIND:
-            path, _sha = acquisition_start_fields(read_json(r, ACQ_START_KIND))
-            if path == THEMES_CODE_PATH:
-                out.append(r)
-    return out
-
-
 def first_order1(records):
-    """除外の規則の kind（stats-order1）の最初の記録（無ければ None）。収集係の関門が使う。"""
+    """除外の規則の kind（stats-order1）の記録（無ければ None）。T-037 の差し戻し1回目 中5 で、
+    stats-order1 は 1 件に限った（check_stats_order）ので、「最初」と「最後」は同じ記録である。
+    収集係の関門と gkg-run-start の exclusion_rule_seq が指す記録。"""
     return _first_of_kind(records, ORDER1_KIND)
 
 
 def check_stats_order(records, read_json):
-    """順番1・順番1b の記録の位置と、その記録が前に要る記録の照合。T-037。
+    """順番1・順番1b の記録の数・中身・位置の照合。T-037（差し戻し1回目で改めた）。
     （docs/stats/seal-order1.md 2章の項目2、3章 (3)。docs/verify/periods-seal.md 13章）
-      - stats-order1・stats-order1b の記録は、最初の method-access と、最初の区分表の取得
-        （acquisition-start のうち fetch.code_path が src/collector/themes.py のもの）より前にある。
-      - 最初の区分表の取得の前に、stats-order1 の記録がある（method-access の前には求めない。下の注記）。
+      - stats-order1 の記録は 1 件だけ（差し戻し1回目 中5。2 件目は書く仕組みも止める。
+        新しい版の扱いは別に決める）。
+      - 各記録の中身が check_order1_doc・check_order1b_doc に通る。
+      - stats-order1・stats-order1b の記録は、最初の method-access より前にある。
       - 最初の gkg-run-start の前に、stats-order1b の記録がある。
+    区分表の取得は ledger に記録を書かない（収集係はマニフェスト data/manifest/gdelt-themes.jsonl に
+    書く）ので、区分表の取得との前後は git の履歴で照らす（check_order1_before_themes。verify と
+    seal_stats が行う）。method-access の前に stats-order1 を求めることは、まだしない
+    （収集係のテストを直すタスクのあとに入れる。リードの指示）。
     返り値: {"order1": [記録], "order1b": [記録]}。
     """
     o1 = [r for r in records if r["kind"] == ORDER1_KIND]
     o1b = [r for r in records if r["kind"] == ORDER1B_KIND]
+    if len(o1) > 1:
+        raise LedgerError("stats-order1（順番1）の記録が %d 件ある（seq %s）。順番1 は 1 件だけ"
+                          % (len(o1), ", ".join(str(r["seq"]) for r in o1)))
+    for r in o1:
+        check_order1_doc(r, read_json(r, ORDER1_KIND))
+    for r in o1b:
+        check_order1b_doc(r, read_json(r, ORDER1B_KIND))
     m = _first_of_kind(records, METHOD_ACCESS_KIND)
-    th = themes_acquisition_starts(records, read_json)
-    t = th[0] if th else None
     g = _first_of_kind(records, GKG_RUN_KIND)
     for r in o1 + o1b:
-        for mark, name in ((m, "method-access"), (t, "区分表の取得（acquisition-start）")):
-            if mark is not None and r["seq"] > mark["seq"]:
-                raise LedgerError("%s の記録（seq %d）が、最初の %s の記録（seq %d）より後にある。順番1・1b は"
-                                  "データに触れる前に封印する決まり" % (r["kind"], r["seq"], name, mark["seq"]))
-    # method-access の前に順番1 を求めることはしない（T-037 のリードの指示の項目2 は区分表の取得だけ。
-    # 収集係のテスト tests/collector/test_acquire_gkg.py が、順番1 の無い写しに method-access を書くため。
-    # 求める場合は、ここに (m, "method-access") を足す。docs/verify/periods-seal.md 13章の限界）
-    for mark, name in ((t, "区分表の取得（acquisition-start）"),):
-        if mark is not None and not any(r["seq"] < mark["seq"] for r in o1):
-            raise LedgerError("最初の %s の記録（seq %d）より前に、stats-order1（順番1）の記録が無い"
-                              % (name, mark["seq"]))
+        if m is not None and r["seq"] > m["seq"]:
+            raise LedgerError("%s の記録（seq %d）が、最初の method-access の記録（seq %d）より後にある。順番1・1b は"
+                              "データに触れる前に封印する決まり" % (r["kind"], r["seq"], m["seq"]))
     if g is not None and not any(r["seq"] < g["seq"] for r in o1b):
         raise LedgerError("最初の gkg-run-start の記録（seq %d）より前に、stats-order1b（順番1b）の記録が無い"
                           % g["seq"])
     return {"order1": o1, "order1b": o1b}
+
+
+def themes_manifest_commits(git):
+    """区分表のマニフェストに行がある commit の集合 F。git(*args) は bytes を返す関数。
+    git log --all --full-history の commit のうち、その版のマニフェストに空でない行があるもの。"""
+    out = set()
+    log = git("log", "--all", "--full-history", "--format=%H", "--", THEMES_MANIFEST).decode().split()
+    for c in log:
+        try:
+            body = git("show", "%s:%s" % (c, THEMES_MANIFEST))
+        except LedgerError:
+            continue
+        if any(l.strip() for l in body.split(b"\n")):
+            out.add(c)
+    return out
+
+
+def check_order1_before_themes(records, git):
+    """区分表の取得より前に順番1、を git の履歴で照らす（T-037 の差し戻し1回目 中1）。
+    F = 区分表のマニフェストに行がある commit の集合（themes_manifest_commits）。F のどの commit C についても、
+    C の親（git rev-parse C^@）のうち少なくとも一つの版の sealed/ledger.jsonl に、今あるすべての
+    stats-order1 の行（正規の形のバイト列）があること。F が空でなければ stats-order1 の記録が要る。
+    親の無い commit が F にあれば失敗。並び順や時刻は使わない（seal-order1.md 3章 (2) と同じ考え方）。
+    返り値: F の件数。"""
+    f = themes_manifest_commits(git)
+    lines = [canonical_line(r) for r in records if r["kind"] == ORDER1_KIND]
+    if f and not lines:
+        raise LedgerError("区分表のマニフェスト（%s）に行がある commit があるのに、stats-order1（順番1）の記録が"
+                          "無い" % THEMES_MANIFEST)
+    for c in sorted(f):
+        parents = git("rev-parse", "%s^@" % c).decode().split()
+        if not parents:
+            raise LedgerError("区分表のマニフェストに行がある commit %s に親が無い" % c[:12])
+        ok = False
+        for p in parents:
+            try:
+                led = git("show", "%s:sealed/ledger.jsonl" % p)
+            except LedgerError:
+                continue
+            have = set(led.split(b"\n"))
+            if all(line in have for line in lines):
+                ok = True
+                break
+        if not ok:
+            raise LedgerError("区分表のマニフェストに行がある commit %s の、どの親の sealed/ledger.jsonl にも "
+                              "stats-order1 の記録の行が無い（区分表の取得が順番1 より前）" % c[:12])
+    return len(f)
+
+
+def check_themes_manifest_refs(records, manifest_bytes):
+    """区分表のマニフェストの行の exclusion_rule_seq・exclusion_rule_record_sha256 が、stats-order1 の記録の
+    seq と行の sha256 と一致すること（T-037 の差し戻し1回目 中1）。行に二つのキーが無ければ失敗。
+    manifest_bytes は作業ツリーのマニフェストのバイト列（無ければ None）。返り値: 照らした行の数。"""
+    if manifest_bytes is None:
+        return 0
+    o1 = first_order1(records)
+    n = 0
+    for i, raw in enumerate(manifest_bytes.split(b"\n"), 1):
+        if not raw.strip():
+            continue
+        try:
+            row = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            raise LedgerError("%s の %d 行目が JSON として読めない" % (THEMES_MANIFEST, i)) from None
+        if not isinstance(row, dict) or "exclusion_rule_seq" not in row \
+                or "exclusion_rule_record_sha256" not in row:
+            raise LedgerError("%s の %d 行目に exclusion_rule_seq・exclusion_rule_record_sha256 が無い"
+                              % (THEMES_MANIFEST, i))
+        if o1 is None or row["exclusion_rule_seq"] != o1["seq"] \
+                or row["exclusion_rule_record_sha256"] != sha256_hex(canonical_line(o1)):
+            raise LedgerError("%s の %d 行目の exclusion_rule_seq %r（と sha256）が、stats-order1 の記録%sと一致しない"
+                              % (THEMES_MANIFEST, i, row["exclusion_rule_seq"],
+                                 "（無し）" if o1 is None else "（seq %d）" % o1["seq"]))
+        n += 1
+    return n
 
 
 # ---------------------------------------------------------------- periods の検査

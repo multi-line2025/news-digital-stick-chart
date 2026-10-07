@@ -40,7 +40,8 @@ docs/verify/periods-seal.md 12章。
   - periods の記録が無い。記録の鎖か .ots の検証に通らない。
   - method-access の記録が無い（gkg-run-start は手順4の記録の後）。
   - 除外の規則の kind（stats-order1）の記録が無い。exclusion_rule_seq がその最初の記録の seq でない。
-    順番1b（stats-order1b）の記録が無い（T-037。T-031 の監査 中2）。
+    順番1b（stats-order1b）の記録が無い。順番1・1b の中身が照合（ledger.check_stats_order）に通らない
+    （T-037。T-031 の監査 中2）。
   - threshold-access の記録がある（閾値を決める期間に触れたあとで、手法を作る期間の GKG の
     取得を始めない。T-031 の中2）。
   - official の記録が既にある（正式な run は 1 件だけ。trial は official より前だけ）。
@@ -94,6 +95,8 @@ def _precheck(project, records, mode):
     if not any(r["kind"] == ledger.ORDER1B_KIND for r in records):
         raise ledger.LedgerError("順番1b（%s）の記録が無い。gkg-run-start は順番1b の封印の後に書く"
                                  "（docs/stats/seal-order1.md 3章 (3)）。追記しない" % ledger.ORDER1B_KIND)
+    # 順番1・1b の中身（必須のファイル、正式な数え方など）と数も、drand の前に照らす（T-037 の差し戻し1回目 中2）
+    ledger.check_stats_order(records, lambda r, role: ledger.read_target_json(project, r, role))
     cut = ledger.first_threshold_access(records)
     if cut is not None:
         raise ledger.LedgerError("threshold-access の記録（seq %d）がある。閾値を決める期間に触れたあとで、"
