@@ -226,7 +226,8 @@ env -u GIT_DIR -u GIT_WORK_TREE -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 \
 - day の行（`data/manifest/gdelt-gkg-method.jsonl`）に、その日の failed のファイルの一覧 `failed_files` を書く。各項目は `file_time`・`reason`・`attempts`（規則で数えた試行の回数）・`requests_sent`（実際に送った要求の数。取得の記録の attempt の行の数）・`listed_size`・`listed_md5`（ファイル一覧の値。GDELT が公開している値）。数は `files_failed` と同じ。day の行には、その日に実際に送った要求の総数 `requests_sent` も書く。
 - **第三者が確かめる手順**（T-026 で直した）
   1. 封印の記録の acquisition-result の `kept_rows_sha256` と同じ sha256 のファイル一覧（手順3の本体）を用意する。本体は公開していないので、自分で `https://data.gdeltproject.org/gdeltv2/masterfilelist.txt` を取って作り直す（T-026 で直した）。作り直し方は、取得のときと同じ固定のコード（`src/collector/filelist.py`）の関数を、この順に使う。
-     - 元の一覧の各行について `filelist._is_kept_line(行)` が真の行だけを残す（ファイル名の14桁の時刻を `LAST_KEPT_TIME`＝2020-12-14 23:45:00 と比べ、それより後の行と、時刻を読めない行を捨てる。4章のファイルの日の規則）。
+     - 取った一覧の本体を、**文字に直さずバイト列（bytes）のまま** 行に分ける（`本体.split(b"\n")` か `本体.splitlines(keepends=True)`。T-030 軽-B）。以下の関数は行をバイト列で受け取る。文字列（str）で渡すと、どの行も残らない（0件になる）。
+     - 元の一覧の各行（バイト列）について `filelist._is_kept_line(行)` が真の行だけを残す（ファイル名の14桁の時刻を `LAST_KEPT_TIME`＝2020-12-14 23:45:00 と比べ、それより後の行と、時刻を読めない行を捨てる。4章のファイルの日の規則）。
      - 残した各行を `filelist.parse_kept_line(行)` で (file_time, file_type, size_bytes, md5) にし、None（形の合わない行）を除く。
      - `filelist.serialize_rows(行の一覧)` で、見出しつき・並べ替え済みのバイト列にする（5章の形）。
      - そのバイト列の sha256 を `kept_rows_sha256` と比べる。GDELT の一覧はあとで変わりうるので、合うとは限らない（README 4章）。
@@ -240,8 +241,8 @@ env -u GIT_DIR -u GIT_WORK_TREE -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 \
      | 分け方 | reason | 今は合うファイルが取れるときの見方 | 確かめ方 |
      |---|---|---|---|
      | 取れなかった（一覧の値と合うファイルを受け取れなかった） | `http_404`・`http_403`・`http_410`、そのほかの `http_<3桁>`（再試行しない値。3xx はリダイレクトを追わないので取れなかった扱い、501 なども含む）、`http_None`（状態の番号の無い応答）、`size_mismatch`・`md5_mismatch`（3回受け取っても一覧の値と合わなかった） | 取得のときに本当に取れなかったのかを疑う理由になる。ただし、GDELT があとでファイルを置いた・直した可能性もある | URL を取り、状態の番号・リダイレクトの有無・大きさと md5 を見る |
-     | 取れたが、このプロジェクトの規則で落とした | `too_large`（zip が `MAX_ZIP_BYTES`＝2億バイトを超えた）、`format_…`（md5 は合ったが、zip や行の形が規則に合わなかった。`format_too_large_unzipped` は展開後の上限）、`content_encoding`（応答が圧縮の指定つきで返った）、`ambiguous_listing`（一覧に同じ file_time の違う行があったので、要求を送らなかった） | 今取れることは反証にならない（正直な失敗でも今は取れる）。規則に当たるかを確かめる | `too_large`：`listed_size` を `MAX_ZIP_BYTES` と比べる。`format_…`：取ったファイルを、run-start の `code_sha256` の版の `gkg.aggregate_zip` にかけ、同じ形の誤りになるかを見る。`content_encoding`：同じ URL の応答のヘッダの Content-Encoding を見る。`ambiguous_listing`：手順1の一覧に、その file_time の違う行が二つ以上あるかを見る |
-     | 一時的 | `http_429`、`http_500`・`http_502`・`http_503`・`http_504`、`network_…`（通信の失敗。例外の名前）、`retry_after_too_long`、`attempts_exhausted` | 今取れることは反証にならない（そのとき相手か通信が不調だったという主張） | 数が多い日、決まった時期への偏り、`requests_sent` と `attempts` の差を見る |
+     | 取れたが、このプロジェクトの規則で落とした | `too_large`（受け取った zip が `MAX_ZIP_BYTES`＝2億バイトを超えた。下の確かめ方の2つの場合を見る）、`format_…`（md5 は合ったが、zip や行の形が規則に合わなかった。`format_too_large_unzipped` は展開後の上限）、`content_encoding`（応答が圧縮の指定つきで返った）、`ambiguous_listing`（一覧に同じ file_time の違う行があったので、要求を送らなかった） | 今取れることは反証にならない（正直な失敗でも今は取れる）。規則に当たるかを確かめる | `too_large`（T-030 軽-C）：(i) `listed_size` が `MAX_ZIP_BYTES` を超えるなら、一覧どおりの大きさのファイルは必ずこの規則で落ちるので、規則のとおり。(ii) `listed_size` が `MAX_ZIP_BYTES` 以下なら、一覧より大きいものを受け取ったという意味なので、「取れなかった」の行と同じに扱い、今取れるファイルの大きさと md5 を一覧の値と比べる（合うものが今取れるなら、取得のときに本当に大きすぎたのかを疑う理由になる）。`format_…`：取ったファイルを、run-start の `code_sha256` の版の `gkg.aggregate_zip` にかけ、同じ形の誤りになるかを見る。`content_encoding`：同じ URL の応答のヘッダの Content-Encoding を見る。`ambiguous_listing`：手順1の一覧に、その file_time の違う行が二つ以上あるかを見る |
+     | 一時的 | `http_429`、`http_500`・`http_502`・`http_503`・`http_504`、`network_…`（通信の失敗。例外の名前は `gkg.NETWORK_ERROR_NAMES` の固定の一覧のどれかで、一覧に無いものは `network_Other`。T-030 軽-D）、`retry_after_too_long`、`attempts_exhausted` | 今取れることは反証にならない（そのとき相手か通信が不調だったという主張） | 数が多い日、決まった時期への偏り、`requests_sent` と `attempts` の差を見る |
 
   4. failed の数の多い日、決まった時期に偏った failed、`reason` の偏りを並べて見る。
 - **一覧の本体が手に入らないときに確かめられないこと**：手順2の `files_listed` の照合（その日のファイルの数を、運営側が少なく数えていないか）は、一覧の本体か、取り直した一覧が要る。取り直した一覧が封印の時の一覧と違えば（sha256 が合わなければ）、数の違いが GDELT の側の変化か、運営側の数え違いかは分からない。手順3（failed のファイルが今は取れるか）は、day の行だけでできる。
@@ -253,7 +254,7 @@ env -u GIT_DIR -u GIT_WORK_TREE -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 \
 |---|---|---|
 | 取得の記録の控え（run-start・run-resume・day・run-stop・run-complete の行の `fetch_log_size`・`fetch_log_sha256`） | 控えより前の行を消す・書き換える。最後の控えが run-start か run-stop のときに、あとから行を足す・記録を置き換える | 控えを書けずに止まった（kill -9・停電）あとに足した行は、控えでは見分けられない（下の「信用しない範囲」で扱う）。マニフェストをコミットの前に書き換えること（下の「全部コミット」で扱う） |
 | 信用しない範囲（`untrusted_ranges`。差し戻し3回目 中-1） | 控えより後ろの行の範囲を run-resume の行に書いて引き継ぎ、以後、何回再開しても、その範囲の結果の行（ok・failed・interrupted）は使わずに取り直す。その範囲の attempt の行は回数に数えるが、それだけで使い切らせない（少なくとも1回は要求を送る） | 範囲の中の attempt の行で、そのファイルの試行の回数が増える（最大で残り1回まで減る）。kill -9 の直前に本当に送った要求も、範囲の中なので、結果は取り直しになる。**そのため、1本のファイルへの要求の総数は、上限（`MAX_ATTEMPTS_PER_FILE` = 3）に kill -9 の回数を足した数まで増えうる**（T-026 軽-2）。実際に送った数は `failed_files` の `requests_sent` と day の行の `requests_sent` に書く。第三者は 6.5.1 の手順2で `requests_sent` と `attempts` を照らして見つけられる |
-| 取得の記録の行の形（T-026 軽-4） | 結果の行の `reason` が、このモジュールが書く決まった語（`http_<3桁>`・`http_None`、`network_` と標準の例外の名前、`format_` と決まった語、そのほかの決まった語）でない行、`attempts` が 0〜3 の整数でない行、attempt の行の回数が 1〜3 の整数でない行があれば止まる。偽の行で、人名などの任意の語や数が day の行の `failed_files` に載ることを止める | 決まった語の中から選んだ偽の reason（たとえば `http_404`）は形では見分けられない。6.5.1 で扱う |
+| 取得の記録の行の形（T-026 軽-4） | 結果の行の `reason` が、このモジュールが書く決まった語（`http_<3桁>`・`http_None`、`network_` と固定の一覧（`gkg.NETWORK_ERROR_NAMES`）の名前、`format_` と決まった語、そのほかの決まった語）でない行、`attempts` が 0〜3 の整数でない行、attempt の行の回数が 1〜3 の整数でない行があれば止まる。偽の行で、人名などの任意の語や数が day の行の `failed_files` に載ることを止める | 決まった語の中から選んだ偽の reason（たとえば `http_404`）は形では見分けられない。6.5.1 で扱う |
 | 再開のたびに、正式な run のマニフェストを全部コミット | 前のコミットより前に書いた行（コミット済みの控え・範囲）を書き換えること | その回に書いた行（止まってから次のコミットまでのあいだ、作業ツリーにだけある day・run-resume の行の控えや範囲）を、コミットの前に書き換えること。たとえば kill -9 のあと、まだコミットしていない day の行の控えを、偽の failed の行を足した取得の記録に合わせて書き直すと、偽の行が使われる。見分けられないので、6.5.1（偽の failed は `failed_files` に載り、第三者が GDELT と照らせる）で扱う。履歴そのものを書き換えること（リモートが無いので、写しを持たない第三者には見えない） |
 | 保存先の一覧（gkg-method・gkg-trial。中-1・中-2） | 決まった名前でないもの（`aside-…` などに名前を変えた日の集計、「.」で始まる名前・フォルダ、リンク）がある。gkg-method に別の run のファイルがある | フォルダの外（同じディスクの別の場所や、別のディスク）へ移したもの。日の集計を書いたあと day の行を書く前に kill -9 し、中身を見てからフォルダの外へ移すことは止められない（そのあとの選び出しは、上の「信用しない範囲」と、6.5.1 の failed の一覧で扱う） |
 | 試しの run の照合（中-2） | 試しの run のマニフェストに載っていない run のファイルがある。載っている run の取得の記録が、無い・控えと合わない | 試しの run のファイルを全部フォルダの外へ移し、マニフェストからも行を消すこと（コミットの前なら見分けられない） |
@@ -306,6 +307,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/collector -v
 - 差し戻し3回目：`test_gkg.py` の `TestRound3Reproductions`（監査の再現 Y1・Y2・exp_peek、2回・3回の再開、day の行の `failed_files`）、`TestRound3Trial`（exp_trial2）、`TestHiddenTrial` の一覧の照合。`test_themes.py` の2段の取得（`test_first_phase_does_not_fetch`、`test_committed_attempt_must_match_code_and_rule`、`TestCodeGate.test_two_phase_with_real_git`）と、限界を確かめる `test_reverting_to_committed_attempt_allows_refetch_limit`。
 - T-026：`test_gkg.py` の `TestT026`（日の集計を書いたあとに止まった正直な再開、実際に送った要求の数）、`test_day_line_lists_failed_files`（`listed_size`・`listed_md5`・`requests_sent`、和の照合）。`test_themes.py` の `TestCodeGate.test_git_mv_after_fetch_stops`・`test_existing_themes_file_in_store_stops`・`test_reset_of_history_is_a_documented_limit`。
 - T-026 差し戻し1回目：`test_gkg.py` の `TestT026Round2`（reason・attempts の形。監査の probe_c の偽の語で止まること）、`TestChangedResultOnHonestResume`（監査の probe_b4。取り直しで結果が変わると止まり続け、日の集計を保存先の外へ移すと続けられること）。
+- T-030：`test_gkg.py` の `TestT030`（既にある日の集計の検査、network_ の名前の固定）。
 - テストは、本物の `/Volumes/LACIE SHARE` を使わない。保存先のディスクは一時的なディレクトリで置き換え、マウントの検査だけを差し替える（本物の検査は `TestVolume` と、下の FAT32 のテストで確かめる）。
 
 ### 7.1 FAT32 のイメージの上でのテスト（T-021）

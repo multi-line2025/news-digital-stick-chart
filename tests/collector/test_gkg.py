@@ -1995,6 +1995,90 @@ class TestChangedResultOnHonestResume(RunCase):
         self.assertEqual(done["files_failed"], 1)
 
 
+class TestT030(RunCase):
+    """T-030：既にある日の集計をそのまま使う前の検査（軽-A。監査の probe_b5x）、network_ の名前（軽-D）。"""
+
+    DAYS = ("20150302", "20150303")
+    N = 3
+
+    def kill_after_dayfile_and_edit(self, val):
+        day = "2015-03-02"
+        real = gkg.append_jsonl
+
+        def app(path, obj, what, *a, **k):
+            if obj.get("kind") == "day" and obj.get("day") == day:
+                raise Kill9()
+            return real(path, obj, what, *a, **k)
+        with mock.patch.object(gkg, "append_jsonl", app), \
+                mock.patch.object(gkg, "_write_stop", lambda *a, **k: None):
+            with self.assertRaises(Kill9):
+                self.run_gkg()
+        p = os.path.join(self.store, gkg.day_file_name(RUN_ID, day))
+        with open(p, "rb") as f:
+            lines = gzip.decompress(f.read()).split(b"\n")
+        for i, l in enumerate(lines):
+            if l.startswith(b"F\t"):
+                f = l.split(b"\t")
+                f[7] = val
+                lines[i] = b"\t".join(f)
+                break
+        with open(p, "wb") as f:
+            f.write(gkg.gzip_bytes(b"\n".join(lines)))
+
+    def assert_refused(self, val, pattern):
+        self.kill_after_dayfile_and_edit(val)
+        with self.assertRaisesRegex(gkg.GkgError, pattern):
+            self.run_once()
+        self.assertEqual([e for e in self.manifest() if e["kind"] == "day"], [])
+
+    def test_free_word_in_attempts_field_is_refused(self):
+        self.assert_refused(b"Taro_Example", "attempts の欄の形")
+
+    def test_address_shape_in_attempts_field_is_refused(self):
+        self.assert_refused(b"someone" + b"@" + b"example.com", "使ってよい文字の外")
+
+    def test_out_of_range_attempts_field_is_refused(self):
+        self.assert_refused(b"4", "attempts の欄の形")
+
+    def test_in_range_attempts_field_is_reused(self):
+        self.kill_after_dayfile_and_edit(b"3")
+        self.run_once()
+        day = [e for e in self.manifest() if e["kind"] == "day"][0]
+        self.assertTrue(day["reused_existing_day_file"])
+
+    def test_check_existing_day_file_unit(self):
+        good = gkg.gzip_bytes(b"#\tgkg-day\t2\t2015-03-02\tofficial\nF\tt\tok\t-\tm\t1\ts\t0\t3\n")
+        gkg.check_existing_day_file(good, "2015-03-02")
+        with self.assertRaisesRegex(gkg.GkgError, "展開できない"):
+            gkg.check_existing_day_file(b"not gzip", "2015-03-02")
+
+    def test_network_names_are_fixed(self):
+        self.assertIsInstance(gkg.NETWORK_ERROR_NAMES, frozenset)
+        self.assertEqual(gkg.network_reason(ConnectionResetError()), "network_ConnectionResetError")
+        self.assertEqual(gkg.network_reason(TimeoutError()), "network_TimeoutError")
+
+        class UnlistedNetError(OSError):
+            pass
+        self.assertEqual(gkg.network_reason(UnlistedNetError()), "network_Other")
+        self.assertTrue(gkg.valid_reason("network_Other"))
+        self.assertFalse(gkg.valid_reason("network_UnlistedNetError"))
+
+    def test_unlisted_network_error_is_recorded_as_other(self):
+        class UnlistedNetError(OSError):
+            pass
+        bad = sorted(self.zips)[0]
+        inner = FakeTransport(self.responses)
+
+        def transport(url, timeout):
+            if bad in url:
+                raise UnlistedNetError("見本")
+            return inner(url, timeout)
+        done = self.run_gkg(transport=transport)
+        self.assertEqual(done["files_failed"], 1)
+        day = [e for e in self.manifest() if e["kind"] == "day"][0]
+        self.assertEqual(day["failed_files"][0]["reason"], "network_Other")
+
+
 class TestRound3Trial(RunCase):
     """exp_trial2：試しの run を「.」で隠す・フォルダの外へ移す。"""
 

@@ -284,6 +284,10 @@
         中身が違えば止まる（上書きしない）。取り直しで結果が変わると、何回再開しても止まり続ける
         （README 6.7 の次の手）。使った日の集計の F の行の attempts と、day の行の failed_files の
         attempts（今回の取り直しの数）は違うことがある。
+      - 既にある日の集計をそのまま使う前に、展開した中身に check_output_bytes をかけ、F の行の
+        attempts の欄が 0〜MAX_ATTEMPTS_PER_FILE の形であることを確かめる（T-030 軽-A）。
+      - 通信の失敗の reason は network_<例外の名前> で、名前は固定の一覧 NETWORK_ERROR_NAMES の
+        どれか（無い名前は network_Other と書く。T-030 軽-D）。
       - 取得の記録の行の形（T-026 軽-4。_check_log_lines）：結果の行の reason が決まった語
         （valid_reason）で、attempts が 0〜MAX_ATTEMPTS_PER_FILE の整数であること、attempt の行の
         attempt が 1〜MAX_ATTEMPTS_PER_FILE の整数であること、file_time が14桁の数字であることを
@@ -762,7 +766,7 @@ def fetch_file(entry, transport, sleep, clock, pacer, log, used=0, on_attempt=No
         except GkgFormatError as e:
             return FetchResult("failed", str(e), False, None, attempt)
         except READ_ERRORS as e:
-            reason, transient = "network_%s" % type(e).__name__, True
+            reason, transient = network_reason(e), True
         finally:
             if resp is not None:
                 try:
@@ -1502,19 +1506,23 @@ def check_log_checkpoint(log_path, mine):
     return size
 
 
-def _exception_names(classes):
-    out, todo = set(), list(classes)
-    while todo:
-        c = todo.pop()
-        if c.__name__ not in out:
-            out.add(c.__name__)
-            todo.extend(c.__subclasses__())
-    return frozenset(out)
+# 5.2章（T-026 軽-4・T-030 軽-D）：network_ のあとに書く・認める例外の名前の一覧。固定する
+# （Python の版や import の順で変わらないようにするため）。一覧に無い例外は network_Other と書く。
+NETWORK_ERROR_NAMES = frozenset({
+    "URLError", "ContentTooShortError", "TimeoutError", "timeout", "OSError", "ConnectionError",
+    "ConnectionResetError", "ConnectionRefusedError", "ConnectionAbortedError", "BrokenPipeError",
+    "HTTPException", "IncompleteRead", "RemoteDisconnected", "BadStatusLine", "LineTooLong",
+    "gaierror", "herror", "SSLError", "SSLEOFError", "SSLZeroReturnError", "SSLSyscallError",
+    "SSLCertVerificationError", "Other",
+})
 
 
-# 5.2章（T-026 軽-4）：取得の記録の結果の行の reason として認める語。このモジュールが書く語だけ。
-# network_ のあとは、READ_ERRORS とその子の例外の名前（標準ライブラリのもの）だけを認める。
-_NETWORK_ERROR_NAMES = _exception_names(READ_ERRORS)
+def network_reason(exc):
+    """通信の失敗の reason。例外の名前が NETWORK_ERROR_NAMES に無ければ network_Other。"""
+    name = type(exc).__name__
+    return "network_" + (name if name in NETWORK_ERROR_NAMES else "Other")
+
+
 _FORMAT_REASONS = frozenset({"zip", "zip_members", "zip_member_name", "zip_encrypted",
                              "too_large_unzipped", "zip_read"})
 _FIXED_REASONS = frozenset({"", "retry_after_too_long", "attempts_exhausted", "ambiguous_listing",
@@ -1531,7 +1539,7 @@ def valid_reason(reason):
     if reason in _FIXED_REASONS or _HTTP_REASON_RE.match(reason):
         return True
     if reason.startswith("network_"):
-        return reason[len("network_"):] in _NETWORK_ERROR_NAMES
+        return reason[len("network_"):] in NETWORK_ERROR_NAMES
     if reason.startswith("format_"):
         return reason[len("format_"):] in _FORMAT_REASONS
     return False
@@ -2067,6 +2075,7 @@ def _write_day(day, day_agg, files, run_id, paths, disk_free):
     reused = False
     existing = _existing_day_file(paths["store"], name)
     if existing:
+        check_existing_day_file(existing, day)
         # 日の集計を書いたあと day の行を書く前に止まった跡（5.2章。T-026 軽-1）。取り直して
         # 作った集計と、F の行の attempts の欄のほかがすべて同じなら、そのファイルを使う
         if not same_day_except_attempts(existing, gz):
@@ -2100,6 +2109,27 @@ def _existing_day_file(store, name):
 
 
 _F_ATTEMPTS_FIELD = 7        # serialize_day の F の行の attempts の欄（0 から数えて）
+_F_ATTEMPTS_RE = re.compile(rb"\A[0-%d]\Z" % MAX_ATTEMPTS_PER_FILE)
+
+
+def check_existing_day_file(gz, day):
+    """既にある日の集計をそのまま使う前の検査（T-030 軽-A）。合わなければ GkgError で止まる。
+
+    展開した中身に check_output_bytes（使ってよい文字だけ・メールアドレスの形が無い）をかけ、
+    F の行の attempts の欄が 0〜MAX_ATTEMPTS_PER_FILE の1桁の数字であることを確かめる。
+    attempts の欄は same_day_except_attempts で比べないので、ここで形を確かめる。
+    """
+    try:
+        text = gzip.decompress(gz)
+    except (OSError, EOFError, ValueError):
+        raise GkgError("%s の既にある日の集計を展開できない（リードに報告）" % day) from None
+    check_output_bytes(text, "既にある日の集計")
+    for line in text.split(b"\n"):
+        if line.startswith(b"F\t"):
+            f = line.split(b"\t")
+            if len(f) <= _F_ATTEMPTS_FIELD or not _F_ATTEMPTS_RE.match(f[_F_ATTEMPTS_FIELD]):
+                raise GkgError("%s の既にある日の集計の F の行の attempts の欄の形が違う"
+                               "（リードに報告）" % day)
 
 
 def same_day_except_attempts(old_gz, new_gz):
