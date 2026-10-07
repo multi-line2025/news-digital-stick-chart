@@ -28,12 +28,26 @@ docs/verify/periods-seal.md 12章。
                                    （テストだけ）
     drand_fetch・runner            通信の差し替え（テストだけ）
 
-拒むもの（何も書かずに止める。drand を取りにいく前に止まるものを先に確かめる）
+いつ呼ぶか（T-031 の差し戻し1回目の中3）
+  gkg-run-start は、収集係のマニフェストの run-start の行 1 件につき 1 件だけ書く。run の最初の実行
+  （run-start の行を書く実行）で、要求を送る前に 1 回だけ呼び、同じ run の再開では呼ばない。
+  そのため、試しの run の回数は gkg-run-start（trial）の件数と同じになる。同じ run_id の trial を
+  2 件書こうとすると止まる。正式な run の 2 回目の実行（run-start を書いて止まったあとの実行）
+  でも呼ばない。
+
+拒むもの（何も書かずに止める）
+  drand を取りにいく前に止まるもの：
   - periods の記録が無い。記録の鎖か .ots の検証に通らない。
   - method-access の記録が無い（gkg-run-start は手順4の記録の後）。
+  - threshold-access の記録がある（閾値を決める期間に触れたあとで、手法を作る期間の GKG の
+    取得を始めない。T-031 の中2）。
   - official の記録が既にある（正式な run は 1 件だけ。trial は official より前だけ）。
-  - 取得のコードが、HEAD のコミットの中身と同じでない。
-  - 中身の照合（ledger.check_gkg_run_doc）に通らない。
+  - trial で、同じ run_id の trial の記録が既にある。trial_days が 1〜3 日でない（T-031 の中3）。
+  - 取得のコードが、HEAD のコミットの中身と同じでない。run_id がその sha256 の先頭 16 桁でない。
+  drand を取ったあと、書く前に止まるもの（seal_records.check_new）：
+  - 中身の照合（ledger.check_gkg_run_doc・check_gkg_runs）に通らない。例えば、一覧の sha256 が
+    最初の method-access より前のただ 1 件の acquisition-result と違う、除外の規則の記録が最初の
+    gkg-run-start より前に無い、ほかの gkg-run-start と入力（一覧・除外の規則・method-access）が違う。
 
 中身に入れるのは公開してよい値だけである。保存先（ディスクやフォルダ）、ユーザー名、VolumeUUID は
 入れない。採用の規則（threshold-access による区切り）には使わない。
@@ -71,9 +85,14 @@ def _precheck(project, records, mode):
     if ledger.check_method_access_order(records) == []:
         raise ledger.LedgerError("method-access の記録が無い。gkg-run-start は手順4の記録の後に書く。"
                                  "追記しない")
+    cut = ledger.first_threshold_access(records)
+    if cut is not None:
+        raise ledger.LedgerError("threshold-access の記録（seq %d）がある。閾値を決める期間に触れたあとで、"
+                                 "手法を作る期間の GKG の取得を始めない。追記しない" % cut["seq"])
     runs = ledger.check_gkg_runs(records, lambda r, role: ledger.read_target_json(project, r, role))
     modes = [(r["seq"], d["mode"]) for r, d in runs] + [(len(records) + 1, mode)]
     ledger.check_gkg_run_modes(modes)
+    return runs
 
 
 def start(project, mode, code_rel, run_id, filelist_sha256, method_access_seq, trial_days,
@@ -81,7 +100,15 @@ def start(project, mode, code_rel, run_id, filelist_sha256, method_access_seq, t
           runner=subprocess.run):
     """gkg-run-start を 1 件追記する。返り値: (記録, 中身のパス, .ots のパス か None)。"""
     data, records = seal_records.load_checked(project, ots_cmd, runner=runner)
-    _precheck(project, records, mode)
+    runs = _precheck(project, records, mode)
+    if mode == "trial":
+        same = [r["seq"] for r, d in runs if d["mode"] == "trial" and d["run_id"] == run_id]
+        if same:
+            raise ledger.LedgerError("同じ run_id %s の trial の記録（seq %d）が既にある。gkg-run-start は run の"
+                                     "最初の実行で 1 件だけ書き、再開では書かない。追記しない"
+                                     % (run_id, same[0]))
+        if not isinstance(trial_days, (list, tuple)) or not 0 < len(trial_days) <= ledger.TRIAL_DAYS_MAX:
+            raise ledger.LedgerError("trial_days は 1〜%d 日の一覧。追記しない" % ledger.TRIAL_DAYS_MAX)
     code_path, code_sha = seal_acquisition.committed_code_sha256(project, code_rel)
     if run_id != code_sha[:16]:
         raise ledger.LedgerError("run_id %r が、取得のコードの sha256 の先頭 16 桁 %s と違う。追記しない"

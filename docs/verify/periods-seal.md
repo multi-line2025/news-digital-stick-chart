@@ -66,6 +66,7 @@
   - `candidates` には、これに加えて「すべての `candidates` の記録が、最初の `acquisition-start` の記録より前にある」ことを求める。後ろにあれば検証は失敗する（9章）。`acquisition-start` があるなら、その前に `candidates` の記録が1件以上なければならない。無ければ検証は失敗する（T-014）。
   - `threshold-access` は、閾値を決める期間の区画（2020-12-15 以降）の情報を初めて「扱う」直前に、鎖へ追記する記録である。「扱う」の定義は docs/stats/periods.md 8章 (2) に従う。ディスクに書く（プロジェクトと Git の外の一時的な置き場を含む）、画面に表示する、集計する、ログに出すことを指す。メモリの上で受け取り、ディスクに書く前に捨てることは含めない。
   - `method-access`（試運転の手順4の開始。10章）も、区切りに使わない。区切りは `threshold-access` のまま（T-014 のリードの指示）。
+  - `gkg-run-start`（GKG の取得の run の開始。12章。T-031）も、区切りに使わない。
   - `acquisition-start`・`acquisition-result`（試運転の手順3の取得）は、区切りに使わない。8章 (2) は、手順3でファイル一覧の 2020-12-15 以降の行をメモリの上で捨てるなら、手順3は期限に当たらないとしている。また、きっかけの値の一部（共起の網の期間など）は、手順3の後に手法を作る期間のデータを見て決めてよいとしている。そのため、手順3の後に追記したきっかけの値も、最初の `threshold-access` より前なら採用される。
   - `threshold-access` の記録がまだ無いうちは、「採用は保留」とする。仮の候補として、今ある最後の記録を示す。
   - 区切りの後に `periods`・`periods-triggers` を追記することは、封印の仕組みでは拒まない（関門は設けない。監査の所見による）。期限の後の作り直しは、追記したうえで、検証が「採用しない」と表示するだけである。
@@ -597,12 +598,12 @@ J は、予言日 t の判定が読むデータの最後の日を t + J とす�
       - 範囲：作り直しが要る場合（J の最大 > 1件目の `embargo_days`）に限らない。今の本物の記録（J の最大 56）でも、正直な流れで入りうる。例えば、手法を作る期間のデータを見て網の日数を決めて作り直し、そのあと同じ週の年数も決めて作り直す流れ（再現1）や、作り直しのあとに J を言い直す流れ（再現2）である。
       - どの `periods-triggers` と比べるべきか（その版より前の最後の記録か、採用された記録か）は、docs/stats/periods.md 8章 (2) の「記録に追記した値」の読み方で決まる。封印係では決めず、リードが統計係に判断を求めている。
     - **決まるまでの扱い（T-027 の差し戻し1回目の中1 (ii)、T-031 で足した）。** この形の記録を作らないよう、次の書く仕組みと関門で止める。T-027 の時点では `seal_periods.py` に照合が無く、`seal_periods.py` だけでこの形の記録を作れた（T-027 の監査 中1。S1・S2・S5）。その時点の「書く仕組みと関門で止める」という書き方は、`seal_periods.py` については事実でなかった。
-      - `seal_periods.py` も、`threshold-access` の記録がまだ無いとき、2件目以降の版を書く前に照合する（T-031。`ledger.check_periods_version_append`）。`before_deadline` の版なら、`rebuild_triggers` が `periods-triggers` の最後の記録と一致し、既にある `before_deadline` の版とも一致し、J が null か `candidates` の J の最大と等しいこと（`candidates` の記録が無いうちは J は照合しない）。`after_deadline` の版なら、`rebuild_triggers` が `periods-triggers` の最後の記録と一致しないこと。きっかけの値が無い版は `deadline_status` が null であること。通らなければ何も書かない。
-      - `method-access` の関門（`require_method_access`）は、`threshold-access` がまだ無ければ、`periods-triggers` の最後の記録を仮の採用として、`verify.py periods` と同じ規則で `deadline_status` を照合する（T-031。`ledger.check_deadline_statuses(provisional=True)`）。`seal_method.py` の書く仕組みには、この照合を入れていない（関門で止まる）。
+      - `seal_periods.py` も、`threshold-access` の記録がまだ無いとき、2件目以降の版を書く前に照合する（T-031。`ledger.check_periods_version_append`）。`before_deadline` の版なら、`rebuild_triggers` が `periods-triggers` の最後の記録と一致し、既にある `before_deadline` の版とも一致し、J が null か `candidates` の J の最大と等しいこと。`candidates` の記録がまだ無いうちは、J が null でない版は書かない（T-031 の差し戻し1回目の軽4。あとで J の最大が違うと、値を変えられずに行き詰まるため）。`after_deadline` の版は書かない（T-031 の差し戻し1回目の中4。下の代償）。きっかけの値が無い版は `deadline_status` が null であること。通らなければ何も書かない。
+      - `method-access` の関門（`require_method_access`）と書く仕組み（`seal_method.py`。T-031 の差し戻し1回目の軽2）は、`threshold-access` がまだ無ければ、`periods-triggers` の最後の記録を仮の採用として、`verify.py periods` と同じ規則で `deadline_status` を照合する（T-031。`ledger.check_deadline_statuses(provisional=True)`）。関門が止まる状態の記録は、`seal_method.py` も書かない。
       - `seal_triggers.py` は、`threshold-access` の記録がまだ無く、`before_deadline` の `periods` の版があるとき、その版の `rebuild_triggers` と違う値の追記を拒む（`ledger.check_triggers_against_rebuilds`）。同じ値の言い直しは拒まない。`threshold-access` の後の追記は採用されないので、今までどおり拒まない。
       - `seal_access.py` と `threshold-access` の関門（`require_threshold_access`）は、`verify.py periods` と同じ規則で `deadline_status` を照合し（`ledger.check_deadline_statuses`）、通らなければ止まる。書く仕組みを飛ばしてこの形の記録を作っても、閾値を決める期間には進めない。
-      - 代償（T-031 で正確に書き直した。T-027 の監査 軽1）：作り直した `before_deadline` の版が一つでもできた後は、`before_deadline` の申告のままでは、きっかけの値を変えられない（`periods-triggers` も `periods` の版も、その版と同じ値しか書けない）。作り直しが要る場合（J の最大 > 90）は、`method-access` の前に J だけで作り直すので、そのあと網の日数などを `before_deadline` で足すことはできない。この代償は、(i) が決まるまでのものである。
-      - **形の上では、`after_deadline` と申告した版を書けば、値を変えられる。** `after_deadline` の版は、`rebuild_triggers` が採用される `periods-triggers` と違えば照合に通る（S3・S4 の形）。しかし、**after_deadline の申告を、期限の前に使ってはいけない。** docs/stats/periods.md 8章 (2) で、`after_deadline` は期限（最初の `threshold-access`）の後に、オーナーの承認を得て作り直すときの申告で、統計係は期限の後に自分で作り直さない。期限の前にこの申告で値を変えることは、手順に反する。照合は申告と記録が矛盾しないことしか確かめず、期限の前の `after_deadline` を止めない。`verify.py periods` の出力には、各版の申告が並ぶので、期限より前の seq に `after_deadline` の版があれば、第三者はそれを見つけられる。
+      - 代償（T-031 で正確に書き直した。T-027 の監査 軽1）：作り直した `before_deadline` の版が一つでもできた後は、期限（最初の `threshold-access`）の前には、きっかけの値を変えられない（`periods-triggers` も `periods` の版も、その版と同じ値しか書けない）。作り直しが要る場合（J の最大 > 90）は、`method-access` の前に J だけで作り直すので、そのあと網の日数などを足すことはできない。この代償は、(i) が決まるまでのものである。
+      - **after_deadline の申告を、期限の前に使ってはいけない。** docs/stats/periods.md 8章 (2) で、`after_deadline` は期限の後に、オーナーの承認を得て作り直すときの申告で、統計係は期限の後に自分で作り直さない。T-031 の初回までは、期限の前に `after_deadline` と申告した版を書けば、上の代償を避けて値を変えられた（S3・S4、T-031 の監査 中4）。差し戻し1回目で、`seal_periods.py` は期限の前の `after_deadline` の版を書かないようにした。また、`seal_triggers.py` は、`after_deadline` の版（書く仕組みを飛ばして作ったもの）と同じ値の追記も拒む（`ledger.check_triggers_against_rebuilds`。採用されると、その版が「`after_deadline` と申告しているが一致する」になるため）。書く仕組みを飛ばして期限の前に `after_deadline` の版を作った場合は、`verify.py periods` の出力に各版の申告が並ぶので、期限より前の seq に `after_deadline` の版があることを第三者が見つけられる。
       - テスト：`tests/sealer/test_t031.py` の `TestSealPeriodsPrecheck`（S1・S2・S5 が `seal_periods.py` で止まり、飛ばして作っても関門と verify で止まる）・`TestFirstStatusGate`、`tests/sealer/test_t027.py` の `TestDeadlineRepro`（再現1・2 が書く仕組みで止まり、飛ばして作っても `seal_access`・関門・verify で止まる）と、`TestRebuildAfterMethod` の `test_gap_is_stopped_by_writers_and_gate`。
     - **T-027 の初回のコミット（58df044）の説明の訂正。** コミットの説明と、初回のこの節は、未解決の形を「作り直しが二度要る正直な流れ」で「今の本物の記録はこの流れに入らない」と書いた。これは事実より狭い。正しくは上の「範囲」のとおりで、作り直した版のあとに違う値の `periods-triggers` を足せば、J の最大に関わらず入る（T-027 の差し戻し1回目の中2）。コミットの説明は書き換えられないので、ここで訂正する。
   - **照合する時点** は、最初の `method-access` と最初の `threshold-access`（あるものすべて）。J は手順4の前、かつ期限（`threshold-access`）より前に決める（docs/stats/periods.md 8章 (2)）。
@@ -777,11 +778,13 @@ Data: The GDELT Project (https://www.gdeltproject.org/). This project is not aff
 - `ledger_head`・drand の回は、7章の `threshold-access` などと同じ（`check_drand_record`）。`step` は 4。
 - `mode` は `trial` か `official`。
 - `code_path` は相対パスの正規の形、`code_sha256` は 64 桁の16進。`run_id` は `code_sha256` の先頭16桁（収集係の run_id の決め方。gkg.py 5章）。書く仕組みは、取得のコードが HEAD のコミットの中身と同じでなければ書かない（`acquisition-start` と同じ）。
-- `filelist_sha256` は、それより前の `acquisition-result` の `kept_rows_sha256` のどれかと同じ（手順3で封印した一覧を使う）。
+- `filelist_sha256` は、最初の `method-access` より前の、ただ1件の `acquisition-result` の `kept_rows_sha256` と同じ（`ledger.gkg_filelist_sha256`。2件以上あれば、どの一覧かを決められないので書けない）。手順3で封印した一覧だけを使い、試しの run のあとで手順3をやり直した一覧に替えることはできない（T-031 の差し戻し1回目の中1）。
 - `method_access_seq` は、最初の `method-access` の記録の seq。
-- `trial_days`：`trial` なら、日付（YYYY-MM-DD）の狭義に増える空でない一覧で、すべて `periods` の1件目の `method` の区画の中。`official` なら null。
-- `exclusion_rule_seq` は、それより前の記録の seq。`exclusion_rule_record_sha256` は、その記録の行の正規の形（`ledger.canonical_line`。末尾の改行を含めない）の sha256。
-- **順序**：どの `gkg-run-start` も、最初の `method-access` より後にある。`official` の記録は1件だけ（0件は可）。`trial` の記録は、`official` の記録より前にだけある。
+- `trial_days`：`trial` なら、日付（YYYY-MM-DD）の狭義に増える1〜3日の一覧（`ledger.TRIAL_DAYS_MAX`。収集係の `TRIAL_DAYS` の3日と揃える。T-031 の差し戻し1回目の中3）で、すべて `periods` の1件目の `method` の区画の中。`official` なら null。
+- `exclusion_rule_seq` は、最初の `gkg-run-start` より前の記録の seq（`gkg-run-start` 自身や、試しの run のあとの記録は指せない。T-031 の差し戻し1回目の中1）。`exclusion_rule_record_sha256` は、その記録の行の正規の形（`ledger.canonical_line`。末尾の改行を含めない）の sha256。除外の規則の kind が決まったら、その kind の最初の記録であることも照合する（下の「示せないこと」。別のタスク）。
+- **どの run も同じ入力**：すべての `gkg-run-start` で、`filelist_sha256`・`exclusion_rule_seq`・`exclusion_rule_record_sha256`・`method_access_seq` が同じ（`ledger.check_gkg_run_common`）。試しの run を見たあとで、正式な run の入力を選び直せない。
+- **順序**：どの `gkg-run-start` も、最初の `method-access` より後で、最初の `threshold-access` より前にある（閾値を決める期間に触れたあとで、手法を作る期間の GKG の取得を始めない。T-031 の差し戻し1回目の中2。CLAUDE.md の試運転の手順4）。`official` の記録は1件だけ（0件は可）。`trial` の記録は、`official` の記録より前にだけある。`trial` の記録どうしで `run_id` は重ならない（下の「run の単位」）。
+- **run の単位（T-031 の差し戻し1回目の中3）**：`gkg-run-start` は、収集係のマニフェストの run-start の行1件につき1件だけ書く。run の最初の実行（run-start の行を書く実行）で、GKG への要求を送る前に1回だけ書き、同じ run の再開では書かない。正式な run の2回目の実行（1回目は run-start を書いて止まる。src/collector/gkg.py 5章）でも書かない。そのため、試しの run の回数は `trial` の記録の件数と同じになる。同じ run_id の `trial` を2件書こうとすると、書く仕組みも verify も止まる。
 - どれかが成り立たなければ、`verify.py gkg-runs` と `all` は失敗し、書く仕組みは何も書かない。
 
 ### 書く仕組み（収集係が呼ぶ入口）
@@ -794,7 +797,7 @@ rec, rel, ots_path = seal_gkg_run.start(
 ```
 
 - 形は `seal_acquisition.start` と同じで、返り値は（記録、中身のパス、その seq 自身の `.ots` のパス）。drand と ots の通信を使う。
-- `method-access` の記録が無い、`official` が既にある（`trial` も `official` も書けない）、取得のコードがコミットされていない、のどれかなら、drand を取りにいく前に止まる。
+- `method-access` の記録が無い、`threshold-access` の記録がある、`official` が既にある（`trial` も `official` も書けない）、同じ run_id の `trial` が既にある、`trial_days` が1〜3日でない、のどれかなら、drand を取りにいく前に止まる。取得のコードがコミットされていないときと、run_id がその sha256 の先頭16桁でないときも、drand の前に止まる。そのほかの中身の照合（一覧、除外の規則の記録、ほかの run と同じ入力など）は、drand を取ったあと、書く前に行い、通らなければ何も書かない（T-031 の差し戻し1回目の軽5）。
 
 ### 確かめるコマンド
 
@@ -809,6 +812,6 @@ grep -n '"kind":"gkg-run-start"' sealed/ledger.jsonl | cut -d: -f1 || true
 
 ### 示せないこと
 
-- **除外の規則の記録の種類。** `exclusion_rule_seq` が指す記録の `kind` が「除外の規則」の kind であることは、まだ照合しない。除外の規則の kind が決まっていないため（src/collector/themes.py の `EXCLUSION_RULE_KIND`）。決まったら、照合を足す（別のタスク）。
+- **除外の規則の記録の種類。** `exclusion_rule_seq` が指す記録の `kind` が「除外の規則」の kind であることは、まだ照合しない。除外の規則の kind が決まっていないため（src/collector/themes.py の `EXCLUSION_RULE_KIND`）。決まったら、その kind の最初の記録であること（収集係の README 6.5.3 と同じ）を照合する（別のタスク）。それまでは、最初の `gkg-run-start` より前のどの記録でも指せる。
 - **記録に無い run。** `gkg-run-start` を書かずに GKG に要求を送ることは、記録からは検出できない（10章の関門の限界と同じ）。数えられるのは、記録に残した run だけである。
 - **run を始めたあとの経過。** 記録が示すのは、run の開始が drand の回の公開時刻より後（drand の署名を確かめた場合に限る）で、その seq の `.ots` の確定時刻＋2時間より前（ヘッダが本当の鎖にある場合に限る）だったことまでである。run の結果は、収集係のマニフェスト（src/collector/README.md）で扱う。

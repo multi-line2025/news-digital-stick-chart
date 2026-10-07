@@ -21,6 +21,7 @@ check_acquisition_pairs と同じ。
        - acquisition-start：ledger_head、drand、step = 3、fetch（取得のコードのパスと sha256）、
          その前に candidates の記録があること（T-014。check_candidates_order）
        - method-access：ledger_head、drand、step = 4、区画（periods の 1 件目の method の区画）、
+         仮の採用での deadline_status（T-031。ledger.check_deadline_statuses(provisional=True)）、
          その前に candidates と acquisition-result の記録があること（T-014）、
          J とエンバーゴの照合（T-017、T-023。ledger.check_horizon_embargo）
        - gkg-run-start（T-031）：ledger_head、drand、step = 4、中身の 13 個のキーと値
@@ -141,6 +142,11 @@ def check_new(project, data_after, records_after, rec, doc):
         ledger.check_method_access_order(records_after)
         ledger.check_acquisition_pairs(records_after, result_refs(project, records_after))
         _check_j(project, records_after)
+        # T-031 の差し戻し1回目の軽2：method-access の関門と同じ、仮の採用（periods-triggers の
+        # 最後の記録）での deadline_status の照合。関門が止まる状態の記録を書かないため
+        ledger.check_deadline_statuses(records_after,
+                                       lambda r, role: ledger.read_target_json(project, r, role),
+                                       provisional=True)
     else:
         ledger.check_acquisition_pairs(records_after,
                                        result_refs(project, records_after, extra=(rec, doc)))

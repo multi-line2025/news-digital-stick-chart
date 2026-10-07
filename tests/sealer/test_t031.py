@@ -92,20 +92,30 @@ class TestGkgRunStart(GkgCase):
         self.assertNotIn(ledger.GKG_RUN_KIND, ledger.ADOPTED_KINDS)
         self.assertEqual(len(ledger.GKG_RUN_DOC_KEYS), 13)
 
+    def change_code(self):
+        """取得のコードを変えてコミットする（run_id が変わる。2 件目の試しの run のため）。"""
+        with open(os.path.join(self.root, tw.CODE_REL), "a") as f:
+            f.write("# 試しの run のあとで直した\n")
+        self.commit("コードを直した")
+
     def test_two_trials_listed_by_verify(self):
-        """完了条件：試しの run を 2 件書くと、verify が 2 件を並べて表示する。"""
+        """完了条件：試しの run を 2 件書くと、verify が 2 件を並べて表示する。2 件目は、コードを
+        直したあとの別の run（同じ run_id の trial は 2 件書けない。差し戻し1回目の中3）。"""
         self.ready()
+        sha1 = self.code_sha()
         r1, rel1, _o = self.start_run(T0 + 4 * H)
+        self.change_code()
+        sha2 = self.code_sha()
         r2, _rel2, _o = self.start_run(T0 + 5 * H, days=["2015-03-02"])
         self.assertEqual(self.doc_of(rel1)["trial_days"], TRIAL_DAYS)
         self.commit("試しの run")
         for args in (("gkg-runs",), ("all", "--rev", "auto")):
             out = self.verify_ok(*args)
             self.assertIn("試しの run 2 回、正式な run 0 回", out)
-            rid = self.code_sha()[:16]
             self.assertIn("  seq %d  試しの run（trial）  run_id %s  code_sha256 %s（%s）  日 %s"
-                          % (r1["seq"], rid, self.code_sha(), tw.CODE_REL, "、".join(TRIAL_DAYS)), out)
-            self.assertIn("  seq %d  試しの run（trial）  run_id %s" % (r2["seq"], rid), out)
+                          % (r1["seq"], sha1[:16], sha1, tw.CODE_REL, "、".join(TRIAL_DAYS)), out)
+            self.assertIn("  seq %d  試しの run（trial）  run_id %s  code_sha256 %s"
+                          % (r2["seq"], sha2[:16], sha2), out)
             self.assertIn("日 2015-03-02  一覧", out)
             self.assertLess(out.index("seq %d  試しの run" % r1["seq"]),
                             out.index("seq %d  試しの run" % r2["seq"]))
@@ -177,16 +187,147 @@ class TestGkgRunStart(GkgCase):
         self.assert_writer_refuses(lambda: self.start_run(T0 + 4 * H), "HEAD のコミットの中身と違う")
 
     def test_adoption_unchanged(self):
-        """gkg-run-start は採用の区切りにならない（threshold-access のまま）。"""
+        """gkg-run-start は採用の区切りにならない（threshold-access のまま）。差し戻し1回目の中2：
+        threshold-access の後には書けない（書く仕組みは drand の前に止まり、飛ばすと verify で止まる）。"""
         self.ready()
         self.start_run(T0 + 4 * H)
+        self.start_run(T0 + 5 * H, mode="official")
         out = self.verify_ok("adopted")
         self.assertIn("採用は保留（threshold-access の記録が無いため）", out)
-        access, _r, _o = self.write_access(T0 + 5 * H)
-        self.start_run(T0 + 6 * H, mode="official")
+        self.assertIn("acquisition-result・method-access・gkg-run-start は区切りに使わない", out)
+        access, _r, _o = self.write_access(T0 + 6 * H)
         out = self.verify_ok("all")
         self.assertIn("区切り：最初の threshold-access の記録 = seq %d" % access["seq"], out)
         self.assertIn("試しの run 1 回、正式な run 1 回", out)
+
+    def test_probe_b_after_threshold_access_refused(self):
+        """監査の probe31.py の test_b：threshold-access の後の trial・official は、drand の前に止まる。"""
+        self.ready()
+        access, _r, _o = self.write_access(T0 + 4 * H)
+        for mode in ("trial", "official"):
+            self.assert_writer_refuses(
+                lambda: seal_gkg_run.start(self.root, mode, tw.CODE_REL, self.code_sha()[:16], KEPT,
+                                           self.method_rec["seq"],
+                                           TRIAL_DAYS if mode == "trial" else None, 1,
+                                           self.excl()[1], T0 + 5 * H, "ots",
+                                           drand_fetch=t23.t17.NoCall(), runner=tw.FakeOts()),
+                "threshold-access の記録（seq %d）がある" % access["seq"])
+        g = self.raw_run(T0 + 5 * H)
+        self.verify_fails(("gkg-runs", "all"), "gkg-run-start の記録（seq %d）が、最初の threshold-access の"
+                                               "記録（seq %d）より後にある" % (g, access["seq"]))
+
+    def test_probe_a_inputs_cannot_be_reselected(self):
+        """監査の probe31.py の test_a：試しの run のあとで、新しい手順3の一覧や、試しの run の記録を
+        除外の規則として指す正式な run は書けない（差し戻し1回目の中1）。"""
+        self.ready()
+        tr, _r, _o = self.start_run(T0 + 4 * H)
+        s, _r1, _o1 = self.start(T0 + 5 * H)
+        self.result(T0 + 6 * H, s["seq"], kept="d" * 64)
+        trec = [x for x in self.records() if x["seq"] == tr["seq"]][0]
+        tr_sha = hashlib.sha256(ledger.canonical_line(trec)).hexdigest()
+        self.assert_writer_refuses(
+            lambda: self.start_run(T0 + 7 * H, mode="official", filelist_sha256="d" * 64,
+                                   exclusion_rule_seq=tr["seq"], exclusion_rule_record_sha256=tr_sha),
+            "filelist_sha256")
+        self.assert_writer_refuses(
+            lambda: self.start_run(T0 + 7 * H, mode="official", exclusion_rule_seq=tr["seq"],
+                                   exclusion_rule_record_sha256=tr_sha),
+            "最初の gkg-run-start（seq %d）より前の記録の seq でない" % tr["seq"])
+        seq2 = self.excl(2)
+        self.assert_writer_refuses(
+            lambda: self.start_run(T0 + 7 * H, mode="official", exclusion_rule_seq=seq2[0],
+                                   exclusion_rule_record_sha256=seq2[1]),
+            "exclusion_rule_seq 2 が、最初の gkg-run-start（seq %d）の 1 と違う" % tr["seq"])
+        # 正直な流れ（同じ一覧・同じ除外の規則の記録）は止まらない
+        self.start_run(T0 + 7 * H, mode="official")
+        self.verify_ok("gkg-runs")
+
+    def test_filelist_needs_single_result_before_method(self):
+        """最初の method-access より前の acquisition-result が 2 件なら、どの一覧かを決められないので止まる。"""
+        self.seal()
+        self.step3(T0 + H)
+        self.step3(T0 + 2 * H)
+        self.method_rec, _r, _o = self.method(T0 + 4 * H)
+        self.commit("手順4まで")
+        self.assert_writer_refuses(lambda: self.start_run(T0 + 5 * H), "ちょうど 1 件でない")
+
+    def test_probe_c_duplicate_trial_and_days(self):
+        """監査の probe31.py の test_c：同じ run_id の trial の 2 件目と、4 日以上の trial は、drand の前に
+        止まる（差し戻し1回目の中3）。"""
+        self.ready()
+        tr, _r, _o = self.start_run(T0 + 4 * H)
+        nocall = dict(drand_fetch=t23.t17.NoCall())
+        self.assert_writer_refuses(
+            lambda: seal_gkg_run.start(self.root, "trial", tw.CODE_REL, self.code_sha()[:16], KEPT,
+                                       self.method_rec["seq"], TRIAL_DAYS, 1, self.excl()[1],
+                                       T0 + 5 * H, "ots", runner=tw.FakeOts(), **nocall),
+            "同じ run_id %s の trial の記録（seq %d）が既にある" % (self.code_sha()[:16], tr["seq"]))
+        self.change_code()
+        import datetime as _dt
+        d0 = _dt.date(2015, 3, 2)
+        for n in (4, 400):
+            days = [(d0 + _dt.timedelta(days=k)).isoformat() for k in range(n)]
+            self.assert_writer_refuses(
+                lambda: seal_gkg_run.start(self.root, "trial", tw.CODE_REL, self.code_sha()[:16], KEPT,
+                                           self.method_rec["seq"], days, 1, self.excl()[1],
+                                           T0 + 5 * H, "ots", runner=tw.FakeOts(), **nocall),
+                "trial_days は 1〜3 日の一覧")
+        # 書く仕組みを飛ばした場合：同じ run_id の trial と、4 日の trial は verify で止まる
+        self.change_code()
+        g = self.raw_run(T0 + 5 * H, {"trial_days": ["2015-03-02", "2015-03-03", "2015-03-04",
+                                                     "2015-03-05"]})
+        self.verify_fails(("gkg-runs",), "seq %d の gkg-run-start（trial）の trial_days" % g)
+
+    def test_duplicate_trial_run_id_fails_verify(self):
+        self.ready()
+        tr, _r, _o = self.start_run(T0 + 4 * H)
+        g = self.raw_run(T0 + 5 * H)
+        self.verify_fails(("gkg-runs", "all"), "run_id %s が、seq %d と同じ" % (self.code_sha()[:16], tr["seq"]))
+
+    def test_verify_checks_run_id_and_exclusion_position(self):
+        """軽1：verify の側の run_id の照合と、exclusion_rule_seq の位置の照合（書く仕組みを飛ばす）。"""
+        self.ready()
+        g = self.raw_run(T0 + 4 * H, {"run_id": "0" * 16})
+        self.verify_fails(("gkg-runs", "all"), "seq %d の gkg-run-start の run_id が、code_sha256 の先頭" % g)
+
+    def test_verify_checks_exclusion_position(self):
+        self.ready()
+        data = self.ledger_bytes()
+        seq = len(self.records()) + 1
+        # 自分自身の seq を指す（sha256 は合わせようがないので、位置の照合で止まることを見る）
+        g = self.raw_run(T0 + 4 * H, {"exclusion_rule_seq": seq})
+        self.assertEqual(g, seq)
+        self.assertTrue(data)
+        self.verify_fails(("gkg-runs", "all"),
+                          "seq %d の gkg-run-start の exclusion_rule_seq %d が、最初の gkg-run-start（seq %d）"
+                          "より前の記録の seq でない" % (g, g, g))
+
+    def test_precheck_stops_before_drand(self):
+        """軽1：official が既にあるときと、method-access が無いときは、drand を呼ぶ前に止まる。"""
+        self.ready()
+        self.start_run(T0 + 4 * H, mode="official")
+        for mode in ("trial", "official"):
+            self.assert_writer_refuses(
+                lambda: seal_gkg_run.start(self.root, mode, tw.CODE_REL, self.code_sha()[:16], KEPT,
+                                           self.method_rec["seq"],
+                                           TRIAL_DAYS if mode == "trial" else None, 1,
+                                           self.excl()[1], T0 + 5 * H, "ots",
+                                           drand_fetch=t23.t17.NoCall(), runner=tw.FakeOts()),
+                "official")
+
+    def test_honest_flow_passes(self):
+        """正直な流れ：試しの run 2 回（コードを直して）、正式な run 1 回、そのあと threshold-access。"""
+        self.ready()
+        self.start_run(T0 + 4 * H)
+        self.change_code()
+        self.start_run(T0 + 5 * H)
+        self.start_run(T0 + 6 * H, mode="official")
+        self.write_access(T0 + 7 * H)
+        self.commit("記録")
+        out = self.verify_ok("all", "--rev", "auto")
+        self.assertIn("試しの run 2 回、正式な run 1 回", out)
+        self.method_gate()
+        self.threshold_gate()
 
     def test_cli_rejects_unknown_mode_and_abbreviation(self):
         for argv in (["start", "--mode", "other"], ["start", "--mod", "trial"]):
@@ -244,7 +385,7 @@ class TestSealPeriodsPrecheck(t23.JCase):
         """S5：最後の triggers と同じ値の版に after_deadline と申告する。"""
         self.nw_rebuilt()
         self.assert_periods_writer_refuses(["--nwonly", "after_deadline"], T0 + 6 * H,
-                                           "after_deadline の版の rebuild_triggers")
+                                           "deadline_status が after_deadline の版")
         # 書く仕組みを飛ばすと、method-access の関門（仮の採用）・seal_access・関門で止まる
         v = self.raw_periods(["--nwonly", "after_deadline"], T0 + 6 * H)
         msg = "3 件目（seq %d）: after_deadline と申告しているが" % v
@@ -258,15 +399,68 @@ class TestSealPeriodsPrecheck(t23.JCase):
         with self.assertRaisesRegex(ledger.ThresholdAccessRequired, re.escape(msg)):
             self.threshold_gate()
 
-    def test_after_deadline_with_different_values_is_not_refused(self):
-        """after_deadline は、最後の triggers と違う値なら書ける（S3・S4 の形）。この申告を期限の前に
-        使ってはいけないことは、手順書にだけ書いてある（照合では止めない。軽1）。"""
+    def test_after_deadline_before_deadline_refused(self):
+        """差し戻し1回目の中4：期限（threshold-access）の前の after_deadline の版は、値に関わらず
+        書かない（S3・S4、probe31.py の test_e）。期限の後なら今までどおり書ける。"""
         self.nw_rebuilt()
-        self.rebuilt(["--nwonly", "--sw3", "after_deadline"], T0 + 6 * H)
-        self.method_gate()
+        self.assert_periods_writer_refuses(["--nwonly", "--sw3", "after_deadline"], T0 + 6 * H,
+                                           "deadline_status が after_deadline の版")
         self.write_access(T0 + 7 * H)
+        self.seal_triggers(T0 + 8 * H, network_window_days=500, same_week_years=3)
+        self.rebuilt(["--nwonly", "--sw3", "after_deadline"], T0 + 9 * H)
         out = self.verify_ok("periods")
         self.assertIn("deadline_status の申告 after_deadline、記録から決まる値 after_deadline", out)
+
+    def test_probe_e_after_deadline_without_triggers(self):
+        """probe31.py の test_e と probe31b.py：triggers の無いまま after_deadline の版を書く。"""
+        self.seal()
+        self.step3(T0 + H)
+        self.assert_periods_writer_refuses(["--nwonly", "after_deadline"], T0 + 2 * H,
+                                           "deadline_status が after_deadline の版")
+        # 正直な流れ（triggers を足してから before_deadline で作り直す）は止まらない
+        self.seal_triggers(T0 + 3 * H, network_window_days=500)
+        self.rebuilt(["--nwonly", "before_deadline"], T0 + 4 * H)
+        self.method(T0 + 5 * H)
+        self.method_gate()
+
+    def test_triggers_same_as_after_deadline_version_refused(self):
+        """差し戻し1回目の中4：after_deadline の版（書く仕組みを飛ばして作ったもの）と同じ値の
+        periods-triggers は、seal_triggers が拒む。"""
+        self.seal()
+        self.step3(T0 + H)
+        v = self.raw_periods(["--nwonly", "after_deadline"], T0 + 2 * H)
+        self.assert_writer_refuses(
+            lambda: seal_triggers.seal(self.root, {"network_window_days": 500}, T0 + 3 * H, None),
+            "periods の 2 件目（seq %d）が after_deadline で、その rebuild_triggers と" % v)
+
+    def test_probe_d_method_writer_provisional(self):
+        """probe31.py の test_d：仮の採用での deadline_status の照合に通らないとき、seal_method も書かない
+        （差し戻し1回目の軽2）。"""
+        self.seal()
+        self.step3(T0 + H)
+        self.seal_triggers(T0 + 2 * H, network_window_days=500)
+        prec = self.rebuilt(["--nwonly", "before_deadline"], T0 + 3 * H)
+        self.raw_triggers(T0 + 4 * H, network_window_days=600)
+        self.assert_writer_refuses(lambda: self.method(T0 + 5 * H),
+                                   "2 件目（seq %d）: before_deadline と申告しているが" % prec["seq"])
+        # 直す：前の版と同じ値の triggers を足せば、それが仮の採用になり、書ける
+        self.seal_triggers(T0 + 5 * H, network_window_days=500)
+        self.method(T0 + 6 * H)
+        self.method_gate()
+
+    def test_status_without_triggers_refused(self):
+        """軽1：きっかけの値が無いのに deadline_status が null でない版は書かない。"""
+        self.seal()
+        self.assert_periods_writer_refuses(["--stonly", "before_deadline"], T0 + H,
+                                           "きっかけの値が無いのに deadline_status が 'before_deadline'")
+
+    def test_j_version_before_candidates_refused(self):
+        """軽4：candidates の記録がまだ無いうちは、J を持つ版を書かない（あとで J の最大が違うと
+        行き詰まるため）。"""
+        self.seal(with_cand=False)
+        self.seal_triggers(T0 + H, last_read_offset_days=60)
+        self.assert_periods_writer_refuses(["--j60", "before_deadline"], T0 + 2 * H,
+                                           "candidates の記録がまだ無いので")
 
     def test_null_status_with_triggers_refused(self):
         self.seal()
@@ -308,8 +502,10 @@ class TestFirstStatusGate(t23.JCase):
         self.raw_periods(["--j60", "before_deadline"], T0)
         self.add_cand(T0 + H / 2)
         self.step3(T0 + H)
-        self.method(T0 + 3 * H)
         msg = "1 件目: deadline_status が null でない"
+        # T-031 の差し戻し1回目の軽2：seal_method も書かない。飛ばして足す
+        self.assert_writer_refuses(lambda: self.method(T0 + 3 * H), msg)
+        self.add_method(T0 + 3 * H, ROUND)
         with self.assertRaisesRegex(ledger.MethodAccessRequired, msg):
             self.method_gate()
         self.assert_writer_refuses(lambda: self.write_access(T0 + 4 * H), msg)
@@ -333,6 +529,17 @@ class TestDocT031(unittest.TestCase):
         self.assertIn("## 12. GKG の取得の run の開始（gkg-run-start。T-031）", self.text)
         for k in ledger.GKG_RUN_DOC_KEYS:
             self.assertIn("`%s`" % k, self.text)
+
+    def test_resubmission1_statements(self):
+        """差し戻し1回目の中1〜中4・軽2・軽4・軽5 の記述。"""
+        for phrase in ("run の単位（T-031 の差し戻し1回目の中3）", "同じ run の再開では書かない",
+                       "最初の `threshold-access` より前にある", "ただ1件の `acquisition-result`",
+                       "どの run も同じ入力", "その kind の最初の記録であること",
+                       "期限の前の `after_deadline` の版を書かない", "`candidates` の記録がまだ無いうちは",
+                       "書く仕組み（`seal_method.py`。T-031 の差し戻し1回目の軽2）",
+                       "drand を取ったあと、書く前に行い", "`gkg-run-start`（GKG の取得の run の開始。12章。T-031）も、区切りに使わない"):
+            self.assertIn(phrase, self.text)
+        self.assertNotIn("**形の上では、`after_deadline` と申告した版を書けば、値を変えられる。**", self.text)
 
     def test_light1_and_mid1_statements(self):
         self.assertIn("after_deadline の申告を、期限の前に使ってはいけない", self.text)

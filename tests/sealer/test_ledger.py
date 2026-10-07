@@ -875,6 +875,8 @@ if "--nwonly" in sys.argv:      # T-027 の差し戻し1回目（監査の probe
 if "--sw3" in sys.argv:
     trig["same_week_years"] = 3
     status = sys.argv[-1]
+if "--stonly" in sys.argv:      # T-031 の差し戻し1回目（軽1）：きっかけの値が無いのに申告がある
+    status = sys.argv[-1]
 if "--j60" in sys.argv:         # T-031（監査の probe_r1.py の S2 と同じ）
     trig["last_read_offset_days"] = 60
     status = sys.argv[-1]
@@ -1073,6 +1075,8 @@ class TestSealPeriods(SealCase):
         self.seal()
         trec = self.seal_triggers(T0 + H, last_read_offset_days=120)
         self.assertEqual(trec["kind"], ledger.TRIGGERS_KIND)
+        # T-031 の軽4：J を持つ版は candidates の後に書く
+        self.add_cand(T0 + H + H / 2, output=CAND_J120)
         args = ["--j120", "before_deadline"]
         sha = ledger.sha256_hex(seal_periods.run_periods(self.root, args))
         self.seal(args=args, sha=sha, now=T0 + 2 * H)
@@ -1093,17 +1097,18 @@ class TestSealPeriods(SealCase):
         """threshold-access の記録があれば採用が決まる。Pending でも採用は変わらない。"""
         self.seal()
         self.seal_triggers(T0 + H, last_read_offset_days=120)
+        # T-017：threshold-access の前に candidates が要る。T-023：J の最大は triggers の J と同じ 120。
+        # T-031 の軽4：J を持つ版は candidates の後に書くので、candidates を periods の版の前にした
+        self.add_cand(T0 + H + H / 2, output=CAND_J120)
         args = ["--j120", "before_deadline"]
         sha = ledger.sha256_hex(seal_periods.run_periods(self.root, args))
         self.seal(args=args, sha=sha, now=T0 + 2 * H)
-        # T-017：threshold-access の前に candidates が要る。T-023：J の最大は triggers の J と同じ 120
-        self.add_cand(T0 + 2 * H + H / 2, output=CAND_J120)
         self.add_access(T0 + 3 * H, 30_000_000)
         r = run_verify(self.root, "all")
         self.assertEqual(r.returncode, 0, r.stderr.decode())
         text = r.stdout.decode()
         self.assertIn("区切り：最初の threshold-access の記録 = seq 5", text)
-        self.assertIn("periods: 採用 = seq 3（2 件目", text)
+        self.assertIn("periods: 採用 = seq 4（2 件目", text)
         self.assertIn("periods-triggers: 採用 = seq 2（1 件目", text)
         self.assertIn("ヘッダが本当の鎖にあることは、この検査では確かめていない", text)
         self.assertIn("確定時刻との照合は保留", text)
@@ -1293,9 +1298,11 @@ def adoption_lines(text):
 
 
 class TestAuditRepro(SealCase):
-    """seq 1 periods、seq 2 periods-triggers、seq 3 periods、seq 4 candidates、
+    """seq 1 periods、seq 2 candidates、seq 3 periods-triggers、seq 4 periods、
     seq 5 threshold-access、seq 6 periods。
-    どの操作でも、採用は periods = seq 3、periods-triggers = seq 2 のまま。
+    どの操作でも、採用は periods = seq 4、periods-triggers = seq 3 のまま。
+    T-031 の差し戻し1回目（軽4）：J を持つ版は candidates の後に書く決まりになったので、
+    candidates を seq 2 にした。
     T-031：作り直した版は、先に periods-triggers を追記してから書く決まり（seal_periods の書く前の
     照合）になったので、seq 2 と seq 3 の順を入れ替えた。
     T-017：threshold-access の前に candidates が要る（verify access の照合）ので seq 4 に足した。
@@ -1307,11 +1314,11 @@ class TestAuditRepro(SealCase):
 
     def build(self, round_no=ACQ_ROUND):
         self.seal()
+        self.add_cand(T0 + H / 2, output=CAND_J120)   # T-023：J の最大 120。T-031：版より前に
         self.seal_triggers(T0 + H, last_read_offset_days=120)
         j120 = ["--j120", "before_deadline"]
         self.seal(args=j120, sha=ledger.sha256_hex(seal_periods.run_periods(self.root, j120)),
                   now=T0 + 2 * H)
-        self.add_cand(T0 + 2 * H + H / 2, output=CAND_J120)   # T-023：J の最大 120
         self.add_access(T0 + 3 * H, round_no)
         args = ["--j120", "before_deadline"]
         sha = ledger.sha256_hex(seal_periods.run_periods(self.root, args))
@@ -1340,8 +1347,8 @@ class TestAuditRepro(SealCase):
     def assertAdoption(self, out):
         lines = adoption_lines(out)
         self.assertEqual(len(lines), 2, out)
-        self.assertTrue(lines[0].startswith("  periods: 採用 = seq 3（2 件目"), lines)
-        self.assertTrue(lines[1].startswith("  periods-triggers: 採用 = seq 2（1 件目"), lines)
+        self.assertTrue(lines[0].startswith("  periods: 採用 = seq 4（2 件目"), lines)
+        self.assertTrue(lines[1].startswith("  periods-triggers: 採用 = seq 3（1 件目"), lines)
         return lines
 
     def test_baseline_all_pending(self):

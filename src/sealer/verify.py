@@ -35,7 +35,7 @@
 採用の規則（T-007、T-008）
     最初の kind=threshold-access の記録より seq が小さい記録のうち、その種類（periods、
     periods-triggers、candidates）の最後のものを採用する。threshold-access の記録が無いうちは保留。
-    acquisition-start・acquisition-result・method-access は区切りに使わない。
+    acquisition-start・acquisition-result・method-access・gkg-run-start は区切りに使わない。
     時刻（Bitcoin の確定時刻、drand の回の公開時刻）と、Pending かどうかは使わない。
 
 drand の照合の幅（T-008）
@@ -543,7 +543,7 @@ def cmd_candidates(st, _a):
 
 def cmd_adopted(st, _a):
     print("採用の規則：最初の threshold-access の記録より seq が小さい記録のうち、その種類の最後の"
-          "もの。acquisition-start・acquisition-result・method-access は区切りに使わない。時刻（Bitcoin の確定"
+          "もの。acquisition-start・acquisition-result・method-access・gkg-run-start は区切りに使わない。時刻（Bitcoin の確定"
           "時刻、drand の回の公開時刻）と Pending かどうかは使わない。")
     print("candidates は、これに加えて、すべての記録が最初の acquisition-start より前に"
           "なければならない（candidates の検査。後ろにあれば検証は失敗する）。")
