@@ -36,7 +36,8 @@
   .venv/bin/python -B src/stats/counting.py apply <試しの run のマニフェスト> <正式な run のマニフェスト>
           <試しの run の保存先> <正式な run の保存先>
       順番2の当てはめ（封印係が当てはめ直すときに使う）。マニフェストは、git の確かめに通った
-      コミットした版を渡す（通らなければ FAILED と書く）。結果を JSON で出力する。終了コードは
+      コミットした版を渡す（通らなければ FAILED、HEAD にファイルが無ければ EMPTY と書く。
+      それ以外で読めないパスは、確かめに通らないものとして止まる）。結果を JSON で出力する。終了コードは
       decided 0、stopped 1、pending 3。
 """
 
@@ -100,7 +101,8 @@ _CAND = {c[0]: (c[1], c[2]) for c in CANDIDATES}
 # ---------------------------------------------------------------------------
 
 CRITERIA_IDS = ("B1", "B2", "B3", "B4", "B5")
-RECOMMENDED_CRITERION = "B1"      # T-028 差し戻し2回目で B1 に戻した（counting.md 3章 (3)）
+# オーナーへの問いの答えと基準の対応（counting.md 冒頭の表。T-028 差し戻し3回目）
+ANSWER_TO_CRITERION = (("(イ)", "B1"), ("(ウ)", "B2"))
 OFFICIAL_CRITERION = None          # オーナーが決める。決まるまで None（"undecided"）
 B4_SPREAD_LIMIT = Fr(11, 10)       # 1日あたりのテーマの数の、最大と最小の比の上限
 B5_MENTION_LIMIT = Fr(21, 20)      # 言及の回数と文書の数の比の上限
@@ -273,7 +275,7 @@ def _field_by_coverage(summaries):
 
     戻り値 (欄 "V1"/"V2" か None, values)。None は該当なし。
     S の行の数とすべての組の D の和は、翻訳の印の付いた組と X を含む（gkg.py の S は組ごとに
-    分けていないため。docs/stats/counting.md 3章）。
+    分けていないため。docs/stats/counting.md 3章 (1) の基準の表のあとの注）。
     """
     u1 = sum(s["stats"].get(S_UNCOVERED["V1"], 0) for s in summaries)
     u2 = sum(s["stats"].get(S_UNCOVERED["V2"], 0) for s in summaries)
@@ -459,10 +461,9 @@ def _day_rows(entries, rid, mode, need_all):
         sha = e.get("sha256")
         if not isinstance(sha, str) or not _SHA_RE.fullmatch(sha):
             raise CountingError("day の行の sha256 の形が違う（%s）" % d)
-        ff = e.get("failed_files", [])
-        if not isinstance(ff, list):
+        if "failed_files" in e and not isinstance(e["failed_files"], list):
             raise CountingError("day の行の failed_files が一覧でない（%s）" % d)
-        days[d] = {"day": d, "file_name": e["file_name"], "sha256": sha, "failed_files": ff}
+        days[d] = {"day": d, "file_name": e["file_name"], "sha256": sha}
     missing = [d for d in TRIAL_DAYS if d not in days]
     if missing:
         msg = "day の行が無い日がある: %s" % ", ".join(missing)
@@ -475,7 +476,8 @@ def select_trial_input(manifest_bytes):
 
     行の並びで最初の run-start の run_id を R とする（ほかの run は使わない）。
     run-start が無ければ {"status": "no_trial"}。R に run-complete が無ければ
-    {"status": "not_complete", "run_id": R}。終わっていれば、TRIAL_DAYS の各日の day の行がちょうど
+    {"status": "not_complete", "run_id": R, "start_runs": 試しの run の run-start の run_id の種類の数,
+    "day_rows": R の day の行の数}。終わっていれば、TRIAL_DAYS の各日の day の行がちょうど
     一つずつ（ほかの日は無い）、mode が trial、file_name が決まった名前、sha256 が16進64字であること
     （満たさなければ CountingError）を確かめ、{"status": "complete", "mode", "run_id", "days"} を返す。
     """
@@ -485,7 +487,9 @@ def select_trial_input(manifest_bytes):
         return {"status": "no_trial"}
     mine = [e for e in entries if e.get("run_id") == rid]
     if not any(e.get("kind") == "run-complete" for e in mine):
-        return {"status": "not_complete", "run_id": rid}
+        start_runs = len({e.get("run_id") for e in entries if e.get("kind") == "run-start"})
+        day_rows = sum(1 for e in mine if e.get("kind") == "day")
+        return {"status": "not_complete", "run_id": rid, "start_runs": start_runs, "day_rows": day_rows}
     return {"status": "complete", "mode": TRIAL_MODE, "run_id": rid,
             "days": _day_rows(entries, rid, TRIAL_MODE, True)}
 
@@ -511,10 +515,14 @@ def select_official_input(manifest_bytes):
 
 
 def runs_record(trial_manifest, official_manifest):
-    """二つの run の run_id と、3日の failed_files（counting.md 4章 (4) で公開すると約束したもの）。
+    """二つの run の run_id と、3日の failed_files（counting.md 4章 (2) の「出力と記録に入れるもの」）。
 
-    マニフェストの行が読めないときや、まだ無いときは、その部分を None にする（止まるかどうかは
-    decide() が決める。ここは記録だけ）。
+    形：{mode: {"run_id": run_id か None, "failed_files": {日: day の行の failed_files の値} か None}}。
+    - run_id と failed_files が None：その run の run-start が無い（またはマニフェストが読めない）。
+    - failed_files の dict に日が無い：その日の day の行がまだ無い。
+    - 日の値が []：day の行があり、取れなかったファイルが無い。値が None：day の行に failed_files の
+      項目が無い。
+    止まるかどうかは decide() が決める。ここは記録だけ。
     """
     out = {}
     for mode, data in ((TRIAL_MODE, trial_manifest), (OFFICIAL_MODE, official_manifest)):
@@ -578,7 +586,9 @@ def decide(trial_manifest, official_manifest, read_day_file):
       "pending"  入力がまだそろっていない。そろってから同じ手順をもう一度行う
       "stopped"  止まる。新しい版の順番1b へ（counting.md 4章 (3)）
     2段目（正式な run の同じ3日）に進むのは、正式な run の run-start があり、かつ (a) 試しの run の
-    run-start が無いか、(b) R の run-complete が無い（正式な run の開始までに終わらなかった）ときだけ。
+    run-start が一つも無いか、(b) 試しの run の run-start が R の一つだけで、R に day の行が一つも無い
+    ときだけ。R が終わっていないのに、R に day の行があるか、ほかの試しの run の run-start がある
+    ときは止まる。
     ファイルが無い・sha256 が合わない・頭の行が合わない・git の確かめに通らない・trial_run_ids や
     trial_manifest_sha256 が合わない・使える候補が無い、は2段目に進まず止まる。
     """
@@ -629,6 +639,14 @@ def decide(trial_manifest, official_manifest, read_day_file):
     if start is None:
         steps.append({"step": "wait", "reason": trial["status"]})
         return out("pending")
+    # 正式な run が始まっている。2段目に進むのは、試しの run の run-start が一つも無いか、
+    # R に day の行が一つも無く、試しの run の run-start が R の一つだけのとき（T-028 差し戻し3回目 中-3）
+    if trial["status"] == "not_complete":
+        if trial["start_runs"] >= 2:
+            return stop("試しの run の run-start が二つ以上あり、最初の run（R）が正式な run の開始までに"
+                        "終わっていない")
+        if trial["day_rows"] > 0:
+            return stop("最初の試しの run（R）に day の行があるのに、正式な run の開始までに終わっていない")
     steps.append({"step": OFFICIAL_MODE, "reason": "trial_" + trial["status"]})
     try:
         sel = select_official_input(official_manifest)
@@ -685,7 +703,7 @@ def as_record():
         },
         "criteria_ids": list(CRITERIA_IDS),
         "fallback_order": {k: list(v) for k, v in sorted(FALLBACK_ORDER.items())},
-        "recommended_criterion": RECOMMENDED_CRITERION,
+        "answer_to_criterion": [list(x) for x in ANSWER_TO_CRITERION],
         "official_criterion": OFFICIAL_CRITERION,
         "official_criterion_status": official_criterion_status(),
         "trial_days": list(TRIAL_DAYS),
@@ -699,9 +717,11 @@ def as_record():
                      "input; any missing file, sha256 or header mismatch, or no usable candidate -> stopped",
             "wait": "no trial run-start, or R without run-complete, while the official run has not started -> "
                     "pending",
-            "step2": "only if the official run has started and (no trial run-start or R without run-complete): "
-                     "the official run's three day rows; pending until all three exist; any file or check "
-                     "failure -> stopped",
+            "step2": "only if the official run has started and either there is no trial run-start, or the only "
+                     "trial run-start is R's and R has no day row: the official run's three day rows; pending "
+                     "until all three exist; any file or check failure -> stopped",
+            "stop_unfinished": "if the official run has started and R has no run-complete while R has a day row "
+                               "or another trial run-start exists -> stopped",
             "authority": "the sealer's own run of this sealed code on the verified inputs is the result",
             "runs": "both run_ids and the three days' failed_files of both runs are in the output",
         },
@@ -727,17 +747,19 @@ def main(argv=None):
     if len(argv) != 5 or argv[0] != "apply":
         sys.stderr.write("counting: 引数なしか、apply <試しの run のマニフェスト> <正式な run のマニフェスト> "
                          "<試しの run の保存先> <正式な run の保存先>（マニフェストが git の確かめに通らないときは "
-                         "FAILED と書く。ファイルが無ければ空として読む）\n")
+                         "FAILED、HEAD にそのファイルが無いときは EMPTY と書く。読めないパスは止まる）\n")
         return 2
 
     def manifest(path):
         if path == "FAILED":
             return None
+        if path == "EMPTY":
+            return b""
         try:
             with open(path, "rb") as f:
                 return f.read()
-        except FileNotFoundError:
-            return b""
+        except OSError:
+            return None             # ファイルが無い・読めない：止まる（T-028 差し戻し3回目 軽-4）
 
     stores = {TRIAL_MODE: argv[3], OFFICIAL_MODE: argv[4]}
 

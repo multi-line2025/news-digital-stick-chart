@@ -366,7 +366,8 @@ class TestCriteria(unittest.TestCase):
     def test_official_undecided(self):
         self.assertIsNone(counting.OFFICIAL_CRITERION)
         self.assertEqual(counting.official_criterion_status(), "undecided")
-        self.assertIn(counting.RECOMMENDED_CRITERION, counting.CRITERIA_IDS)
+        self.assertFalse(hasattr(counting, "RECOMMENDED_CRITERION"))
+        self.assertEqual(counting.ANSWER_TO_CRITERION, (("(イ)", "B1"), ("(ウ)", "B2")))
 
 
 RID = "0123456789abcdef"
@@ -413,7 +414,8 @@ class TestTrialInputRule(unittest.TestCase):
         # 最初の run が終わっていなければ、あとの完了した run があっても代えない
         m = manifest(trial_rows(RID, counting.TRIAL_DAYS[:1], complete=False)
                      + trial_rows(RID2, counting.TRIAL_DAYS))
-        self.assertEqual(counting.select_trial_input(m), {"status": "not_complete", "run_id": RID})
+        self.assertEqual(counting.select_trial_input(m),
+                         {"status": "not_complete", "run_id": RID, "start_runs": 2, "day_rows": 1})
         m = manifest(trial_rows(RID, counting.TRIAL_DAYS) + trial_rows(RID2, counting.TRIAL_DAYS))
         self.assertEqual(counting.select_trial_input(m)["run_id"], RID)
 
@@ -510,10 +512,45 @@ class TestDecide(unittest.TestCase):
         self.assertEqual((out["status"], out["input_mode"]), ("decided", "trial"))
 
     def test_trial_not_complete(self):
+        """中-3：R が終わらないまま正式な run が始まったとき、2段目に進むのは R に day の行が一つも無く、
+        試しの run の run-start が R の一つだけのときだけ。"""
         tm = manifest(trial_rows(RID, counting.TRIAL_DAYS, complete=False))
         self.assertEqual(self.decide(tm, b"")["status"], "pending")
         out = self.decide(tm, self.om(tm, [RID]))
+        self.assertEqual(out["status"], "stopped")            # R に day の行がある
+        tm0 = manifest(trial_rows(RID, (), complete=False))
+        self.assertEqual(self.decide(tm0, b"")["status"], "pending")
+        out = self.decide(tm0, self.om(tm0, [RID]))
         self.assertEqual((out["status"], out["input_mode"]), ("decided", "official"))
+
+    def test_two_trial_runs_unfinished_stops(self):
+        """中-3：試しの run を二つ行い（A を途中で止め、B で3日を全部作る）、A を終えないまま正式な run を
+        始めても、2段目にはならず止まる。A に day の行が無くても同じ。"""
+        for a_days in (counting.TRIAL_DAYS[:1], ()):
+            tm = manifest(trial_rows(RID, a_days, complete=False) + trial_rows(RID2, counting.TRIAL_DAYS))
+            self.assertEqual(self.decide(tm, b"")["status"], "pending")
+            out = self.decide(tm, self.om(tm, [RID, RID2]))
+            self.assertEqual(out["status"], "stopped", a_days)
+            self.assertIn("二つ以上", out["steps"][-1]["reason"])
+
+    def test_trial_run_ids_shapes(self):
+        """軽-3：trial_run_ids の鍵が無い・一覧でない・2件以上の場合。"""
+        rows = json_rows(self.om(self.tm, [RID]))
+        del rows[0]["trial_run_ids"]
+        self.assertEqual(self.decide(self.tm, manifest(rows))["status"], "stopped")
+        rows[0]["trial_run_ids"] = RID
+        self.assertEqual(self.decide(self.tm, manifest(rows))["status"], "stopped")
+        out = self.decide(self.tm, self.om(self.tm, [RID, RID2]))
+        self.assertEqual((out["status"], out["input_mode"]), ("decided", "trial"))
+        self.assertEqual(self.decide(self.tm, self.om(self.tm, [RID2, RID]))["status"], "stopped")
+        # 試しの run が無く、正式な run の run-start に trial_run_ids の鍵が無い・一覧でない：止まる
+        for bad in (None, "x"):
+            rows = json_rows(self.om(b"", []))
+            if bad is None:
+                del rows[0]["trial_run_ids"]
+            else:
+                rows[0]["trial_run_ids"] = bad
+            self.assertEqual(self.decide(b"", manifest(rows))["status"], "stopped", bad)
 
     def test_no_trial_run(self):
         self.assertEqual(self.decide(b"", b"")["status"], "pending")
@@ -595,6 +632,9 @@ class TestDecide(unittest.TestCase):
         self.assertEqual(out["runs"]["official"]["run_id"], OID)
         self.assertEqual(out["runs"]["official"]["failed_files"]["2015-03-03"], ff["2015-03-03"])
         self.assertEqual(out["runs"]["trial"]["failed_files"]["2015-03-02"], [])
+        # day の行に failed_files の項目が無ければ None（[] と区別する。軽-6）
+        out = counting.decide(self.tm, b"", _reader(files))
+        self.assertIsNone(out["runs"]["trial"]["failed_files"]["2015-03-02"])
         out = counting.decide(b"", b"", _reader(files))
         self.assertEqual(out["runs"]["official"], {"run_id": None, "failed_files": None})
 
@@ -614,15 +654,18 @@ class TestDecide(unittest.TestCase):
                 f.write(self.tm)
             env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
             cmd = [sys.executable, "-B", os.path.join(SRC, "counting.py"), "apply"]
+            # 正式な run のマニフェストのファイルが無いときは止まる（軽-4）。HEAD に無いことは EMPTY で示す
             r = subprocess.run(cmd + [tp, op, ts, os_], capture_output=True, env=env, cwd=PROJECT)
+            self.assertEqual(r.returncode, 1, r.stderr)
+            r = subprocess.run(cmd + [tp, "EMPTY", ts, os_], capture_output=True, env=env, cwd=PROJECT)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertEqual(json.loads(r.stdout), self.decide(self.tm, b""))
-            r = subprocess.run(cmd + ["FAILED", op, ts, os_], capture_output=True, env=env, cwd=PROJECT)
+            r = subprocess.run(cmd + ["FAILED", "EMPTY", ts, os_], capture_output=True, env=env, cwd=PROJECT)
             self.assertEqual(r.returncode, 1)
             tm2 = manifest(trial_rows(RID, counting.TRIAL_DAYS, complete=False))
             with open(tp, "wb") as f:
                 f.write(tm2)
-            r = subprocess.run(cmd + [tp, op, ts, os_], capture_output=True, env=env, cwd=PROJECT)
+            r = subprocess.run(cmd + [tp, "EMPTY", ts, os_], capture_output=True, env=env, cwd=PROJECT)
             self.assertEqual(r.returncode, 3)
 
 
@@ -696,8 +739,21 @@ class TestRecordAndDoc(unittest.TestCase):
     def test_doc_criteria_table(self):
         rows = self._table("criteria")
         self.assertEqual([r[0] for r in rows], ["`%s`" % b for b in counting.CRITERIA_IDS])
-        rec = [r for r in rows if "おすすめ" in r[1]]
-        self.assertEqual([r[0] for r in rec], ["`%s`" % counting.RECOMMENDED_CRITERION])
+        self.assertEqual(len(rows), len(counting.CRITERIA_IDS))
+
+    def test_doc_answer_table_and_no_recommendation(self):
+        """オーナーへの問いは一つで、答えと基準の対応は表だけにある。おすすめは書かない（差し戻し3回目）。"""
+        rows = self._table("answer")
+        self.assertEqual([(r[0], r[1]) for r in rows],
+                         [(a, "`%s`" % b) for a, b in counting.ANSWER_TO_CRITERION])
+        with open(DOC, encoding="utf-8") as f:
+            text = f.read()
+        for word in ("おすすめ", "推奨", "読みA", "読みB"):
+            self.assertNotIn(word, text, word)
+        with open(os.path.join(SRC, "counting.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertNotIn("おすすめ", src)
+        self.assertNotIn("recommend", src.lower())
 
     def test_doc_fallback_table(self):
         """代わりの順の文書の写し（T-028 差し戻し2回目 軽3）。文書のほかの場所に順の写しを置かない。"""
