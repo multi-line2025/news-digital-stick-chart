@@ -294,6 +294,13 @@ class E2ECase(taf.CopyCase):
         taf.git(self.project, "commit", "-q", "-m", "手順3と method-access")
         return rec
 
+    def change_code(self, tag):
+        """入口のスクリプトを写しの中で変えてコミットする（run_id が変わる）。"""
+        p = os.path.join(self.project, "src", "collector", "acquire_gkg.py")
+        with open(p, "ab") as f:
+            f.write(("# %s\n" % tag).encode())
+        taf.git(self.project, "commit", "-q", "-am", tag)
+
     def run_with_root(self, fn, *a, **k):
         """関門が読むルート（ledger.PROJECT_ROOT）を、この中だけ写しに差し替える。"""
         with mock.patch.object(ledger, "PROJECT_ROOT", self.project):
@@ -563,13 +570,6 @@ class TestEndToEndOnFat32(E2ECase):
 class TestSealGkgRun(E2ECase):
     """T-032：試しの run と正式な run の開始を、写しの封印の記録に gkg-run-start として書く。"""
 
-    def change_code(self, tag):
-        """入口のスクリプトを写しの中で変えてコミットする（run_id が変わる）。"""
-        p = os.path.join(self.project, "src", "collector", "acquire_gkg.py")
-        with open(p, "ab") as f:
-            f.write(("# %s\n" % tag).encode())
-        taf.git(self.project, "commit", "-q", "-am", tag)
-
     def test_two_trial_runs_leave_two_records(self):
         self.add_method_access()
         self.acquire(self.gseams(), mode="trial")
@@ -654,6 +654,89 @@ class TestSealGkgRun(E2ECase):
         self.assertEqual(len(runs), 1)
         tm = gkg.read_jsonl(os.path.join(self.project, "data", "manifest", gkg.TRIAL_MANIFEST_NAME))
         self.assertEqual(tm[0]["gkg_run_seq"], runs[0][0]["seq"])
+
+
+class TestSealedRunCheck(E2ECase):
+    """T-032 の差し戻し1回目 中-1（監査の test_forged_row_skips_hook の形）：手で書いた run-start の行を
+    置いても、再開のときに封印の記録と照らして止まり、gkg-run-start を書かずに試しの run は走らない。"""
+
+    def forge_start(self, ref):
+        """gkg-run-start を書く代わりに ref を返す（記録を書かない）形で run-start の行を書き、
+        要求を送る前に止める。返り値なし。"""
+        orig = ag._exec_module
+        n = []
+
+        def exec_module(name, path, source):
+            mod = orig(name, path, source)
+            if name == "gkg" and not n:
+                n.append(1)
+                mod._seal_run_start = lambda *a, **k: dict(ref)
+
+                def stop(*a, **k):
+                    raise mod.RunInterrupted("見本：要求を送る前に止める")
+                mod._run_plan = stop
+            return mod
+        with mock.patch.object(ag, "_exec_module", exec_module):
+            with self.assertRaises(Exception) as cm:
+                self.acquire(self.gseams(), mode="trial")
+        self.assertEqual(type(cm.exception).__name__, "RunInterrupted")
+        self.assertEqual(self.gtransport.calls, [])
+
+    def assert_resume_stops(self, pattern):
+        before = self.gsnapshot()
+        n_runs = len(gkg_run_docs(self.project))
+        s = self.gseams()
+        with self.assertRaises(Exception) as cm:
+            self.acquire(s, mode="trial")
+        self.assertEqual(type(cm.exception).__name__, "GkgError")
+        self.assertRegex(str(cm.exception), pattern)
+        self.assertEqual(self.gtransport.calls, [])
+        self.assertEqual(self.gsnapshot(), before)
+        self.assertEqual(len(gkg_run_docs(self.project)), n_runs)
+
+    def test_forged_row_pointing_at_other_kind(self):
+        self.add_method_access()
+        self.forge_start({"seq": 1, "record_sha256": "0" * 64})       # seq 1 は periods
+        self.assert_resume_stops("gkg-run-start でない")
+
+    def test_forged_row_with_missing_seq(self):
+        self.add_method_access()
+        self.forge_start({"seq": 999, "record_sha256": "0" * 64})
+        self.assert_resume_stops("封印の記録に無い")
+
+    def real_trial_record(self):
+        """本物の試しの run を1回行い（コード A）、その gkg-run-start の記録を返す。"""
+        self.add_method_access()
+        self.acquire(self.gseams(), mode="trial")
+        self.commit_manifest("試しの run A")
+        (r, d), = gkg_run_docs(self.project)
+        return r, d
+
+    def test_forged_row_with_sha_mismatch(self):
+        r, _d = self.real_trial_record()
+        self.change_code("コード B")
+        self.forge_start({"seq": r["seq"], "record_sha256": "0" * 64})
+        self.assert_resume_stops("一致しない")
+
+    def test_forged_row_pointing_at_other_run_id(self):
+        r, _d = self.real_trial_record()
+        self.change_code("コード B")
+        self.forge_start({"seq": r["seq"],
+                          "record_sha256": ledger.sha256_hex(ledger.canonical_line(r))})
+        self.assert_resume_stops("この run")
+
+    def test_honest_resume_after_real_record_passes(self):
+        self.add_method_access()
+        calls = []
+
+        def disk_free(p):
+            calls.append(p)
+            return 100 * 1024 ** 3 if len(calls) == 1 else 0
+        with self.assertRaises(Exception):
+            self.acquire(self.gseams(disk_free=disk_free), mode="trial")
+        out = self.acquire(self.gseams(), mode="trial")
+        self.assertEqual(out["days"], len(self.DAYS))
+        self.assertEqual(len(gkg_run_docs(self.project)), 1)
 
 
 class TestCodeScope(unittest.TestCase):

@@ -352,7 +352,12 @@
     など）、何も書かずに GkgError で止まり、要求は1件も送らない。
     run-start の行には、その記録の seq（gkg_run_seq）と、記録の行の正規の形の sha256
     （gkg_run_record_sha256）を書く。同じ run の再開と、正式な run の2回目の実行では呼ばない。
-    そのため、試しの run の回数は、封印の記録の gkg-run-start（trial）の件数と同じになる。
+    再開のとき（run-start の行が既にあるとき）は、その行の gkg_run_seq の記録を封印の記録から
+    読み、kind が gkg-run-start で、行の sha256 が gkg_run_record_sha256 と同じで、中身の mode と
+    run_id がこの run と同じことを確かめる（check_sealed_run。T-032 の差し戻し1回目 中-1）。
+    無い・合わなければ、要求を送らず、何も書かずに止まる。そのため、このスクリプトで行った
+    試しの run の回数（異なる run_id の数）は、封印の記録の gkg-run-start（trial）の件数と同じに
+    なる。同じ run_id の試しの run は、記録を使い回すので1件と数える。
 
 ------------------------------------------------------------------------
 6. 集計の単位と形（ディスクに書く前に集計する。行単位のデータは保存しない）
@@ -1840,6 +1845,7 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
             if s0.get("trial_run_ids") != trial["trial_run_ids"]:
                 raise GkgError("試しの run の一覧が、正式な run の run-start のあとで変わった")
         check_exclusion_record(root, exclusion_rule, s0)
+        check_sealed_run(root, s0, mode, run_id)
         check_volume_mark(paths, run_id, mode)
         trusted_size = check_log_checkpoint(log_path, mine)
         if disk_free(paths["store"]) < MIN_FREE_DISK_BYTES:
@@ -1885,6 +1891,58 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
         # kill -9 と停電では書けない（5.2章の限界）
         _write_stop(paths, base, log_path, now)
         raise
+
+
+def sealed_run_record(root, seq):
+    """封印の記録 sealed/ledger.jsonl の seq の記録の (行の正規の形のバイト列, kind, 中身)。
+
+    無ければ None。gkg-run-start でなければ中身は None。鎖の検証に通らなければ GkgError。
+    封印係の ledger.py を読む（読むだけ。書かない）。
+    """
+    themes = _load_sibling("themes")
+    ledger = themes._import_ledger()
+    try:
+        data = ledger.read_ledger(os.path.join(root, "sealed", "ledger.jsonl"))
+        rec = next((r for r in ledger.verify_chain(data) if r["seq"] == seq), None)
+        if rec is None:
+            return None
+        doc = (ledger.read_target_json(root, rec, rec["kind"])
+               if rec["kind"] == ledger.GKG_RUN_KIND else None)
+    except ledger.LedgerError as e:
+        raise GkgError("封印の記録を読めない: %s" % e) from None
+    return ledger.canonical_line(rec), rec["kind"], doc
+
+
+GKG_RUN_KIND = "gkg-run-start"      # 封印係の ledger.GKG_RUN_KIND と同じ（テストで照らす）
+
+
+def check_sealed_run(root, s0, mode, run_id):
+    """5.5章（T-032 の差し戻し1回目 中-1）：再開のときに、既にある run-start の行の gkg_run_seq と
+    gkg_run_record_sha256 を封印の記録と照らす。
+
+    その seq の記録があり、kind が gkg-run-start で、行の正規の形の sha256 が
+    gkg_run_record_sha256 と同じで、中身の mode と run_id がこの run と同じでなければ、
+    要求を送らず、何も書かずに止まる（手で書いた run-start の行を置いて、gkg-run-start を書かずに
+    試しの run を走らせる道を塞ぐ）。
+    """
+    seq, sha = s0.get("gkg_run_seq"), s0.get("gkg_run_record_sha256")
+    if (type(seq) is not int or seq < 1 or not isinstance(sha, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", sha)):
+        raise GkgError("run-start の行に、gkg-run-start の記録の seq と sha256 が無いか、形が違う"
+                       "（リードに報告）")
+    got = sealed_run_record(root, seq)
+    if got is None:
+        raise GkgError("run-start の行の gkg_run_seq %d の記録が、封印の記録に無い（リードに報告）" % seq)
+    line, kind, doc = got
+    if kind != GKG_RUN_KIND:
+        raise GkgError("run-start の行の gkg_run_seq %d の記録が gkg-run-start でない（%s。リードに報告）"
+                       % (seq, kind))
+    if hashlib.sha256(line).hexdigest() != sha:
+        raise GkgError("run-start の行の gkg_run_record_sha256 が、封印の記録の seq %d の行と一致しない"
+                       "（リードに報告）" % seq)
+    if not isinstance(doc, dict) or doc.get("mode") != mode or doc.get("run_id") != run_id:
+        raise GkgError("封印の記録の seq %d の gkg-run-start が、この run（%s・%s）のものでない"
+                       "（リードに報告）" % (seq, mode, run_id))
 
 
 def _seal_run_start(start_hook, mode, run_id, trial_days):
@@ -2213,8 +2271,11 @@ def check_existing_day_file(gz, day):
     展開した中身について：check_output_bytes（使ってよい文字だけ・メールアドレスの形が無い）を
     かけ、F の行の attempts の欄が 0〜MAX_ATTEMPTS_PER_FILE の1桁の数字であることを確かめる。
     attempts の欄は same_day_except_attempts で比べないので、ここで形を確かめる。
-    この3つで、ファイルの中で任意のバイトを置ける場所（頭の欄・後ろ・中身）がすべて照らされる
-    （deflate の部分は、展開した中身として照らす）。
+    照らす範囲（T-032 の差し戻し1回目 軽-2）：頭の1〜8バイト目、任意の語を入れられる欄の有無、
+    後ろ、展開した中身（deflate の部分は展開した中身として。最後の8バイトの CRC32 と大きさは
+    展開のときに zlib が確かめる）。頭の9・10バイト目（XFL と OS。圧縮の度合いと書いた OS を示す
+    1バイトずつ）は照らさない。別の圧縮器や OS で書いた正直なファイルも通すためで、この2バイトに
+    は任意の値を置ける（2バイトだけで、語やメールアドレスの形は入らない）。
     """
     if len(gz) < 18 or gz[:8] != _GZIP_FIXED_HEAD:
         raise GkgError("%s の既にある日の集計の gzip の頭が、このコードの書く形でない"

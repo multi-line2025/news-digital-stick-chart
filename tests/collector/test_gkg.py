@@ -518,6 +518,11 @@ class RunCase(unittest.TestCase):
         os.makedirs(self.trial_store)
         self.check_volume = fake_check_volume
         self.sealed_runs = []                # start_hook に渡された値（封印の記録に書いた run）
+        self.fake_records = {}               # 仮の封印の記録 {seq: (行, kind, 中身)}
+        p = mock.patch.object(gkg, "sealed_run_record",
+                              lambda root, seq: self.fake_records.get(seq))
+        p.start()
+        self.addCleanup(p.stop)
         # 除外の規則の封印の記録（鎖の上の記録の読み取りだけを差し替える。照らす規則は本物）
         self.excl = dict(EXCL_REF)
         p = mock.patch.object(gkg, "chain_exclusion_ref", lambda root: dict(EXCL_REF))
@@ -552,7 +557,11 @@ class RunCase(unittest.TestCase):
     def start_hook(self, *, mode, run_id, trial_days):
         """封印の記録に gkg-run-start を書く入口の差し替え（本物は acquire_gkg.make_start_hook）。"""
         self.sealed_runs.append((mode, run_id, trial_days))
-        return {"seq": 20 + len(self.sealed_runs), "record_sha256": "9" * 64}
+        seq = 20 + len(self.sealed_runs)
+        line = json.dumps({"seq": seq, "kind": "gkg-run-start", "mode": mode, "run_id": run_id},
+                          sort_keys=True).encode()
+        self.fake_records[seq] = (line, "gkg-run-start", {"mode": mode, "run_id": run_id})
+        return {"seq": seq, "record_sha256": hashlib.sha256(line).hexdigest()}
 
     def committed_now(self):
         """作業ツリーのマニフェストの全部をコミットした、とみなしたバイト列。"""
@@ -2175,7 +2184,8 @@ class TestT032(RunCase):
         self.assertEqual(seen[0][1:], ([], []))                 # 要求も印のファイルもまだ無い
         self.assertEqual(self.sealed_runs, [("trial", RUN_ID, list(gkg.TRIAL_DAYS)[:len(self.DAYS)])])
         s0 = self.manifest(gkg.TRIAL_MANIFEST_NAME)[0]
-        self.assertEqual((s0["gkg_run_seq"], s0["gkg_run_record_sha256"]), (21, "9" * 64))
+        self.assertEqual((s0["gkg_run_seq"], s0["gkg_run_record_sha256"]),
+                         (21, hashlib.sha256(self.fake_records[21][0]).hexdigest()))
         # 2回目の試しの run（コードが違う）：もう1件
         self.run_once(mode="trial", committed_manifest=None, code_sha256="cd" * 32)
         self.assertEqual([r[:2] for r in self.sealed_runs], [("trial", RUN_ID), ("trial", "cd" * 8)])
@@ -2219,6 +2229,74 @@ class TestT032(RunCase):
                     self.run_once(start_hook=hook)
                 self.assertEqual(self.transport.calls, [])
                 self.assertFalse(os.path.exists(self.manifest_path()))
+
+
+class TestCheckSealedRun(RunCase):
+    """T-032 の差し戻し1回目 中-1：再開のときに、run-start の行の gkg_run_seq を封印の記録と照らす。"""
+
+    def start_then(self, change):
+        self.low_after = 2
+        with self.assertRaises(gkg.RunInterrupted):
+            self.run_gkg()
+        self.low_after = None
+        change()
+
+    def assert_stops(self, pattern):
+        before = sorted(os.listdir(self.store)), self.manifest()
+        with self.assertRaisesRegex(gkg.GkgError, pattern):
+            self.run_once()
+        self.assertEqual(self.transport.calls, [])
+        self.assertEqual((sorted(os.listdir(self.store)), self.manifest()), before)
+
+    def test_constant_matches_sealer(self):
+        sys.path.insert(0, os.path.join(PROJECT, "src", "sealer"))
+        import ledger
+        self.assertEqual(gkg.GKG_RUN_KIND, ledger.GKG_RUN_KIND)
+
+    def test_honest_resume_passes(self):
+        self.start_then(lambda: None)
+        self.run_once()
+
+    def test_missing_record(self):
+        self.start_then(lambda: self.fake_records.pop(21))
+        self.assert_stops("封印の記録に無い")
+
+    def test_other_kind(self):
+        def change():
+            line, _k, doc = self.fake_records[21]
+            self.fake_records[21] = (line, "periods", None)
+        self.start_then(change)
+        self.assert_stops("gkg-run-start でない")
+
+    def test_sha_mismatch(self):
+        def change():
+            line, k, doc = self.fake_records[21]
+            self.fake_records[21] = (line + b" ", k, doc)
+        self.start_then(change)
+        self.assert_stops("一致しない")
+
+    def test_other_run_id_or_mode(self):
+        for doc in ({"mode": "official", "run_id": "cd" * 8}, {"mode": "trial", "run_id": RUN_ID}):
+            with self.subTest(doc=doc):
+                self.tearDown_reset()
+
+                def change(doc=doc):
+                    line, k, _d = self.fake_records[21]
+                    self.fake_records[21] = (line, k, doc)
+                self.start_then(change)
+                self.assert_stops("この run")
+
+    def tearDown_reset(self):
+        shutil.rmtree(self.tmp, True)
+        self.setUp()
+
+    def test_row_without_fields(self):
+        for bad in ({"gkg_run_seq": None}, {"gkg_run_record_sha256": "x"}, {"gkg_run_seq": 0}):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(gkg.GkgError, "形が違う"):
+                    gkg.check_sealed_run(self.root, dict({"gkg_run_seq": 21,
+                                                          "gkg_run_record_sha256": "a" * 64}, **bad),
+                                         "official", RUN_ID)
 
 
 class TestT032Vocab(unittest.TestCase):

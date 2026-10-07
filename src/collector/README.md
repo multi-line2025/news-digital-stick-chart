@@ -164,7 +164,7 @@ mkdir "/Volumes/LACIE SHARE/news-stick-data/gkg-method"
 
 - 取る日は `gkg.TRIAL_DAYS`（2015-03-02・03・04 の3日）に固定。上限は3日で、手法を作る期間の最初の3日だけ。ほかの日は取れない。
 - 書くもの：`/Volumes/LACIE SHARE/news-stick-data/gkg-trial/` と `data/manifest/gdelt-gkg-trial.jsonl`（行に `official: false`、`trial: true`）。
-- 要求を送る前に、封印の記録に `gkg-run-start`（mode が trial）を1件書く（6.5.5）。2回目以降の試しの run も同じく記録に残るので、何回試したかは封印の記録から数えられる。
+- 要求を送る前に、封印の記録に `gkg-run-start`（mode が trial）を1件書く（6.5.5）。2回目以降の試しの run も同じく記録に残るので、何回試したか（異なる run_id の数）は封印の記録から数えられる。
 - **正式な run の判定には数えない。** 正式な run のマニフェスト（`gdelt-gkg-method.jsonl`）には何も書かない。正式な run の run-start がある場合は、試しの run は始まらない（試しの run は正式な run の前にだけ）。
 - 正式な run は、試しの run の3日も含めて全部の日を取り直す。試しの run の集計は、正式な run の結果に使わない。
 - 終了コード 0：3日が終わった。1：関門。3：止まる条件（同じコマンドで再開）。
@@ -258,9 +258,9 @@ env -u GIT_DIR -u GIT_WORK_TREE -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 \
 | 取得の記録の行の形（T-026 軽-4） | 結果の行の `reason` が、このモジュールが書く決まった語（`http_<3桁>`・`http_None`、`network_` と固定の一覧（`gkg.NETWORK_ERROR_NAMES`）の名前、`format_` と決まった語、そのほかの決まった語）でない行、`attempts` が 0〜3 の整数でない行、attempt の行の回数が 1〜3 の整数でない行があれば止まる。偽の行で、人名などの任意の語や数が day の行の `failed_files` に載ることを止める | 決まった語の中から選んだ偽の reason（たとえば `http_404`）は形では見分けられない。6.5.1 で扱う |
 | 再開のたびに、正式な run のマニフェストを全部コミット | 前のコミットより前に書いた行（コミット済みの控え・範囲）を書き換えること | その回に書いた行（止まってから次のコミットまでのあいだ、作業ツリーにだけある day・run-resume の行の控えや範囲）を、コミットの前に書き換えること。たとえば kill -9 のあと、まだコミットしていない day の行の控えを、偽の failed の行を足した取得の記録に合わせて書き直すと、偽の行が使われる。見分けられないので、6.5.1（偽の failed は `failed_files` に載り、第三者が GDELT と照らせる）で扱う。履歴そのものを書き換えること（リモートが無いので、写しを持たない第三者には見えない） |
 | 保存先の一覧（gkg-method・gkg-trial。中-1・中-2） | 決まった名前でないもの（`aside-…` などに名前を変えた日の集計、「.」で始まる名前・フォルダ、リンク）がある。gkg-method に別の run のファイルがある | フォルダの外（同じディスクの別の場所や、別のディスク）へ移したもの。日の集計を書いたあと day の行を書く前に kill -9 し、中身を見てからフォルダの外へ移すことは止められない（そのあとの選び出しは、上の「信用しない範囲」と、6.5.1 の failed の一覧で扱う） |
-| 試しの run の照合（中-2） | 試しの run のマニフェストに載っていない run のファイルがある。載っている run の取得の記録が、無い・控えと合わない | 試しの run のファイルを全部フォルダの外へ移し、マニフェストからも行を消すこと（コミットの前なら見分けられない） |
+| 試しの run の照合（中-2・T-032） | 試しの run のマニフェストに載っていない run のファイルがある。載っている run の取得の記録が、無い・控えと合わない。再開のときに、run-start の行の `gkg_run_seq` の記録が無い・合わない（6.5.5） | 試しの run のファイルを全部フォルダの外へ移し、コミットの前にマニフェストの行も消すことは、手元の検査では見分けられない。ただし T-032 のあとは、その run の `gkg-run-start`（trial）の記録が封印の記録に残るので、記録の件数（異なる run_id の数）と、試しの run のマニフェストの run-start の行の数の食い違いとして、第三者が見つけられる（6.5.5 の第三者の照らし方の3） |
 | ディスクの印（`gkg-<mode>-<run_id>-volume-mark`。オーナーの決定で、値もハッシュも記録しない） | 印のファイルが無い（印を作っていないディスクをつないだ）・形が違う・リンク | **決めた形（16進64字と改行）の値なら、どんな値でも通る**。照らす相手を公開される場所に置けないため。違うディスクをつないだ場合に主に止めるのは、取得の記録の控え（記録が無い・違うので合わない）の方である |
-| 既にある日の集計をそのまま使う前の検査（T-030 軽-A・T-032。`gkg.check_existing_day_file`） | ファイルのバイト列について：gzip の頭がこのコードの書く形でない（FEXTRA・FNAME・FCOMMENT などの欄がある、時刻が 0 でない）、gzip の部分の後ろに別の部分かバイトがある。展開した中身について：使ってよい文字の外の文字やメールアドレスの形がある、F の行の attempts の欄が 0〜3 の1桁の数字でない。どれも、day の行を書かずに止まる | attempts の欄を 0〜3 の範囲で書き換えること（比べない欄なので見分けられない。day の行の `failed_files` の `attempts` は今回の取り直しの数で、照らす相手にならない） |
+| 既にある日の集計をそのまま使う前の検査（T-030 軽-A・T-032。`gkg.check_existing_day_file`） | ファイルのバイト列について：gzip の頭がこのコードの書く形でない（FEXTRA・FNAME・FCOMMENT などの欄がある、時刻が 0 でない）、gzip の部分の後ろに別の部分かバイトがある。展開した中身について：使ってよい文字の外の文字やメールアドレスの形がある、F の行の attempts の欄が 0〜3 の1桁の数字でない。どれも、day の行を書かずに止まる | attempts の欄を 0〜3 の範囲で書き換えること（比べない欄なので見分けられない。day の行の `failed_files` の `attempts` は今回の取り直しの数で、照らす相手にならない）。gzip の頭の9・10バイト目（XFL・OS。1バイトずつ）は照らさない（別の圧縮器や OS で書いた正直なファイルも通すため）ので、この2バイトには任意の値を置ける（語やメールアドレスの形は入らない） |
 | 除外の規則の封印の記録（5.3章） | 鎖に除外の規則の記録が無い・違うのに取得を始めること（`run_gkg` を直接呼んでも止まる） | 記録の中身（どの規則を封印したか）の照合は、封印係の仕組みで行う |
 
 - VolumeUUID は、マニフェスト・取得の記録・日の集計・ログのどこにも書かない（オーナーの決定「記録に残さず、公開もしない」）。ディスクの形式（msdos でなければ止まる）は diskutil で確かめるが、形式も記録には書かない。
@@ -271,19 +271,6 @@ env -u GIT_DIR -u GIT_WORK_TREE -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 \
 - `exclusion_rule_record_sha256` は、その記録の行の**正規の形のバイト列（`ledger.canonical_line`：キーを並べ替え、区切りに空白を入れない UTF-8 の JSON。末尾の改行を含めない）の sha256** である。記録の行は正規の形で書かれているので、`sealed/ledger.jsonl` のその行のバイト列（改行を除く）の sha256 と同じになる。
 - 確かめ方：`sealed/ledger.jsonl` の seq がその値の行を取り出し、改行を除いて sha256 を計算し、マニフェストの値と比べる。その行の kind が `stats-order1` であること、ほかに同じ kind の行が無いことも確かめる。区分表のマニフェストの試行の行と結果の行にも、同じ2つの値を書く。
 
-#### 6.5.5 run の開始の封印の記録（gkg-run-start。T-032）
-
-- 試しの run と正式な run のどちらも、run の最初の実行（マニフェストに run-start の行を書く実行）で、run-start の行を書く前・印のファイルを書く前・GKG に要求を送る前に、封印係の `seal_gkg_run.start`（`src/sealer/seal_gkg_run.py`。`docs/verify/periods-seal.md` 12章）で、封印の記録 `sealed/ledger.jsonl` に `gkg-run-start` を1件書く。中身は、mode・run_id・取得のコードのパスと sha256・ファイル一覧の sha256・method-access の seq・試しの run の日（正式な run は null）・除外の規則の記録（`stats-order1`）の seq と sha256・drand・ledger_head だけ（保存先・ユーザー名・VolumeUUID は入れない）。
-- 書くときに、drand（`api.drand.sh` ほか）と OpenTimestamps のカレンダーに通信する（3章の表と同じ宛先）。書けなければ（封印係の関門で止まった・通信の失敗など）、マニフェスト・印のファイル・取得の記録のどれも書かずに止まり、GKG への要求は1件も送らない。
-- 同じ run の再開と、正式な run の2回目の実行（1回目は run-start を書いて止まる）では書かない。そのため、**試しの run の回数は、封印の記録の `gkg-run-start`（mode が trial）の件数と同じ** になる。記録を書いたあと run-start の行を書く前に止まった場合は、次の実行で、同じ mode・run_id の記録を新しく書かずに使う（同じ run の記録は1件のまま）。
-- マニフェストの run-start の行（`gdelt-gkg-trial.jsonl`・`gdelt-gkg-method.jsonl`）には、その記録の seq（`gkg_run_seq`）と、記録の行の正規の形の sha256（`gkg_run_record_sha256`）を書く。
-- **第三者の照らし方**（verify 側の照合は封印係の別のタスクで足す）
-  1. マニフェストの各 run-start の行について、`sealed/ledger.jsonl` の seq が `gkg_run_seq` の行を取り出し、改行を除いたバイト列の sha256 が `gkg_run_record_sha256` と同じことを確かめる。その行の kind が `gkg-run-start` であること。
-  2. その記録の中身（`sealed/gkg-run-start-<sha256>.json`）の `mode`・`run_id`・`code_sha256`・`filelist_sha256`・`method_access_seq`・`exclusion_rule_seq`・`exclusion_rule_record_sha256` が、run-start の行の同じ名前の値（mode は行の `mode`）と同じこと。試しの run なら `trial_days` が行の `trial_days` と同じこと。
-  3. **試しの run の回数と入力**：`verify.py gkg-runs` が数える trial の記録の件数が、試しの run のマニフェストの run-start の行の数と同じで、各 run_id が1対1に対応すること。正式な run の run-start の行の `trial_run_ids` が、official の記録より前の trial の記録の run_id の一覧と同じこと。一覧に無い試しの run（記録だけあって行が無い、または行だけあって記録が無い）は、隠した試しの run か、手順を飛ばした跡である。
-  4. 各 run の `code_sha256` を、その記録を含むコミットの中の `src/collector/acquire_gkg.py` と照らす。
-- 示せないこと：`gkg-run-start` を書かずに GKG に要求を送ること（このスクリプトを使わない取得）は、記録からは検出できない（封印係の 12章の「記録に無い run」）。
-
 #### 6.5.4 日の集計の形（版3。T-035）
 
 - 頭の行（タブ区切り）：`# gkg-day 3 <日> <mode>`。
@@ -291,6 +278,24 @@ env -u GIT_DIR -u GIT_WORK_TREE -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 \
 - S の行：`docs_without_any_theme`（V1 にも V2 にもテーマが一つも付かない文書の数）を足した。`docs_without_v1_theme`・`docs_without_v2_theme` は前のまま。形の合わない名前しか付かない欄は、一つも付かない欄と同じに数える。`docs_without_any_theme` は、ほかの2つの値のどちらよりも大きくならない。**S の行は、値が 0 の名前を書かない**（T-035 の監査 軽-2）。読む側は、無い名前を 0 と読む。
 - 名前の取り出し方：V1THEMES は「;」で区切った各部分、V2ENHANCEDTHEMES は「;」で区切った各ブロックの最初の「,」より前（文中の位置の数を捨てる）。どちらも英大文字で始まり英大文字・数字・下線だけの名前（160字まで）だけを数える。名前の辞書はテーマ・国・言語・ENG の語で別々にしてあり（T-032。T-035 の監査 中-1）、同じプロセスで先に言語の符号などを見ても、テーマの数は変わらない。同じ文書の同じ欄に同じ名前が2回あっても、文書の数は1回と数える。同じテーマかどうかは、取り出した名前の文字列が完全に一致するかで決める。
 - 限界：V1 と V2 で同じテーマに違う名前が付いている場合は、別々のテーマとして数えられ、`v1_or_v2_docs` で1つにまとまらない。名前の対応表は使わない。
+
+#### 6.5.5 run の開始の封印の記録（gkg-run-start。T-032）
+
+- 試しの run と正式な run のどちらも、run の最初の実行（マニフェストに run-start の行を書く実行）で、run-start の行を書く前・印のファイルを書く前・GKG に要求を送る前に、封印係の `seal_gkg_run.start`（`src/sealer/seal_gkg_run.py`。`docs/verify/periods-seal.md` 12章）で、封印の記録 `sealed/ledger.jsonl` に `gkg-run-start` を1件書く。中身は、mode・run_id・取得のコードのパスと sha256・ファイル一覧の sha256・method-access の seq・試しの run の日（正式な run は null）・除外の規則の記録（`stats-order1`）の seq と sha256・drand・ledger_head だけ（保存先・ユーザー名・VolumeUUID は入れない）。
+- 書くときに、drand（`api.drand.sh` ほか）と OpenTimestamps のカレンダーに通信する（3章の表と同じ宛先）。書けなければ（封印係の関門で止まった・通信の失敗など）、マニフェスト・印のファイル・取得の記録のどれも書かずに止まり、GKG への要求は1件も送らない。
+- 同じ run の再開と、正式な run の2回目の実行（1回目は run-start を書いて止まる）では書かない。記録を書いたあと run-start の行を書く前に止まった場合は、次の実行で、同じ mode・run_id の記録を新しく書かずに使う。
+- **再開のときの照合**（T-032 の差し戻し1回目 中-1）：run-start の行が既にあるとき（再開・正式な run の2回目の実行）は、その行の `gkg_run_seq` の記録を封印の記録から読み、kind が `gkg-run-start` で、行の正規の形の sha256 が `gkg_run_record_sha256` と同じで、中身の mode と run_id がこの run と同じことを確かめる。無い・合わなければ、要求を送らず、何も書かずに止まる。手で書いた run-start の行を置いて、記録を書かずに試しの run を走らせる道は、ここで止まる。
+- そのため、**このスクリプトで行った試しの run の回数（異なる run_id の数）は、封印の記録の `gkg-run-start`（mode が trial）の件数と同じ** になる。同じ run_id で試しの run をやり直しても（記録を書いたあとに止まった run・マニフェストの行を消してから同じコードで走らせた run）、記録を使い回すので1件と数える。同じ run_id の run は同じコードと同じ入力なので、入力を選び直す余地にはならない。
+- マニフェストの run-start の行（`gdelt-gkg-trial.jsonl`・`gdelt-gkg-method.jsonl`）には、その記録の seq（`gkg_run_seq`）と、記録の行の正規の形の sha256（`gkg_run_record_sha256`）を書く。
+- **第三者の照らし方**（verify 側の照合は封印係の別のタスクで足す）
+  1. マニフェストの各 run-start の行について、`sealed/ledger.jsonl` の seq が `gkg_run_seq` の行を取り出し、改行を除いたバイト列の sha256 が `gkg_run_record_sha256` と同じことを確かめる。その行の kind が `gkg-run-start` であること。
+  2. その記録の中身（`sealed/gkg-run-start-<sha256>.json`）の `mode`・`run_id`・`code_sha256`・`filelist_sha256`・`method_access_seq`・`exclusion_rule_seq`・`exclusion_rule_record_sha256` が、run-start の行の同じ名前の値（mode は行の `mode`）と同じこと。試しの run なら `trial_days` が行の `trial_days` と同じこと。
+  3. **試しの run の回数と入力**：`verify.py gkg-runs` が数える trial の記録の件数が、試しの run のマニフェストの run-start の行の異なる run_id の数と同じで、各 run_id が1対1に対応すること（同じ run_id の試しの run は記録を使い回すので、1件と数える）。正式な run の run-start の行の `trial_run_ids` が、official の記録より前の trial の記録の run_id の一覧と同じこと。一覧に無い試しの run（記録だけあって行が無い、または行だけあって記録が無い）は、隠した試しの run か、手順を飛ばした跡である。
+  4. 各 run の `code_sha256` を、その記録を含むコミットの中の `src/collector/acquire_gkg.py` と照らす。
+- **示せないこと**（照らしたあとに残る限界）
+  - このスクリプトを使わない取得（コードを変えて照合を外して動かす・別のプログラムで GKG を取る）は、記録からは検出できない（封印係の 12章の「記録に無い run」）。照らせるのは、このスクリプトを通した run だけである。
+  - 同じ run_id で試しの run をやり直した回数は、記録の件数には出ない（上のとおり1件と数える）。やり直したことは、試しの run のマニフェストの行（コミットしたもの）と、保存先の取得の記録・日の集計からしか分からない。
+  - 試しの run の結果を見たあとで、別の run_id（コードを変えたもの）で取り直すことは止めない。ただし、そのたびに記録が1件増え、記録の件数（異なる run_id の数）として数えられる。
 
 ### 6.6 本番の規模とメモリ
 
@@ -334,6 +339,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/collector -v
 - T-026 差し戻し1回目：`test_gkg.py` の `TestT026Round2`（reason・attempts の形。監査の probe_c の偽の語で止まること）、`TestChangedResultOnHonestResume`（監査の probe_b4。取り直しで結果が変わると止まり続け、日の集計を保存先の外へ移すと続けられること）。
 - T-030：`test_gkg.py` の `TestT030`（既にある日の集計の検査、network_ の名前の固定）。
 - T-035：`test_gkg.py` の `TestT035`（V1 と V2 で同じ名前・違う名前・片方だけ・同じ文書で両方、`docs_without_any_theme`、頭の行の版3）。
+- T-032 差し戻し1回目：`test_acquire_gkg.py` の `TestSealedRunCheck`（手で書いた run-start の行、seq の欠け、sha256 の食い違い、別の run_id・別の kind の記録を指す行で、再開が要求0件で止まること）、`test_gkg.py` の `TestCheckSealedRun`。
 - T-032：`test_gkg.py` の `TestT032`（start_hook の呼び方、書けなければ要求0件、vocab の分け方、日の集計のファイルのバイト列の検査、T-035 の軽-1）。`test_acquire_gkg.py` の `TestSealGkgRun`（一時の写しの封印の記録に、試しの run 2回で2件、正式な run で1件。書けなければ要求0件）。
 - テストは、本物の `/Volumes/LACIE SHARE` を使わない。保存先のディスクは一時的なディレクトリで置き換え、マウントの検査だけを差し替える（本物の検査は `TestVolume` と、下の FAT32 のテストで確かめる）。
 

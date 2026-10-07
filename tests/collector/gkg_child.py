@@ -18,11 +18,14 @@
 
 import base64
 import datetime
+import hashlib
 import json
 import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+FAKE_RUN_LINE = b'{"kind":"gkg-run-start","seq":21}'
+FAKE_RUN_SHA = hashlib.sha256(FAKE_RUN_LINE).hexdigest()
 sys.path.insert(0, HERE)
 
 import filelist_child as fc  # noqa: E402  （見張りの部品。変異のモジュールもここで読み込む）
@@ -85,8 +88,11 @@ def main():
         def check_volume(v):
             return os.lstat(v).st_dev        # 一時的なディレクトリはマウント先でないため
 
-        # 鎖の上の除外の規則の記録の読み取りだけを差し替える（照らす規則は本物）
+        # 鎖の上の除外の規則の記録と gkg-run-start の記録の読み取りだけを差し替える（照らす規則は本物）
         gkg.chain_exclusion_ref = lambda root: {"seq": 7, "record_sha256": "e" * 64}
+        gkg.sealed_run_record = lambda root, seq: (
+            (FAKE_RUN_LINE, "gkg-run-start", {"mode": "official", "run_id": cfg["code_sha"][:16]})
+            if seq == 21 else None)
 
         def run(committed):
             return gkg.run_gkg(
@@ -96,7 +102,7 @@ def main():
                 committed_manifest=committed, committed_trial_manifest=b"",
                 check_volume=check_volume,
                 exclusion_rule={"seq": 7, "record_sha256": "e" * 64},
-                start_hook=lambda **k: {"seq": 21, "record_sha256": "9" * 64},
+                start_hook=lambda **k: {"seq": 21, "record_sha256": FAKE_RUN_SHA},
                 transport=transport, sleep=sleep, clock=lambda: clock[0], now=lambda: now,
                 log=report["logs"].append, disk_free=lambda p: 100 * 1024 ** 3)
 
