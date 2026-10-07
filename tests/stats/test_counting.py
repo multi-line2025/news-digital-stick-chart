@@ -847,12 +847,76 @@ class TestOrder2Record(unittest.TestCase):
             with self.assertRaises(ValueError):
                 counting.select_order2_record(bad)
 
+    def test_order3_may_seal_checks_input(self):
+        """T-039 軽-4：order3_may_seal() は入力の形を確かめる。"""
+        for bad in ({"seq": 1, "status": "pending", "stop_kind": None},
+                    {"seq": 1, "status": "stopped", "stop_kind": None},
+                    {"seq": "1", "status": "decided", "stop_kind": None},
+                    {"seq": 1, "status": "decided", "stop_kind": "b"},
+                    {"seq": 1, "status": "done", "stop_kind": None},
+                    ["not", "a", "dict"]):
+            with self.assertRaises(ValueError, msg=bad):
+                counting.order3_may_seal(bad)
+        self.assertTrue(counting.order3_may_seal({"seq": 1, "status": "decided", "stop_kind": None}))
+        self.assertTrue(counting.order3_may_seal({"seq": 1, "status": "stopped", "stop_kind": "c"}))
+
     def test_record_rule_in_definition(self):
         rec = counting.as_record()
         self.assertIn("smallest seq", rec["order2_record_rule"])
         self.assertIn("exception (a)", rec["order2_record_rule"])
         self.assertEqual(rec["decision_phrases"], [list(x) for x in counting.DECISION_PHRASES])
         self.assertEqual(rec["owner_approval_1b"], counting.OWNER_APPROVAL_1B)
+        self.assertIn("largest seq", rec["order3_gate"])
+        self.assertIn("rechecks the timing condition", rec["order3_gate"])
+        self.assertIn("not part of what the owner approved", rec["outside_owner_approval"])
+
+
+def rec2(seq, status, ref, stop_kind=None):
+    return {"seq": seq, "status": status, "stop_kind": stop_kind, "ref_1b_seq": ref}
+
+
+class TestOrder3Gate(unittest.TestCase):
+    """T-039：順番3の関門（T-038 の監査の中-1・中-2）。"""
+
+    def test_normal(self):
+        g = counting.order3_gate([3], [rec2(8, "pending", 3), rec2(9, "decided", 3)], True)
+        self.assertEqual((g["may_seal"], g["ref_1b_seq"], g["chosen"]["seq"]), (True, 3, 9))
+
+    def test_timing_found_later(self):
+        """中-1：順番2は決まった記録でも、順番3の時点で (a) の破れが判明すれば止まる。"""
+        g = counting.order3_gate([3], [rec2(9, "decided", 3)], False)
+        self.assertFalse(g["may_seal"])
+        self.assertIn("(a)", g["reason"])
+
+    def test_a_record_with_larger_seq_blocks(self):
+        """中-1：(a) で止まった記録が、seq の小さい決まった記録のあとにあっても止まる。"""
+        g = counting.order3_gate([3], [rec2(9, "decided", 3), rec2(12, "stopped", 3, "a")], True)
+        self.assertFalse(g["may_seal"])
+
+    def test_reference_is_largest_1b(self):
+        """中-2：順番2のあとに順番1b の新しい版が封印されると、参照する1b はそちらになり、その1b に対する
+        順番2の記録が無いので止まる。古い1b に対する記録は数えない。"""
+        recs = [rec2(9, "decided", 3)]
+        g = counting.order3_gate([3, 15], recs, True)
+        self.assertEqual((g["may_seal"], g["ref_1b_seq"]), (False, 15))
+        g = counting.order3_gate([15, 3], recs + [rec2(20, "stopped", 15, "b")], True)
+        self.assertEqual((g["may_seal"], g["chosen"]["seq"]), (True, 20))
+        # 古い1b に対する (a) の記録は、新しい1b の判断に入れない
+        g = counting.order3_gate([3, 15], [rec2(9, "stopped", 3, "a"), rec2(20, "decided", 15)], True)
+        self.assertTrue(g["may_seal"])
+
+    def test_no_records_or_no_1b(self):
+        self.assertFalse(counting.order3_gate([3], [], True)["may_seal"])
+        self.assertFalse(counting.order3_gate([3], [rec2(8, "pending", 3)], True)["may_seal"])
+        self.assertFalse(counting.order3_gate([], [rec2(9, "decided", 3)], True)["may_seal"])
+
+    def test_bad_inputs(self):
+        for args in (([3, 3], [], True), (["3"], [], True), ([3], [], "yes"), ([3], "x", True),
+                     ([3], [{"seq": 9, "status": "decided", "stop_kind": None}], True),
+                     ([3], [rec2(9, "decided", "3")], True),
+                     ([3], [rec2(9, "stopped", 3, "z")], True)):
+            with self.assertRaises(ValueError, msg=args):
+                counting.order3_gate(*args)
 
 
 class TestApproval1b(unittest.TestCase):
@@ -884,7 +948,10 @@ class TestApproval1b(unittest.TestCase):
         other = "x\n%s\n## 別の節\n%s\n" % (a["heading"], a["line"])          # 別の節の中
         twice = ok + a["line"] + "\n"                                              # 2つある
         no_head = "x\n%s\n" % a["line"]
-        for t in (other, twice, no_head):
+        # 見出しが2つある（承認の行の直前の見出しは合っていても、見出しがファイルの中で1つでない。T-039 軽-1）
+        two_heads = "x\n%s\nq\n%s\n%s\n" % (a["heading"], a["heading"], a["line"])
+        two_heads_apart = "%s\nq\n## 別\n%s\n%s\n" % (a["heading"], a["heading"], a["line"])
+        for t in (other, twice, no_head, two_heads, two_heads_apart):
             self.assertFalse(counting.approval_line_ok(t))
 
 

@@ -480,13 +480,10 @@ def select_order2_record(records):
     seen = set()
     chosen = None
     for r in records:
-        if r.get("status") not in ORDER2_STATUSES:
-            raise ValueError("順番2の記録の status が決まった値でない")
-        if r["status"] == "stopped" and r.get("stop_kind") not in ORDER2_STOP_KINDS:
-            raise ValueError("止まった順番2の記録の stop_kind が決まった値でない")
-        seq = r.get("seq")
-        if type(seq) is not int or seq in seen:
-            raise ValueError("順番2の記録の seq が整数でないか、重なっている")
+        _check_order2_record(r)
+        seq = r["seq"]
+        if seq in seen:
+            raise ValueError("順番2の記録の seq が重なっている")
         seen.add(seq)
         if r["status"] == "pending":
             continue
@@ -495,15 +492,81 @@ def select_order2_record(records):
     return chosen
 
 
+def _check_order2_record(r):
+    """順番2の記録の形（seq は整数、status は決まった値、stopped なら stop_kind は (a)(b)(c) のどれか、
+    それ以外なら stop_kind は None）。合わなければ ValueError。"""
+    if not isinstance(r, dict):
+        raise ValueError("順番2の記録が dict でない")
+    if type(r.get("seq")) is not int:
+        raise ValueError("順番2の記録の seq が整数でない")
+    if r.get("status") not in ORDER2_STATUSES:
+        raise ValueError("順番2の記録の status が決まった値でない")
+    if r["status"] == "stopped":
+        if r.get("stop_kind") not in ORDER2_STOP_KINDS:
+            raise ValueError("止まった順番2の記録の stop_kind が決まった値でない")
+    elif r.get("stop_kind") is not None:
+        raise ValueError("止まっていない順番2の記録に stop_kind がある")
+
+
 def order3_may_seal(chosen):
-    """select_order2_record() の結果で順番3を封印してよいか。
+    """select_order2_record() の結果で順番3を封印してよいか（入力の形も確かめる。T-039 軽-4）。
 
     記録が無い（None）とき、(a)（時機の条件を満たさない）で止まった記録のときは False（順番3を封印せず、
     0件ならリードに報告、(a) ならオーナーが扱いを決める）。それ以外（決まった記録、(b)・(c) で止まった記録）は True。
+    pending の記録は select_order2_record() が選ばないので、渡されたら ValueError。
+    順番3の関門としては、これだけでなく order3_gate() を使う（あとから判明した (a) と、参照する順番1b）。
     """
     if chosen is None:
         return False
-    return not (chosen["status"] == "stopped" and chosen.get("stop_kind") == "a")
+    _check_order2_record(chosen)
+    if chosen["status"] == "pending":
+        raise ValueError("待つ（pending）の記録は、順番3が参照する記録にならない")
+    return not (chosen["status"] == "stopped" and chosen["stop_kind"] == "a")
+
+
+def order3_gate(order1b_seqs, order2_records, timing_ok):
+    """順番3を封印してよいかと、参照する記録を決める（T-039。T-038 の監査の中-1・中-2。counting.md 4章 (3)）。
+
+    order1b_seqs：順番3の時点の ledger にある、順番1b の kind の記録の seq の一覧。
+    order2_records：順番2の試みの記録の一覧。各要素は select_order2_record() の形に、
+      "ref_1b_seq"（その記録が参照した順番1b の記録の seq）を足したもの。
+    timing_ok：封印係が、順番3の時点で、参照する順番1b の記録について時機の条件（seal-order1.md 3章 (2)。
+      ledger の seq と git の親子の関係だけで決まる）を確かめ直した結果（True / False）。
+    規則：
+      1. 参照する順番1b の記録は、order1b_seqs の最大の seq（順番2と同じ決め方）。無ければ封印しない。
+      2. 順番2の記録は、ref_1b_seq がその seq のものだけを数える。
+      3. timing_ok が False なら封印しない（順番2のあとで (a) の破れが判明した場合も、ここで止まる）。
+      4. 2 の記録の中に、(a) で止まった記録が一つでもあれば封印しない（seq の大小によらない）。
+      5. 2 の記録から select_order2_record() で選ぶ。無ければ封印しない。
+    戻り値：{"may_seal", "ref_1b_seq", "chosen", "reason"}。
+    """
+    if not isinstance(order1b_seqs, list) or not all(type(x) is int for x in order1b_seqs) \
+            or len(set(order1b_seqs)) != len(order1b_seqs):
+        raise ValueError("order1b_seqs が、重ならない整数の一覧でない")
+    if not isinstance(timing_ok, bool):
+        raise ValueError("timing_ok が True か False でない")
+    if not isinstance(order2_records, list):
+        raise ValueError("order2_records が一覧でない")
+    for r in order2_records:
+        _check_order2_record(r)
+        if type(r.get("ref_1b_seq")) is not int:
+            raise ValueError("順番2の記録の ref_1b_seq が整数でない")
+
+    def result(ok, ref, chosen, reason):
+        return {"may_seal": ok, "ref_1b_seq": ref, "chosen": chosen, "reason": reason}
+
+    if not order1b_seqs:
+        return result(False, None, None, "順番1b の記録が無い")
+    ref = max(order1b_seqs)
+    mine = [r for r in order2_records if r["ref_1b_seq"] == ref]
+    if not timing_ok:
+        return result(False, ref, None, "(a) 参照する順番1b の記録が時機の条件を満たさない（順番3の時点で確かめ直した）")
+    if any(r["status"] == "stopped" and r["stop_kind"] == "a" for r in mine):
+        return result(False, ref, None, "(a) 時機の条件で止まった順番2の記録がある")
+    chosen = select_order2_record(mine)
+    if chosen is None:
+        return result(False, ref, None, "参照する順番1b の記録に対する順番2の記録が無い")
+    return result(True, ref, chosen, None)
 
 
 def order5_candidate_status(cid, totals, missing_days, days):
@@ -739,19 +802,22 @@ def decide(trial_manifest, official_manifest, read_day_file):
       確かめ（作業ツリーと HEAD が同じ、過去の版が先頭と同じ）に通らなかったマニフェストは None。
     read_day_file(mode, file_name)：日の集計のバイト列を返す関数（無ければ例外）。
     status：
-      "decided"  入力が決まり、すべての基準の案を当てはめた
-      "pending"  入力がまだそろっていない。そろってから同じ手順をもう一度行う
+      "decided"  入力が決まり、正式な数え方 C7 が3日のどの日でも計算でき、参考の基準の案 B1〜B5 の結果
+                 （どれも official: false）と、日ごとの欄の手厚さ（coverage）を出した
+      "pending"  入力がまだそろっていない。そろってから同じ手順をもう一度行う（順番2の記録としては
+                 数えない。select_order2_record()）
       "stopped"  止まる。参考の基準の結果と欄の手厚さは、この入力からは出さない。止まった事実を
                  記録して公開する（counting.md 4章 (3)。正式な数え方 C7 は順番1b で決まっているので
-                 変わらない）
-    2段目（正式な run の同じ3日）に進むのは、正式な run の run-start があり、かつ (a) 試しの run の
-    run-start が一つも無いか、(b) 試しの run の run-start が R の一つだけで、R に day の行が一つも無い
+                 変わらない）。これは seal-order1.md 3章 (2) の (b) にあたる。(a)（時機の条件）と (c)
+                 （コードの sha256）は、封印係が decide() の外で確かめる。
+    2段目（正式な run の同じ3日）に進むのは、正式な run の run-start があり、かつ (i) 試しの run の
+    run-start が一つも無いか、(ii) 試しの run の run-start が R の一つだけで、R に day の行が一つも無い
     ときだけ。R が終わっていないのに、R に day の行があるか、ほかの試しの run の run-start がある
     ときは止まる。
-    ファイルが無い・sha256 が合わない・頭の行が合わない・git の確かめに通らない・trial_run_ids や
+    ファイルが無い・sha256 が合わない・形の合わない集計・git の確かめに通らない・trial_run_ids や
     trial_manifest_sha256 が合わない・正式な数え方 C7 が計算できない、は2段目に進まず止まる。
     止まっても、新しい版の順番1b には進まない（正式な数え方 C7 は順番2の入力に依らない）。
-    順番3は、止まった順番2の記録を参照して進む（counting.md 4章 (3)）。
+    順番3を封印してよいか、どの記録を参照するかは order3_gate() で決める（counting.md 4章 (3)）。
     """
     runs = runs_record(trial_manifest, official_manifest)
     steps = []
@@ -868,6 +934,14 @@ def as_record():
         "owner_decision": dict(OWNER_DECISION),
         "decision_phrases": [list(x) for x in DECISION_PHRASES],
         "owner_approval_1b": dict(OWNER_APPROVAL_1B),
+        "order3_gate": "order 3 references the order 1b record with the largest seq at the time of order 3 (same "
+                       "rule as order 2) and counts only order 2 records that reference it; the sealer rechecks the "
+                       "timing condition (a) for that order 1b record at order 3; if it fails, or any of those "
+                       "order 2 records stopped on (a), order 3 is not sealed; otherwise order2_record_rule "
+                       "(order3_gate)",
+        "outside_owner_approval": "order2_record_rule and order3_gate are details added after the owner's "
+                                  "approval of order 1b (T-038, T-039, by the lead's assignment); they are not "
+                                  "part of what the owner approved",
         "order2_record_rule": "among the order 2 records for the referenced order 1b record, ignore status "
                               "pending; order 3 references the one with the smallest seq (decided or stopped "
                               "of kind b or c); if there is none, order 3 is not sealed; exception (a): if the "
