@@ -406,7 +406,7 @@ class TestAggregate(unittest.TestCase):
         self.assertEqual(privacy_scan.find_in_bytes(data), {})
         self.assertEqual(gkg.serialize_day("2015-03-02", a, files), data)   # 決まった並べ方
         lines = data.decode().splitlines()
-        self.assertEqual(lines[0], "#\tgkg-day\t2\t2015-03-02\tofficial")
+        self.assertEqual(lines[0], "#\tgkg-day\t3\t2015-03-02\tofficial")
         tags = {l.split("\t")[0] for l in lines}
         self.assertTrue({"F", "FD", "V", "D", "T", "C", "L", "P1", "P2", "NC", "NL", "E", "S"}
                         <= tags)
@@ -1245,7 +1245,7 @@ class TestModeMarks(RunCase):
         self.assertTrue(all(e["mode"] == "trial" for e in self.manifest(gkg.TRIAL_MANIFEST_NAME)))
         with open(os.path.join(self.trial_store, names[0]), "rb") as f:
             head = gzip.decompress(f.read()).split(b"\n", 1)[0]
-        self.assertEqual(head, b"#\tgkg-day\t2\t2015-03-02\ttrial")
+        self.assertEqual(head, b"#\tgkg-day\t3\t2015-03-02\ttrial")
         self.run_gkg()
         self.assertTrue(all(n.startswith("gkg-official-") for n in os.listdir(self.store)))
         with self.assertRaises(gkg.GkgError):
@@ -2077,6 +2077,73 @@ class TestT030(RunCase):
         self.assertEqual(done["files_failed"], 1)
         day = [e for e in self.manifest() if e["kind"] == "day"][0]
         self.assertEqual(day["failed_files"][0]["reason"], "network_Other")
+
+
+class TestT035(unittest.TestCase):
+    """T-035：T の行の v1_or_v2_docs（V1 か V2 の少なくとも一方に付いた文書の数）と、
+    S の行の docs_without_any_theme。架空のテーマ名だけを使う。"""
+
+    TS = "20150302000000"
+
+    def day_tables(self, rows):
+        a = gkg.aggregate_zip(make_zip(self.TS, rows), self.TS, {})
+        files = [{"file_time": self.TS, "result": "ok", "reason": "", "md5": "a" * 32, "size": 9,
+                  "sha256": "b" * 64, "attempts": 1, "docs": {"1": len(rows)}}]
+        data = gkg.serialize_day("2015-03-02", a, files)
+        gkg.check_output_bytes(data, "日の集計")
+        lines = data.decode().splitlines()
+        names = {l.split("\t")[1]: l.split("\t")[2] for l in lines if l.startswith("V\t")}
+        t = {}
+        for l in lines:
+            f = l.split("\t")
+            if f[0] == "T":
+                self.assertEqual(len(f), 7, l)
+                t[(f[1], names[f[2]])] = tuple(int(x) for x in f[3:])
+        st = {l.split("\t")[1]: int(l.split("\t")[2]) for l in lines if l.startswith("S\t")}
+        return lines, t, st
+
+    def test_same_different_one_side_and_both(self):
+        ts = self.TS
+        rows = [
+            # 同じ文書で V1 と V2 の両方に同じ名前（V2 は2回言及）、V1 だけ、V2 だけ
+            gkg_row(ts, 1, themes1=("QQ_SAME", "QQ_V1ONLY"),
+                    themes2=(("QQ_SAME", 10), ("QQ_SAME", 50), ("QQ_V2ONLY", 20))),
+            gkg_row(ts, 2, themes1=("QQ_SAME",), themes2=()),             # V1 だけに付いた文書
+            gkg_row(ts, 3, themes1=(), themes2=(("QQ_SAME", 5),)),         # V2 だけに付いた文書
+            # 同じ中身らしいが V1 と V2 で名前が違う：別々のテーマとして数える（限界）
+            gkg_row(ts, 4, themes1=("QQ_ALIAS_A",), themes2=(("QQ_ALIAS_B", 1),)),
+            gkg_row(ts, 5, themes1=(), themes2=()),                        # どちらにも無い
+        ]
+        lines, t, st = self.day_tables(rows)
+        self.assertEqual(lines[0], "#\tgkg-day\t3\t2015-03-02\tofficial")
+        # (v1_docs, v2_docs, v2_mentions, v1_or_v2_docs)
+        self.assertEqual(t[("1", "QQ_SAME")], (2, 2, 3, 3))
+        self.assertEqual(t[("1", "QQ_V1ONLY")], (1, 0, 0, 1))
+        self.assertEqual(t[("1", "QQ_V2ONLY")], (0, 1, 1, 1))
+        self.assertEqual(t[("1", "QQ_ALIAS_A")], (1, 0, 0, 1))
+        self.assertEqual(t[("1", "QQ_ALIAS_B")], (0, 1, 1, 1))
+        for (_g, _n), (v1, v2, _m, v12) in t.items():
+            self.assertLessEqual(max(v1, v2), v12)
+            self.assertLessEqual(v12, v1 + v2)
+        self.assertEqual(st["docs_without_any_theme"], 1)
+        self.assertEqual(st["docs_without_v1_theme"], 2)
+        self.assertEqual(st["docs_without_v2_theme"], 2)
+
+    def test_invalid_names_are_not_counted(self):
+        ts = self.TS
+        rows = [gkg_row(ts, 1, themes1=("QQ_OK", "lower case"), themes2=(("QQ_OK", 1),))]
+        _lines, t, st = self.day_tables(rows)
+        self.assertEqual(t[("1", "QQ_OK")], (1, 1, 1, 1))
+        self.assertEqual(st["theme_tokens_invalid_v1"], 1)
+        self.assertNotIn("docs_without_any_theme", st)       # 一つも無い文書が無ければ行は出ない
+
+    def test_groups_are_separate(self):
+        ts = self.TS
+        rows = [gkg_row(ts, 1, themes1=("QQ_SAME",), themes2=(("QQ_SAME", 1),)),
+                gkg_row(ts, 2, themes1=("QQ_SAME",), themes2=(), coll="2")]
+        _lines, t, _st = self.day_tables(rows)
+        self.assertEqual(t[("1", "QQ_SAME")], (1, 1, 1, 1))
+        self.assertEqual(t[("2", "QQ_SAME")], (1, 0, 0, 1))
 
 
 class TestRound3Trial(RunCase):

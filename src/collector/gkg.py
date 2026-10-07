@@ -355,7 +355,7 @@
       FD  file_time g docs
       V   id theme                    （その日に出たテーマの名前と、その日の中だけの番号）
       D   g docs                      （文書数。比率の分母の候補）
-      T   g theme_id v1_docs v2_docs v2_mentions
+      T   g theme_id v1_docs v2_docs v2_mentions v1_or_v2_docs   （版3で v1_or_v2_docs を足した）
       C   g theme_id country v1_docs v2_docs v2_mentions   （テーマ×国）
       L   g theme_id lang v1_docs v2_docs v2_mentions      （テーマ×言語）
       P1  g theme_id_a theme_id_b docs  （V1THEMES の組。a < b、文書の数）
@@ -364,14 +364,33 @@
       S   name value                  （行の件数の内訳の合計。OTHER の件数を含む）
     v1_docs は V1THEMES にそのテーマがある文書の数、v2_docs は V2ENHANCEDTHEMES にある文書の
     数、v2_mentions は V2ENHANCEDTHEMES の言及の回数（同じ文書で複数回なら回数分）。
+    v1_or_v2_docs は、V1THEMES か V2ENHANCEDTHEMES の少なくとも一方にそのテーマが付いた文書の
+    数（同じ文書で両方に付いても1回。T-035。2026-10-08 のオーナーの決定で、正式に使う報道量の
+    分子。分母は同じ数え方の全テーマの合計）。v1_docs + v2_docs − v1_or_v2_docs が、両方に
+    付いた文書の数になる。
+    名前の取り出し方と、同じテーマかの決め方（T-035）
+      - V1THEMES：「;」で区切った各部分をそのまま名前とする。
+      - V2ENHANCEDTHEMES：「;」で区切った各ブロックの、最初の「,」より前を名前とする（後ろの
+        文中の位置の数は捨てる）。
+      - どちらも THEME_RE（英大文字で始まり、英大文字・数字・下線だけ、160字まで）に完全に
+        合うものだけを数える。合わないものは件数（theme_tokens_invalid_v1・_v2）だけ数える。
+      - 同じテーマかどうかは、こうして取り出した名前のバイト列が完全に一致するかで決める。
+      - 限界：V1 と V2 で同じテーマに違う名前が付いている場合（V2 だけの名前・付け方の違い）、
+        別々のテーマとして数えられ、v1_or_v2_docs で1つにまとまらない。名前の対応表は使わない。
+    S の行の docs_without_any_theme は、V1THEMES にも V2ENHANCEDTHEMES にもテーマが一つも
+    付かない文書の数（T-035。欄の手厚さの推移を公開するため）。docs_without_v1_theme・
+    docs_without_v2_theme は、それぞれ片方に一つも付かない文書の数。
     テーマの数え方（文書の有無か、言及の回数か）は試運転のあとで決めるので、どちらでも
-    数えられるように三つとも持つ。
+    数えられるように四つとも持つ。
     大きさの見込み（データを見ていないので幅は大きい。根拠は GKG の一般的な性質と、ファイル
     一覧の大きさ）
       - 対象は 198,226 本、圧縮で約 1.79 TB（一覧の size_bytes の合計）。1本あたり約 9 MB、
         1日あたり約 0.85 GB の zip。
       - 1日の文書数は 10万〜20万、1文書のテーマは V1 で 10〜50 種類と見込む。
-      - T・L：1日に数千〜2万行。C：1日に 10万〜100万行。
+      - T・L：1日に数千〜2万行。C：1日に 10万〜100万行。T の行は版3で欄が1つ増え、1行あたり
+        数バイト大きくなる（全体への影響は P1・P2 に比べて小さい）。
+      - メモリ：v1_or_v2_docs のための入れ物（テーマごとの数）が1日分の T の表に1つ増える
+        （1日に数千〜2万項目で、数 MB）。
       - P1・P2（共起の網）：1文書の組は n(n−1)/2 で、1日の組の種類は 200万〜1,000万と見込む。
         1行は約 20 バイト（テーマは番号で書く）で、gzip で 4〜6 分の1になるとして、1日 10〜
         100 MB、全体で 20〜200 GB。保存先の LACIE SHARE の空き（2026-10-08 の時点で約 372 GB）
@@ -595,8 +614,8 @@ BAD_COLL = b"X"
 # 日の集計に使ってよい文字（7章）
 OUTPUT_ALPHABET = frozenset(
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_\t\n-. #")
-DAY_FORMAT = b"gkg-day\t2"          # T-021 の差し戻し1回目で頭の行に mode を足した
-DAY_TABLES = ("t1", "t2", "t2m", "c1", "c2", "c2m", "l1", "l2", "l2m", "p1", "p2",
+DAY_FORMAT = b"gkg-day\t3"          # 版2：頭の行に mode（T-021）。版3：T の行に v1_or_v2_docs、S に docs_without_any_theme（T-035）
+DAY_TABLES = ("t1", "t2", "t2m", "t12", "c1", "c2", "c2m", "l1", "l2", "l2m", "p1", "p2",
               "nc", "nl", "eng")
 
 # 7章：保存先（T-021。外付けディスク LACIE SHARE。FAT32）
@@ -936,11 +955,16 @@ def add_line(agg, line, file_time_b, vocab):
         st["docs_without_v1_theme"] += 1
     if not s2:
         st["docs_without_v2_theme"] += 1
+    if not s1 and not s2:
+        st["docs_without_any_theme"] += 1
     if not cs:
         st["docs_without_country"] += 1
     T["t1"][g].update(s1)
     T["t2"][g].update(s2)
     T["t2m"][g].update(m2)
+    # 正式な数え方（2026-10-08 オーナー決定）の分子：V1THEMES か V2ENHANCEDTHEMES の少なくとも
+    # 一方に付いた文書の数。同じ文書で両方に付いても1回。同じテーマかは名前のバイト列の一致で決める
+    T["t12"][g].update(s1 | s2)
     if cs:
         T["c1"][g].update((t, c) for t in s1 for c in cs)
         T["c2"][g].update((t, c) for t in s2 for c in cs)
@@ -1346,9 +1370,10 @@ def serialize_day(day, agg, files, mode="official"):
     groups = sorted(set(agg.docs))
     for g in groups:
         t1, t2, t2m = T["t1"].get(g, {}), T["t2"].get(g, {}), T["t2m"].get(g, {})
+        t12 = T["t12"].get(g, {})
         for t in sorted(set(t1) | set(t2), key=ids.get):
             out.append(b"\t".join([b"T", g, _b(ids[t]), _b(t1.get(t, 0)), _b(t2.get(t, 0)),
-                                   _b(t2m.get(t, 0))]))
+                                   _b(t2m.get(t, 0)), _b(t12.get(t, 0))]))
     for tag, k1, k2, km in ((b"C", "c1", "c2", "c2m"), (b"L", "l1", "l2", "l2m")):
         for g in groups:
             a, b, m = T[k1].get(g, {}), T[k2].get(g, {}), T[km].get(g, {})

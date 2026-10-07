@@ -269,6 +269,14 @@ env -u GIT_DIR -u GIT_WORK_TREE -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 \
 - `exclusion_rule_record_sha256` は、その記録の行の**正規の形のバイト列（`ledger.canonical_line`：キーを並べ替え、区切りに空白を入れない UTF-8 の JSON。末尾の改行を含めない）の sha256** である。記録の行は正規の形で書かれているので、`sealed/ledger.jsonl` のその行のバイト列（改行を除く）の sha256 と同じになる。
 - 確かめ方：`sealed/ledger.jsonl` の seq がその値の行を取り出し、改行を除いて sha256 を計算し、マニフェストの値と比べる。その行の kind が除外の規則の kind であること、それより前に同じ kind の行が無いことも確かめる。区分表のマニフェストの試行の行と結果の行にも、同じ2つの値を書く。
 
+### 6.5.4 日の集計の形（版3。T-035）
+
+- 頭の行（タブ区切り）：`# gkg-day 3 <日> <mode>`。
+- T の行（タブ区切り。7つの欄）：`T g theme_id v1_docs v2_docs v2_mentions v1_or_v2_docs`。`v1_or_v2_docs` は、そのテーマが V1THEMES か V2ENHANCEDTHEMES の少なくとも一方に付いた文書の数（同じ文書で両方に付いても1回）。2026-10-08 のオーナーの決定で、正式に使う報道量の分子。分母は同じ数え方の全テーマの合計。`v1_docs + v2_docs − v1_or_v2_docs` が、両方に付いた文書の数。
+- S の行：`docs_without_any_theme`（V1 にも V2 にもテーマが一つも付かない文書の数）を足した。`docs_without_v1_theme`・`docs_without_v2_theme` は前のまま。
+- 名前の取り出し方：V1THEMES は「;」で区切った各部分、V2ENHANCEDTHEMES は「;」で区切った各ブロックの最初の「,」より前（文中の位置の数を捨てる）。どちらも英大文字で始まり英大文字・数字・下線だけの名前（160字まで）だけを数える。同じテーマかどうかは、取り出した名前の文字列が完全に一致するかで決める。
+- 限界：V1 と V2 で同じテーマに違う名前が付いている場合は、別々のテーマとして数えられ、`v1_or_v2_docs` で1つにまとまらない。名前の対応表は使わない。
+
 ### 6.6 本番の規模とメモリ
 
 規模：198,226 本、約 1.79 TB の通信、2,115 日。要求の間隔だけで約55時間、全体で60〜120時間の見込み。試行の行を書くたびに外付けディスクで fsync するので、その分も少し延びる。
@@ -277,6 +285,7 @@ env -u GIT_DIR -u GIT_WORK_TREE -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 \
 - テーマの組1種類あたり約 110 バイト（Counter の項目と tuple）。1日の組の種類を V1・V2 それぞれ 200万〜1,000万と見込み、合わせて 0.4〜2.2 GB。
 - そのほか：zip（最大 200 MB）、1ファイル分の集計、テーマ×国（1日 10万〜100万種類、約 0.1 GB）、テーマの名前の一覧。
 - 日の集計を書くときは、組を並べ替えた一覧と書き出しの文字列を一時的に作るので、組の部分が最大で約2倍になる。
+- 版3（T-035）で、T の表に `v1_or_v2_docs` の入れ物が1つ増える（1日に数千〜2万項目、数 MB）。日の集計の T の行は1行あたり数バイト大きくなるが、全体の大きさは P1・P2 の行で決まるので、見込み（全体で 20〜200 GB）は変わらない。
 - まとめ：ふつうの日で 1〜5 GB、上限（組 4千万種類）に近い日で 9〜10 GB。上限を超えた日は、書かずに止まる。
 
 ### 6.7 止まったときの次の手（どれもファイルを削除しない）
@@ -308,6 +317,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/collector -v
 - T-026：`test_gkg.py` の `TestT026`（日の集計を書いたあとに止まった正直な再開、実際に送った要求の数）、`test_day_line_lists_failed_files`（`listed_size`・`listed_md5`・`requests_sent`、和の照合）。`test_themes.py` の `TestCodeGate.test_git_mv_after_fetch_stops`・`test_existing_themes_file_in_store_stops`・`test_reset_of_history_is_a_documented_limit`。
 - T-026 差し戻し1回目：`test_gkg.py` の `TestT026Round2`（reason・attempts の形。監査の probe_c の偽の語で止まること）、`TestChangedResultOnHonestResume`（監査の probe_b4。取り直しで結果が変わると止まり続け、日の集計を保存先の外へ移すと続けられること）。
 - T-030：`test_gkg.py` の `TestT030`（既にある日の集計の検査、network_ の名前の固定）。
+- T-035：`test_gkg.py` の `TestT035`（V1 と V2 で同じ名前・違う名前・片方だけ・同じ文書で両方、`docs_without_any_theme`、頭の行の版3）。
 - テストは、本物の `/Volumes/LACIE SHARE` を使わない。保存先のディスクは一時的なディレクトリで置き換え、マウントの検査だけを差し替える（本物の検査は `TestVolume` と、下の FAT32 のテストで確かめる）。
 
 ### 7.1 FAT32 のイメージの上でのテスト（T-021）
