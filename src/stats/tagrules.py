@@ -89,7 +89,7 @@ EXCLUSION_TERMS = {
         "ABUSE", "ARREST", "DETAIN", "DETAINEE", "DETENTION", "POLICE", "PRISON",
         "JAIL", "INCARCERATION", "PROSECUTION", "PROSECUTOR", "INDICTMENT", "FELONY",
         "PIRACY", "SCAM", "VANDALISM", "ARSON", "POACHING", "COUNTERFEIT",
-        "ESPIONAGE", "TREASON", "VICTIM",
+        "ESPIONAGE", "TREASON", "VICTIM", "CYBERCRIME",
     ),
     "specific_person": (
         "POPE", "KING", "QUEEN", "PRINCE", "PRINCESS", "MONARCH", "MONARCHY", "ROYAL",
@@ -147,7 +147,7 @@ MATCH_FIELDS = ("name", "description")
 PREFIX_MIN_LEN = 6
 # 先頭でも末尾でも、名前の語から一覧の語を除いた残りが、この文字数以上の英字であること。
 GLUE_MIN_REST = 4
-# 末尾での一致を使わない語：4文字以下で、英語の語尾（ING, ED, ER, S）で終わる語（今は KING）。
+# 末尾での一致を使わない語：4文字以下で、英語の語尾（ING, ED, ER, S）で終わる語（今は KING・SARS・MERS）。
 # 短い語が別の語の語尾として偶然現れるのを防ぐため（BREAKING, SPEAKING など）。
 SUFFIX_BLOCK_MAX_LEN = 4
 SUFFIX_BLOCK_ENDINGS = ("ING", "ED", "ER", "S")
@@ -229,7 +229,8 @@ def _term_match(term, toks, glue=True):
 
     - 語が一つ：どれかの語に _word_matches が当たれば一致。
     - 語の並び：並びが連続して現れれば一致（最後の語だけ形の変化を認める）。
-      加えて、並びをつなげた一語（AIR FORCE -> AIRFORCE）を、語が一つの場合と同じ規則で照合する。
+      加えて、glue が真のとき（名前の欄だけ）、並びをつなげた一語（AIR FORCE -> AIRFORCE）を、
+      語が一つの場合と同じ規則で照合する。語がくっついた形への対応は、すべて名前の欄だけに使う。
     """
     tt = tokens(term)
     if len(tt) == 1:
@@ -244,7 +245,7 @@ def _term_match(term, toks, glue=True):
         if seg[:-1] == tt[:-1] and (seg[-1] == tt[-1] or seg[-1] in inflections(tt[-1])):
             return "exact" if seg[-1] == tt[-1] else "inflection"
     joined = "".join(tt)
-    if joined.isalpha():
+    if glue and joined.isalpha():
         for t in toks:
             how = _word_matches(joined, t, glue)
             if how:
@@ -449,7 +450,7 @@ def as_record():
                      "(glue), both alphabetic: prefix if len(word) >= %d and the rest has >= %d letters; "
                      "suffix (word or an inflection of it) if the rest before it has >= %d letters, except "
                      "words of <= %d letters ending in %s; phrase: contiguous tokens (last may be "
-                     "inflected), or the joined phrase matched as a single word"
+                     "inflected), or (name field only) the joined phrase matched as a single word"
                      % (PREFIX_MIN_LEN, GLUE_MIN_REST, GLUE_MIN_REST, SUFFIX_BLOCK_MAX_LEN,
                         "/".join(SUFFIX_BLOCK_ENDINGS)),
             "prefix_min_len": PREFIX_MIN_LEN,

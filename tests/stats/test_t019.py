@@ -120,11 +120,21 @@ V1_TERMS = (
 )
 
 
+# オーナーが選んだ選べる区分（文書 0章の7・8）。オーナーの選択が決まったら、この値と
+# tagrules.ENABLED_OPTIONAL_CATEGORIES の両方を同じに直す（文書 2章 (8)）。
+OWNER_CHOICE = ("disease_named", "ethnic_religious_group")
+# 規則そのもののテストは、選べる区分をすべて有効にして行う（オーナーの選択に依らないようにするため）。
+ALL = tagrules.OPTIONAL_CATEGORIES
+
+
 class TestExclusion(unittest.TestCase):
     # テストに使う名前は、すべてテストのために作ったもの。
 
-    def terms_hit(self, name, desc=None, optional=None):
+    def terms_hit(self, name, desc=None, optional=ALL):
         return [(m[1], m[3]) for m in tagrules.exclusion_matches(name, desc, optional)]
+
+    def ex(self, name, desc=None):
+        return tagrules.is_excluded(name, desc, ALL)
 
     def test_tokens(self):
         self.assertEqual(tagrules.tokens("AB_123_Fragility-Conflict and violence"),
@@ -178,8 +188,11 @@ class TestExclusion(unittest.TestCase):
     def test_v1_terms_still_excluded(self):
         # 1cb463a の版の語（CRISISLEX を除く）は、今の版でもすべて外れる（後戻りが無いこと）。
         # V1_TERMS は git show 1cb463a:src/stats/tagrules.py の EXCLUSION_TERMS の写し。
+        # 名前の欄と説明の欄の両方で確かめる（説明の欄ではくっつき一致を使わないため、別に見る）。
         for t in V1_TERMS:
-            self.assertTrue(tagrules.is_excluded(t.replace(" ", "_")), t)
+            self.assertTrue(self.ex(t.replace(" ", "_")), t)
+            self.assertTrue(self.ex("QQ_X", t), t)
+            self.assertTrue(self.ex("QQ_X", "about " + t.lower() + " today"), t)
 
     def test_crisislex_removed(self):
         allt = [t for ts in tagrules.EXCLUSION_TERMS.values() for t in ts]
@@ -241,6 +254,7 @@ class TestExclusion(unittest.TestCase):
         "LEADERSHIP_TRAINING", "BRAINSTORM_SESSION", "ANTIVIRUS_SOFTWARE", "COMPATRIOT", "CAMPFIRE",
         "MARKETCRASH", "TEAMLEADER", "ROADKILL", "DEFENSELESS", "HEART_ATTACK", "AB_DEFENSE_ATTORNEY",
         "OBITUARY_DEATH", "AB_VACCINE_POLICY", "AB_FIRED", "HEARTATTACK", "SNOWSTORM",
+        "SKYSCRAPER", "PAINKILLER", "SOFTSKILLS", "CABINETMAKER", "REGIMENTAL", "PROTESTANTISM",
     )
     KNOWN_EXCLUDED = (
         "CIVILWAR", "COLDWAR", "BIRDFLU", "SWINEFLU", "PLANECRASH", "CYBERATTACK", "PARAMILITARY",
@@ -250,9 +264,9 @@ class TestExclusion(unittest.TestCase):
 
     def test_known_examples(self):
         for n in self.KNOWN_KEPT + self.KNOWN_MISSED:
-            self.assertFalse(tagrules.is_excluded(n), n)
+            self.assertFalse(self.ex(n), n)
         for n in self.KNOWN_OVEREXCLUDED + self.KNOWN_EXCLUDED:
-            self.assertTrue(tagrules.is_excluded(n), n)
+            self.assertTrue(self.ex(n), n)
 
     def test_doc_known_examples(self):
         head, rows = read_table("known-examples")
@@ -269,20 +283,62 @@ class TestExclusion(unittest.TestCase):
         self.assertFalse(tagrules.is_excluded("HEAD_STATE_OF"))
 
     def test_description_used_and_reported(self):
-        m = tagrules.exclusion_matches("QQ_GENERAL", "Outbreak of cholera")
+        m = tagrules.exclusion_matches("QQ_GENERAL", "Outbreak of cholera", ALL)
         self.assertIn(("disease_general", "OUTBREAK", "description", "exact"), m)
         self.assertIn(("disease_named", "CHOLERA", "description", "exact"), m)
 
     def test_optional_categories(self):
         self.assertEqual(tagrules.OPTIONAL_CATEGORIES, ("disease_named", "ethnic_religious_group"))
-        self.assertEqual(tagrules.ENABLED_OPTIONAL_CATEGORIES, tagrules.OPTIONAL_CATEGORIES)
         # 案B：病名を使わない
-        self.assertTrue(tagrules.is_excluded("AB_EBOLA"))
+        self.assertTrue(tagrules.is_excluded("AB_EBOLA", optional=ALL))
         self.assertFalse(tagrules.is_excluded("AB_EBOLA", optional=("ethnic_religious_group",)))
         self.assertTrue(tagrules.is_excluded("AB_DISEASE", optional=()))
         self.assertFalse(tagrules.is_excluded("AB_ETHNICITY_X", optional=("disease_named",)))
         with self.assertRaises(ValueError):
             tagrules.is_excluded("X", optional=("crime",))
+
+    def test_owner_choice(self):
+        # 既定の有効な区分は、テストに書いたオーナーの選択と同じでなければならない。
+        self.assertEqual(tagrules.ENABLED_OPTIONAL_CATEGORIES, OWNER_CHOICE)
+        self.assertEqual(tagrules.enabled_categories(),
+                         tuple(c for c in tagrules.EXCLUSION_TERMS
+                               if c not in tagrules.OPTIONAL_CATEGORIES or c in OWNER_CHOICE))
+        rec = json.loads(tagrules.canonical_json())
+        self.assertEqual(rec["exclusion"]["enabled_optional_categories"], list(OWNER_CHOICE))
+
+    # 選べる区分を外すと結果が変わる、作った名前の例（文書 2章 (8)）。
+    OPTION_SENSITIVE = {
+        "disease_named": ("BIRDFLU", "SWINEFLU", "AB_EBOLA", "AB_COVID19", "AB_CHOLERA_X", "SARSCOV2"),
+        "ethnic_religious_group": ("AB_ETHNICITY_X", "AB_TRIBAL_LAND", "AB_RELIGIOUS_X"),
+    }
+
+    def test_option_sensitive_examples(self):
+        for cat, names in self.OPTION_SENSITIVE.items():
+            without = tuple(c for c in ALL if c != cat)
+            for n in names:
+                self.assertTrue(tagrules.is_excluded(n, optional=ALL), n)
+                self.assertFalse(tagrules.is_excluded(n, optional=without), n)
+
+    def test_doc_option_sensitive(self):
+        head, rows = read_table("option-sensitive")
+        got = {r[0]: tuple(x.strip() for x in r[1].split(",")) for r in rows}
+        self.assertEqual(got, self.OPTION_SENSITIVE)
+
+    def test_joined_only_in_name(self):
+        self.assertIn(("AIR FORCE", "joined-exact"), self.terms_hit("AB_AIRFORCE"))
+        self.assertEqual(tagrules.exclusion_matches("QQ_X", "the airforce base", ALL), [])
+        self.assertTrue(self.ex("QQ_X", "the air force base"))
+        rec = json.loads(tagrules.canonical_json())
+        self.assertIn("(name field only) the joined phrase", rec["exclusion"]["match"])
+
+    def test_suffix_block_words(self):
+        blocked = [w for ts in tagrules.EXCLUSION_TERMS.values() for w in ts
+                   if " " not in w and not tagrules._suffix_allowed(w)]
+        self.assertEqual(blocked, ["KING", "SARS", "MERS"])
+
+    def test_cybercrime_restored(self):
+        self.assertIn("CYBERCRIME", tagrules.EXCLUSION_TERMS["crime"])
+        self.assertTrue(self.ex("QQ_X", "rise of cybercrime"))
 
     def test_neutral_examples_kept(self):
         for name, desc in (("QQ_STOCKMARKET", "Stock market"), ("EDUCATION", None),
