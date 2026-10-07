@@ -223,14 +223,23 @@
         （trial・official）を入れる（gkg-<mode>-<run_id>-day-<日>.tsv.gz、
         gkg-<mode>-<run_id>-fetch-log.jsonl）。取得の記録の各行と、マニフェストの各行に mode を
         書く。日の集計の頭の行（# の行）にも mode を書く（形式の版 2）。取得の記録に、別の
-        run_id か別の mode の行が1つでもあれば止まる。そのため、試しの run の記録を正式な run の
-        場所に写しても、名前が合わず、写した行は正式な run の判定に使われない。
+        run_id か別の mode の行が1つでもあれば止まる。
+        mode の印は、行の中の文字なので書き換えられる。試しの run の記録の mode を書き換えて
+        正式な run の場所に置くことを止めるのは、5.2章の控えの照合である（run-start のあとの
+        取得の記録の大きさは控えとちょうど同じでなければならないので、置いた記録で止まる）。
       - 試しの run の回数と範囲（中4）：正式な run は、試しの run のマニフェスト
         （gdelt-gkg-trial.jsonl）が全部コミットされていなければ始めない（作業ツリーの中身が
         HEAD の中身と同じであること。無ければ両方とも空）。正式な run の run-start には、試しの
         run の run_id の一覧（trial_run_ids）と、試しの run のマニフェストの sha256
         （trial_manifest_sha256）を書く。再開のたびに、試しの run のマニフェストがこの sha256 の
-        ままであることを確かめる。試しの run の run_id はコードの sha256 から決まるので、
+        ままであることを確かめる。
+      - 試しの run の保存先の照合（差し戻し2回目 中-C。check_trial_folder）：正式な run の
+        run-start の前と再開のたびに、gkg-trial のフォルダを一覧する。「.」で始まる付属の
+        ファイルのほかは、すべて gkg-trial-<run_id>-… の名前でなければならず、その run_id が
+        すべて試しの run のマニフェストに載っていて、各取得の記録の大きさと sha256 が、
+        マニフェストのその run の最後の控えと同じでなければならない。違えば止まる。コミットの
+        前にマニフェストの行を消して試しの run を隠しても、フォルダに残ったファイルで止まる。
+        限界：フォルダのファイルごと移せば見つからない（ファイルは削除しない運用で防ぐ）。試しの run の run_id はコードの sha256 から決まるので、
         試しの run のあとでコードを変えたかどうかは、run_id の一覧と正式な run の run_id を
         比べて分かる。
 
@@ -240,14 +249,23 @@
     取得の記録の大きさと sha256 の控え（中1）
       - マニフェスト（Git に入る側）の run-start・run-resume・day・run-stop・run-complete の
         行に、その時点の取得の記録の大きさ（fetch_log_size）と sha256（fetch_log_sha256）を
-        書く。run-stop は、止まる条件（RunInterrupted）か Ctrl-C で止まったときに書く
-        （書けなければ書かない）。
+        書く。run-stop は、取得の途中でどの例外で止まっても書く（RunInterrupted・GkgError・
+        Ctrl-C など。差し戻し2回目 軽-6）。書けなければ書かない。kill -9 と停電では書けない。
       - 再開のときは、最後に控えた行の値について、取得の記録の先頭からその大きさまでの
         sha256 が一致することを確かめる。一致しなければ（行を消した・書き換えた）、要求を
         送らずに GkgError で止まる。
-      - 限界：最後の控えのあとに書いた行（停電などで run-stop を書けなかった場合の、最後の
-        day の行より後の行）は、控えが無いので確かめられない。範囲は最大で1日分と、続いている
-        一時的な失敗の分である。マニフェストはコミットするまで書き換えられる。
+      - 最後の控えが run-start か run-stop（きちんと止まった）なら、取得の記録の大きさが控えと
+        ちょうど同じでなければならない。止まったあとに足した行（偽の failed の行など）や、
+        置き換えた記録があれば止まる（差し戻し2回目 中-A）。
+      - 最後の控えが day か run-resume（控えを書けずに止まった跡）なら、控えより後ろの行の
+        うち、結果の行（ok・failed・interrupted）は信用せず、そのファイルは取り直す。attempt の
+        行は、試行の回数としてだけ数える。
+      - 正式な run は、再開のたびに、作業ツリーのマニフェストが HEAD とちょうど同じ（全部
+        コミットされている）ことを求める。コミットの前にマニフェストの控えを書き換えることを
+        止めるため。止まるたびに、マニフェストをコミットしてから再開する。
+      - 限界：kill -9・停電のあとは、控えより後ろに足した attempt の行を見分けられない（その
+        ファイルの試行の回数が増える。最悪の場合、要求を送らずに attempts_exhausted になる）。
+        試しの run のマニフェストは、正式な run の前まではコミットを求めない（5.1章の照合で補う）。
     ディスクの識別子（軽3）
       - 入口のスクリプトが diskutil で読んだ VolumeUUID（volume_id）を run-start に書き、
         再開のたびに同じであることを確かめる。違うディスク（同じ名前の別のディスク・
@@ -257,6 +275,16 @@
         再開のときに同じ名前の0バイトのファイルがあれば、消さずに、そこへ中身を書き足す
         （write_new_file）。マニフェストの day の行に refilled_empty_file: true を書く。
       - 中身のある違うファイルがあれば、これまでどおり止まる（リードに報告）。
+
+------------------------------------------------------------------------
+5.3 除外の規則の封印の記録（差し戻し2回目 中-B）
+------------------------------------------------------------------------
+    run_gkg は exclusion_rule（除外の規則の封印の記録の seq と、記録の行の正規の形の sha256）を
+    受け取り、run-start に exclusion_rule_seq・exclusion_rule_record_sha256 として書く。
+    run_gkg の中でも、themes.require_exclusion_rules_sealed()（入口のスクリプトの関門と同じ）を
+    もう一度呼び、鎖の上の記録と同じであることを確かめる（chain_exclusion_ref）。再開のときは、
+    run-start に書いた値とも照らす。そのため、入口のスクリプトを通らずにこの関数を呼んでも、
+    鎖に除外の規則の記録が無ければ、何も書かずに止まる。kind が未決のあいだは必ず止まる。
 
 ------------------------------------------------------------------------
 6. 集計の単位と形（ディスクに書く前に集計する。行単位のデータは保存しない）
@@ -1396,8 +1424,13 @@ def _log_state(log_path):
 
 
 def check_log_checkpoint(log_path, mine):
-    """5章（T-021 の差し戻し1回目 中1）：取得の記録が、マニフェストに書いた最後の時点の
-    バイト列で始まることを確かめる。違えば GkgError（run と run のあいだの書き換え）。"""
+    """5.2章：取得の記録を、マニフェストに書いた最後の控えと照らす。返り値：控えの大きさ。
+
+    - 取得の記録の先頭から控えの大きさまでの sha256 が、控えと一致すること。
+    - 最後の控えが run-start か run-stop（きちんと止まった）なら、取得の記録の大きさが
+      控えとちょうど同じであること（止まったあとに足した行・写した記録を拒む。差し戻し2回目 中-A）。
+    違えば GkgError（run と run のあいだの書き換え）。
+    """
     last = None
     for e in mine:
         if "fetch_log_size" in e:
@@ -1409,6 +1442,10 @@ def check_log_checkpoint(log_path, mine):
     if len(data) < size or hashlib.sha256(data[:size]).hexdigest() != last["fetch_log_sha256"]:
         raise GkgError("取得の記録が、マニフェストに書いた時点（%s）から書き換わっている"
                        "（行を消した・差し替えたなど。リードに報告）" % last.get("kind"))
+    if last.get("kind") in ("run-start", "run-stop") and len(data) != size:
+        raise GkgError("取得の記録に、止まったあと（%s のあと）で足した行がある（リードに報告）"
+                       % last.get("kind"))
+    return size
 
 
 def _check_log_lines(entries, run_id, mode):
@@ -1416,6 +1453,63 @@ def _check_log_lines(entries, run_id, mode):
     for e in entries:
         if e.get("run_id") != run_id or e.get("mode") != mode:
             raise GkgError("取得の記録に、別の run か別の mode（試しの run と正式な run）の行がある")
+
+
+def chain_exclusion_ref(root):
+    """鎖の上の除外の規則の封印の記録の {"seq", "record_sha256"}（themes の関門をもう一度通す）。"""
+    themes = _load_sibling("themes")
+    try:
+        rec, gate_root = themes.require_exclusion_rules_sealed()
+    except themes.ThemesError as e:
+        raise GkgError("除外の規則の封印の関門：%s" % e) from None
+    if os.path.realpath(gate_root) != os.path.realpath(root):
+        raise GkgError("除外の規則の関門が読んだプロジェクトが、root と違う")
+    return themes.exclusion_rule_ref(rec)
+
+
+def check_exclusion_record(root, ref, s0):
+    """5.3章（差し戻し2回目 中-B）：渡された除外の規則の封印の記録が、鎖の上の記録であること。
+
+    themes.require_exclusion_rules_sealed() を、ここでもう一度呼んで照らす（関門と同じ検査）。
+    再開のときは、run-start に書いた seq と sha256 とも同じであること。
+    """
+    if not isinstance(ref, dict) or set(ref) != {"seq", "record_sha256"}:
+        raise GkgError("除外の規則の封印の記録を受け取っていない（入口のスクリプトから実行する）")
+    if chain_exclusion_ref(root) != ref:
+        raise GkgError("渡された除外の規則の封印の記録が、鎖の上の記録と違う")
+    if s0 is not None and (s0.get("exclusion_rule_seq"), s0.get("exclusion_rule_record_sha256")) \
+            != (ref["seq"], ref["record_sha256"]):
+        raise GkgError("除外の規則の封印の記録が、run-start に書いたものと違う")
+
+
+_TRIAL_FILE_RE = re.compile(r"\Agkg-trial-([0-9a-f]{16})-(?:day-\d{8}\.tsv\.gz|fetch-log\.jsonl)\Z")
+
+
+def check_trial_folder(root, volume, check_volume, trial_bytes, trial_run_ids):
+    """5.1章（差し戻し2回目 中-C）：試しの run の保存先にあるすべての run が、試しの run の
+    マニフェストに載っていて、各取得の記録の大きさと sha256 がマニフェストの最後の控えと同じこと。"""
+    tpaths = resolve_paths(root, volume, "trial", check_volume)
+    entries = _parse_log_lines(trial_bytes)
+    ids = set()
+    for name in sorted(os.listdir(tpaths["store"])):
+        if name.startswith("."):
+            continue                       # macOS の付属のファイル（._ など）
+        m = _TRIAL_FILE_RE.match(name)
+        if m is None:
+            raise GkgError("試しの run の保存先に、知らない名前のファイルがある（リードに報告）")
+        ids.add(m.group(1))
+    for rid in sorted(ids):
+        if rid not in trial_run_ids:
+            raise GkgError("試しの run の保存先に、マニフェストに載っていない run（%s）のファイルが"
+                           "ある（リードに報告）" % rid)
+        last = None
+        for e in entries:
+            if e.get("run_id") == rid and "fetch_log_size" in e:
+                last = e
+        size, sha = _log_state(os.path.join(tpaths["store"], fetch_log_name(rid, "trial")))
+        if last is None or (last["fetch_log_size"], last["fetch_log_sha256"]) != (size, sha):
+            raise GkgError("試しの run（%s）の取得の記録が、マニフェストの控えと合わない"
+                           "（リードに報告）" % rid)
 
 
 def _trial_info(paths):
@@ -1435,7 +1529,7 @@ def _trial_info(paths):
 
 def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, code_sha256,
             mode="official", committed_manifest=None, committed_trial_manifest=None,
-            volume_id=None, transport=urllib_transport, sleep=time.sleep, clock=time.monotonic,
+            volume_id=None, exclusion_rule=None, transport=urllib_transport, sleep=time.sleep, clock=time.monotonic,
             now=lambda: datetime.datetime.now(datetime.timezone.utc), log=_stderr_log,
             disk_free=_disk_free, check_volume=check_volume):
     """5章の取得の全体。全部の日が終われば dict を返す。
@@ -1444,6 +1538,8 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
     RunStartWritten（5章）。mode が trial なら 5.1章の試しの run。
     committed_trial_manifest：HEAD の試しの run のマニフェスト（正式な run だけ。5.1章）。
     volume_id：保存先のディスクの識別子（入口のスクリプトが diskutil で読む。7章）。
+    exclusion_rule：除外の規則の封印の記録の {"seq", "record_sha256"}（5.3章）。ここでも鎖の上の
+      記録と照らす（関門を通らずにこの関数を呼んでも、取得は始まらない）。
     """
     if not re.fullmatch(r"[0-9a-f]{64}", code_sha256 or ""):
         raise GkgError("code_sha256 の形が違う")
@@ -1479,6 +1575,7 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
         if not isinstance(committed_trial_manifest, bytes) or trial_bytes != committed_trial_manifest:
             raise GkgError("試しの run のマニフェストが、全部コミットされていない（正式な run の前に"
                            "コミットする。5.1章）")
+        check_trial_folder(root, volume, check_volume, trial_bytes, trial["trial_run_ids"])
     if start:
         s0 = start[0]
         for k in ("code_sha256", "filelist_sha256", "method_access_seq", "mode", "volume_id"):
@@ -1486,10 +1583,17 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
             if s0.get(k) != want:
                 raise GkgError("再開しようとした run の %s が、最初の run-start と違う" % k)
         if mode == "official":
-            check_committed_start(read_bytes_nofollow(paths["manifest"]), committed_manifest)
+            current = read_bytes_nofollow(paths["manifest"])
+            check_committed_start(current, committed_manifest)
+            if current != committed_manifest:
+                raise GkgError("正式な run のマニフェストに、コミットしていない行がある。再開の"
+                               "前に、マニフェストを全部コミットする（5.2章）")
             if s0.get("trial_manifest_sha256") != trial["trial_manifest_sha256"]:
                 raise GkgError("試しの run のマニフェストが、正式な run の run-start のあとで変わった")
-        check_log_checkpoint(log_path, mine)
+            if s0.get("trial_run_ids") != trial["trial_run_ids"]:
+                raise GkgError("試しの run の一覧が、正式な run の run-start のあとで変わった")
+        check_exclusion_record(root, exclusion_rule, s0)
+        trusted_size = check_log_checkpoint(log_path, mine)
         if disk_free(paths["store"]) < MIN_FREE_DISK_BYTES:
             raise RunInterrupted("保存先のディスクの空きが足りない")
         size, sha = _log_state(log_path)
@@ -1501,11 +1605,15 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
             raise RunInterrupted("保存先のディスクの空きが足りない")
         if os.path.lexists(log_path):
             raise GkgError("run-start の前なのに、取得の記録が既にある（リードに報告）")
+        check_exclusion_record(root, exclusion_rule, None)
         size, sha = _log_state(log_path)
+        trusted_size = size
         head = dict(base, kind="run-start", started_at=_iso(now()), files_selected=n_files,
                     days=len(plan), block_start=METHOD_BLOCK[0], block_end=METHOD_BLOCK[1],
                     store_location=paths["location"], volume_id=volume_id,
-                    fetch_log_size=size, fetch_log_sha256=sha)
+                    fetch_log_size=size, fetch_log_sha256=sha,
+                    exclusion_rule_seq=exclusion_rule["seq"],
+                    exclusion_rule_record_sha256=exclusion_rule["record_sha256"])
         if mode == "trial":
             head.update(trial=True, trial_days=sorted(plan))
         else:
@@ -1517,8 +1625,10 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
                                   "あれば push も）、同じコマンドでもう一度実行する" % MANIFEST_NAME)
     try:
         return _run_plan(plan, mine, base, paths, log_path, run_id, mode, transport, sleep,
-                         clock, now, log, disk_free)
-    except (RunInterrupted, KeyboardInterrupt):
+                         clock, now, log, disk_free, trusted_size)
+    except BaseException:
+        # どの例外で止まっても（RunInterrupted・GkgError・Ctrl-C など）控えを書く（軽-6）。
+        # kill -9 と停電では書けない（5.2章の限界）
         _write_stop(paths, base, log_path, now)
         raise
 
@@ -1534,13 +1644,27 @@ def _write_stop(paths, base, log_path, now):
         pass
 
 
+def _parse_log_lines(data):
+    out = []
+    for raw in data.splitlines():
+        if raw.strip():
+            try:
+                out.append(json.loads(raw))
+            except ValueError:
+                raise GkgError("取得の記録に JSON でない行がある") from None
+    return out
+
+
 def _run_plan(plan, mine, base, paths, log_path, run_id, mode, transport, sleep, clock, now,
-              log, disk_free):
+              log, disk_free, trusted_size):
     done_days = {e["day"] for e in mine if e.get("kind") == "day"}
     latest, used, trips = {}, Counter(), set()
-    entries_in_log = read_jsonl(log_path)
-    _check_log_lines(entries_in_log, run_id, mode)
-    for e in entries_in_log:
+    data = read_bytes_nofollow(log_path)
+    trusted = _parse_log_lines(data[:trusted_size])
+    tail = _parse_log_lines(data[trusted_size:])
+    del data
+    _check_log_lines(trusted + tail, run_id, mode)
+    for e in trusted:
         if "file_time" not in e:
             continue
         ft = e["file_time"]
@@ -1551,7 +1675,12 @@ def _run_plan(plan, mine, base, paths, log_path, run_id, mode, transport, sleep,
         used[ft] = 0
         if e.get("result") == "interrupted":
             trips.add(e.get("trip"))
-    del entries_in_log
+    # 最後の控えより後ろの行（控えを書けずに止まった跡）：結果の行（ok・failed・interrupted）は
+    # 信用せず、そのファイルは取り直す。attempt の行は、試行の回数としてだけ数える（中-A）
+    for e in tail:
+        if e.get("result") == "attempt" and "file_time" in e:
+            used[e["file_time"]] += 1
+    del trusted, tail
     state = {"transient": [], "format": 0, "retries_used": len(trips)}
     ctx = {"paths": paths, "log_path": log_path, "run_id": run_id, "mode": mode, "now": now}
     pacer = Pacer(clock, sleep)

@@ -26,10 +26,14 @@
                    （gkg.py 5章。T-018 の監査 軽2）
 
 このスクリプトがすること（この順。途中で止まれば、それより後のことはしない）
-    00. 最初に、除外の規則の封印の関門（themes.require_exclusion_rules_sealed。区分表の取得と
+    000. 最初に、コードの関門（下の 1 の (2)。_check_code）を通す（差し戻し2回目 軽-2。
+       除外の規則の関門が読み込む themes.py・ledger.py を含め、固定したコードで動くことを先に
+       確かめる）。ただし ledger.py は、このファイルを読み込んだ時点で既に読み込まれている。
+    00. 次に、除外の規則の封印の関門（themes.require_exclusion_rules_sealed。区分表の取得と
        同じ関門）を通す（T-021 の差し戻し1回目 重1。試しの run と正式な run の両方）。GKG の
        集計にはテーマの名前と件数が出るので、除外の規則の封印より前には取得しない。themes.py は
-       PINNED_SHA256 の値と一致するバイト列だけを読み込む。**封印係の kind が未決のあいだは、
+       手順000 で HEAD と PINNED_SHA256 に照らしたバイト列から読み込む。関門が返した記録の seq と
+       sha256 を gkg.run_gkg に渡し、run-start に書く。gkg.run_gkg の中でも鎖の上の記録と照らす。**封印係の kind が未決のあいだは、
        ここで必ず止まる（GKG も取得しない）。** ledger の側の検査（method-access より前に除外の
        規則の封印があること）は、封印係の別のタスクで行う。
     0. 次に ledger.require_method_access() を引数なしで呼ぶ（T-014）。鎖に method-access の
@@ -115,11 +119,11 @@ DISKUTIL_TIMEOUT_SECONDS = 60
 # 取得のコードのうち、このファイル以外の4つの sha256。変えたらここも直してコミットする
 # （テストが照合する）。
 PINNED_SHA256 = (
-    (GKG_REL, "c86d95b955a0ef3698dcc9186f5368aa452f50dc7de7e0e5ce7088e5371ea96b"),
+    (GKG_REL, "5fb1d56655619678603f3452c1b933727ec9aadc9784090511f030e4437dd39d"),
     (FILELIST_REL, "afd7a9dd47bc052a691e1a4cd558b211f4d72cf1ce1f451fa9f3016540cd04a7"),
     (PRIVACY_SCAN_REL, "68d8836d56489ca5df9f2f55e24a2642ebf3aa14afdc2e0120577c7b6c6cb887"),
     (CODEGATE_REL, "d422be41dc59c4be50689a2426453db965be506a9981770ab3eb7557ed078769"),
-    (THEMES_REL, "4a90e02cd60afb08dcb00a32c5edbb8db703d2acbe30563d25ed657de998cdad"),
+    (THEMES_REL, "6f22a4a43bf65dcf63c55cc3a190868823301fdd02b67948b889929c3948abc7"),
 )
 CLEAN_PATHS = ("src/collector", "src/sealer")
 FILELIST_MANIFEST_REL = ("data", "manifest", "gdelt-filelist.jsonl")
@@ -197,30 +201,20 @@ def _checked_test_seams(t):
     return t
 
 
-def _load_pinned(project, rel, name):
-    path = os.path.join(project, rel)
-    try:
-        st = os.lstat(path)
-    except OSError:
-        raise GateError("取得のコードが無い: %s" % rel) from None
-    if not stat.S_ISREG(st.st_mode):
-        raise GateError("取得のコードが通常のファイルでない: %s" % rel)
-    with open(path, "rb") as f:
-        source = f.read()
-    if _sha256(source) != dict(PINNED_SHA256)[rel]:
-        raise GateError("%s の sha256 が、入口のスクリプトに固定した値と違う" % rel)
-    return _exec_module(name, path, source)
+def _exclusion_gate(s, codes):
+    """手順00（重1）。区分表の取得と同じ、除外の規則の封印の関門。通らなければ GateError。
 
-
-def _exclusion_gate(s):
-    """手順00（重1）。区分表の取得と同じ、除外の規則の封印の関門。通らなければ GateError。"""
-    themes = _load_pinned(s.project, THEMES_REL, "themes")
+    themes.py は、手順000 のコードの関門で HEAD と PINNED_SHA256 に照らしたバイト列（codes）から
+    読み込む。返り値：除外の規則の封印の記録の {"seq", "record_sha256"}（run-start に書く。中-B）。
+    """
+    themes = _exec_module("themes", os.path.join(s.project, THEMES_REL), codes[THEMES_REL])
     try:
-        _rec, root = themes.require_exclusion_rules_sealed()
+        rec, root = themes.require_exclusion_rules_sealed()
     except themes.ThemesError as e:
         raise GateError("除外の規則の封印の関門：%s" % e) from None
     if os.path.realpath(root) != os.path.realpath(s.project):
         raise GateError("除外の規則の関門が読んだプロジェクトと、取得に使うプロジェクトが違う")
+    return themes.exclusion_rule_ref(rec)
 
 
 def volume_identity(volume):
@@ -360,13 +354,13 @@ def _check_filelist(project, home, gkg):
     return rows, sha
 
 
-def check_gate(s, method_rec, mode="official"):
-    """関門 (1)〜(5)。通れば dict を返す。"""
+def check_gate(s, method_rec, mode="official", code=None):
+    """関門 (1)〜(5)。通れば dict を返す。code は手順000 の _check_code の返り値。"""
     try:
         doc = ledger.read_target_json(s.project, method_rec, ledger.METHOD_ACCESS_KIND)
     except ledger.LedgerError as e:
         raise GateError("method-access の中身を読めない: %s" % e) from None
-    codes, cg = _check_code(s.project)
+    codes, cg = _check_code(s.project) if code is None else code
     gkg = _exec_module("gkg", os.path.join(s.project, GKG_REL), codes[GKG_REL])
     if (doc.get("block_start"), doc.get("block_end")) != gkg.METHOD_BLOCK:
         raise GateError("method-access の区画が、gkg.METHOD_BLOCK と違う")
@@ -402,11 +396,12 @@ def check_gate(s, method_rec, mode="official"):
 def _acquire(mode="official", _test=None):
     """手順00 → 手順0 → 関門 → 取得。mode は official か trial。_test はテストだけが渡す。"""
     s = _production_seams() if _test is None else _checked_test_seams(_test)
-    _exclusion_gate(s)
+    code = _check_code(s.project)
+    exclusion_rule = _exclusion_gate(s, code[0])
     method_rec = _method_access_gate(s)
     if mode not in ("official", "trial"):
         raise ValueError("mode は official か trial だけ")
-    gate = check_gate(s, method_rec, mode)
+    gate = check_gate(s, method_rec, mode, code)
     gkg = gate["gkg"]
     kw = {}
     for name in ("transport", "log", "disk_free"):
@@ -420,7 +415,7 @@ def _acquire(mode="official", _test=None):
                        code_sha256=gate["code_sha256"],
                        committed_manifest=gate["committed_manifest"],
                        committed_trial_manifest=gate["committed_trial_manifest"],
-                       volume_id=gate["volume_id"],
+                       volume_id=gate["volume_id"], exclusion_rule=exclusion_rule,
                        check_volume=gate["check_volume"], sleep=s.sleep, clock=s.clock,
                        now=s.now, **kw)
 

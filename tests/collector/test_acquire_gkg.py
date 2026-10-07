@@ -76,17 +76,42 @@ def tearDownModule():
     taf.tearDownModule()
 
 
-def pass_exclusion_gate(s):
+EXCL_REF = {"seq": 7, "record_sha256": "e" * 64}
+
+
+def pass_exclusion_gate(s, codes):
     """除外の規則の封印の関門を通ったことにする（関門そのものは TestExclusionGateFirst）。"""
-    return None
+    return dict(EXCL_REF)
+
+
+def file_codes(*a, **k):
+    """手順000 のコードの関門の差し替え：作業ツリーのファイルをそのまま返す（git を使わない）。"""
+    codes = {}
+    for rel in (ag.CODE_REL,) + tuple(r for r, _ in ag.PINNED_SHA256):
+        with open(os.path.join(PROJECT, rel), "rb") as f:
+            codes[rel] = f.read()
+    return codes, None
+
+
+FAKE_THEMES = """
+class ThemesError(Exception):
+    pass
+def require_exclusion_rules_sealed():
+    if MODE == "boom":
+        raise ThemesError("見本")
+    return {"seq": 9}, ROOT
+def exclusion_rule_ref(rec):
+    return {"seq": rec["seq"], "record_sha256": "f" * 64}
+"""
 
 
 class TestExclusionGateFirst(unittest.TestCase):
-    """差し戻し1回目 重1：試しの run と正式な run の両方で、最初に除外の規則の封印の関門を通す。"""
+    """重1・差し戻し2回目 軽-2：コードの関門 → 除外の規則の封印の関門 → method-access の関門の順。"""
 
     def test_real_gate_stops_first_while_kind_undecided(self):
         never = mock.Mock(side_effect=AssertionError("除外の規則の関門より先に進んではいけない"))
-        with mock.patch.object(ledger, "require_method_access", never), \
+        with mock.patch.object(ag, "_check_code", file_codes), \
+                mock.patch.object(ledger, "require_method_access", never), \
                 mock.patch.object(ag, "check_gate", never):
             for mode in ("official", "trial"):
                 with self.assertRaisesRegex(ag.GateError, "除外の規則.*まだ決まっていない"):
@@ -96,38 +121,35 @@ class TestExclusionGateFirst(unittest.TestCase):
                 self.assertEqual(ag.main(["--trial"]), 1)
         never.assert_not_called()
 
-    def test_gate_uses_pinned_themes_and_root(self):
-        project = ag.PROJECT
-        s = ag._production_seams()
+    def test_code_gate_runs_before_exclusion_gate(self):
+        order = []
+        with mock.patch.object(ag, "_check_code",
+                               side_effect=lambda p: order.append("code") or file_codes()), \
+                mock.patch.object(ag, "_exclusion_gate",
+                                  side_effect=lambda s, c: order.append("excl") or dict(EXCL_REF)), \
+                mock.patch.object(ledger, "require_method_access",
+                                  side_effect=ledger.MethodAccessRequired("見本")):
+            with self.assertRaises(ledger.MethodAccessRequired):
+                ag._acquire()
+        self.assertEqual(order, ["code", "excl"])
+        bad = ag.GateError("未コミット")
+        never = mock.Mock(side_effect=AssertionError("コードの関門より先に進んではいけない"))
+        with mock.patch.object(ag, "_check_code", side_effect=bad), \
+                mock.patch.object(ag, "_exclusion_gate", never):
+            with self.assertRaisesRegex(ag.GateError, "未コミット"):
+                ag._acquire()
+        never.assert_not_called()
 
-        class ThemesError(Exception):
-            pass
-        ok = types.SimpleNamespace(ThemesError=ThemesError,
-                                   require_exclusion_rules_sealed=lambda: ({"seq": 9}, project))
-        with mock.patch.object(ag, "_load_pinned", return_value=ok) as load:
-            ag._exclusion_gate(s)
-        load.assert_called_once_with(project, ag.THEMES_REL, "themes")
-        other = types.SimpleNamespace(ThemesError=ThemesError,
-                                      require_exclusion_rules_sealed=lambda: ({"seq": 9}, "/"))
-        with mock.patch.object(ag, "_load_pinned", return_value=other):
-            with self.assertRaisesRegex(ag.GateError, "プロジェクトが違う"):
-                ag._exclusion_gate(s)
+    def gate_with(self, mode, root):
+        src = ("MODE = %r\nROOT = %r\n" % (mode, root) + FAKE_THEMES).encode()
+        return ag._exclusion_gate(ag._production_seams(), {ag.THEMES_REL: src})
 
-        def boom():
-            raise ThemesError("見本")
-        bad = types.SimpleNamespace(ThemesError=ThemesError, require_exclusion_rules_sealed=boom)
-        with mock.patch.object(ag, "_load_pinned", return_value=bad):
-            with self.assertRaisesRegex(ag.GateError, "見本"):
-                ag._exclusion_gate(s)
-
-    def test_pinned_themes_must_match(self):
-        tmp = tempfile.mkdtemp(prefix="gkg-themes-pin-")
-        self.addCleanup(shutil.rmtree, tmp, True)
-        os.makedirs(os.path.join(tmp, "src", "collector"))
-        with open(os.path.join(tmp, ag.THEMES_REL), "wb") as f:
-            f.write(b"EXCLUSION_RULE_KIND = 'x'\n")
-        with self.assertRaisesRegex(ag.GateError, "固定した値と違う"):
-            ag._load_pinned(tmp, ag.THEMES_REL, "themes")
+    def test_gate_uses_checked_bytes_and_root(self):
+        self.assertEqual(self.gate_with("ok", ag.PROJECT), {"seq": 9, "record_sha256": "f" * 64})
+        with self.assertRaisesRegex(ag.GateError, "プロジェクトが違う"):
+            self.gate_with("ok", "/")
+        with self.assertRaisesRegex(ag.GateError, "見本"):
+            self.gate_with("boom", ag.PROJECT)
 
 
 class TestVolumeIdentity(unittest.TestCase):
@@ -151,9 +173,10 @@ class TestVolumeIdentity(unittest.TestCase):
 
 class TestMethodAccessFirst(unittest.TestCase):
     def setUp(self):
-        p = mock.patch.object(ag, "_exclusion_gate", pass_exclusion_gate)
-        p.start()
-        self.addCleanup(p.stop)
+        for p in (mock.patch.object(ag, "_exclusion_gate", pass_exclusion_gate),
+                  mock.patch.object(ag, "_check_code", file_codes)):
+            p.start()
+            self.addCleanup(p.stop)
 
     def test_production_calls_gate_without_arguments_first(self):
         calls = []
@@ -161,7 +184,6 @@ class TestMethodAccessFirst(unittest.TestCase):
         never = mock.Mock(side_effect=AssertionError("関門より先に進んではいけない"))
         with mock.patch.object(ledger, "require_method_access", gate), \
                 mock.patch.object(ag, "check_gate", never), \
-                mock.patch.object(ag, "_check_code", never), \
                 mock.patch.object(ag, "_check_filelist", never):
             with self.assertRaises(ledger.MethodAccessRequired):
                 ag._acquire()
@@ -176,8 +198,9 @@ class TestMethodAccessFirst(unittest.TestCase):
         body = src.split('"""', 2)[2]
         first = [l.strip() for l in body.splitlines() if l.strip()]
         self.assertTrue(first[0].startswith("s = "))
-        self.assertEqual(first[1], "_exclusion_gate(s)")
-        self.assertTrue(first[2].startswith("method_rec = _method_access_gate("))
+        self.assertEqual(first[1], "code = _check_code(s.project)")
+        self.assertEqual(first[2], "exclusion_rule = _exclusion_gate(s, code[0])")
+        self.assertTrue(first[3].startswith("method_rec = _method_access_gate("))
         self.assertIn("rec = ledger.require_method_access()\n",
                       inspect.getsource(ag._method_access_gate))
 
@@ -190,6 +213,17 @@ class E2ECase(taf.CopyCase):
     def setUp(self):
         super().setUp()
         p = mock.patch.object(ag, "_exclusion_gate", pass_exclusion_gate)
+        p.start()
+        self.addCleanup(p.stop)
+        real_exec = ag._exec_module
+
+        def exec_module(name, path, source):
+            # gkg.run_gkg の中の、鎖の上の除外の規則の記録の読み取りだけを差し替える
+            mod = real_exec(name, path, source)
+            if name == "gkg":
+                mod.chain_exclusion_ref = lambda root: dict(EXCL_REF)
+            return mod
+        p = mock.patch.object(ag, "_exec_module", exec_module)
         p.start()
         self.addCleanup(p.stop)
         self.volume_id = lambda v: "TEST-VOLUME-UUID"
@@ -435,6 +469,8 @@ class TestEndToEndOnFat32(E2ECase):
 
     def make_volume(self):
         v = tg._fat32_mount(tg.FAT32_ENV)
+        if not ag._under_tmp(v):
+            self.fail("TMPDIR を、イメージのマウント先を含む場所にして実行する（README 7.1）")
         base = os.path.join(v, gkg.STORE_PARTS[0])
         if os.path.lexists(base):
             self.fail("イメージの直下に news-stick-data が既にある（前のテストの残り）")
@@ -505,6 +541,7 @@ class TestProductionPath(unittest.TestCase):
         self.assertEqual([c.args for c in got.call_args_list], [("official",), ("trial",)])
         with mock.patch.object(ledger, "require_method_access", return_value={"seq": 1}), \
                 mock.patch.object(ag, "_exclusion_gate", pass_exclusion_gate), \
+                mock.patch.object(ag, "_check_code", file_codes), \
                 mock.patch.object(ag, "check_gate", side_effect=AssertionError("進まない")):
             with self.assertRaises(ValueError):
                 ag._acquire("other")

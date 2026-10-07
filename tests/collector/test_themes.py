@@ -10,6 +10,7 @@
 """
 
 import datetime
+import hashlib
 import importlib.util
 import io
 import json
@@ -59,17 +60,21 @@ def setUpModule():
         p.start()
 
 
+EXCL_REF = {"seq": 7, "record_sha256": "e" * 64}
+
+
 def no_gate(root):
     """0章の関門を通ったことにする（関門そのものは TestExclusionGate で確かめる）。"""
-    return None
+    return dict(EXCL_REF)
 
 
 CODE_SHA = "ab" * 32
 
 
 def no_code_gate(root):
-    """0.1章のコードの関門を通ったことにする（関門そのものは TestCodeGate で確かめる）。"""
-    return CODE_SHA
+    """0.1章のコードの関門を通ったことにする（関門そのものは TestCodeGate で確かめる）。
+    返り値の2つ目は HEAD のマニフェスト（空）。"""
+    return CODE_SHA, b""
 
 
 def tearDownModule():
@@ -226,8 +231,8 @@ class TestCodeGate(unittest.TestCase):
         self.mod = _load("themes_copy", os.path.join(col, "themes.py"))
 
     def test_committed_code_passes(self):
-        sha = self.mod._code_gate(self.root)
-        self.assertEqual(sha, self.mod.code_sha256())
+        sha, head = self.mod._code_gate(self.root)
+        self.assertEqual((sha, head), (self.mod.code_sha256(), b""))
 
     def test_uncommitted_change_stops(self):
         with open(os.path.join(self.root, "src", "collector", "privacy_scan.py"), "ab") as f:
@@ -243,6 +248,40 @@ class TestCodeGate(unittest.TestCase):
         with self.assertRaisesRegex(self.mod.ThemesError, "HEAD にコミットした中身と違う"):
             self.mod._code_gate(self.root)
 
+    def test_sealer_change_stops(self):
+        """差し戻し2回目 軽-2：src/sealer の未コミットの変更でも止まる（ledger.py を読み込む前に）。"""
+        os.makedirs(os.path.join(self.root, "src", "sealer"))
+        with open(os.path.join(self.root, "src", "sealer", "ledger.py"), "wb") as f:
+            f.write(b"# x\n")
+        with self.assertRaisesRegex(self.mod.ThemesError, "コードの関門"):
+            self.mod._code_gate(self.root)
+
+    def test_attempt_line_deleted_after_commit_stops(self):
+        """差し戻し2回目 軽-1：試行の行をコミットしたあと、作業ツリーから消しても2回目はできない。"""
+        os.makedirs(os.path.join(self.root, "data", "manifest"))
+        home = os.path.join(self.tmp, "home")
+        os.makedirs(os.path.join(home, *themes.STORE_PARTS))
+        gate = mock.patch.object(self.mod, "_exclusion_gate", no_gate)
+        gate.start()
+        self.addCleanup(gate.stop)
+        tr = FakeTransport(GOOD, status=503)
+        with self.assertRaises(self.mod.ThemesError):
+            self.mod.run(root=self.root, home=home, transport=tr, clock=lambda: 0.0,
+                         now=lambda: NOW)
+        self.assertEqual(len(tr.calls), 1)
+        mp = os.path.join(self.root, "data", "manifest", themes.MANIFEST_NAME)
+        with open(mp, "rb") as f:
+            line = json.loads(f.read())
+        self.assertEqual((line["kind"], line["code_sha256"]), ("attempt", self.mod.code_sha256()))
+        self.taf.git(self.root, "add", "data/manifest")
+        self.taf.git(self.root, "commit", "-q", "-m", "試行の行")
+        open(mp, "w").close()                          # コミットのあとで作業ツリーから消す
+        tr2 = FakeTransport(GOOD)
+        with self.assertRaisesRegex(self.mod.ThemesError, "既に試みた"):
+            self.mod.run(root=self.root, home=home, transport=tr2, clock=lambda: 0.0,
+                         now=lambda: NOW)
+        self.assertEqual(tr2.calls, [])
+
     def test_other_root_stops(self):
         with self.assertRaisesRegex(themes.ThemesError, "root のプロジェクトのものでない"):
             themes._code_gate(self.root)
@@ -252,6 +291,9 @@ class TestExclusionGate(unittest.TestCase):
     """T-021：統計係の除外の規則の封印より前には、区分表を取得しない。"""
 
     def setUp(self):
+        p = mock.patch.object(themes, "_code_gate", no_code_gate)
+        p.start()
+        self.addCleanup(p.stop)
         self.tmp = tempfile.mkdtemp(prefix="themes-gate-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.root = os.path.join(self.tmp, "proj")
@@ -319,17 +361,22 @@ class TestExclusionGate(unittest.TestCase):
             self.gate_with(self.records(["periods", "exclusion-rules"]), root=self.tmp)
         self.assertEqual(self.tr.calls, [])
 
-    @mock.patch.object(themes, "_code_gate", no_code_gate)
     def test_passes_with_record(self):
-        e = self.gate_with(self.records(["periods", "exclusion-rules"]))
+        recs = self.records(["periods", "exclusion-rules"])
+        e = self.gate_with(recs)
         self.assertEqual(len(self.tr.calls), 1)
+        want = self.ledger.canonical_line(recs[1])
+        self.assertEqual((e["exclusion_rule_seq"], e["exclusion_rule_record_sha256"]),
+                         (2, hashlib.sha256(want).hexdigest()))
         self.assertEqual(e["source_url"], URL)
 
     def test_gate_is_first_in_run(self):
         import inspect
         body = inspect.getsource(themes.run).split('"""', 2)[2]
         lines = [l.strip() for l in body.splitlines() if l.strip()]
-        self.assertTrue(lines[2].startswith("_exclusion_gate(root)"), lines[:3])
+        self.assertTrue(lines[2].startswith("sha_code, head_manifest = _code_gate(root)"),
+                        lines[:4])
+        self.assertTrue(lines[3].startswith("excl = _exclusion_gate(root)"), lines[:4])
 
 
 class TestClassify(unittest.TestCase):
@@ -562,6 +609,15 @@ class TestRun(RunCase):
         self.assertEqual([l["kind"] for l in lines], ["attempt", "result"])
         self.assertEqual(lines[1]["attempted_at"], lines[0]["attempted_at"])
         self.assertEqual(lines[1]["code_sha256"], CODE_SHA)
+
+    def test_emptied_uncommitted_manifest_stops(self):
+        """差し戻し2回目 軽-1（監査の再現 exp_th2）：コミット前に試行の行を消して空にしても止まる。"""
+        with self.assertRaises(themes.ThemesError):
+            self.run_themes(GOOD, status=503)
+        open(os.path.join(self.root, "data", "manifest", themes.MANIFEST_NAME), "w").close()
+        with self.assertRaisesRegex(themes.ThemesError, "既に試みた"):
+            self.run_themes(GOOD)
+        self.assertEqual(self.tr.calls, [])
 
     def test_gate_failure_writes_nothing(self):
         def stop(root):

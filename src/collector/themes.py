@@ -32,16 +32,22 @@
 ------------------------------------------------------------------------
 0.1 コードの関門と「1回だけ」の記録（T-021 の差し戻し1回目 中3）
 ------------------------------------------------------------------------
-    - コードの関門（_code_gate）：src/collector に未コミットの変更・無視されるファイル・
-      skip-worktree の印が無く（codegate.check_clean）、動いている themes.py と privacy_scan.py
+    順番：コードの関門を先に、除外の規則の関門をそのあとに通す（差し戻し2回目 軽-2。関門が
+    読み込む ledger.py を含めて、固定したコードで動くことを先に確かめる）。
+    - コードの関門（_code_gate）：src/collector と src/sealer に未コミットの変更・無視される
+      ファイル・skip-worktree の印が無く（codegate.check_clean）、動いている themes.py と privacy_scan.py
       が HEAD にコミットした中身と同じであること。区分表の取得は、このファイル（2.1 の名前の欄
       だけを残す規則を含む）をコミットしたあとの、その code_sha256 のコードでだけ行う。
     - 1回だけの取得（オーナーの承認「1回取得してよい」）：通信の前に、マニフェスト
       data/manifest/gdelt-themes.jsonl に試行の行（kind が attempt。code_sha256・source_url・
-      attempted_at）を書く。マニフェストに既に行が1つでもあれば（前の試行が成功しても失敗
-      しても）、通信せずに止まる。失敗した取得も、試行の行として記録に残る。
+      attempted_at・除外の規則の封印の記録の seq と sha256）を書く。作業ツリーにマニフェストの
+      ファイルがあるか（空にしたファイルを含む）、HEAD にマニフェストがあれば（前の試行が成功
+      しても失敗しても）、通信せずに止まる（差し戻し2回目 軽-1）。失敗した取得も、試行の行として記録に残る。
       取得に成功すれば、結果の行（kind が result）を書く。
-      限界：マニフェストは Git に入るまで消せる。試行の行は、取得のあとすぐにコミットする。
+      限界：コミットする前にマニフェストのファイルごと消すと（rm など）、HEAD にも無いので
+      見つけられない。試行の行は、取得のあとすぐにコミットする。
+    - 結果の行と試行の行には、除外の規則の関門が返した記録の seq と sha256
+      （exclusion_rule_seq・exclusion_rule_record_sha256）を書く（差し戻し2回目 中-B）。
 
 ------------------------------------------------------------------------
 1. 取得元と通信
@@ -263,10 +269,18 @@ def require_exclusion_rules_sealed():
     return recs[0], root
 
 
+def exclusion_rule_ref(rec):
+    """関門が返した記録の {"seq", "record_sha256"}（記録の行の正規の形の sha256）。中-B。"""
+    ledger = _import_ledger()
+    return {"seq": rec["seq"], "record_sha256": hashlib.sha256(ledger.canonical_line(rec)).hexdigest()}
+
+
 def _exclusion_gate(root):
-    _rec, gate_root = require_exclusion_rules_sealed()
+    """0章。返り値：exclusion_rule_ref。"""
+    rec, gate_root = require_exclusion_rules_sealed()
     if os.path.realpath(gate_root) != os.path.realpath(root):
         raise ExclusionRulesNotSealed("関門が読んだプロジェクトと、run() の root が違う")
+    return exclusion_rule_ref(rec)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -549,14 +563,25 @@ def _load_codegate():
 
 
 def _code_gate(root):
-    """0.1章。返り値：themes.py の code_sha256。通らなければ ThemesError（何も書かない）。"""
+    """0.1章。返り値：(themes.py の code_sha256, HEAD のマニフェストのバイト列)。
+
+    通らなければ ThemesError（何も書かない）。src/collector と src/sealer の両方を確かめる
+    （除外の規則の関門が読み込む ledger.py は src/sealer にあるため。差し戻し2回目 軽-2）。
+    """
     import subprocess
     if os.path.realpath(HERE) != os.path.join(os.path.realpath(root), "src", "collector"):
         raise ThemesError("動いている themes.py が、root のプロジェクトのものでない")
     cg = _load_codegate()
     try:
-        codes = cg.check_clean(root, ("src/collector",),
+        codes = cg.check_clean(root, ("src/collector", "src/sealer"),
                                (CODE_REL, "src/collector/privacy_scan.py"))
+        rel = "/".join(MANIFEST_DIR_PARTS + (MANIFEST_NAME,))
+        code, _o = cg.run_git(root, "cat-file", "-e", "HEAD:%s" % rel)
+        head_manifest = b""
+        if code == 0:
+            code, head_manifest = cg.run_git(root, "cat-file", "blob", "HEAD:%s" % rel)
+            if code != 0:
+                raise ThemesError("コードの関門：HEAD のマニフェストを読めない")
     except cg.CodeGateError as e:
         raise ThemesError("コードの関門：%s" % e) from None
     except (OSError, subprocess.SubprocessError):
@@ -564,7 +589,7 @@ def _code_gate(root):
     sha = hashlib.sha256(codes[CODE_REL]).hexdigest()
     if sha != _LOADED_SHA256 or sha != code_sha256():
         raise ThemesError("動いている themes.py が、HEAD にコミットした中身と違う")
-    return sha
+    return sha, head_manifest
 
 
 def _read_manifest(path):
@@ -600,11 +625,13 @@ def run(*, root, home, url=None, transport=urllib_transport, clock=time.monotoni
     """
     url = THEMES_URL if url is None else url
     name = validate_doc_url(url)
-    _exclusion_gate(root)                             # 0章。通信の前に最初に確かめる
-    sha_code = _code_gate(root)                       # 0.1章
+    sha_code, head_manifest = _code_gate(root)       # 0.1章。固定したコードで動くことを先に
+    excl = _exclusion_gate(root)                      # 0章。通信の前に確かめる
     store, manifest = _resolve(root, home)
-    if _read_manifest(manifest).strip():
-        raise ThemesError("区分表の取得は既に試みた（マニフェストに行がある）。2回目は取得しない")
+    if os.path.lexists(manifest) or head_manifest:
+        # 行が1つも無い（空にした）ファイルがあっても止まる（差し戻し2回目 軽-1）
+        raise ThemesError("区分表の取得は既に試みた（作業ツリーか HEAD にマニフェストがある）。"
+                          "2回目は取得しない")
     stamp = now().astimezone(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     file_name = "gdelt-themes-%s.tsv" % stamp
     out_path = os.path.join(store, file_name)
@@ -612,7 +639,10 @@ def run(*, root, home, url=None, transport=urllib_transport, clock=time.monotoni
         raise ThemesError("同じ名前のファイルが既にある")
     attempted_at = _iso(now())
     _append_line(manifest, {"kind": "attempt", "attempted_at": attempted_at, "source_url": url,
-                            "code_path": CODE_REL, "code_sha256": sha_code}, "マニフェストの行")
+                            "code_path": CODE_REL, "code_sha256": sha_code,
+                            "exclusion_rule_seq": excl["seq"],
+                            "exclusion_rule_record_sha256": excl["record_sha256"]},
+                 "マニフェストの行")
     raw = fetch_once(url, transport, clock)
     fetched_at = _iso(now())
     sheets = read_table(raw, name)
@@ -624,6 +654,8 @@ def run(*, root, home, url=None, transport=urllib_transport, clock=time.monotoni
              "fetched_at": fetched_at, "attempted_at": attempted_at,
              "sheet_names_replaced": replaced, "headerless": headerless,
              "source_url": url, "code_path": CODE_REL, "code_sha256": sha_code,
+             "exclusion_rule_seq": excl["seq"],
+             "exclusion_rule_record_sha256": excl["record_sha256"],
              "store_location": STORE_LOCATION_NAME}
     line = (json.dumps(entry, sort_keys=True, ensure_ascii=True) + "\n").encode("ascii")
     for what, b in (("区分表", data), ("マニフェストの行", line)):

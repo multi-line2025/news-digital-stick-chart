@@ -85,6 +85,9 @@ def main():
         def check_volume(v):
             return os.lstat(v).st_dev        # 一時的なディレクトリはマウント先でないため
 
+        # 鎖の上の除外の規則の記録の読み取りだけを差し替える（照らす規則は本物）
+        gkg.chain_exclusion_ref = lambda root: {"seq": 7, "record_sha256": "e" * 64}
+
         def run(committed):
             return gkg.run_gkg(
                 root=cfg["root"], volume=cfg["volume"],
@@ -92,6 +95,7 @@ def main():
                 filelist_sha256="c" * 64, method_access_seq=5, code_sha256=cfg["code_sha"],
                 committed_manifest=committed, committed_trial_manifest=b"",
                 check_volume=check_volume, volume_id="TEST-VOLUME-UUID",
+                exclusion_rule={"seq": 7, "record_sha256": "e" * 64},
                 transport=transport, sleep=sleep, clock=lambda: clock[0], now=lambda: now,
                 log=report["logs"].append, disk_free=lambda p: 100 * 1024 ** 3)
 
