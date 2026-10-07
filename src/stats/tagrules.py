@@ -134,8 +134,8 @@ CLAUDE_CATEGORY_OF = {
 }
 CLAUDE_CATEGORIES = ("政治・選挙", "紛争・暴力", "犯罪", "特定の人物", "災害・感染症")
 
-# オーナーが選ぶ区分（文書 0章）。この提案では両方を有効にしている。
-# オーナーの選択は、封印の前にこの定数に反映する（区分表を見る前なので選び出しにならない）。
+# オーナーが選ぶ区分（文書 0章の7・8）。**未決**。今の既定は仮の値（両方を有効）。
+# 封印の前に、オーナーの決定をこの定数とテストの OWNER_CHOICE に反映する（文書 2章 (8)）。
 OPTIONAL_CATEGORIES = ("disease_named", "ethnic_religious_group")
 ENABLED_OPTIONAL_CATEGORIES = ("disease_named", "ethnic_religious_group")
 
@@ -334,7 +334,7 @@ def _int_count(v):
     return v
 
 
-def build_tag_list(themes, counts, totals, missing_days, block_start, block_end):
+def build_tag_list(themes, counts, totals, missing_days, block_start, block_end, optional=None):
     """タグの一覧を作る（手法を作る期間の区画のデータだけで）。
 
     themes:  {テーマ名: 説明}。区分表の名前と説明（説明が無ければ None か ""）。
@@ -342,12 +342,16 @@ def build_tag_list(themes, counts, totals, missing_days, block_start, block_end)
     totals:  {日付: 全体の報道量}。区画のすべての日が要る（欠けた日は値があってもなくてもよい）。
     missing_days: 欠けた日の集合（封印した一覧）。
     どの引数にも区画の外の日付があれば止まる。区画の外のデータを渡す余地を無くすため。
+    optional: 有効にする選べる区分（既定は ENABLED_OPTIONAL_CATEGORIES）。二つの設定で一覧を作って
+              比べるときに渡す（文書 2章 (8)）。使った値は戻り値の enabled_optional_categories に入る。
 
     対象のテーマは、区分表のテーマと、データに現れたテーマの和集合（名前の順）。
     戻り値は、規則の値（A・N_med・四半期）とテーマごとの判定を含む dict。
     """
     if block_end < block_start:
         raise ValueError("区画が逆")
+    opt = ENABLED_OPTIONAL_CATEGORIES if optional is None else tuple(optional)
+    enabled_categories(opt)  # 選べる区分でない値なら止まる
     _check_dates(totals.keys(), block_start, block_end, "totals")
     _check_dates(missing_days, block_start, block_end, "missing_days")
     for name, per_day in counts.items():
@@ -389,7 +393,7 @@ def build_tag_list(themes, counts, totals, missing_days, block_start, block_end)
         mean = math.fsum(per_day.get(x, 0) / totals[x] for x in usable_days) / len(usable_days)
         volume_ok = fractions.Fraction(mean) >= a
         desc = themes.get(name)
-        matches = exclusion_matches(name, desc)
+        matches = exclusion_matches(name, desc, opt)
         rows.append({
             "name": name,
             "in_category_table": name in themes,
@@ -411,6 +415,7 @@ def build_tag_list(themes, counts, totals, missing_days, block_start, block_end)
         "a": "%d/%d" % (a.numerator, a.denominator),
         "a_float": float(a),
         "v_equals_a": True,
+        "enabled_optional_categories": [c for c in OPTIONAL_CATEGORIES if c in opt],
         "themes": rows,
         "tag_list": [r["name"] for r in rows if r["in_list"]],
     }
@@ -461,6 +466,7 @@ def as_record():
             "claude_categories": list(CLAUDE_CATEGORIES),
             "optional_categories": list(OPTIONAL_CATEGORIES),
             "enabled_optional_categories": list(ENABLED_OPTIONAL_CATEGORIES),
+            "optional_choice_status": "undecided",
             "terms": {k: list(v) for k, v in EXCLUSION_TERMS.items()},
             "per_theme_exceptions": "none",
             "organizations": "no separate rule; excluded only when a term of a category matches",

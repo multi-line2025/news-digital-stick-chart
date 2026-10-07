@@ -120,9 +120,12 @@ V1_TERMS = (
 )
 
 
-# オーナーが選んだ選べる区分（文書 0章の7・8）。オーナーの選択が決まったら、この値と
-# tagrules.ENABLED_OPTIONAL_CATEGORIES の両方を同じに直す（文書 2章 (8)）。
+# 選べる区分の設定（文書 0章の7・8）。封印の前にオーナーの決定で決める値で、**今は未決**。
+# 下の値は仮の値（tagrules.ENABLED_OPTIONAL_CATEGORIES の今の既定と同じ）で、オーナーの決定ではない。
+# オーナーが決めたら、この値と tagrules.ENABLED_OPTIONAL_CATEGORIES を同じに直し、
+# OWNER_CHOICE_SOURCE に決定の記録（reviews/ のファイルと見出し）を書く（文書 2章 (8)）。
 OWNER_CHOICE = ("disease_named", "ethnic_religious_group")
+OWNER_CHOICE_SOURCE = None  # 未決。決定の記録が無いあいだは None のまま
 # 規則そのもののテストは、選べる区分をすべて有効にして行う（オーナーの選択に依らないようにするため）。
 ALL = tagrules.OPTIONAL_CATEGORIES
 
@@ -298,13 +301,18 @@ class TestExclusion(unittest.TestCase):
             tagrules.is_excluded("X", optional=("crime",))
 
     def test_owner_choice(self):
-        # 既定の有効な区分は、テストに書いたオーナーの選択と同じでなければならない。
+        # 既定の有効な区分は、テストに書いた OWNER_CHOICE（今は未決の仮の値）と同じでなければならない。
+        # 決定の記録が無いあいだは、OWNER_CHOICE_SOURCE は None。
+        self.assertTrue(OWNER_CHOICE_SOURCE is None or OWNER_CHOICE_SOURCE.startswith("reviews/"))
         self.assertEqual(tagrules.ENABLED_OPTIONAL_CATEGORIES, OWNER_CHOICE)
         self.assertEqual(tagrules.enabled_categories(),
                          tuple(c for c in tagrules.EXCLUSION_TERMS
                                if c not in tagrules.OPTIONAL_CATEGORIES or c in OWNER_CHOICE))
         rec = json.loads(tagrules.canonical_json())
         self.assertEqual(rec["exclusion"]["enabled_optional_categories"], list(OWNER_CHOICE))
+        # 決定の記録が無いあいだは「未決」と出力する。
+        self.assertEqual(rec["exclusion"]["optional_choice_status"],
+                         "undecided" if OWNER_CHOICE_SOURCE is None else "decided")
 
     # 選べる区分を外すと結果が変わる、作った名前の例（文書 2章 (8)）。
     OPTION_SENSITIVE = {
@@ -505,6 +513,25 @@ class TestBuildTagList(unittest.TestCase):
             tagrules.build_tag_list({}, {"A": {self.S: -1}}, self.base(), set(), self.S, self.E)
         with self.assertRaises(ValueError):
             tagrules.build_tag_list({}, {"A": {self.S: 1.5}}, self.base(), set(), self.S, self.E)
+
+    def test_two_settings_distinguishable(self):
+        ds = self.days()
+        counts = {"QQ_A": {d: 20 for d in ds}, "QQ_EBOLA": {d: 20 for d in ds}}
+        allset = tagrules.build_tag_list({}, counts, self.base(), set(), self.S, self.E,
+                                         optional=tagrules.OPTIONAL_CATEGORIES)
+        planb = tagrules.build_tag_list({}, counts, self.base(), set(), self.S, self.E,
+                                        optional=("ethnic_religious_group",))
+        default = tagrules.build_tag_list({}, counts, self.base(), set(), self.S, self.E)
+        self.assertEqual(allset["enabled_optional_categories"], ["disease_named", "ethnic_religious_group"])
+        self.assertEqual(planb["enabled_optional_categories"], ["ethnic_religious_group"])
+        self.assertEqual(default["enabled_optional_categories"], list(tagrules.ENABLED_OPTIONAL_CATEGORIES))
+        self.assertNotEqual(allset["enabled_optional_categories"], planb["enabled_optional_categories"])
+        self.assertEqual(allset["tag_list"], ["QQ_A"])
+        self.assertEqual(planb["tag_list"], ["QQ_A", "QQ_EBOLA"])
+        self.assertEqual(tagrules.compare_lists(allset, planb),
+                         {"only_in_old": [], "only_in_new": ["QQ_EBOLA"], "in_both": 1})
+        with self.assertRaises(ValueError):
+            tagrules.build_tag_list({}, counts, self.base(), set(), self.S, self.E, optional=("crime",))
 
     def test_compare_lists(self):
         old = {"tag_list": ["A", "B", "C"]}

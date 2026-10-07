@@ -34,18 +34,18 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/stats -v
    - 既知の外しすぎ（2章 (1) の表）：LEADERSHIP_TRAINING、BRAINSTORM_SESSION、ANTIVIRUS_SOFTWARE、COMPATRIOT、CAMPFIRE、MARKETCRASH、TEAMLEADER、ROADKILL、DEFENSELESS、HEARTATTACK。
    - 形の変化を使った末尾の一致と、先頭の一致による外しすぎ：SKYSCRAPER（RAPE の形の変化 RAPER が末尾にある）、PAINKILLER（KILLER）、SOFTSKILLS（KILLS）、CABINETMAKER（CABINET が先頭）、REGIMENTAL（REGIME が先頭）、PROTESTANTISM（PROTEST が先頭）。規則は変えず、外しすぎの方向の誤りとして開示する。既知の取りこぼし：GUNCONTROL、COUPATTEMPT、HIVAIDS、CARBOMB、MINISTERIAL、DEADLY。
 5. **外しすぎの方向を選ぶ方針**（2章 (1)・(3)）：5つの区分のテーマが一覧に残るより、関係の無いテーマが外れる方を選ぶ。たとえば DEFENSE（法廷の弁護側も外れる）、DEATH と DEAD（訃報も外れる）、VACCINE（予防接種の制度も外れる）、FIRE（解雇の意味の FIRED も外れる）、ATTACK（HEARTATTACK の心臓発作も外れる）、LEADER（LEADERSHIP も外れる）、VIRUS（ANTIVIRUS も外れる）、STORM（BRAINSTORM も外れる）。
-6. **語の一覧**（2章 (2)）。1cb463a の版からの変更は、出どころを付けて 2章 (7) の表にまとめた（CRISISLEX と ELECT を外し、ASSASSINATION、EXECUTION、STABBING、EXPLOSION、CRASH、ELECTED、MANSLAUGHTER、KILLING などを足した。CYBERCRIME は 0e14f3b で一度消して説明の欄で後戻りが出たので、T-020 で戻した）。
-7. **病名の扱い**（2章 (4)）：次の二つから選ぶ。
-   - 案A（今の案）：一般の語（DISEASE、VIRUS、EPIDEMIC など）に加えて、病名（EBOLA、ZIKA、COVID など）の区分 `disease_named` も使う。
+6. **語の一覧**（2章 (2)）。1cb463a の版からの変更は、出どころを付けて 2章 (7) の表にまとめた（CRISISLEX と ELECT を外し、ASSASSINATION、EXECUTION、STABBING、EXPLOSION、CRASH、ELECTED、MANSLAUGHTER、KILLING などを足した。CYBERCRIME は 0e14f3b で語の一覧から消した。0e14f3b では、くっつき一致が説明の欄にも掛かっていたので、説明の欄でも外れていた。247fc1d でくっつき一致を名前の欄だけにしたときに、説明の欄の cybercrime で外れなくなる後戻りが出た。T-020 で語の一覧に戻した）。
+7. **病名の扱い**（2章 (4)）：**未決**。次の二つから選んでほしい。今のコードの既定は案A だが、これは仮の値で、オーナーの決定ではない。
+   - 案A：一般の語（DISEASE、VIRUS、EPIDEMIC など）に加えて、病名（EBOLA、ZIKA、COVID など）の区分 `disease_named` も使う。
    - 案B：一般の語だけを使い、`disease_named` を使わない。
    - 病名は過去の流行の知識から選んだ（7章）。案Bなら、その知識は規則に入らない。代わりに、名前と説明に一般の語が無い病気のテーマが一覧に残る。
    - 案Bを選んだ場合のコードとテストの直し方、開示の手順は 2章 (8)。
-8. **民族・宗教の集団の区分を足すか**（2章 (5)）：CLAUDE.md の5つの区分の外にある。統計係の推奨は「足す」。足す場合は CLAUDE.md の決定事項の変更になる。足さない場合のコードとテストの直し方、開示の手順は 2章 (8)。
+8. **民族・宗教の集団の区分を足すか**（2章 (5)）：**未決**。CLAUDE.md の5つの区分の外にある。統計係の推奨は「足す」。今のコードの既定は「足す」だが、これは仮の値で、オーナーの決定ではない。足す場合は CLAUDE.md の決定事項の変更になる。足さない場合のコードとテストの直し方、開示の手順は 2章 (8)。
 9. **組織名**（2章 (5)）：別の規則を作らない。5つの区分の語に当たる組織のテーマだけが外れる。
 10. **区分表を見たあとの変更の範囲**（2章 (6)）：**テストで再現できる不具合の修正だけ** を認める（例外が出る、空の名前で落ちる、など）。語、数値（PREFIX_MIN_LEN、GLUE_MIN_REST など）、当たり方の種類は変えない。
     - 危うさ：区分表を見たあとで規則を変えると、名前を見ながら、どのテーマを外すかを実質的に選べる。たとえば GLUE_MIN_REST を4から3に変えるだけで、特定の名前の群れを外したり残したりできる。語を一つ足すのも同じである。数値と当たり方を変えないのは、この余地を無くすためである。
     - それでも変える場合は、新しい版として、オーナーの承認を得て、method-access より前に封印する。前の版と新しい版の両方で一覧を計算し、出入りしたテーマを並べて公開することを必須とする。
-11. **記憶にある名前で照合を試したこと**（7章）：統計係（0e14f3b の版を作る途中）と監査係（1cb463a の版の監査）は、記憶にある GDELT のテーマ名の形の名前を照合に通して、当たり方を見た。監査係の例は差し戻しを通して、0e14f3b と今回の版の語と規則に入った。そのため、「区分表を見る前に決めた」という主張は、「区分表を取得する前に決めた。ただし作成者と監査係はテーマ名の一部を記憶しており、それを照合で試した」に弱まる。統計係が試した名前の一覧は 7章に残した。最初の監査係が試した名前の全部の一覧は、その監査係が途中で止まったため作れない。記録の欠けとして開示する。リードの決定（2026-10-07）により、これ以降は記憶にある名前を照合に通さない。この事実を承知したうえで、規則を承認するかを判断してほしい。
+11. **記憶にある名前で照合を試したこと**（7章）：統計係（0e14f3b の版を作る途中）と、1cb463a の版を監査した監査係は、記憶にある GDELT のテーマ名の形の名前を照合に通して、当たり方を見た。その監査係は所見を出し終えている。監査係の例は差し戻しを通して、0e14f3b と今回の版の語と規則に入った。そのため、「区分表を見る前に決めた」という主張は、「区分表を取得する前に決めた。ただし作成者と監査係はテーマ名の一部を記憶しており、それを照合で試した」に弱まる。統計係が試した名前の一覧は 7章に残した。その監査係が試した名前の全部の一覧は作れない。報告が「など」で終わっているためである。記録の欠けとして開示する。（エラーで止まったのは、247fc1d の監査を始めた別の監査係で、この件とは別である。）リードの決定（2026-10-07）により、これ以降は記憶にある名前を照合に通さない。この事実を承知したうえで、規則を承認するかを判断してほしい。
 
 素朴な予測（3章）
 12. **素朴な予測の形**（3章 (1)(2)）：特徴量6つと切片のロジスティック回帰を、21組それぞれで作る。
@@ -173,7 +173,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/stats -v
 ### (4) 病名（案A と案B）
 - 病名（`disease_named` の行）は、一般の英語の語ではなく、過去の流行の知識から選んだ（7章）。CLAUDE.md の「データ源の区分を使って機械的に判定する」に照らすと、知識から名前を選ぶことは、テーマを名指しする判断に近づく。
 - そのため、次の二つを並べてオーナーに選んでもらう。
-  - 案A（今のコードの既定）：`disease_general` と `disease_named` の両方を使う。名前と説明に一般の語が無い病気のテーマも外れる。
+  - 案A（今のコードの既定。仮の値で、オーナーの決定ではない）：`disease_general` と `disease_named` の両方を使う。名前と説明に一般の語が無い病気のテーマも外れる。
   - 案B：`disease_general` だけを使う。知識から選んだ病名は規則に入らない。代わりに、名前が病名だけで説明にも一般の語が無いテーマは一覧に残る。
 - どちらを選ぶかは、封印の前に `ENABLED_OPTIONAL_CATEGORIES` に反映する（手順は (8)）。区分表を見る前なので、どちらを選んでも選び出しにはならない。
 
@@ -245,22 +245,30 @@ T-001 の報告では、テーマの欄に組織名と民族集団が入るこ�
 | 種類 | 中身 | 出どころ |
 |---|---|---|
 | 足した語 | CYBERCRIME（説明の欄での後戻りを直すため） | 監査の例 |
-| 変えた規則 | つなげた一語の照合を名前の欄だけにした（文書の記述にコードを合わせた） | 監査の例 |
+| 変えた規則 | つなげた一語の照合を名前の欄だけにした（文書の記述にコードを合わせた）。結果：説明の欄だけに airforce、primeminister、headofstate、ethniccleansing（その複数形などの形の変化を含む）のようにつなげた形で現れ、ほかの語には当たらないテーマは、247fc1d では外れていたが、今回の版では一覧に残る。名前の欄の同じ形は今までどおり外れる | 監査の例 |
 | 開示だけ | 形の変化を使った末尾の一致と先頭の一致の外しすぎ（SKYSCRAPER など6つ）を既知の例に足した。規則は変えていない | 監査の例 |
 | 開示だけ | 末尾の一致を使わない語は KING・SARS・MERS の三つ（前回「KING だけ」と書いたのは誤り）。規則は変えていない | 監査の例 |
 
-- 1cb463a の版の語（CRISISLEX を除く）が、今回の版でもすべて外れることを、テスト `test_v1_terms_still_excluded` で確かめている。名前の欄（語を下線でつないだ名前）と、説明の欄（語をそのまま置いた説明と、文の中に置いた説明）の両方を見る。
+- 選べる区分（病名と民族・宗教）をすべて有効にしたとき、1cb463a の版の語（CRISISLEX を除く）が今回の版でもすべて外れることを、テスト `test_v1_terms_still_excluded` で確かめている。オーナーが案Bを選ぶか、民族・宗教の区分を足さないと決めた場合は、その区分の語（1cb463a の病名と ETHNIC などの語）は外れなくなる。これは後戻りではなく、選択の結果として 2章 (8) の手順で開示する。名前の欄（語を下線でつないだ名前）と、説明の欄（語をそのまま置いた説明と、文の中に置いた説明）の両方を見る。
 
 ### (8) オーナーが選べる区分を外す場合の手順
 対象は、案B（`disease_named` を使わない。0章の7）を選んだ場合と、民族・宗教の区分（`ethnic_religious_group`）を足さないと決めた場合。どちらも、区分表を見る前に、封印の前に行う。
 
 1. `src/stats/tagrules.py` の `ENABLED_OPTIONAL_CATEGORIES` から、その区分を除く。語の一覧（`EXCLUSION_TERMS`）は変えない。選ばれなかった区分の語も、封印する記録に残す。
-2. `tests/stats/test_t019.py` の `OWNER_CHOICE` を、同じ値に直す。テスト `test_owner_choice` が、二つが同じであることと、出力の JSON の `enabled_optional_categories` を確かめる。
+2. `tests/stats/test_t019.py` の `OWNER_CHOICE` を同じ値に直し、`OWNER_CHOICE_SOURCE` に決定の記録（reviews/ のファイルと見出し）を書く。テスト `test_owner_choice` が、二つが同じであることと、出力の JSON の `enabled_optional_categories` を確かめる。
+   - 今の `OWNER_CHOICE` は、オーナーの決定ではなく仮の値（今の既定と同じ、両方を有効）で、`OWNER_CHOICE_SOURCE` は None（未決）である。出力の JSON の `optional_choice_status` も "undecided" になっている。決定を反映するときに "decided" に直す。
 3. ほかのテストは直さない。規則そのもののテスト（既知の例、1cb463a の語の後戻り、くっつき一致など）は、選べる区分をすべて有効にした状態（`ALL`）で行っており、オーナーの選択に依らない。
 4. 選択で結果が変わる例は、下の表のとおり。テスト `test_option_sensitive_examples` が、区分を有効にすれば外れ、外せば残ることを確かめる。選択を変えても、この表とテストは直さない。
 5. 開示：
    - 0章の7・8 の答えと、`ENABLED_OPTIONAL_CATEGORIES` の値を、封印の記録に書く。
-   - 区分表の取得のあと、オーナーの選択どおりの設定と、選べる区分をすべて有効にした設定の両方で `build_tag_list()` を実行し、`compare_lists()` で出入りしたテーマを公開する。選択によって一覧に残ったテーマが分かるようにするため。
+   - 区分表の取得のあと、オーナーの選択どおりの設定と、選べる区分をすべて有効にした設定の両方で `build_tag_list()` を実行し、`compare_lists()` で出入りしたテーマを公開する。選択によって一覧に残ったテーマが分かるようにするため。呼び方は次のとおり（入力は同じものを渡す）。
+     ```
+     chosen = tagrules.build_tag_list(themes, counts, totals, missing, start, end)
+     allset = tagrules.build_tag_list(themes, counts, totals, missing, start, end,
+                                      optional=tagrules.OPTIONAL_CATEGORIES)
+     moved = tagrules.compare_lists(allset, chosen)
+     ```
+     一つ目は `optional` を渡さないので、`ENABLED_OPTIONAL_CATEGORIES`（オーナーの選択）を使う。どちらの戻り値にも、使った設定が `enabled_optional_categories` として入るので、出力の中身から二つを見分けられる（テスト `test_two_settings_distinguishable`）。三つ（chosen、allset、moved）をすべて封印の記録に入れて公開する。
    - 採点に使うのは、オーナーの選択どおりの一覧だけ。比べた結果を見て、選択を変えない。
 
 <!-- table:option-sensitive -->
