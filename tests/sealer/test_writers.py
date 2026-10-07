@@ -240,7 +240,8 @@ class TestWriteThreeKinds(WriterCase):
         self.seal()
         s, _r, _o = self.start(T0 + H)
         self.result(T0 + 2 * H, s["seq"])
-        self.seal_triggers(T0 + 3 * H, last_read_offset_days=120)
+        # T-023：candidates の J の最大（28）と食い違う J は置けないので、J の無いきっかけにする
+        self.seal_triggers(T0 + 3 * H, network_window_days=500)
         self.access(T0 + 4 * H)
         self.commit("記録")
         out = self.verify_ok("all", "--rev", "auto")

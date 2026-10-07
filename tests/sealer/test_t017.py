@@ -303,7 +303,8 @@ class TestHorizonEmbargo(t14.Case):
         rec, _rel, _o = self.method(T0 + 5 * H)
         out = self.verify_ok("candidates")
         self.assertIn("method-access（seq %d）の時点で採用される periods（seq %d）の embargo_days 120 "
-                      "≥ J の最大。periods-triggers：seq %d、last_read_offset_days 120"
+                      "= max(1 件目の embargo_days, J の最大)。periods-triggers：seq %d、"
+                      "last_read_offset_days 120（= J の最大）"
                       % (rec["seq"], prec["seq"], trec["seq"]), out)
         self.verify_ok("all")
         self.method_gate()

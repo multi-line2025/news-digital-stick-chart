@@ -16,12 +16,12 @@ check_acquisition_pairs と同じ。
        - 中身の kind が記録の kind と同じこと
        - threshold-access：ledger_head、drand、block_start（periods の 1 件目の閾値の期間の始まり）、
          その前に candidates の記録があり、候補の順序の照合に通ること（T-014）、
-         J の最大が embargo_days を超えるなら、その前に periods-triggers があること（T-017）
+         J とエンバーゴの照合（T-017、T-023。ledger.check_horizon_embargo）
        - acquisition-start：ledger_head、drand、step = 3、fetch（取得のコードのパスと sha256）、
          その前に candidates の記録があること（T-014。check_candidates_order）
        - method-access：ledger_head、drand、step = 4、区画（periods の 1 件目の method の区画）、
          その前に candidates と acquisition-result の記録があること（T-014）、
-         J の最大が embargo_days を超えるなら、その前に periods-triggers があること（T-017）
+         J とエンバーゴの照合（T-017、T-023。ledger.check_horizon_embargo）
        - acquisition-result：start_seq・kept_rows_sha256 の形、start が実在し、result が後にあり、
          一つの start に result が一つだけであること
      どれかが通らなければ、何も書かずに止める。
@@ -93,7 +93,12 @@ def result_refs(project, records, extra=None):
 
 
 def _check_j(project, records_after):
-    """J の最大が periods の embargo_days を超えるなら、期限より前に periods-triggers が要る（T-017）。"""
+    """J とエンバーゴの照合（T-017、T-023）。追記した後の記録に対して ledger.check_horizon_embargo。
+
+    J を持つ periods-triggers が最初の method-access より前にだけあること、採用される periods の
+    embargo_days が max(1 件目の embargo_days, J の最大) と等しいこと、採用される periods-triggers
+    の J が null でなければ J の最大と等しいこと。
+    """
     ledger.check_horizon_embargo(records_after,
                                  lambda r, role: ledger.read_target_json(project, r, role))
 

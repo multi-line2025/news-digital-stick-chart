@@ -20,6 +20,11 @@ docs/stats/periods.md 8章 (2) の「きっかけの値は期限より前に決�
 時刻証明の時刻は、採用の判定には使わない。
 threshold-access の記録の後でも、追記は拒まない（関門は設けない。T-008）。その場合、
 検証が「採用しない」と表示する。
+ただし、J（--last-read-offset-days）を渡したときは、鎖に method-access（試運転の手順4の開始）の
+記録が 1 件でもあれば、追記しない（T-023）。J は手順4の前に決めて追記する決まり
+（docs/stats/periods.md 8章 (2)）で、検証（ledger.check_j_triggers_before_method）も、
+最初の method-access より後の J を持つ periods-triggers を失敗にする。追記のみの記録に
+検証に通らない行を残さないため、書く前に止める。
 """
 
 import argparse
@@ -49,6 +54,12 @@ def seal(project, values, now, ots_cmd, runner=subprocess.run):
         ledger.check_anchors(data, sealed_dir)
     if not ledger.records_of_kind(records, "periods"):
         raise ledger.LedgerError("periods の記録が無い。きっかけの値は封印しない")
+    if doc["last_read_offset_days"] is not None:
+        m = next((r for r in records if r["kind"] == ledger.METHOD_ACCESS_KIND), None)
+        if m is not None:
+            raise ledger.LedgerError("method-access の記録（seq %d）がある。J（last_read_offset_days）は"
+                                     "試運転の手順4の前に決めて追記する決まり"
+                                     "（docs/stats/periods.md 8章 (2)）。追記しない" % m["seq"])
     if ots_cmd is not None:
         stamp.check_ots(ots_cmd)
     content = ledger.canonical_line(doc) + b"\n"

@@ -203,11 +203,13 @@ class TestMethodAccessWriter(Case):
         self.assertEqual(self.snapshot(), before)
 
     def test_method_access_does_not_change_adoption(self):
-        """method-access の後・threshold-access の前の triggers は採用される（区切りは変わらない）。"""
+        """method-access の後・threshold-access の前の triggers は採用される（区切りは変わらない）。
+        T-023：method-access の後に J を持つ triggers は置けないので、J の無いきっかけ
+        （共起の網の日数）で確かめる。"""
         self.seal()
         self.step3(T0 + H)
         self.method(T0 + 3 * H)
-        trec = self.seal_triggers(T0 + 4 * H, last_read_offset_days=120)
+        trec = self.seal_triggers(T0 + 4 * H, network_window_days=500)
         out = self.verify_ok("adopted")
         self.assertIn("採用は保留（threshold-access の記録が無いため）", out)
         access, _rel, _o = self.access(T0 + 5 * H)

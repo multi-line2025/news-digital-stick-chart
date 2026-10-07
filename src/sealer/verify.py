@@ -21,8 +21,11 @@
     python3 -B src/sealer/verify.py periods            区画の境目と deadline_status の照合
     python3 -B src/sealer/verify.py candidates         閾値と判定期間の候補の記録の形・出力の形、
                                                        最初の acquisition-start より前にあること（T-013）、
-                                                       J の最大 ≤ periods の embargo_days。超えたときだけ
-                                                       期限より前の periods-triggers を求める（T-017）
+                                                       J とエンバーゴ（T-017、T-023）：J を持つ
+                                                       periods-triggers が最初の method-access より前に
+                                                       だけあること、採用される periods の embargo_days
+                                                       = max(1 件目の embargo_days, J の最大)、採用される
+                                                       periods-triggers の J（null でなければ）= J の最大
     python3 -B src/sealer/verify.py adopted            採用される版（鎖の順番で決める）
     python3 -B src/sealer/verify.py all [--rev R]      上のすべて
 
@@ -55,6 +58,9 @@ drand の照合の幅（T-008）
     auto             各記録について、その記録を最初に含んだコミットを Git の履歴から探し、
                      そのコミットの中のファイルと照合する。
     <コミット>       そのコミットの中のファイルと照合する。
+    auto か <コミット> のときは、そのコミットの sealed/ の時刻証明（.ots・.bitcoin.ots）と
+    ヘッダが、作業ツリーにも同じ中身であることも確かめる（auto なら HEAD の履歴で sealed/ に
+    足されたことのあるもの全部）。外していれば失敗する（T-023）。
 
 終了コード 0: すべての検査に通った（保留の判定があれば、そのことを出力する）
            1: どこかで失敗した  2: 引数の誤り
@@ -74,6 +80,10 @@ import ledger  # noqa: E402
 
 LEDGER_REL = "sealed/ledger.jsonl"
 HEADER_FILE_RE = re.compile(r"\Abitcoin-header-(\d+)\.hex\Z")
+# --rev で選んだコミットの sealed/ にあれば、作業ツリーにも同じ中身で無ければならないファイル
+# （T-023。T-017 の再提出1回目の監査 軽1）。時刻証明（.ots と .bitcoin.ots）とヘッダ。
+REV_ANCHOR_RE = re.compile(r"\Asealed/(ledger\.jsonl\.seq\d{6}(\.bitcoin)?\.ots"
+                           r"|bitcoin-header-\d+\.hex)\Z")
 NOT_CHECKED = ("この検査で確かめていないこと：(1) .ots の Bitcoin の証明に照合したヘッダが、"
                "Bitcoin の本当の鎖にあること（ots verify や自分のノードで確かめる）。"
                "(2) " + ledger.DRAND_NOT_VERIFIED)
@@ -118,6 +128,54 @@ class Repo:
         if missing:
             raise ledger.LedgerError("seq %s の記録を含むコミットが無い" % missing)
         return found
+
+    def anchor_files(self, rev):
+        """[(パス, コミット)]。rev のコミットの sealed/ にある時刻証明とヘッダ。T-023。
+
+        rev が auto なら、HEAD の履歴の中で sealed/ に足されたことのある、すべての時刻証明と
+        ヘッダ（足したコミットの中身と比べる）。それ以外なら、そのコミットの sealed/ にあるもの。
+        """
+        out = []
+        if rev == "auto":
+            text = self.git("log", "--no-renames", "--diff-filter=A", "--format=@%H",
+                            "--name-only", "HEAD", "--", "sealed/").decode("utf-8")
+            commit = None
+            for line in text.splitlines():
+                if line.startswith("@"):
+                    commit = line[1:]
+                elif line and REV_ANCHOR_RE.match(line):
+                    out.append((line, commit))
+        else:
+            text = self.git("ls-tree", "-r", "--name-only", rev, "--", "sealed/").decode("utf-8")
+            out = [(p, rev) for p in text.splitlines() if REV_ANCHOR_RE.match(p)]
+        return sorted(set(out))
+
+
+def check_rev_anchor_files(repo, rev):
+    """--rev で選んだコミットの sealed/ の時刻証明（.ots・.bitcoin.ots）とヘッダが、作業ツリーにも
+    同じ中身であることを確かめる。T-023（T-017 の再提出1回目の監査 軽1）。
+
+    検証の残りは作業ツリーの sealed/ を読むので、コミットにある .bitcoin.ots とヘッダを
+    作業ツリーからまとめて外すと、確定した seq が「Pending」のまま検証が通ってしまう。それを止める。
+    作業ツリーのファイルがシンボリックリンクなら、それも失敗にする。返り値: 照合した件数。
+    """
+    if rev == "working":
+        return 0
+    files = repo.anchor_files(rev)
+    bad = []
+    for rel, commit in files:
+        path = os.path.join(repo.root, rel)
+        if os.path.islink(path) or not os.path.isfile(path):
+            bad.append("%s（コミット %s にあるが、作業ツリーに無い）" % (rel, commit[:12]))
+            continue
+        with open(path, "rb") as f:
+            got = f.read()
+        if got != repo.git("show", "%s:%s" % (commit, rel)):
+            bad.append("%s（作業ツリーの中身が、コミット %s の中身と違う）" % (rel, commit[:12]))
+    if bad:
+        raise ledger.LedgerError("--rev %s で選んだコミットの sealed/ の時刻証明・ヘッダが、作業ツリーと"
+                                 "一致しない: %s" % (rev, "; ".join(bad)))
+    return len(files)
 
 
 class State:
@@ -243,6 +301,10 @@ def cmd_targets(st, a):
     if bad:
         raise ledger.LedgerError("対象のファイルの sha256 が %d 件一致しない" % bad)
     print("対象のファイルの sha256 はすべて記録と一致する。")
+    n = check_rev_anchor_files(repo, a.rev)
+    if a.rev != "working":
+        print("--rev %s で選んだコミットの sealed/ にある時刻証明（.ots・.bitcoin.ots）とヘッダ %d 件は、"
+              "作業ツリーにも同じ中身である（T-023）。" % (a.rev, n))
 
 
 def adopted_triggers(st):
@@ -417,10 +479,13 @@ def cmd_candidates(st, _a):
              "以下（区切りの作り直しは要らない）" if hz["j_max"] <= hz["embargo_first"]
              else "を超える（作り直しと、periods-triggers が要る）"))
     for p, per, emb, trg, j in hz["points"]:
-        print("  %s（seq %d）の時点で採用される periods（seq %d）の embargo_days %d ≥ J の最大。"
-              "periods-triggers：%s" % (p["kind"], p["seq"], per["seq"], emb,
-                                       "無し" if trg is None else "seq %d、last_read_offset_days %r"
-                                       % (trg["seq"], j)))
+        print("  %s（seq %d）の時点で採用される periods（seq %d）の embargo_days %d = "
+              "max(1 件目の embargo_days, J の最大)。periods-triggers：%s"
+              % (p["kind"], p["seq"], per["seq"], emb,
+                 "無し" if trg is None else "seq %d、last_read_offset_days %r%s"
+                 % (trg["seq"], j, "（null）" if j is None else "（= J の最大）")))
+    print("J を持つ periods-triggers は、最初の method-access より前にだけある"
+          "（method-access の記録が無ければ、すべて前）。")
     if hz["status"] == "pending":
         print("保留：method-access・threshold-access の記録がまだ無いので、periods-triggers の照合を保留")
     elif not hz["points"]:

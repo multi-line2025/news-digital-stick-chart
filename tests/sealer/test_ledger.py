@@ -865,6 +865,8 @@ if "--j120" in sys.argv:
     trig["last_read_offset_days"] = 120
     embargo = 120
     status = sys.argv[-1]
+if "--e120" in sys.argv:        # T-023：きっかけの無いエンバーゴの延長（照合で拒まれる形）
+    embargo = 120
 print(json.dumps({"deadline_status": status, "rebuild_triggers": trig,
     "rules": {"embargo_days": embargo},
     "periods": [{"name": n, "block_start": s, "block_end": e} for n, s, e in blocks]}))
@@ -874,6 +876,13 @@ print(json.dumps({"deadline_status": status, "rebuild_triggers": trig,
 CAND_OUTPUT = {"threshold_multipliers": [2, 3], "horizon_days": [14, 28],
                "combinations": [[2, 14], [2, 28], [3, 14], [3, 28]], "combination_count": 4,
                "last_read_offset_days": {"14": 14, "28": 28}}
+
+# J の最大が 120 の候補（T-023）。FAKE_PERIODS の --j120（J 120、embargo 120）と組にする。
+# 採用される periods-triggers の J は candidates の J の最大と等しく、採用される periods の
+# embargo_days は max(1 件目の 90, J の最大) と等しくなければならないため。
+CAND_J120 = {"threshold_multipliers": [2, 3], "horizon_days": [14, 120],
+             "combinations": [[2, 14], [2, 120], [3, 14], [3, 120]], "combination_count": 4,
+             "last_read_offset_days": {"14": 14, "120": 120}}
 
 
 def run_verify(root, *args):
@@ -1076,7 +1085,8 @@ class TestSealPeriods(SealCase):
         args = ["--j120", "before_deadline"]
         sha = ledger.sha256_hex(seal_periods.run_periods(self.root, args))
         self.seal(args=args, sha=sha, now=T0 + 2 * H)
-        self.add_cand(T0 + 2 * H + H / 2)        # T-017：threshold-access の前に candidates が要る
+        # T-017：threshold-access の前に candidates が要る。T-023：J の最大は triggers の J と同じ 120
+        self.add_cand(T0 + 2 * H + H / 2, output=CAND_J120)
         self.add_access(T0 + 3 * H, 30_000_000)
         r = run_verify(self.root, "all")
         self.assertEqual(r.returncode, 0, r.stderr.decode())
@@ -1104,7 +1114,7 @@ class TestSealPeriods(SealCase):
         """手順3（start の後）・threshold-access の前の triggers は採用され、before_deadline が通る。
         threshold-access の後に追記した triggers と periods は採用されない（追記は拒まない）。"""
         self.seal()
-        self.add_cand(T0 + H / 2)
+        self.add_cand(T0 + H / 2, output=CAND_J120)   # T-023：J の最大を triggers の J にそろえる
         start = self.add_start(T0 + H, 30_000_000)
         self.add_result(T0 + 2 * H, start)
         trec = self.seal_triggers(T0 + 3 * H, last_read_offset_days=120)
@@ -1275,15 +1285,20 @@ class TestAuditRepro(SealCase):
     """seq 1 periods、seq 2 periods、seq 3 periods-triggers、seq 4 candidates、
     seq 5 threshold-access、seq 6 periods。
     どの操作でも、採用は periods = seq 2、periods-triggers = seq 3 のまま。
-    T-017：threshold-access の前に candidates が要る（verify access の照合）ので seq 4 に足した。"""
+    T-017：threshold-access の前に candidates が要る（verify access の照合）ので seq 4 に足した。
+    T-023：J とエンバーゴの照合（採用される triggers の J = candidates の J の最大、採用される
+    periods の embargo_days = max(90, J の最大)）に通るよう、candidates の J の最大を seq 3 の
+    J（120）にそろえ（CAND_J120）、seq 2 を J 120 で作り直した periods（embargo 120）にした。"""
 
     ACQ_ROUND = 30_000_000   # 公開時刻は 2026 年の夏。下の確定時刻（T0 以後）より前。
 
     def build(self, round_no=ACQ_ROUND):
         self.seal()
-        self.seal(now=T0 + H)
+        j120 = ["--j120", "before_deadline"]
+        self.seal(args=j120, sha=ledger.sha256_hex(seal_periods.run_periods(self.root, j120)),
+                  now=T0 + H)
         self.seal_triggers(T0 + 2 * H, last_read_offset_days=120)
-        self.add_cand(T0 + 2 * H + H / 2)
+        self.add_cand(T0 + 2 * H + H / 2, output=CAND_J120)   # T-023：J の最大 120
         self.add_access(T0 + 3 * H, round_no)
         args = ["--j120", "before_deadline"]
         sha = ledger.sha256_hex(seal_periods.run_periods(self.root, args))

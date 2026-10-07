@@ -697,34 +697,71 @@ def _last_before(records, kind, seq):
     return found
 
 
+def triggers_j(record, read_json):
+    """periods-triggers の記録の last_read_offset_days（null なら None）。"""
+    return triggers_values(read_json(record, "triggers"))["last_read_offset_days"]
+
+
+def check_j_triggers_before_method(records, read_json):
+    """J（last_read_offset_days）を持つ periods-triggers の記録が、最初の method-access より
+    前にだけあることを確かめる。T-023（T-017 の再提出1回目の監査 中1）。
+
+    docs/stats/periods.md 8章 (2)：「J は試運転の手順4の前に決めて封印の記録に追記する。
+    J は手法を作る期間のデータを見ずに決まる」。手順4の開始は method-access の記録なので、
+    その後に J を持つ periods-triggers があれば LedgerError（採用されるかどうかに関わらない）。
+    J が null の periods-triggers（ほかの三つのきっかけだけのもの）は、手法を作る期間のデータを
+    見て決めてよい値なので、method-access の後でも拒まない。
+    method-access が無ければ何もしない。返り値: 最初の method-access の記録か None。
+    """
+    m = next((r for r in records if r["kind"] == METHOD_ACCESS_KIND), None)
+    if m is None:
+        return None
+    for r in records:
+        if r["kind"] == TRIGGERS_KIND and r["seq"] > m["seq"]:
+            j = triggers_j(r, read_json)
+            if j is not None:
+                raise LedgerError("periods-triggers（seq %d）が J（last_read_offset_days %d）を持つが、"
+                                  "最初の method-access（seq %d）より後にある。J は試運転の手順4の前に"
+                                  "決めて追記する決まり（docs/stats/periods.md 8章 (2)）"
+                                  % (r["seq"], j, m["seq"]))
+    return m
+
+
 def check_horizon_embargo(records, read_json):
-    """candidates の J の最大と、採用される periods・periods-triggers を照合する。T-017。
+    """candidates の J の最大と、採用される periods・periods-triggers を照合する。T-017、T-023。
 
     T-014 の監査 軽4 で加え、T-017 の差し戻し1回目の中2 で、照合の相手を「その時点で採用される
-    版」に改めた（以前は periods の 1 件目の embargo_days と、期限より前のどれかの
-    periods-triggers を見ていたので、採用されない古い triggers の J で通っていた）。
+    版」に改めた。T-023（T-017 の再提出1回目の監査 中1）で、J の値とエンバーゴを「等しい」ことの
+    照合に改め、J を持つ periods-triggers を最初の method-access より前に限った
+    （以前は J が大きすぎても通り、method-access の後に J を足してエンバーゴを作り直せた）。
 
     read_json(記録, role) は、記録の対象のファイルを sha256 を照合して JSON で返す関数。
     - J の最大 = すべての candidates の記録の出力の J の最大（candidates_max_j）。
+    - 期待するエンバーゴ E = max(periods の 1 件目の embargo_days, J の最大)
+      （docs/stats/periods.md 8章 (1) の表の「EMBARGO_DAYS = max(90, J)」。1 件目は 90）。
     - 照合する時点 P = 最初の method-access と、最初の threshold-access（あるものすべて）。
       P ごとに、P より前の periods の最後の記録（P が threshold-access なら、採用される periods）と、
       P より前の periods-triggers の最後の記録（同じく、採用される periods-triggers）を使う。
-      J は手順4の前、かつ期限（threshold-access）より前に決める（docs/stats/periods.md 8章 (2)）。
-    - P ごとに、次のどれかなら LedgerError。
-      (1) その periods の rules.embargo_days が J の最大より小さい（区切りが J を覆わない）。
+    - 次のどれかなら LedgerError。
+      (0) J を持つ periods-triggers が、最初の method-access より後にある
+          （check_j_triggers_before_method。採用されるかどうかに関わらない）。
+      (1) P で採用される periods の rules.embargo_days が E と等しくない
+          （J を覆わない区切りも、きっかけの無い延長も拒む。periods.md 8章 (1)）。
       (2) J の最大が periods の 1 件目の embargo_days を超えている（作り直しが要る）のに、
-          その periods-triggers が無いか、その last_read_offset_days が J の最大より小さい。
-      (3) その periods-triggers の last_read_offset_days が値を持ち、J の最大より小さい
-          （宣言した J が候補の J と食い違う）。
-    - P が一つも無いうちは失敗にしない。J の最大が 1 件目の embargo_days 以下なら "within"、
-      超えていれば "pending"。
-    返り値: {"j_max", "embargo_first", "status", "points"}。points は
+          P で採用される periods-triggers が無いか、その last_read_offset_days が null。
+      (3) P で採用される periods-triggers の last_read_offset_days が null でなく、J の最大と
+          等しくない（小さすぎる値も、大きすぎる値も拒む）。
+    - P が一つも無いうちは (0) 以外を失敗にしない。J の最大が 1 件目の embargo_days 以下なら
+      "within"、超えていれば "pending"。
+    返り値: {"j_max", "embargo_first", "embargo_expected", "status", "points"}。points は
       [(P の記録, periods の記録, その embargo_days, periods-triggers の記録か None, その J か None)]。
       status は "no-candidates"、"within"（作り直しは要らず、すべての P で照合に通る）、
       "ok"（作り直しが要り、すべての P で照合に通る）、"pending"。
     """
+    check_j_triggers_before_method(records, read_json)
     cands = [r for r in records if r["kind"] == CANDIDATES_KIND]
-    out = {"j_max": None, "embargo_first": None, "status": "no-candidates", "points": []}
+    out = {"j_max": None, "embargo_first": None, "embargo_expected": None,
+           "status": "no-candidates", "points": []}
     if not cands:
         return out
     j_max = max(candidates_max_j(read_json(r, "output")) for r in cands)
@@ -734,6 +771,8 @@ def check_horizon_embargo(records, read_json):
         raise LedgerError("periods の記録が無い")
     first = periods_embargo_days(read_json(versions[0][1], "output"))
     out["embargo_first"] = first
+    expected = max(first, j_max)
+    out["embargo_expected"] = expected
     rebuild = j_max > first
     marks = []
     for kind in (METHOD_ACCESS_KIND, THRESHOLD_ACCESS_KIND):
@@ -749,21 +788,27 @@ def check_horizon_embargo(records, read_json):
             raise LedgerError("%s の記録（seq %d）より前に periods の記録が無い" % (p["kind"], p["seq"]))
         emb = periods_embargo_days(read_json(per, "output"))
         trg = _last_before(records, TRIGGERS_KIND, p["seq"])
-        j = None if trg is None else triggers_values(read_json(trg, "triggers"))["last_read_offset_days"]
+        j = None if trg is None else triggers_j(trg, read_json)
         where = "%s の記録（seq %d）の時点" % (p["kind"], p["seq"])
         if emb < j_max:
             raise LedgerError("%sで採用される periods（seq %d）の embargo_days %d が、candidates の J の"
                               "最大 %d より小さい。J を覆う区切りを、その前に封印する必要がある"
                               % (where, per["seq"], emb, j_max))
+        if emb != expected:
+            raise LedgerError("%sで採用される periods（seq %d）の embargo_days %d が、max(periods の "
+                              "1 件目の embargo_days %d, candidates の J の最大 %d) = %d と等しくない。"
+                              "きっかけの無い変更はしない決まり（docs/stats/periods.md 8章 (1)）"
+                              % (where, per["seq"], emb, first, j_max, expected))
         if rebuild and (j is None or j < j_max):
             raise LedgerError("%sで採用される periods-triggers（%s）の last_read_offset_days が、"
                               "candidates の J の最大 %d 以上でない。J の最大が periods の 1 件目の "
-                              "embargo_days %d を超えるので、その前に %d 以上の periods-triggers の記録が要る"
+                              "embargo_days %d を超えるので、その前に last_read_offset_days が %d の "
+                              "periods-triggers の記録が要る"
                               % (where, "無し" if trg is None else "seq %d、%r" % (trg["seq"], j),
                                  j_max, first, j_max))
-        if j is not None and j < j_max:
+        if j is not None and j != j_max:
             raise LedgerError("%sで採用される periods-triggers（seq %d）の last_read_offset_days %d が、"
-                              "candidates の J の最大 %d より小さい" % (where, trg["seq"], j, j_max))
+                              "candidates の J の最大 %d と等しくない" % (where, trg["seq"], j, j_max))
         out["points"].append((p, per, emb, trg, j))
     out["status"] = "ok" if rebuild else "within"
     return out
@@ -1155,10 +1200,13 @@ def check_sealed_inside(project):
 def check_sealed_path(path):
     """sealed/ に書く・追記するファイルのパスを、書く前に確かめる。T-017（差し戻し1回目の中1）。
 
-    path は <プロジェクト>/sealed/<名前> の形でなければならない。プロジェクトについて
-    check_sealed_inside を行い、path がもう存在するなら、その実体が sealed/ の中の同じ名前で
-    あること（別の場所へのリンクでないこと）も確かめる。書く仕組みの共通の入口
+    path は <渡したルート>/sealed/<名前> の形（親のフォルダの名前が sealed）でなければならない。
+    その親（渡したルート）について check_sealed_inside を行い、path がもう存在するなら、その実体が
+    sealed/ の中の同じ名前であること（別の場所へのリンクでないこと）と、リンク数が 1 である
+    こと（ハードリンクでないこと。T-023）も確かめる。書く仕組みの共通の入口
     （append_record、write_once、stamp.stamp_seq、stamp.upgrade_seq）が呼ぶ。
+    渡したルートが PROJECT_ROOT であることは確かめない（書く仕組みは --root で別のルートを
+    受け付け、テストは仮のプロジェクトに書くため。T-023 の軽2 で、手順書の書き方をこれに合わせた）。
     """
     sealed_dir = os.path.dirname(os.path.abspath(path))
     if os.path.basename(sealed_dir) != "sealed":
@@ -1169,6 +1217,13 @@ def check_sealed_path(path):
         if real != os.path.join(os.path.realpath(sealed_dir), os.path.basename(path)):
             raise LedgerError("%s の実体（%s）が sealed/ の中に無い。シンボリックリンクで別の場所を"
                               "指している。書かない" % (path, real))
+        # T-023（T-017 の再提出1回目の監査 軽3）：ハードリンクは realpath では見分けられない。
+        # 書く先（追記する ledger.jsonl）のリンク数が 2 以上なら、別の名前で同じ実体を持つ
+        # ファイルがある。追記がそちらにも及ぶので書かない。もう一方の名前の場所は分からない。
+        nlink = os.lstat(path).st_nlink
+        if nlink != 1:
+            raise LedgerError("%s のリンク数が %d（ハードリンクで、別の名前が同じ実体を持つ）。書かない"
+                              % (path, nlink))
 
 
 class ThresholdAccessRequired(LedgerError):
@@ -1221,8 +1276,11 @@ def require_threshold_access():
       - 中身の block_start が、periods の 1 件目の出力の閾値の期間の始まりと一致すること
       - 候補の順序（T-014）：最初の threshold-access より前に candidates の記録が 1 件以上
         あり、すべての candidates が最初の acquisition-start より前にあり、形の照合に通ること
-      - J とエンバーゴ（T-017）：check_horizon_embargo。candidates の J の最大が periods の
-        embargo_days を超えるときだけ、期限より前に periods-triggers の記録があること
+      - J とエンバーゴ（T-017、T-023）：check_horizon_embargo。J を持つ periods-triggers が
+        最初の method-access より前にだけあること。採用される periods の embargo_days が
+        max(periods の 1 件目の embargo_days, candidates の J の最大) と等しいこと。採用される
+        periods-triggers の J が null でなければ J の最大と等しいこと。J の最大が 1 件目の
+        embargo_days を超えるときは、その periods-triggers が要ること
       - sealed/ と記録のファイルの実体が、プロジェクトの下にあること（check_sealed_inside）
     記録が無ければ、先に src/sealer/seal_access.py で threshold-access を追記する。
 
@@ -1268,7 +1326,7 @@ def require_method_access():
       - 前提：その記録より前に candidates と acquisition-result の記録があること
         （check_method_access_order）。acquisition-start と result の対応が正しいこと
       - 候補の順序：candidates が最初の acquisition-start より前にあり、形の照合に通ること
-      - J とエンバーゴ（T-017）：check_horizon_embargo（require_threshold_access と同じ）
+      - J とエンバーゴ（T-017、T-023）：check_horizon_embargo（require_threshold_access と同じ）
       - sealed/ と記録のファイルの実体が、プロジェクトの下にあること（check_sealed_inside）
     記録が無ければ、先に src/sealer/seal_method.py で method-access を追記する。
 
