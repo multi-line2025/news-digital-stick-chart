@@ -38,14 +38,18 @@
       ファイル・skip-worktree の印が無く（codegate.check_clean）、動いている themes.py と privacy_scan.py
       が HEAD にコミットした中身と同じであること。区分表の取得は、このファイル（2.1 の名前の欄
       だけを残す規則を含む）をコミットしたあとの、その code_sha256 のコードでだけ行う。
-    - 1回だけの取得（オーナーの承認「1回取得してよい」）：通信の前に、マニフェスト
-      data/manifest/gdelt-themes.jsonl に試行の行（kind が attempt。code_sha256・source_url・
-      attempted_at・除外の規則の封印の記録の seq と sha256）を書く。作業ツリーにマニフェストの
-      ファイルがあるか（空にしたファイルを含む）、HEAD にマニフェストがあれば（前の試行が成功
-      しても失敗しても）、通信せずに止まる（差し戻し2回目 軽-1）。失敗した取得も、試行の行として記録に残る。
+    - 1回だけの取得（オーナーの承認「1回取得してよい」）は2段で行う（差し戻し3回目 軽-2）。
+      1段目：マニフェスト data/manifest/gdelt-themes.jsonl が作業ツリーにも HEAD にも無ければ、
+      試行の行（kind が attempt。code_sha256・source_url・attempted_at・除外の規則の封印の記録の
+      seq と sha256）を書いて AttemptRecorded で止まる（通信しない）。
+      2段目（試行の行をコミットしたあと）：作業ツリーのマニフェストが HEAD とちょうど同じで、
+      中身がこのコードとこの除外の規則の記録の試行の行1行だけのときに限り、kind が fetch の
+      行を書いてから通信する。止まれば failed の行、成功すれば result の行を書く。
+      それ以外（コミットしていない変更がある・ほかの行がある）なら、通信せずに止まる。失敗した取得も、試行の行として記録に残る。
       取得に成功すれば、結果の行（kind が result）を書く。
-      限界：コミットする前にマニフェストのファイルごと消すと（rm など）、HEAD にも無いので
-      見つけられない。試行の行は、取得のあとすぐにコミットする。
+      限界（前提 → 結論）：通信のあとの行（fetch・failed）は、コミットする前は作業ツリーに
+      だけある → その行を消して HEAD と同じ形に戻すと、もう一度通信できる。2段目のあとすぐに
+      コミットする。
     - 結果の行と試行の行には、除外の規則の関門が返した記録の seq と sha256
       （exclusion_rule_seq・exclusion_rule_record_sha256）を書く（差し戻し2回目 中-B）。
 
@@ -189,6 +193,10 @@ CODE_REL = "src/collector/themes.py"
 
 class ThemesError(Exception):
     """止まった。文には、表の値を入れない（見出しの名前だけ）。"""
+
+
+class AttemptRecorded(ThemesError):
+    """0.1章の1段目：試行の行を書いて止まった（通信はしていない）。コミットしてから再実行する。"""
 
 
 class ExclusionRulesNotSealed(ThemesError):
@@ -618,31 +626,58 @@ def _append_line(path, entry, what):
 
 def run(*, root, home, url=None, transport=urllib_transport, clock=time.monotonic,
         now=lambda: datetime.datetime.now(datetime.timezone.utc)):
-    """1回だけ取得し、件数の欄を捨てて保存する（ThemesError で止まる）。
+    """1回だけ取得し、件数の欄を捨てて保存する（ThemesError で止まる）。2段で動く（0.1章）。
 
-    関門（0章・0.1章）で止まるときは何も書かない。通信の直前に試行の行を書くので、通信の
-    あとで止まったときは、試行の行だけが残る（区分表の本体は書かない）。
+    1段目：マニフェストが作業ツリーにも HEAD にも無ければ、試行の行を書いて AttemptRecorded で
+      止まる（通信しない）。オーナー（または実行の担当）がコミットしてから、もう一度実行する。
+    2段目：作業ツリーのマニフェストが HEAD と同じで、中身がこのコードとこの除外の規則の記録の
+      試行の行ちょうど1行のときだけ、通信の直前に fetch の行を書いてから通信する。通信や形の
+      誤りで止まったときは failed の行を書く。成功すれば結果の行を書く。
+    関門（0章・0.1章）で止まるときは何も書かない。
     """
     url = THEMES_URL if url is None else url
     name = validate_doc_url(url)
     sha_code, head_manifest = _code_gate(root)       # 0.1章。固定したコードで動くことを先に
     excl = _exclusion_gate(root)                      # 0章。通信の前に確かめる
     store, manifest = _resolve(root, home)
-    if os.path.lexists(manifest) or head_manifest:
-        # 行が1つも無い（空にした）ファイルがあっても止まる（差し戻し2回目 軽-1）
-        raise ThemesError("区分表の取得は既に試みた（作業ツリーか HEAD にマニフェストがある）。"
-                          "2回目は取得しない")
+    attempt = {"kind": "attempt", "source_url": url, "code_path": CODE_REL,
+               "code_sha256": sha_code, "exclusion_rule_seq": excl["seq"],
+               "exclusion_rule_record_sha256": excl["record_sha256"]}
+    if not os.path.lexists(manifest) and not head_manifest:
+        _append_line(manifest, dict(attempt, attempted_at=_iso(now())), "マニフェストの行")
+        raise AttemptRecorded("試行の行を書いた（通信はしていない）。data/manifest/%s をコミット"
+                              "してから、同じコマンドでもう一度実行する" % MANIFEST_NAME)
+    working = _read_manifest(manifest)
+    if working != head_manifest:
+        raise ThemesError("区分表のマニフェストに、コミットしていない変更がある（前の取得の途中か"
+                          "あとの跡。2回目は取得しない。リードに報告）")
+    lines = [l for l in working.splitlines() if l.strip()]
+    try:
+        only = json.loads(lines[0]) if len(lines) == 1 else None
+    except ValueError:
+        only = None
+    if only is None or {k: v for k, v in only.items() if k != "attempted_at"} != attempt:
+        raise ThemesError("区分表の取得は既に試みた（マニフェストが、このコードの試行の行1行だけ"
+                          "でない）。2回目は取得しない")
+    attempted_at = only.get("attempted_at")
     stamp = now().astimezone(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     file_name = "gdelt-themes-%s.tsv" % stamp
     out_path = os.path.join(store, file_name)
     if os.path.lexists(out_path):
         raise ThemesError("同じ名前のファイルが既にある")
-    attempted_at = _iso(now())
-    _append_line(manifest, {"kind": "attempt", "attempted_at": attempted_at, "source_url": url,
-                            "code_path": CODE_REL, "code_sha256": sha_code,
-                            "exclusion_rule_seq": excl["seq"],
-                            "exclusion_rule_record_sha256": excl["record_sha256"]},
+    _append_line(manifest, {"kind": "fetch", "at": _iso(now()), "code_sha256": sha_code},
                  "マニフェストの行")
+    try:
+        return _fetch_and_write(url, name, transport, clock, now, attempted_at, sha_code, excl,
+                                file_name, out_path, manifest)
+    except ThemesError as e:
+        _append_line(manifest, {"kind": "failed", "at": _iso(now()),
+                                "reason": type(e).__name__}, "マニフェストの行")
+        raise
+
+
+def _fetch_and_write(url, name, transport, clock, now, attempted_at, sha_code, excl, file_name,
+                     out_path, manifest):
     raw = fetch_once(url, transport, clock)
     fetched_at = _iso(now())
     sheets = read_table(raw, name)

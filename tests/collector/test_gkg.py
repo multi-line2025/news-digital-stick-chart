@@ -577,6 +577,9 @@ class RunCase(unittest.TestCase):
     def manifest(self, name=None):
         return gkg.read_jsonl(self.manifest_path(name))
 
+    def store_path(self, name):
+        return os.path.join(self.store, name)
+
     def fetch_log(self):
         return gkg.read_jsonl(os.path.join(self.store, gkg.fetch_log_name(RUN_ID)))
 
@@ -1084,6 +1087,10 @@ class TestRunStartCommit(RunCase):
         committed = self.committed_now()
         with open(self.manifest_path(), "wb") as f:     # コミットのあとで消して作り直す
             f.write(b"")
+        with self.assertRaisesRegex(gkg.GkgError, "決まった名前でない"):   # 前の run の印が残る
+            self.run_once(committed_manifest=b"", code_sha256="cd" * 32)
+        os.rename(self.store_path(gkg.volume_mark_name(RUN_ID)),
+                  os.path.join(self.tmp, "mark-aside"))       # 印も保存先の外へ移した場合
         with self.assertRaises(gkg.RunStartWritten):
             self.run_once(committed_manifest=b"", code_sha256="cd" * 32)
         with self.assertRaisesRegex(gkg.GkgError, "書き換わっている"):
@@ -1192,7 +1199,7 @@ class TestLogCheckpoint(RunCase):
         self.low_after = 2
         with self.assertRaises(gkg.RunInterrupted):
             self.run_gkg()
-        os.rename(self.log_path(), self.log_path() + "-aside")
+        os.rename(self.log_path(), os.path.join(self.tmp, "log-aside"))   # 保存先の外へ
         self.low_after = None
         with self.assertRaisesRegex(gkg.GkgError, "書き換わっている"):
             self.run_gkg()
@@ -1324,7 +1331,7 @@ class TestVolumeIdAndEmptyFile(RunCase):
     def test_other_disk_without_mark_refused_on_resume(self):
         with self.assertRaises(gkg.RunStartWritten):
             self.run_once()
-        os.rename(self.mark_path(), self.mark_path() + "-aside")   # 別のディスクの形
+        os.rename(self.mark_path(), os.path.join(self.tmp, "mark-aside"))   # 別のディスクの形
         with self.assertRaisesRegex(gkg.GkgError, "印のファイルが無い"):
             self.run_once()
         self.assertEqual(self.transport.calls, [])
@@ -1336,9 +1343,9 @@ class TestVolumeIdAndEmptyFile(RunCase):
             f.write(b"x\n")
         with self.assertRaisesRegex(gkg.GkgError, "印のファイルの形"):
             self.run_once()
-        os.remove(self.mark_path())
+        os.rename(self.mark_path(), os.path.join(self.tmp, "mark-aside"))
         os.symlink(self.mark_path() + "-elsewhere", self.mark_path())
-        with self.assertRaisesRegex(gkg.GkgError, "印のファイルが無い"):
+        with self.assertRaisesRegex(gkg.GkgError, "決まった名前でない"):   # リンクは一覧で止まる
             self.run_once()
 
     def test_existing_mark_before_start_refused(self):
@@ -1563,14 +1570,30 @@ class TestHiddenTrial(RunCase):
     def test_unknown_file_in_trial_folder_is_refused(self):
         with open(os.path.join(self.trial_store, "raw.zip"), "wb") as f:
             f.write(b"x")
-        with self.assertRaisesRegex(gkg.GkgError, "知らない名前"):
+        with self.assertRaisesRegex(gkg.GkgError, "決まった名前でない"):
             self.run_once()
 
-    def test_dot_files_are_ignored(self):
-        with open(os.path.join(self.trial_store, "._gkg-trial-x"), "wb") as f:
-            f.write(b"x")                                  # macOS の付属のファイル
+    def test_only_appledouble_of_known_names_is_allowed(self):
+        """差し戻し3回目 中-2：飛ばすのは「._」に決まった名前を続けたものだけ。"""
+        ok = "._" + gkg.fetch_log_name(RUN_ID, "trial")
+        with open(os.path.join(self.trial_store, ok), "wb") as f:
+            f.write(b"x")                                  # macOS の付属のファイルの形
         with self.assertRaises(gkg.RunStartWritten):
             self.run_once()
+
+    def test_other_dot_names_and_folders_are_refused(self):
+        for make in (lambda p: open(os.path.join(p, "._gkg-trial-x"), "wb").close(),
+                     lambda p: open(os.path.join(p, "." + gkg.fetch_log_name(RUN_ID, "trial")),
+                                    "wb").close(),
+                     lambda p: os.mkdir(os.path.join(p, ".old"))):
+            with self.subTest():
+                self.tearDown_dir = tempfile.mkdtemp(prefix="gkg-dot-", dir=self.tmp)
+                store = os.path.join(self.tearDown_dir, "vol", *gkg.TRIAL_STORE_PARTS)
+                os.makedirs(store)
+                os.makedirs(os.path.join(self.tearDown_dir, "vol", *gkg.STORE_PARTS))
+                make(store)
+                with self.assertRaisesRegex(gkg.GkgError, "決まった名前でない"):
+                    self.run_once(volume=os.path.join(self.tearDown_dir, "vol"))
 
 
 class TestExclusionRecord(RunCase):
@@ -1606,6 +1629,179 @@ class TestExclusionRecord(RunCase):
             with self.assertRaisesRegex(gkg.GkgError, "まだ決まっていない"):
                 self.run_once()
         self.assertEqual(self.manifest(), [])
+
+
+class Kill9(BaseException):
+    """kill -9 の見本。run-stop も書かれない（_write_stop を外して使う）。"""
+
+
+class TestRound3Reproductions(RunCase):
+    """差し戻し3回目：監査係の再現（scratchpad/exp4）。止まるものと、止まらずに記録に残るもの。"""
+
+    DAYS = ("20150302", "20150303", "20150304")
+    N = 3
+
+    def lp(self):
+        return os.path.join(self.store, gkg.fetch_log_name(RUN_ID))
+
+    def forged(self, ft, result="failed"):
+        return {"run_id": RUN_ID, "mode": "official", "file_time": ft, "listed_md5": "0" * 32,
+                "listed_size": 1, "result": result, "reason": "http_404", "transient": False,
+                "attempts": 1, "sha256": None, "docs": {}, "stats": {},
+                "finished_at": "2026-10-08T00:00:00Z"}
+
+    def append_log(self, *objs):
+        with open(self.lp(), "ab") as f:
+            for o in objs:
+                f.write((json.dumps(o) + "\n").encode())
+
+    def kill_at(self, boom):
+        inner = FakeTransport(self.responses)
+
+        def transport(url, timeout):
+            if boom in url:
+                raise Kill9()
+            return inner(url, timeout)
+        with mock.patch.object(gkg, "_write_stop", lambda *a, **k: None):
+            with self.assertRaises(Kill9):
+                self.run_gkg(transport=transport)
+
+    def test_Y1_forged_failed_in_tail_is_not_laundered_by_two_resumes(self):
+        target = ts_of(self.DAYS[2], 1)
+        self.kill_at(ts_of(self.DAYS[1], 0))
+        self.assertEqual(self.manifest()[-1]["kind"], "day")
+        self.append_log(self.forged(target))
+        self.free_calls, self.low_after = 0, 1             # 再開1：すぐ止まる
+        with self.assertRaises(gkg.RunInterrupted):
+            self.run_once()
+        resume = [e for e in self.manifest() if e["kind"] == "run-resume"][-1]
+        self.assertEqual(len(resume["untrusted_ranges"]), 1)
+        self.low_after = None
+        done = self.run_once()                               # 再開2
+        self.assertIn(target, self.transport.calls)          # 偽の failed は使われない
+        self.assertEqual(done["files_failed"], 0)
+
+    def test_two_resumes_keep_ranges(self):
+        self.kill_at(ts_of(self.DAYS[1], 0))
+        self.append_log(self.forged(ts_of(self.DAYS[2], 0)))
+        with mock.patch.object(gkg, "_write_stop", lambda *a, **k: None), \
+                mock.patch.object(gkg, "_run_plan", side_effect=Kill9()):
+            with self.assertRaises(Kill9):                  # 再開1：run-resume のあと kill -9
+                self.run_once()
+        self.append_log(self.forged(ts_of(self.DAYS[2], 1)))
+        with mock.patch.object(gkg, "_write_stop", lambda *a, **k: None), \
+                mock.patch.object(gkg, "_run_plan", side_effect=Kill9()):
+            with self.assertRaises(Kill9):                  # 再開2
+                self.run_once()
+        ranges = [e for e in self.manifest() if e["kind"] == "run-resume"][-1]["untrusted_ranges"]
+        self.assertEqual(len(ranges), 2)
+        done = self.run_once()                               # 再開3
+        for i in (0, 1):
+            self.assertIn(ts_of(self.DAYS[2], i), self.transport.calls)
+        self.assertEqual(done["files_failed"], 0)
+
+    def test_peek_rename_in_store_is_refused(self):
+        """exp_peek：日の集計を書いた直後に kill -9 し、保存先の中で名前を変える → 一覧で止まる。"""
+        day = "2015-03-02"
+        real = gkg.append_jsonl
+
+        def app(path, obj, what, *a, **k):
+            if obj.get("kind") == "day" and obj.get("day") == day:
+                raise Kill9()
+            return real(path, obj, what, *a, **k)
+        with mock.patch.object(gkg, "append_jsonl", app), \
+                mock.patch.object(gkg, "_write_stop", lambda *a, **k: None):
+            with self.assertRaises(Kill9):
+                self.run_gkg()
+        name = gkg.day_file_name(RUN_ID, day)
+        os.rename(os.path.join(self.store, name), os.path.join(self.store, "aside-" + name))
+        with self.assertRaisesRegex(gkg.GkgError, "決まった名前でない"):
+            self.run_once()
+        self.assertEqual(self.transport.calls, [])
+
+    def test_peek_move_out_then_forge_is_not_used(self):
+        """exp_peek の変形：保存先の外へ移し、偽の failed を足し、2回再開しても、偽の行は使われない。"""
+        day = "2015-03-02"
+        real = gkg.append_jsonl
+
+        def app(path, obj, what, *a, **k):
+            if obj.get("kind") == "day" and obj.get("day") == day:
+                raise Kill9()
+            return real(path, obj, what, *a, **k)
+        with mock.patch.object(gkg, "append_jsonl", app), \
+                mock.patch.object(gkg, "_write_stop", lambda *a, **k: None):
+            with self.assertRaises(Kill9):
+                self.run_gkg()
+        name = gkg.day_file_name(RUN_ID, day)
+        os.rename(os.path.join(self.store, name), os.path.join(self.tmp, "aside"))
+        target = ts_of(self.DAYS[0], 1)
+        self.append_log(self.forged(target))
+        with mock.patch.object(gkg, "_write_stop", lambda *a, **k: None), \
+                mock.patch.object(gkg, "_run_plan", side_effect=Kill9()):
+            with self.assertRaises(Kill9):
+                self.run_once()
+        done = self.run_once()
+        self.assertIn(target, self.transport.calls)
+        self.assertEqual(done["files_failed"], 0)
+
+    def test_Y2_forged_attempts_in_tail_do_not_exhaust_without_request(self):
+        target = ts_of(self.DAYS[2], 2)
+        self.kill_at(ts_of(self.DAYS[1], 0))
+        self.append_log(*[{"run_id": RUN_ID, "mode": "official", "file_time": target,
+                           "result": "attempt", "attempt": n, "at": "2026-10-08T00:00:00Z"}
+                          for n in (1, 2, 3)])
+        self.run_once()
+        self.assertEqual(self.transport.calls.count(target), 1)   # 少なくとも1回は要求を送る
+        rec = [e for e in self.fetch_log() if e["file_time"] == target and e["result"] == "ok"]
+        self.assertEqual(len(rec), 1)
+
+    def test_day_line_lists_failed_files(self):
+        """主な防御：day の行に failed のファイルの一覧（第三者が GDELT と照らせる）。"""
+        bad = ts_of(self.DAYS[0], 1)
+        self.responses[bad] = [FakeResponse(status=404)]
+        self.run_gkg()
+        days = [e for e in self.manifest() if e["kind"] == "day"]
+        self.assertEqual(days[0]["failed_files"],
+                         [{"file_time": bad, "reason": "http_404", "attempts": 1}])
+        self.assertEqual(days[1]["failed_files"], [])
+        for d in days:
+            self.assertEqual(len(d["failed_files"]), d["files_failed"])
+
+
+class TestRound3Trial(RunCase):
+    """exp_trial2：試しの run を「.」で隠す・フォルダの外へ移す。"""
+
+    DAYS = ("20150302",)
+    N = 2
+
+    def hide(self, how):
+        self.run_once(mode="trial", committed_manifest=None)
+        open(self.manifest_path(gkg.TRIAL_MANIFEST_NAME), "w").close()
+        if how == "dot":
+            for n in os.listdir(self.trial_store):
+                os.rename(os.path.join(self.trial_store, n), os.path.join(self.trial_store, "." + n))
+        else:
+            os.mkdir(os.path.join(self.trial_store, ".old"))
+            for n in os.listdir(self.trial_store):
+                if n != ".old":
+                    os.rename(os.path.join(self.trial_store, n),
+                              os.path.join(self.trial_store, ".old", n))
+        with self.assertRaisesRegex(gkg.GkgError, "決まった名前でない"):
+            self.run_once(mode="trial", committed_manifest=None, code_sha256="cd" * 32)
+
+    def test_dot(self):
+        self.hide("dot")
+
+    def test_subdir_dot(self):
+        self.hide("subdir")
+
+    def test_listed_trial_files_missing(self):
+        self.run_once(mode="trial", committed_manifest=None)
+        for n in os.listdir(self.trial_store):
+            os.rename(os.path.join(self.trial_store, n), os.path.join(self.tmp, n))
+        with self.assertRaisesRegex(gkg.GkgError, "控えと合わない"):
+            self.run_once()
+        self.assertFalse(os.path.exists(self.manifest_path()))
 
 
 # --- T-021：FAT32 のイメージの上での検査（環境変数でイメージのマウント先を渡したときだけ） -----
@@ -1698,8 +1894,10 @@ class TestOnFat32(RunCase):
         with self.assertRaises(gkg.RunStartWritten):
             self.run_once()
         os.symlink(target, os.path.join(self.store, gkg.fetch_log_name(RUN_ID)))
-        with self.assertRaisesRegex(gkg.GkgError, "開けない"):
+        with self.assertRaisesRegex(gkg.GkgError, "決まった名前でない"):   # 一覧でリンクを止める
             self.run_once()
+        with self.assertRaisesRegex(gkg.GkgError, "開けない"):           # 一覧の後ろの O_NOFOLLOW
+            gkg.read_bytes_nofollow(os.path.join(self.store, gkg.fetch_log_name(RUN_ID)))
         self.assertEqual(self.transport.calls, [])
         self.assertFalse(os.path.lexists(target))
 

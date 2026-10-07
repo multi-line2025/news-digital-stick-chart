@@ -71,6 +71,24 @@ def no_gate(root):
 CODE_SHA = "ab" * 32
 
 
+def run_two_phase(call, manifest_path):
+    """0.1章の2段：1段目（試行の行を書いて止まる）→ その行をコミットしたとみなす → 2段目。
+
+    1段目で AttemptRecorded 以外で止まれば、その例外をそのまま出す。返り値：(2段目の返り値, HEAD)。
+    """
+    with mock.patch.object(themes, "_code_gate", lambda root: (CODE_SHA, b"")):
+        try:
+            call()
+        except themes.AttemptRecorded:
+            pass
+        else:
+            raise AssertionError("1段目で止まらなかった")
+    with open(manifest_path, "rb") as f:
+        head = f.read()
+    with mock.patch.object(themes, "_code_gate", lambda root: (CODE_SHA, head)):
+        return call(), head
+
+
 def no_code_gate(root):
     """0.1章のコードの関門を通ったことにする（関門そのものは TestCodeGate で確かめる）。
     返り値の2つ目は HEAD のマニフェスト（空）。"""
@@ -256,30 +274,37 @@ class TestCodeGate(unittest.TestCase):
         with self.assertRaisesRegex(self.mod.ThemesError, "コードの関門"):
             self.mod._code_gate(self.root)
 
-    def test_attempt_line_deleted_after_commit_stops(self):
-        """差し戻し2回目 軽-1：試行の行をコミットしたあと、作業ツリーから消しても2回目はできない。"""
+    def test_two_phase_with_real_git(self):
+        """軽-1・軽-2：試行の行をコミットしてから通信する。コミットしたあとで消しても2回目はできない。"""
         os.makedirs(os.path.join(self.root, "data", "manifest"))
         home = os.path.join(self.tmp, "home")
         os.makedirs(os.path.join(home, *themes.STORE_PARTS))
         gate = mock.patch.object(self.mod, "_exclusion_gate", no_gate)
         gate.start()
         self.addCleanup(gate.stop)
-        tr = FakeTransport(GOOD, status=503)
-        with self.assertRaises(self.mod.ThemesError):
-            self.mod.run(root=self.root, home=home, transport=tr, clock=lambda: 0.0,
-                         now=lambda: NOW)
-        self.assertEqual(len(tr.calls), 1)
         mp = os.path.join(self.root, "data", "manifest", themes.MANIFEST_NAME)
+
+        def run(tr):
+            return self.mod.run(root=self.root, home=home, transport=tr, clock=lambda: 0.0,
+                                now=lambda: NOW)
+        tr = FakeTransport(GOOD, status=503)
+        with self.assertRaises(self.mod.AttemptRecorded):
+            run(tr)
+        self.assertEqual(tr.calls, [])
         with open(mp, "rb") as f:
             line = json.loads(f.read())
         self.assertEqual((line["kind"], line["code_sha256"]), ("attempt", self.mod.code_sha256()))
         self.taf.git(self.root, "add", "data/manifest")
         self.taf.git(self.root, "commit", "-q", "-m", "試行の行")
-        open(mp, "w").close()                          # コミットのあとで作業ツリーから消す
+        with self.assertRaises(self.mod.ThemesError):
+            run(tr)                                        # 2段目：通信して 503
+        self.assertEqual(len(tr.calls), 1)
+        self.taf.git(self.root, "add", "data/manifest")
+        self.taf.git(self.root, "commit", "-q", "-m", "失敗の行")
+        open(mp, "w").close()                              # コミットのあとで作業ツリーから消す
         tr2 = FakeTransport(GOOD)
-        with self.assertRaisesRegex(self.mod.ThemesError, "既に試みた"):
-            self.mod.run(root=self.root, home=home, transport=tr2, clock=lambda: 0.0,
-                         now=lambda: NOW)
+        with self.assertRaisesRegex(self.mod.ThemesError, "コミットしていない変更"):
+            run(tr2)
         self.assertEqual(tr2.calls, [])
 
     def test_other_root_stops(self):
@@ -311,8 +336,11 @@ class TestExclusionGate(unittest.TestCase):
 
     def run_themes(self):
         self.tr = FakeTransport(GOOD)
-        return themes.run(root=self.root, home=self.home, transport=self.tr,
-                          clock=lambda: 0.0, now=lambda: NOW)
+        out, _head = run_two_phase(
+            lambda: themes.run(root=self.root, home=self.home, transport=self.tr,
+                               clock=lambda: 0.0, now=lambda: NOW),
+            os.path.join(self.root, "data", "manifest", themes.MANIFEST_NAME))
+        return out
 
     def test_kind_undecided_stops_before_network(self):
         """今（T-021）は封印係の kind が未定なので、関門が必ず止まる。"""
@@ -333,7 +361,7 @@ class TestExclusionGate(unittest.TestCase):
                 mock.patch.object(self.ledger, "_load_for_gate",
                                   return_value=(b"", records)) as load:
             out = self.run_themes()
-        load.assert_called_once_with(root or self.root)
+        load.assert_called_with(root or self.root)
         return out
 
     def test_kind_not_in_allowed_list(self):
@@ -422,8 +450,10 @@ class TestClassify(unittest.TestCase):
         body = tsv(["Theme", "Description", "Type", "Notes", "kind"],
                    [["QQ_A", "Seen in 7,123,457 articles", "8123459", "12.3k", "9 123461"],
                     ["QQ_B", "plain", "N/A", "none", "k"]])
-        e = themes.run(root=root, home=home, url=URL, transport=FakeTransport(body),
-                       clock=lambda: 0.0, now=lambda: NOW)
+        e, _head = run_two_phase(
+            lambda: themes.run(root=root, home=home, url=URL, transport=FakeTransport(body),
+                               clock=lambda: 0.0, now=lambda: NOW),
+            os.path.join(root, "data", "manifest", themes.MANIFEST_NAME))
         self.assertEqual(e["kept_columns"], ["Theme"])
         for top in (os.path.join(home, *themes.STORE_PARTS), os.path.join(root, "data", "manifest")):
             for n in os.listdir(top):
@@ -507,10 +537,27 @@ class RunCase(unittest.TestCase):
         self.store = os.path.join(self.home, *themes.STORE_PARTS)
         os.makedirs(self.store)
 
+    def manifest_path(self):
+        return os.path.join(self.root, "data", "manifest", themes.MANIFEST_NAME)
+
     def run_themes(self, body, url=URL, status=200):
+        """マニフェストが無ければ2段で、あれば今の HEAD（self.head）で1回動かす。"""
         self.tr = FakeTransport(body, status)
-        return themes.run(root=self.root, home=self.home, url=url, transport=self.tr,
-                          clock=lambda: 0.0, now=lambda: NOW)
+
+        def call():
+            return themes.run(root=self.root, home=self.home, url=url, transport=self.tr,
+                              clock=lambda: 0.0, now=lambda: NOW)
+        if not os.path.lexists(self.manifest_path()):
+            with mock.patch.object(themes, "_code_gate", lambda root: (CODE_SHA, b"")):
+                with self.assertRaises(themes.AttemptRecorded):
+                    call()                             # 1段目：試行の行だけ
+            self.commit_all()                          # その行をコミットしたとみなす
+        with mock.patch.object(themes, "_code_gate", lambda root: (CODE_SHA, self.head)):
+            return call()
+
+    def commit_all(self):
+        with open(self.manifest_path(), "rb") as f:
+            self.head = f.read()
 
     def written(self):
         out = {}
@@ -556,11 +603,11 @@ class TestRun(RunCase):
                 self.assertNotIn(m.encode(), data)
 
     def attempt_only(self):
-        """通信のあとで止まったとき：試行の行だけが残り、区分表の本体は書かれない。"""
+        """通信のあとで止まったとき：試行・fetch・failed の行だけが残り、区分表の本体は書かれない。"""
         files = self.written()
         self.assertEqual(sorted(files), [themes.MANIFEST_NAME])
         lines = [json.loads(l) for l in files[themes.MANIFEST_NAME].splitlines()]
-        self.assertEqual([l["kind"] for l in lines], ["attempt"])
+        self.assertEqual([l["kind"] for l in lines], ["attempt", "fetch", "failed"])
         self.assertEqual(lines[0]["code_sha256"], CODE_SHA)
         self.assertEqual(lines[0]["source_url"], URL)
 
@@ -595,6 +642,9 @@ class TestRun(RunCase):
         """差し戻し1回目 中3：失敗しても成功しても、2回目は通信せずに止まる。"""
         with self.assertRaises(themes.ThemesError):
             self.run_themes(GOOD, status=503)
+        with self.assertRaisesRegex(themes.ThemesError, "コミットしていない変更"):
+            self.run_themes(GOOD)
+        self.commit_all()
         with self.assertRaisesRegex(themes.ThemesError, "既に試みた"):
             self.run_themes(GOOD)
         self.assertEqual(self.tr.calls, [])
@@ -602,31 +652,88 @@ class TestRun(RunCase):
         self.fresh()
         e = self.run_themes(GOOD)
         self.assertEqual(e["kind"], "result")
+        self.commit_all()
         with self.assertRaisesRegex(themes.ThemesError, "既に試みた"):
             self.run_themes(GOOD)
         self.assertEqual(self.tr.calls, [])
         lines = [json.loads(l) for l in self.written()[themes.MANIFEST_NAME].splitlines()]
-        self.assertEqual([l["kind"] for l in lines], ["attempt", "result"])
-        self.assertEqual(lines[1]["attempted_at"], lines[0]["attempted_at"])
-        self.assertEqual(lines[1]["code_sha256"], CODE_SHA)
+        self.assertEqual([l["kind"] for l in lines], ["attempt", "fetch", "result"])
+        self.assertEqual(lines[2]["attempted_at"], lines[0]["attempted_at"])
+        self.assertEqual(lines[2]["code_sha256"], CODE_SHA)
 
     def test_emptied_uncommitted_manifest_stops(self):
         """差し戻し2回目 軽-1（監査の再現 exp_th2）：コミット前に試行の行を消して空にしても止まる。"""
         with self.assertRaises(themes.ThemesError):
             self.run_themes(GOOD, status=503)
         open(os.path.join(self.root, "data", "manifest", themes.MANIFEST_NAME), "w").close()
-        with self.assertRaisesRegex(themes.ThemesError, "既に試みた"):
+        with self.assertRaisesRegex(themes.ThemesError, "コミットしていない変更"):
             self.run_themes(GOOD)
         self.assertEqual(self.tr.calls, [])
+
+    def test_first_phase_does_not_fetch(self):
+        """差し戻し3回目 軽-2：1段目は試行の行を書いて止まり、通信しない。"""
+        tr = FakeTransport(GOOD)
+        with self.assertRaises(themes.AttemptRecorded):
+            themes.run(root=self.root, home=self.home, transport=tr, clock=lambda: 0.0,
+                       now=lambda: NOW)
+        self.assertEqual(tr.calls, [])
+        lines = [json.loads(l) for l in self.written()[themes.MANIFEST_NAME].splitlines()]
+        self.assertEqual([l["kind"] for l in lines], ["attempt"])
+        with self.assertRaisesRegex(themes.ThemesError, "コミットしていない変更"):
+            themes.run(root=self.root, home=self.home, transport=tr, clock=lambda: 0.0,
+                       now=lambda: NOW)                # コミットしないまま2段目
+        self.assertEqual(tr.calls, [])
+
+    def test_deleting_uncommitted_attempt_before_fetch_is_harmless(self):
+        """コミット前に試行の行を消しても、まだ通信していないので、1段目からやり直すだけ。"""
+        tr = FakeTransport(GOOD)
+        with self.assertRaises(themes.AttemptRecorded):
+            themes.run(root=self.root, home=self.home, transport=tr, clock=lambda: 0.0,
+                       now=lambda: NOW)
+        os.rename(self.manifest_path(), os.path.join(self.tmp, "aside"))
+        with self.assertRaises(themes.AttemptRecorded):
+            themes.run(root=self.root, home=self.home, transport=tr, clock=lambda: 0.0,
+                       now=lambda: NOW)
+        self.assertEqual(tr.calls, [])
+
+    def test_committed_attempt_must_match_code_and_rule(self):
+        tr = FakeTransport(GOOD)
+        with self.assertRaises(themes.AttemptRecorded):
+            themes.run(root=self.root, home=self.home, transport=tr, clock=lambda: 0.0,
+                       now=lambda: NOW)
+        self.commit_all()
+        with mock.patch.object(themes, "_code_gate", lambda root: ("cd" * 32, self.head)):
+            with self.assertRaisesRegex(themes.ThemesError, "既に試みた"):
+                themes.run(root=self.root, home=self.home, transport=tr, clock=lambda: 0.0,
+                           now=lambda: NOW)
+        with mock.patch.object(themes, "_code_gate", lambda root: (CODE_SHA, self.head)), \
+                mock.patch.object(themes, "_exclusion_gate",
+                                  lambda root: {"seq": 8, "record_sha256": "e" * 64}):
+            with self.assertRaisesRegex(themes.ThemesError, "既に試みた"):
+                themes.run(root=self.root, home=self.home, transport=tr, clock=lambda: 0.0,
+                           now=lambda: NOW)
+        self.assertEqual(tr.calls, [])
+
+    def test_reverting_to_committed_attempt_allows_refetch_limit(self):
+        """限界（README 8章）：通信のあとの行をコミット前に消して HEAD と同じに戻すと、もう一度通信
+        できる。手元の検査では止められない。"""
+        with self.assertRaises(themes.ThemesError):
+            self.run_themes(GOOD, status=503)
+        with open(self.manifest_path(), "wb") as f:
+            f.write(self.head)
+        self.run_themes(GOOD)
+        self.assertEqual(len(self.tr.calls), 1)
 
     def test_gate_failure_writes_nothing(self):
         def stop(root):
             raise themes.ThemesError("見本")
+        tr = FakeTransport(GOOD)
         with mock.patch.object(themes, "_code_gate", stop):
             with self.assertRaises(themes.ThemesError):
-                self.run_themes(GOOD)
+                themes.run(root=self.root, home=self.home, transport=tr, clock=lambda: 0.0,
+                           now=lambda: NOW)
         self.assertEqual(self.written(), {})
-        self.assertEqual(self.tr.calls, [])
+        self.assertEqual(tr.calls, [])
 
     def test_headerless_name_and_count(self):
         """リードの判断（質問 G）：見出しの無い「名前・件数」の2欄なら、名前の欄だけを残す。"""

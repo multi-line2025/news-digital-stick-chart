@@ -233,13 +233,13 @@
         run の run_id の一覧（trial_run_ids）と、試しの run のマニフェストの sha256
         （trial_manifest_sha256）を書く。再開のたびに、試しの run のマニフェストがこの sha256 の
         ままであることを確かめる。
-      - 試しの run の保存先の照合（差し戻し2回目 中-C。check_trial_folder）：正式な run の
-        run-start の前と再開のたびに、gkg-trial のフォルダを一覧する。「.」で始まる付属の
-        ファイルのほかは、すべて gkg-trial-<run_id>-… の名前でなければならず、その run_id が
-        すべて試しの run のマニフェストに載っていて、各取得の記録の大きさと sha256 が、
-        マニフェストのその run の最後の控えと同じでなければならない。違えば止まる。コミットの
-        前にマニフェストの行を消して試しの run を隠しても、フォルダに残ったファイルで止まる。
-        限界：フォルダのファイルごと移せば見つからない（ファイルは削除しない運用で防ぐ）。試しの run の run_id はコードの sha256 から決まるので、
+      - 試しの run の保存先の照合（差し戻し2回目 中-C・3回目 中-2。check_trial_folder）：
+        正式な run の run-start の前と再開のたびに、gkg-trial のフォルダを一覧する
+        （check_store_listing。5.4章）。フォルダにある run_id がすべて試しの run の
+        マニフェストに載っていて、マニフェストに載っているすべての run の取得の記録が、
+        フォルダにあって最後の控えと大きさも sha256 も同じでなければ止まる。
+        限界：試しの run のファイルを全部フォルダの外へ移し、コミットの前にマニフェストの行も
+        消せば見つからない。試しの run の run_id はコードの sha256 から決まるので、
         試しの run のあとでコードを変えたかどうかは、run_id の一覧と正式な run の run_id を
         比べて分かる。
 
@@ -257,26 +257,32 @@
       - 最後の控えが run-start か run-stop（きちんと止まった）なら、取得の記録の大きさが控えと
         ちょうど同じでなければならない。止まったあとに足した行（偽の failed の行など）や、
         置き換えた記録があれば止まる（差し戻し2回目 中-A）。
-      - 最後の控えが day か run-resume（控えを書けずに止まった跡）なら、控えより後ろの行の
-        うち、結果の行（ok・failed・interrupted）は信用せず、そのファイルは取り直す。attempt の
-        行は、試行の回数としてだけ数える。
+      - 最後の控えより後ろの行（控えを書けずに止まった跡）は、信用しない範囲として、再開の
+        ときに run-resume の行の untrusted_ranges（取得の記録のバイトの [始め, 終わり) の一覧）に
+        書き、前の run-resume の範囲も引き継ぐ（差し戻し3回目 中-1）。以後、何回再開しても、
+        その範囲に始まる結果の行（ok・failed・interrupted）は使わず、そのファイルは取り直す。
+        その範囲の attempt の行は試行の回数に数えるが、それだけでは使い切らせない（範囲の
+        attempt の行があるファイルは、回数を最大 MAX_ATTEMPTS_PER_FILE − 1 にして、少なくとも
+        1回は要求を送る）。
       - 正式な run は、再開のたびに、作業ツリーのマニフェストが HEAD とちょうど同じ（全部
         コミットされている）ことを求める。コミットの前にマニフェストの控えを書き換えることを
         止めるため。止まるたびに、マニフェストをコミットしてから再開する。
-      - 限界：kill -9・停電のあとは、控えより後ろに足した attempt の行を見分けられない（その
-        ファイルの試行の回数が増える。最悪の場合、要求を送らずに attempts_exhausted になる）。
+      - 限界：信用しない範囲の attempt の行で、そのファイルの試行の回数が増える（残り1回まで）。
+        kill -9 の直前に本当に送った要求の結果も、範囲の中なので取り直しになる。
         試しの run のマニフェストは、正式な run の前まではコミットを求めない（5.1章の照合で補う）。
+      - 主な防御は手元の検査ではなく、day の行の failed_files（その日の failed のファイルの
+        file_time・reason・attempts の一覧）である。第三者は、封印済みのファイル一覧と GDELT の
+        サーバーと照らして、そのファイルが今は取れるかを確かめられる（README 6.5.1）。
     ディスクの同一性（軽3。オーナーの決定「記録に残さず、公開もしない」2026-10-08）
       - VolumeUUID は、マニフェスト・取得の記録・日の集計・ログのどこにも書かない。
       - 代わりに、run を始めるとき（run-start の行を書く前）に、保存先のフォルダの中に印の
         ファイル gkg-<mode>-<run_id>-volume-mark を作り、乱数（secrets.token_hex(32)）を書く。
         印の値も、そのハッシュも、マニフェストには書かない（Git に入らず、公開されない）。
       - 再開のたびに、保存先のフォルダに印のファイルがあり、通常のファイル（リンクでない）で、
-        決めた形（16進64字と改行）であることを確かめる。無ければ、run-start のときと違うディスク
-        （同じ名前の別のディスク・フォーマットし直したディスク）とみなして止まる。
-      - 印の値と照らす相手は、公開される場所には置けないので、確かめるのは「同じ印のファイルが
-        保存先にあること」までである。保存先のフォルダごと別のディスクに写したものは、同じ
-        ディスクとして通る（中身は同じなので、取得の記録の控えの照合は続けて働く）。
+        決めた形（16進64字と改行）であることを確かめる。無ければ止まる。
+      - 限界：印の値と照らす相手は、公開される場所には置けない。そのため、決めた形の値なら
+        どんな値でも通る（印のファイルを作り直せば、違うディスクでも通る）。違うディスクを
+        つないだ場合に主に止めるのは、取得の記録の控えの照合である（記録が無いか違うので合わない）。
       - ディスクの形式（msdos でなければ止まる）は、入口のスクリプトの関門で確かめる（記録には
         何も書かない）。
     0バイトの日の集計（軽3）
@@ -294,6 +300,23 @@
     もう一度呼び、鎖の上の記録と同じであることを確かめる（chain_exclusion_ref）。再開のときは、
     run-start に書いた値とも照らす。そのため、入口のスクリプトを通らずにこの関数を呼んでも、
     鎖に除外の規則の記録が無ければ、何も書かずに止まる。kind が未決のあいだは必ず止まる。
+    照合のしかた（第三者向け。差し戻し3回目 軽-3）：exclusion_rule_seq は、sealed/ledger.jsonl の
+    除外の規則の kind の記録のうち seq の順で最初の1件の seq（同じ kind が複数あっても最初の
+    1件）。exclusion_rule_record_sha256 は、その記録の行の正規の形のバイト列
+    （ledger.canonical_line。末尾の改行を含めない）の sha256 で、ledger.jsonl のその行（改行を
+    除く）の sha256 と同じになる。
+
+------------------------------------------------------------------------
+5.4 保存先の一覧の照合（check_store_listing。差し戻し3回目 中-1・中-2）
+------------------------------------------------------------------------
+    run を始めるときと再開のたびに、その mode の保存先のフォルダを一覧する。許すのは、
+    gkg-<mode>-<run_id>-（day-<日>.tsv.gz | fetch-log.jsonl | volume-mark）の名前の通常の
+    ファイルと、その名前に「._」を付けたもの（macOS の付属のファイル）だけ。正式な run では
+    run_id もこの run のものに限る。ほかの名前（名前を変えた日の集計、「.」で始まるほかの名前、
+    フォルダ、リンク）があれば止まる。
+    止めないもの：フォルダの外へ移したもの。日の集計を書いたあと day の行を書く前に止まった
+    場合、その日の中身は保存先にあり、見ることができる。見てから外へ移し、取得の記録に偽の
+    行を足しても、偽の行は信用しない範囲に入るので使われない（5.2章）。
 
 ------------------------------------------------------------------------
 6. 集計の単位と形（ディスクに書く前に集計する。行単位のデータは保存しない）
@@ -1535,27 +1558,50 @@ def check_exclusion_record(root, ref, s0):
         raise GkgError("除外の規則の封印の記録が、run-start に書いたものと違う")
 
 
-_TRIAL_FILE_RE = re.compile(
-    r"\Agkg-trial-([0-9a-f]{16})-(?:day-\d{8}\.tsv\.gz|fetch-log\.jsonl|volume-mark)\Z")
+_STORE_KINDS = r"(?:day-\d{8}\.tsv\.gz|fetch-log\.jsonl|volume-mark)"
+
+
+def check_store_listing(store, mode, run_id=None):
+    """5.4章（差し戻し3回目 中-1・中-2）：保存先のフォルダの一覧を照らす。返り値：run_id の集合。
+
+    許す名前は、決まった形の名前（mode が official なら run_id もこの run のもの）と、
+    「._」にその名前を続けたもの（macOS の付属のファイル）だけ。どれも通常のファイルで
+    なければならない。ほかの名前（「.」で始まるほかの名前・フォルダ・リンク）があれば止まる。
+    """
+    rid = re.escape(run_id) if run_id is not None else "([0-9a-f]{16})"
+    if run_id is not None:
+        rid = "(" + rid + ")"
+    pat = re.compile(r"\Agkg-%s-%s-%s\Z" % (re.escape(mode), rid, _STORE_KINDS))
+    ids = set()
+    for name in sorted(os.listdir(store)):
+        base = name[2:] if name.startswith("._") else name
+        m = pat.match(base)
+        st = os.lstat(os.path.join(store, name))
+        if m is None or not stat.S_ISREG(st.st_mode):
+            raise GkgError("保存先（%s）に、決まった名前でないもの（「.」で始まる名前・フォルダ・"
+                           "リンクを含む）がある（リードに報告）" % mode)
+        if not name.startswith("._"):
+            ids.add(m.group(1))
+    return ids
 
 
 def check_trial_folder(root, volume, check_volume, trial_bytes, trial_run_ids):
-    """5.1章（差し戻し2回目 中-C）：試しの run の保存先にあるすべての run が、試しの run の
-    マニフェストに載っていて、各取得の記録の大きさと sha256 がマニフェストの最後の控えと同じこと。"""
+    """5.1章（差し戻し2回目 中-C・3回目 中-2）：試しの run の保存先とマニフェストを両方向に照らす。
+
+    - 保存先の一覧が check_store_listing に通ること。
+    - 保存先にある run がすべてマニフェストに載っていること。
+    - マニフェストに載っている run のすべてについて、保存先の取得の記録の大きさと sha256 が、
+      マニフェストのその run の最後の控えと同じであること（ファイルが無くなっていれば止まる。
+      取得の記録をまだ作っていない run は、控えも 0 バイトなので、無いままで合う）。
+    """
     tpaths = resolve_paths(root, volume, "trial", check_volume)
     entries = _parse_log_lines(trial_bytes)
-    ids = set()
-    for name in sorted(os.listdir(tpaths["store"])):
-        if name.startswith("."):
-            continue                       # macOS の付属のファイル（._ など）
-        m = _TRIAL_FILE_RE.match(name)
-        if m is None:
-            raise GkgError("試しの run の保存先に、知らない名前のファイルがある（リードに報告）")
-        ids.add(m.group(1))
+    ids = check_store_listing(tpaths["store"], "trial")
     for rid in sorted(ids):
         if rid not in trial_run_ids:
             raise GkgError("試しの run の保存先に、マニフェストに載っていない run（%s）のファイルが"
                            "ある（リードに報告）" % rid)
+    for rid in trial_run_ids:
         last = None
         for e in entries:
             if e.get("run_id") == rid and "fetch_log_size" in e:
@@ -1563,7 +1609,7 @@ def check_trial_folder(root, volume, check_volume, trial_bytes, trial_run_ids):
         size, sha = _log_state(os.path.join(tpaths["store"], fetch_log_name(rid, "trial")))
         if last is None or (last["fetch_log_size"], last["fetch_log_sha256"]) != (size, sha):
             raise GkgError("試しの run（%s）の取得の記録が、マニフェストの控えと合わない"
-                           "（リードに報告）" % rid)
+                           "（無くなった・書き換わったなど。リードに報告）" % rid)
 
 
 def _trial_info(paths):
@@ -1623,6 +1669,7 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
             "filelist_sha256": filelist_sha256, "method_access_seq": method_access_seq,
             "official": mode == "official"}
     log_path = os.path.join(paths["store"], fetch_log_name(run_id, mode))
+    check_store_listing(paths["store"], mode, run_id if mode == "official" else None)
     if mode == "official":
         trial_bytes, trial = _trial_info(paths)
         if not isinstance(committed_trial_manifest, bytes) or trial_bytes != committed_trial_manifest:
@@ -1650,8 +1697,10 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
         if disk_free(paths["store"]) < MIN_FREE_DISK_BYTES:
             raise RunInterrupted("保存先のディスクの空きが足りない")
         size, sha = _log_state(log_path)
+        untrusted = untrusted_ranges(mine, trusted_size, size)
         append_jsonl(paths["manifest"], dict(base, kind="run-resume", at=_iso(now()),
-                                             fetch_log_size=size, fetch_log_sha256=sha),
+                                             fetch_log_size=size, fetch_log_sha256=sha,
+                                             untrusted_ranges=untrusted),
                      "マニフェストの行")
     else:
         if disk_free(paths["store"]) < MIN_FREE_DISK_BYTES:
@@ -1661,7 +1710,7 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
         check_exclusion_record(root, exclusion_rule, None)
         write_volume_mark(paths, run_id, mode)
         size, sha = _log_state(log_path)
-        trusted_size = size
+        untrusted = []
         head = dict(base, kind="run-start", started_at=_iso(now()), files_selected=n_files,
                     days=len(plan), block_start=METHOD_BLOCK[0], block_end=METHOD_BLOCK[1],
                     store_location=paths["location"],
@@ -1679,7 +1728,7 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
                                   "あれば push も）、同じコマンドでもう一度実行する" % MANIFEST_NAME)
     try:
         return _run_plan(plan, mine, base, paths, log_path, run_id, mode, transport, sleep,
-                         clock, now, log, disk_free, trusted_size)
+                         clock, now, log, disk_free, untrusted)
     except BaseException:
         # どの例外で止まっても（RunInterrupted・GkgError・Ctrl-C など）控えを書く（軽-6）。
         # kill -9 と停電では書けない（5.2章の限界）
@@ -1698,6 +1747,25 @@ def _write_stop(paths, base, log_path, now):
         pass
 
 
+def untrusted_ranges(mine, trusted_size, size):
+    """5.2章（差し戻し3回目 中-1）：信用しない範囲（取得の記録のバイトの [始め, 終わり)）の一覧。
+
+    前の run-resume の行に書いた範囲を引き継ぎ、今回の最後の控えより後ろ（控えを書けずに
+    止まった跡）を足す。run-resume の行に書いて、以後の読み取りでも除く。
+    """
+    prev = []
+    for e in mine:
+        if "untrusted_ranges" in e:
+            prev = [list(r) for r in e["untrusted_ranges"]]
+    for r in prev:
+        if not (isinstance(r, list) and len(r) == 2 and all(isinstance(x, int) for x in r)
+                and 0 <= r[0] < r[1] <= trusted_size):
+            raise GkgError("マニフェストの信用しない範囲の形が違う（リードに報告）")
+    if size > trusted_size:
+        prev.append([trusted_size, size])
+    return prev
+
+
 def _parse_log_lines(data):
     out = []
     for raw in data.splitlines():
@@ -1710,31 +1778,41 @@ def _parse_log_lines(data):
 
 
 def _run_plan(plan, mine, base, paths, log_path, run_id, mode, transport, sleep, clock, now,
-              log, disk_free, trusted_size):
+              log, disk_free, untrusted):
     done_days = {e["day"] for e in mine if e.get("kind") == "day"}
-    latest, used, trips = {}, Counter(), set()
+    latest, trips = {}, set()
+    used_ok, used_bad = Counter(), Counter()     # 信用する試行の行・信用しない範囲の試行の行
     data = read_bytes_nofollow(log_path)
-    trusted = _parse_log_lines(data[:trusted_size])
-    tail = _parse_log_lines(data[trusted_size:])
+    lines, pos = [], 0
+    for raw in data.splitlines(keepends=True):
+        bad = any(a <= pos < b for a, b in untrusted)
+        pos += len(raw)
+        if raw.strip():
+            lines.append((bad, _parse_log_lines(raw)[0]))
     del data
-    _check_log_lines(trusted + tail, run_id, mode)
-    for e in trusted:
+    _check_log_lines([e for _b, e in lines], run_id, mode)
+    for bad, e in lines:
         if "file_time" not in e:
             continue
         ft = e["file_time"]
         if e.get("result") == "attempt":
-            used[ft] += 1                   # 最後の結果の行より後の試行の回数（5章）
+            (used_bad if bad else used_ok)[ft] += 1    # 最後の結果の行より後の試行の回数（5章）
+            continue
+        if bad:
+            # 信用しない範囲の結果の行（ok・failed・interrupted）は使わず、そのファイルは取り直す
             continue
         latest[ft] = e
-        used[ft] = 0
+        used_ok[ft] = used_bad[ft] = 0
         if e.get("result") == "interrupted":
             trips.add(e.get("trip"))
-    # 最後の控えより後ろの行（控えを書けずに止まった跡）：結果の行（ok・failed・interrupted）は
-    # 信用せず、そのファイルは取り直す。attempt の行は、試行の回数としてだけ数える（中-A）
-    for e in tail:
-        if e.get("result") == "attempt" and "file_time" in e:
-            used[e["file_time"]] += 1
-    del trusted, tail
+    used = Counter()
+    for ft in set(used_ok) | set(used_bad):
+        n = used_ok[ft] + used_bad[ft]
+        if used_bad[ft]:
+            # 信用しない範囲の試行の行だけでは使い切らせない（少なくとも1回は要求を送る。中-1）
+            n = min(n, MAX_ATTEMPTS_PER_FILE - 1)
+        used[ft] = n
+    del lines
     state = {"transient": [], "format": 0, "retries_used": len(trips)}
     ctx = {"paths": paths, "log_path": log_path, "run_id": run_id, "mode": mode, "now": now}
     pacer = Pacer(clock, sleep)
@@ -1751,7 +1829,10 @@ def _run_plan(plan, mine, base, paths, log_path, run_id, mode, transport, sleep,
                          sha256=info["sha256"], files_listed=n_listed,
                          files_ok=info["ok"], files_failed=info["failed"], docs=info["docs"],
                          written_at=_iso(now()), store_location=paths["location"],
-                         fetch_log_size=size, fetch_log_sha256=sha)
+                         fetch_log_size=size, fetch_log_sha256=sha,
+                         failed_files=[{"file_time": f["file_time"], "reason": f["reason"],
+                                        "attempts": f["attempts"]}
+                                       for f in files if f["result"] != "ok"])
             if info["refilled"]:
                 dline["refilled_empty_file"] = True
             append_jsonl(paths["manifest"], dline, "マニフェストの行")
