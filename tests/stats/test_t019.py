@@ -73,6 +73,53 @@ class Guarded:
 # 除外の規則
 # ---------------------------------------------------------------------------
 
+V1_TERMS = (
+        "ELECTION", "ELECTIONS", "ELECTORAL", "ELECTED", "VOTE", "VOTES", "VOTING", "VOTER",
+        "VOTERS", "BALLOT", "BALLOTS", "REFERENDUM", "REFERENDUMS", "POLITICS", "POLITICAL",
+        "POLITICIAN", "POLITICIANS", "PARLIAMENT", "PARLIAMENTARY", "LEGISLATURE",
+        "LEGISLATIVE", "CONGRESS", "SENATE", "SENATOR", "SENATORS", "LAWMAKER", "LAWMAKERS",
+        "PRESIDENT", "PRESIDENTS", "PRESIDENTIAL", "PRIME MINISTER", "MINISTER", "MINISTERS",
+        "GOVERNOR", "GOVERNORS", "MAYOR", "MAYORS", "LEADER", "LEADERS", "HEAD OF STATE",
+        "CABINET", "COUP", "COUPS", "IMPEACH", "IMPEACHMENT", "REGIME", "REGIMES", "DICTATOR",
+        "DICTATORS", "DICTATORSHIP", "PROTEST", "PROTESTS", "PROTESTER", "PROTESTERS",
+        "DEMONSTRATOR", "DEMONSTRATORS", "SANCTION", "SANCTIONS", "DIPLOMACY", "DIPLOMATIC",
+        "DIPLOMAT", "DIPLOMATS", "EMBASSY", "AMBASSADOR", "PROPAGANDA", "LOBBYING", "WAR",
+        "WARS", "WARFARE", "MILITARY", "ARMY", "ARMIES", "ARMED", "NAVY", "AIR FORCE",
+        "SOLDIER", "SOLDIERS", "TROOP", "TROOPS", "MILITIA", "MILITIAS", "INSURGENCY",
+        "INSURGENT", "INSURGENTS", "REBEL", "REBELS", "REBELLION", "TERROR", "TERRORISM",
+        "TERRORIST", "TERRORISTS", "EXTREMISM", "EXTREMIST", "EXTREMISTS", "JIHAD", "JIHADIST",
+        "JIHADISTS", "CONFLICT", "CONFLICTS", "VIOLENCE", "VIOLENT", "ATTACK", "ATTACKS",
+        "BOMB", "BOMBS", "BOMBING", "BOMBINGS", "EXPLOSIVE", "EXPLOSIVES", "WEAPON", "WEAPONS",
+        "GUN", "GUNS", "FIREARM", "FIREARMS", "SHOOTING", "SHOOTINGS", "MISSILE", "MISSILES",
+        "AIRSTRIKE", "AIRSTRIKES", "KILL", "KILLS", "KILLED", "KILLING", "KILLINGS", "MASSACRE",
+        "MASSACRES", "GENOCIDE", "CEASEFIRE", "PEACEKEEPING", "PEACEKEEPER", "PEACEKEEPERS",
+        "INVASION", "HOSTAGE", "HOSTAGES", "TORTURE", "RIOT", "RIOTS", "UNREST", "CRACKDOWN",
+        "PERSECUTION", "SIEGE", "BLOCKADE", "DEFENSE", "DEFENCE", "REFUGEE", "REFUGEES",
+        "DISPLACED", "ETHNIC CLEANSING", "CRIME", "CRIMES", "CRIMINAL", "CRIMINALS", "MURDER",
+        "MURDERS", "HOMICIDE", "HOMICIDES", "ASSAULT", "ASSAULTS", "ROBBERY", "THEFT",
+        "BURGLARY", "FRAUD", "CORRUPTION", "BRIBERY", "BRIBE", "BRIBES", "SMUGGLING",
+        "TRAFFICKING", "NARCOTICS", "CARTEL", "CARTELS", "GANG", "GANGS", "MAFIA", "LAUNDERING",
+        "EXTORTION", "KIDNAP", "KIDNAPPING", "KIDNAPPINGS", "RAPE", "HARASSMENT", "ABUSE",
+        "ARREST", "ARRESTS", "ARRESTED", "POLICE", "PRISON", "PRISONS", "PRISONER", "PRISONERS",
+        "JAIL", "INCARCERATION", "PROSECUTION", "PROSECUTOR", "PROSECUTORS", "INDICTMENT",
+        "PIRACY", "SCAM", "SCAMS", "VANDALISM", "ARSON", "CYBERCRIME", "POPE", "KING", "KINGS",
+        "QUEEN", "QUEENS", "PRINCE", "PRINCES", "PRINCESS", "MONARCH", "MONARCHY", "ROYAL",
+        "ROYALS", "EMPEROR", "EMPRESS", "CELEBRITY", "CELEBRITIES", "DISASTER", "DISASTERS",
+        "EARTHQUAKE", "EARTHQUAKES", "TSUNAMI", "TSUNAMIS", "FLOOD", "FLOODS", "FLOODING",
+        "HURRICANE", "HURRICANES", "TYPHOON", "TYPHOONS", "CYCLONE", "CYCLONES", "TORNADO",
+        "TORNADOES", "WILDFIRE", "WILDFIRES", "FIRE", "FIRES", "DROUGHT", "DROUGHTS",
+        "LANDSLIDE", "LANDSLIDES", "VOLCANO", "VOLCANOES", "VOLCANIC", "ERUPTION", "AVALANCHE",
+        "HEATWAVE", "HEAT WAVE", "STORM", "STORMS", "BLIZZARD", "FAMINE", "CASUALTY",
+        "CASUALTIES", "FATALITY", "FATALITIES", "DEATH", "DEATHS", "DEAD", "EPIDEMIC",
+        "EPIDEMICS", "PANDEMIC", "PANDEMICS", "OUTBREAK", "OUTBREAKS", "DISEASE", "DISEASES",
+        "INFECTION", "INFECTIONS", "INFECTIOUS", "VIRUS", "VIRUSES", "INFLUENZA", "FLU",
+        "EBOLA", "ZIKA", "CHOLERA", "MALARIA", "MEASLES", "HIV", "TUBERCULOSIS", "POLIO",
+        "CORONAVIRUS", "COVID", "SARS", "MERS", "PLAGUE", "DENGUE", "VACCINE", "VACCINES",
+        "VACCINATION", "QUARANTINE", "ETHNIC", "ETHNICITY", "ETHNICITIES", "TRIBE", "TRIBES",
+        "TRIBAL", "RELIGION", "RELIGIONS", "RELIGIOUS", "SECTARIAN",
+)
+
+
 class TestExclusion(unittest.TestCase):
     # テストに使う名前は、すべてテストのために作ったもの。
 
@@ -100,7 +147,7 @@ class TestExclusion(unittest.TestCase):
         self.assertEqual(f("H1N1"), frozenset())
 
     def test_exact_and_inflection(self):
-        self.assertIn(("WAR", "exact"), self.terms_hit("ECON_WAR_DAMAGE"))
+        self.assertIn(("WAR", "exact"), self.terms_hit("QQ_WAR_DAMAGE"))
         self.assertIn(("ELECTION", "exact"), self.terms_hit("x", "about the election results"))
         self.assertIn(("POLICE", "exact"), self.terms_hit("ab_cd_police"))
         self.assertIn(("WAR", "inflection"), self.terms_hit("AB_WARS"))
@@ -114,11 +161,12 @@ class TestExclusion(unittest.TestCase):
         self.assertIn(("SARSCOV", "exact"), self.terms_hit("SARSCOV2"))
 
     def test_words_glued(self):
-        self.assertIn(("CRASH", "glue"), self.terms_hit("AB_PLANECRASH"))
-        self.assertIn(("ATTACK", "glue"), self.terms_hit("CYBERATTACK"))
-        self.assertIn(("ATTACK", "glue"), self.terms_hit("CYBERATTACKS"))
-        self.assertIn(("MILITARY", "glue"), self.terms_hit("PARAMILITARY"))
-        self.assertIn(("CRIME", "glue"), self.terms_hit("AB_GENERALCRIME"))
+        self.assertIn(("CRASH", "glue-suffix"), self.terms_hit("AB_PLANECRASH"))
+        self.assertIn(("ATTACK", "glue-suffix"), self.terms_hit("CYBERATTACK"))
+        self.assertIn(("ATTACK", "glue-suffix"), self.terms_hit("CYBERATTACKS"))
+        self.assertIn(("MILITARY", "glue-suffix"), self.terms_hit("PARAMILITARY"))
+        self.assertIn(("CRIME", "glue-suffix"), self.terms_hit("AB_GENERALCRIME"))
+        self.assertIn(("POLICE", "glue-prefix"), self.terms_hit("POLICEOFFICER"))
         self.assertIn(("AIR FORCE", "joined-exact"), self.terms_hit("AB_AIRFORCE"))
         self.assertIn(("PRIME MINISTER", "joined-exact"), self.terms_hit("PRIMEMINISTER"))
 
@@ -126,6 +174,12 @@ class TestExclusion(unittest.TestCase):
         for name in ("ASSASSINATION", "EXECUTION", "STABBING", "EXPLOSION", "PLANE_CRASH",
                      "CYBERATTACK", "ELECTION2016", "AB_ASSASSINATIONS", "AB_STABBINGS"):
             self.assertTrue(tagrules.is_excluded(name), name)
+
+    def test_v1_terms_still_excluded(self):
+        # 1cb463a の版の語（CRISISLEX を除く）は、今の版でもすべて外れる（後戻りが無いこと）。
+        # V1_TERMS は git show 1cb463a:src/stats/tagrules.py の EXCLUSION_TERMS の写し。
+        for t in V1_TERMS:
+            self.assertTrue(tagrules.is_excluded(t.replace(" ", "_")), t)
 
     def test_crisislex_removed(self):
         allt = [t for ts in tagrules.EXCLUSION_TERMS.values() for t in ts]
@@ -138,25 +192,74 @@ class TestExclusion(unittest.TestCase):
                      "POLLEN", "GANGES", "SCAMPI", "DEADLINE", "GUNPOWDER", "EXECUTIVE"):
             self.assertFalse(tagrules.is_excluded(name), name)
 
-    def test_short_words_never_glue(self):
+    def test_glue_numbers(self):
+        self.assertEqual((tagrules.PREFIX_MIN_LEN, tagrules.GLUE_MIN_REST), (6, 4))
+        self.assertEqual(tagrules.SUFFIX_BLOCK_MAX_LEN, 4)
+        self.assertEqual(tagrules.SUFFIX_BLOCK_ENDINGS, ("ING", "ED", "ER", "S"))
+        self.assertEqual(tagrules.GLUE_FIELDS, ("name",))
+        self.assertNotIn("ELECT", [t for ts in tagrules.EXCLUSION_TERMS.values() for t in ts])
+
+    def test_prefix_needs_six_letters_and_rest(self):
+        w = tagrules._word_matches
+        self.assertEqual(w("POLICE", "POLICEABCD"), "glue-prefix")    # 6文字、残り4
+        self.assertIsNone(w("POLICE", "POLICEABC"))                   # 残り3
+        self.assertIsNone(w("CRASH", "CRASHABCDEF"))                  # 5文字は先頭で当たらない
+        self.assertIsNone(w("WAR", "WARABCDEF"))
         for t in [t for ts in tagrules.EXCLUSION_TERMS.values() for t in ts]:
             tt = tagrules.tokens(t)
-            if len(tt) == 1 and len(tt[0]) < tagrules.GLUE_MIN_LEN:
-                self.assertIsNone(tagrules._word_matches(tt[0], "ZZ" + tt[0]))
-                self.assertIsNone(tagrules._word_matches(tt[0], tt[0] + "QQ"))
-        self.assertEqual(tagrules.GLUE_MIN_LEN, 5)
+            if len(tt) == 1 and len(tt[0]) < tagrules.PREFIX_MIN_LEN:
+                self.assertNotEqual(w(tt[0], tt[0] + "QQQQQQ"), "glue-prefix", t)
 
-    def test_glue_only_at_ends(self):
-        self.assertIsNone(tagrules._word_matches("CRASH", "ABCRASHCD"))
-        self.assertEqual(tagrules._word_matches("CRASH", "CRASHPAD"), "glue")
-        self.assertEqual(tagrules._word_matches("CRASH", "BIGCRASH"), "glue")
-        self.assertIsNone(tagrules._word_matches("COVID", "COVID19"))  # 数字は別の語に区切ってから照合する
+    def test_suffix_needs_rest(self):
+        w = tagrules._word_matches
+        self.assertEqual(w("WAR", "ABCDWAR"), "glue-suffix")
+        self.assertIsNone(w("WAR", "ABCWAR"))
+        self.assertEqual(w("CRASH", "ABCDCRASHES"), "glue-suffix")
+        self.assertIsNone(w("KING", "ABCDKING"))     # 4文字以下で ING で終わる語は末尾で当たらない
+        self.assertIsNone(w("CRASH", "ABCDCRASHXY"))  # 途中は見ない
+        self.assertIsNone(w("COVID", "COVID19"))      # 数字を含む語には使わない（先に区切る）
 
-    def test_known_overexclusion(self):
-        # 外しすぎの方向の誤りとして受け入れたもの（文書 2章 (1)、0章の5）。
-        for name in ("PRINCETON", "STORMWATER", "LEADERBOARD", "PROTESTANT", "HEART_ATTACK",
-                     "AB_DEFENSE_ATTORNEY", "OBITUARY_DEATH", "AB_VACCINE_POLICY", "AB_FIRED"):
-            self.assertTrue(tagrules.is_excluded(name), name)
+    def test_glue_not_in_description(self):
+        self.assertEqual(tagrules.exclusion_matches(
+            "QQ_SOLAR_ENERGY", "Electricity from solar power, leadership in renewables, brainstorm"), [])
+        self.assertTrue(tagrules.is_excluded("BRAINSTORM_SESSION"))
+        self.assertTrue(tagrules.is_excluded("QQ_SOLAR_ENERGY", "Solar storms and grids"))  # 説明でも形の変化は当たる
+
+    # 監査係が作った名前（差し戻しで示されたもの）と、統計係が作った名前。
+    # 結果を既知の例として固定する（文書 2章 (1) の表 known-examples）。
+    KNOWN_KEPT = (
+        "ELECTRIC_POWER", "ELECTRONICS", "QUEENSLAND_TOURISM", "SOFTWARE", "AWARD", "WARNING", "WARM",
+        "STEWARD", "FIREWORKS", "KINGDOM", "BOOKING", "BREAKING_NEWS", "SPEAKING", "THINKING", "PARKING",
+        "GRAPE", "DRAPE", "PATRIOT", "BEGUN", "SKILLS", "RECOUP", "COUPON", "POLLEN", "SCAMPI", "GANGES",
+        "PRINCETON", "STORMWATER", "PROTESTANT", "CABINETRY", "AIDGROUPS", "STOCKMARKET", "FLUENT",
+        "DEADLINE", "GUNPOWDER", "EXECUTIVE",
+    )
+    KNOWN_MISSED = (
+        "GUNCONTROL", "COUPATTEMPT", "HIVAIDS", "CARBOMB", "MINISTERIAL", "DEADLY",
+    )
+    KNOWN_OVEREXCLUDED = (
+        "LEADERSHIP_TRAINING", "BRAINSTORM_SESSION", "ANTIVIRUS_SOFTWARE", "COMPATRIOT", "CAMPFIRE",
+        "MARKETCRASH", "TEAMLEADER", "ROADKILL", "DEFENSELESS", "HEART_ATTACK", "AB_DEFENSE_ATTORNEY",
+        "OBITUARY_DEATH", "AB_VACCINE_POLICY", "AB_FIRED", "HEARTATTACK", "SNOWSTORM",
+    )
+    KNOWN_EXCLUDED = (
+        "CIVILWAR", "COLDWAR", "BIRDFLU", "SWINEFLU", "PLANECRASH", "CYBERATTACK", "PARAMILITARY",
+        "MANSLAUGHTER", "TIMEBOMB", "SHOTGUN", "HANDGUN", "POLICEOFFICER", "ELECTION2016",
+        "PRIMEMINISTER", "AIRFORCE", "DRUGABUSE", "IDENTITYTHEFT",
+    )
+
+    def test_known_examples(self):
+        for n in self.KNOWN_KEPT + self.KNOWN_MISSED:
+            self.assertFalse(tagrules.is_excluded(n), n)
+        for n in self.KNOWN_OVEREXCLUDED + self.KNOWN_EXCLUDED:
+            self.assertTrue(tagrules.is_excluded(n), n)
+
+    def test_doc_known_examples(self):
+        head, rows = read_table("known-examples")
+        got = {r[0]: tuple(x.strip() for x in r[1].split(",")) for r in rows}
+        self.assertEqual(got, {"残す（正しく残す）": self.KNOWN_KEPT, "残る（取りこぼし）": self.KNOWN_MISSED,
+                               "外れる（外しすぎ）": self.KNOWN_OVEREXCLUDED,
+                               "外れる（正しく外す）": self.KNOWN_EXCLUDED})
 
     def test_phrase_needs_contiguous_tokens(self):
         self.assertTrue(tagrules.is_excluded("AB_CD_PRIME_MINISTER"))
@@ -166,7 +269,7 @@ class TestExclusion(unittest.TestCase):
         self.assertFalse(tagrules.is_excluded("HEAD_STATE_OF"))
 
     def test_description_used_and_reported(self):
-        m = tagrules.exclusion_matches("SOC_GENERAL", "Outbreak of cholera")
+        m = tagrules.exclusion_matches("QQ_GENERAL", "Outbreak of cholera")
         self.assertIn(("disease_general", "OUTBREAK", "description", "exact"), m)
         self.assertIn(("disease_named", "CHOLERA", "description", "exact"), m)
 
@@ -182,8 +285,8 @@ class TestExclusion(unittest.TestCase):
             tagrules.is_excluded("X", optional=("crime",))
 
     def test_neutral_examples_kept(self):
-        for name, desc in (("ECON_STOCKMARKET", "Stock market"), ("EDUCATION", None),
-                           ("ENV_SOLAR", "Solar power"), ("SOC_INNOVATION", ""),
+        for name, desc in (("QQ_STOCKMARKET", "Stock market"), ("EDUCATION", None),
+                           ("QQ_SOLAR", "Solar power"), ("QQ_INNOVATION", ""),
                            ("AB_AGRICULTURE", "Farming and crops"), ("AB_TOURISM", None)):
             self.assertFalse(tagrules.is_excluded(name, desc), name)
 
@@ -273,32 +376,32 @@ class TestBuildTagList(unittest.TestCase):
         totals = self.base(1000)  # A = 10/1000
         ds = self.days()
         counts = {
-            "ECON_A": {d: 10 for d in ds},                 # 平均 = A ちょうど → 入る
-            "ECON_B": {d: 9 for d in ds},                  # A 未満
-            "ECON_C": {d: 50 for d in ds if d.month >= 4},  # 最初の四半期に無い
+            "QQ_A": {d: 10 for d in ds},                 # 平均 = A ちょうど → 入る
+            "QQ_B": {d: 9 for d in ds},                  # A 未満
+            "QQ_C": {d: 50 for d in ds if d.month >= 4},  # 最初の四半期に無い
             "MILITARY_X": {d: 100 for d in ds},            # 除外の語
-            "ECON_D": {d: 100 for d in ds},                # 説明で除外
+            "QQ_D": {d: 100 for d in ds},                # 説明で除外
         }
-        themes = {"ECON_A": None, "ECON_B": "", "ECON_C": "x", "MILITARY_X": "", "ECON_D": "flood relief",
-                  "ECON_E": "never appears"}
+        themes = {"QQ_A": None, "QQ_B": "", "QQ_C": "x", "MILITARY_X": "", "QQ_D": "flood relief",
+                  "QQ_E": "never appears"}
         r = tagrules.build_tag_list(themes, counts, totals, set(), self.S, self.E)
-        self.assertEqual(r["tag_list"], ["ECON_A"])
+        self.assertEqual(r["tag_list"], ["QQ_A"])
         rows = {x["name"]: x for x in r["themes"]}
-        self.assertTrue(rows["ECON_A"]["mean_ratio_at_least_a"])
-        self.assertFalse(rows["ECON_B"]["mean_ratio_at_least_a"])
-        self.assertFalse(rows["ECON_C"]["present_throughout"])
-        self.assertEqual(rows["ECON_C"]["quarter_counts"][0], 0)
+        self.assertTrue(rows["QQ_A"]["mean_ratio_at_least_a"])
+        self.assertFalse(rows["QQ_B"]["mean_ratio_at_least_a"])
+        self.assertFalse(rows["QQ_C"]["present_throughout"])
+        self.assertEqual(rows["QQ_C"]["quarter_counts"][0], 0)
         self.assertEqual(rows["MILITARY_X"]["exclusion_matches"], [["conflict_violence", "MILITARY", "name", "exact"]])
-        self.assertEqual(rows["ECON_D"]["exclusion_matches"], [["disaster", "FLOOD", "description", "exact"]])
-        self.assertFalse(rows["ECON_E"]["present_throughout"])
-        self.assertTrue(rows["ECON_A"]["in_category_table"])
+        self.assertEqual(rows["QQ_D"]["exclusion_matches"], [["disaster", "FLOOD", "description", "exact"]])
+        self.assertFalse(rows["QQ_E"]["present_throughout"])
+        self.assertTrue(rows["QQ_A"]["in_category_table"])
         self.assertEqual([x["name"] for x in r["themes"]], sorted(rows))
         self.assertTrue(r["v_equals_a"])
 
     def test_theme_only_in_data_is_considered(self):
         ds = self.days()
-        r = tagrules.build_tag_list({}, {"ECON_Z": {d: 20 for d in ds}}, self.base(), set(), self.S, self.E)
-        self.assertEqual(r["tag_list"], ["ECON_Z"])
+        r = tagrules.build_tag_list({}, {"QQ_Z": {d: 20 for d in ds}}, self.base(), set(), self.S, self.E)
+        self.assertEqual(r["tag_list"], ["QQ_Z"])
         self.assertFalse(r["themes"][0]["in_category_table"])
 
     def test_missing_days_not_counted(self):
@@ -306,14 +409,14 @@ class TestBuildTagList(unittest.TestCase):
         march = [d for d in ds if d.month == 3]
         missing = set(march)  # 最初の四半期の使える日が無い → その四半期は条件から外す
         totals = self.base()
-        counts = {"ECON_C": {d: 50 for d in ds if d.month >= 4}}
+        counts = {"QQ_C": {d: 50 for d in ds if d.month >= 4}}
         r = tagrules.build_tag_list({}, counts, totals, missing, self.S, self.E)
         self.assertEqual(r["quarters_without_usable_days"], [0])
-        self.assertEqual(r["tag_list"], ["ECON_C"])
+        self.assertEqual(r["tag_list"], ["QQ_C"])
         self.assertIsNone(r["themes"][0]["quarter_counts"][0])
         # 欠けた日の件数は存在の条件にも平均にも入らない
         missing2 = {march[0]}
-        counts2 = {"ECON_Q": {march[0]: 10 ** 6}}
+        counts2 = {"QQ_Q": {march[0]: 10 ** 6}}
         r2 = tagrules.build_tag_list({}, counts2, totals, missing2, self.S, self.E)
         self.assertEqual(r2["themes"][0]["mean_ratio"], 0.0)
         self.assertEqual(r2["themes"][0]["quarter_counts"], [0, 0])
@@ -322,7 +425,7 @@ class TestBuildTagList(unittest.TestCase):
         totals = self.base()
         later = {self.E + DAY: 5}
         with self.assertRaises(ValueError):
-            tagrules.build_tag_list({}, {"ECON_A": later}, totals, set(), self.S, self.E)
+            tagrules.build_tag_list({}, {"QQ_A": later}, totals, set(), self.S, self.E)
         t2 = dict(totals)
         t2[self.E + DAY] = 1000
         with self.assertRaises(ValueError):
@@ -346,6 +449,12 @@ class TestBuildTagList(unittest.TestCase):
             tagrules.build_tag_list({}, {"A": {self.S: -1}}, self.base(), set(), self.S, self.E)
         with self.assertRaises(ValueError):
             tagrules.build_tag_list({}, {"A": {self.S: 1.5}}, self.base(), set(), self.S, self.E)
+
+    def test_compare_lists(self):
+        old = {"tag_list": ["A", "B", "C"]}
+        new = {"tag_list": ["B", "C", "D", "E"]}
+        self.assertEqual(tagrules.compare_lists(old, new),
+                         {"only_in_old": ["A"], "only_in_new": ["D", "E"], "in_both": 2})
 
     def test_deterministic(self):
         ds = self.days()
@@ -687,8 +796,10 @@ class TestOutput(unittest.TestCase):
         rec = json.loads(tagrules.canonical_json())
         self.assertEqual(rec["inclusion"]["k_articles_per_day"], 10)
         self.assertEqual(rec["exclusion"]["per_theme_exceptions"], "none")
-        self.assertEqual(rec["exclusion"]["glue_min_len"], 5)
-        self.assertIn("no new words", rec["changes_after_seeing_table"])
+        self.assertEqual(rec["exclusion"]["prefix_min_len"], 6)
+        self.assertEqual(rec["exclusion"]["glue_min_rest"], 4)
+        self.assertIn("only fixes of defects", rec["changes_after_seeing_table"])
+        self.assertIn("1cb463a", rec["sealed_versions"])
         self.assertIn("counting method", rec["counting"])
         self.assertEqual(rec["exclusion"]["terms"], {k: list(v) for k, v in tagrules.EXCLUSION_TERMS.items()})
 

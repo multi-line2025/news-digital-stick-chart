@@ -18,8 +18,9 @@
       最低の報道量 V は A と同じ値（docs/stats/candidates.md 3章 (4)）。
 除外する規則（CLAUDE.md「タグの一覧」2）
   テーマの名前と説明を tokens() で語の並びにし、有効な区分の EXCLUSION_TERMS の語に当たる
-  ものが一つでもあれば外す。当たり方は、完全一致・形の変化（inflections()）・くっつき一致
-  （GLUE_MIN_LEN 文字以上の語が、名前の語の先頭か末尾にある）の三つだけ（_word_matches()）。
+  ものが一つでもあれば外す。当たり方は、完全一致・形の変化（inflections()）と、名前の欄だけに
+  使うくっつき一致（先頭：PREFIX_MIN_LEN 文字以上の語、末尾：どの長さの語も。どちらも残りが
+  GLUE_MIN_REST 文字以上）だけ（_word_matches()）。
   一件ずつの例外（特定のテーマ名を足す・外す）は持たない。
 
 使い方
@@ -55,7 +56,7 @@ MIN_COUNT_PER_QUARTER = 1
 
 EXCLUSION_TERMS = {
     "politics_election": (
-        "ELECTION", "ELECTORAL", "ELECT", "VOTE", "BALLOT", "REFERENDUM", "POLL",
+        "ELECTION", "ELECTORAL", "ELECTED", "ELECTING", "VOTE", "BALLOT", "REFERENDUM", "POLL",
         "CANDIDATE", "INAUGURATION", "POLITICS", "POLITICAL", "POLITICIAN",
         "PARLIAMENT", "PARLIAMENTARY", "LEGISLATURE", "LEGISLATIVE", "LEGISLATOR",
         "CONGRESS", "SENATE", "SENATOR", "LAWMAKER", "PRESIDENT", "PRESIDENTIAL",
@@ -72,8 +73,8 @@ EXCLUSION_TERMS = {
         "TERRORIST", "EXTREMISM", "EXTREMIST", "JIHAD", "JIHADIST", "CONFLICT",
         "VIOLENCE", "VIOLENT", "ATTACK", "BOMB", "BOMBING", "EXPLOSIVE", "EXPLOSION",
         "WEAPON", "GUN", "GUNMAN", "GUNMEN", "GUNFIRE", "FIREARM", "SHOOTING",
-        "SHOOTER", "SNIPER", "MISSILE", "ARTILLERY", "AIRSTRIKE", "KILL", "MASSACRE",
-        "GENOCIDE", "SLAUGHTER", "ASSASSIN", "ASSASSINATE", "ASSASSINATION",
+        "SHOOTER", "SNIPER", "MISSILE", "ARTILLERY", "AIRSTRIKE", "KILL", "KILLING", "MASSACRE",
+        "GENOCIDE", "SLAUGHTER", "MANSLAUGHTER", "ASSASSIN", "ASSASSINATE", "ASSASSINATION",
         "EXECUTION", "BEHEADING", "STABBING", "LYNCHING", "CEASEFIRE", "PEACEKEEPING",
         "PEACEKEEPER", "INVASION", "HOSTAGE", "TORTURE", "RIOT", "UNREST",
         "CRACKDOWN", "PERSECUTION", "SIEGE", "BLOCKADE", "DEFENSE", "DEFENCE",
@@ -141,8 +142,17 @@ ENABLED_OPTIONAL_CATEGORIES = ("disease_named", "ethnic_religious_group")
 # 照合に使う欄。区分表のこの二つの欄だけを使う（ほかの欄は、あっても使わない）。
 MATCH_FIELDS = ("name", "description")
 
-# 語がくっついた形を拾う規則（くっつき一致）を使う、語の長さの下限（文字数）。
-GLUE_MIN_LEN = 5
+# くっつき一致（名前の欄だけ。文書 2章 (1)）の数値。
+# 先頭での一致は、この文字数以上の語だけ。
+PREFIX_MIN_LEN = 6
+# 先頭でも末尾でも、名前の語から一覧の語を除いた残りが、この文字数以上の英字であること。
+GLUE_MIN_REST = 4
+# 末尾での一致を使わない語：4文字以下で、英語の語尾（ING, ED, ER, S）で終わる語（今は KING）。
+# 短い語が別の語の語尾として偶然現れるのを防ぐため（BREAKING, SPEAKING など）。
+SUFFIX_BLOCK_MAX_LEN = 4
+SUFFIX_BLOCK_ENDINGS = ("ING", "ED", "ER", "S")
+# くっつき一致を使う欄。
+GLUE_FIELDS = ("name",)
 
 _PIECES = re.compile(r"[A-Z]+|[0-9]+")
 _TERM_OK = re.compile(r"\A[A-Z0-9]+( [A-Z0-9]+)*\Z")
@@ -185,21 +195,36 @@ def inflections(word):
     return frozenset(out)
 
 
-def _word_matches(word, tok):
-    """一つの語 word が、名前の一つの語 tok に当たるか。当たり方の名前か None。"""
+def _suffix_allowed(word):
+    return not (len(word) <= SUFFIX_BLOCK_MAX_LEN and word.endswith(SUFFIX_BLOCK_ENDINGS))
+
+
+def _word_matches(word, tok, glue=True):
+    """一つの語 word が、一つの語 tok に当たるか。当たり方の名前か None。
+
+    exact       tok == word
+    inflection  tok が word の形の変化
+    glue        （glue が真で、word と tok が英字だけのとき）
+                - 先頭：len(word) >= PREFIX_MIN_LEN で、tok が word で始まり、残りが GLUE_MIN_REST 文字以上
+                - 末尾：_suffix_allowed(word) で、tok が word か word の形の変化で終わり、
+                  その前の残りが GLUE_MIN_REST 文字以上
+    """
     if tok == word:
         return "exact"
     if tok in inflections(word):
         return "inflection"
-    if len(word) >= GLUE_MIN_LEN and word.isalpha() and tok.isalpha():
-        if tok.startswith(word) or tok.endswith(word):
-            return "glue"
-        if any(tok.endswith(f) for f in inflections(word)):
-            return "glue"
+    if not (glue and word.isalpha() and tok.isalpha()):
+        return None
+    if len(word) >= PREFIX_MIN_LEN and tok.startswith(word) and len(tok) - len(word) >= GLUE_MIN_REST:
+        return "glue-prefix"
+    if _suffix_allowed(word):
+        for form in (word,) + tuple(sorted(inflections(word))):
+            if tok.endswith(form) and len(tok) - len(form) >= GLUE_MIN_REST:
+                return "glue-suffix"
     return None
 
 
-def _term_match(term, toks):
+def _term_match(term, toks, glue=True):
     """語（または語の並び）term が、語の並び toks に当たるか。当たり方の名前か None。
 
     - 語が一つ：どれかの語に _word_matches が当たれば一致。
@@ -209,7 +234,7 @@ def _term_match(term, toks):
     tt = tokens(term)
     if len(tt) == 1:
         for t in toks:
-            how = _word_matches(tt[0], t)
+            how = _word_matches(tt[0], t, glue)
             if how:
                 return how
         return None
@@ -221,7 +246,7 @@ def _term_match(term, toks):
     joined = "".join(tt)
     if joined.isalpha():
         for t in toks:
-            how = _word_matches(joined, t)
+            how = _word_matches(joined, t, glue)
             if how:
                 return "joined-" + how
     return None
@@ -245,7 +270,7 @@ def exclusion_matches(name, description=None, optional=None):
     for cat in enabled_categories(optional):
         for term in EXCLUSION_TERMS[cat]:
             for f in MATCH_FIELDS:
-                how = _term_match(term, fields[f])
+                how = _term_match(term, fields[f], f in GLUE_FIELDS)
                 if how:
                     out.append((cat, term, f, how))
     return out
@@ -390,6 +415,13 @@ def build_tag_list(themes, counts, totals, missing_days, block_start, block_end)
     }
 
 
+def compare_lists(old_result, new_result):
+    """二つの版の build_tag_list() の結果を比べ、出入りしたテーマを返す（名前の順）。"""
+    old, new = set(old_result["tag_list"]), set(new_result["tag_list"])
+    return {"only_in_old": sorted(old - new), "only_in_new": sorted(new - old),
+            "in_both": len(old & new)}
+
+
 def as_record():
     return {
         "proposed_label": PROPOSED_LABEL,
@@ -413,11 +445,17 @@ def as_record():
             "inflections": "+S always; +ES after S/X/Z/CH/SH/O; consonant+Y -> IES, IED; ending E -> +D, "
                            "+R, +RS, drop E +ING; otherwise +ED, +ING, +ER, +ERS; letters only; no "
                            "consonant doubling",
-            "match": "single word: token equals the word, or an inflection of it, or (word of >= %d "
-                     "letters, both alphabetic) token starts with the word or ends with the word or an "
-                     "inflection of it; phrase: contiguous tokens (last may be inflected), or the joined "
-                     "phrase matched as a single word" % GLUE_MIN_LEN,
-            "glue_min_len": GLUE_MIN_LEN,
+            "match": "single word: token equals the word or an inflection of it; in the name field only "
+                     "(glue), both alphabetic: prefix if len(word) >= %d and the rest has >= %d letters; "
+                     "suffix (word or an inflection of it) if the rest before it has >= %d letters, except "
+                     "words of <= %d letters ending in %s; phrase: contiguous tokens (last may be "
+                     "inflected), or the joined phrase matched as a single word"
+                     % (PREFIX_MIN_LEN, GLUE_MIN_REST, GLUE_MIN_REST, SUFFIX_BLOCK_MAX_LEN,
+                        "/".join(SUFFIX_BLOCK_ENDINGS)),
+            "prefix_min_len": PREFIX_MIN_LEN,
+            "glue_min_rest": GLUE_MIN_REST,
+            "suffix_block": {"max_len": SUFFIX_BLOCK_MAX_LEN, "endings": list(SUFFIX_BLOCK_ENDINGS)},
+            "glue_fields": list(GLUE_FIELDS),
             "category_to_claude": CLAUDE_CATEGORY_OF,
             "claude_categories": list(CLAUDE_CATEGORIES),
             "optional_categories": list(OPTIONAL_CATEGORIES),
@@ -429,11 +467,14 @@ def as_record():
         },
         "counting": "numerator and denominator of r(d) follow the counting method sealed by the collector "
                     "(T-018); this record is sealed only after, or together with, that counting method",
-        "changes_after_seeing_table": "no new words. Allowed only: (a) irregular inflected forms of sealed "
-                                      "words not produced by the inflection rule, (b) a change of the "
-                                      "tokenize / inflection / glue rule applied to all words alike. New "
-                                      "version, owner approval, before method-access, diff and affected "
-                                      "themes published. Theme names are never named",
+        "changes_after_seeing_table": "only fixes of defects reproducible by a test (exception, crash on "
+                                      "empty input, etc.); no words, no numbers, no new kinds of match. "
+                                      "New version, owner approval, before method-access; lists computed "
+                                      "with both versions and themes that moved published. Theme names "
+                                      "are never named",
+        "sealed_versions": "the final version and the version of commit 1cb463a are both sealed; after the "
+                           "category table is acquired both lists are computed and the themes that differ "
+                           "are published (compare_lists)",
     }
 
 

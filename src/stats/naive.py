@@ -237,6 +237,8 @@ def sort_rows(rows):
     """学習の行を、規則で決めた順（予言日、タグ名）に並べる。
 
     rows: (予言日 t, タグ名, 特徴量の並び, 0 か 1) の並び。同じ (t, タグ名) が二つあれば止まる。
+    前提：タグ名はタグの一覧の中で一意（一覧は名前の集合として作るので重複しない）。
+    この前提があるので、(予言日, タグ名) で行の順が一つに決まる。
     入力の順に依らず、同じ行の集まりからは同じ並びになる。
     """
     out = sorted(rows, key=lambda r: (r[0], r[1]))
@@ -298,7 +300,7 @@ def as_record():
                          "range; all tags of the sealed tag list with status target; label = candidates.judge "
                          "with the sealed V; null labels dropped; nothing else dropped",
         "row_order": "rows sorted by (prediction date, tag name) ascending before fitting (fit_rows); "
-                     "duplicate (date, tag) stops the fit",
+                     "tag names are unique within the tag list; duplicate (date, tag) stops the fit",
         "revision_rule": "during the method period, the only allowed change is adding features (never "
                          "removing or changing one), as a new sealed version; ridge_lambda, max_iter, tol, "
                          "the fitting procedure, the training-data selection and the row order stay at the "
