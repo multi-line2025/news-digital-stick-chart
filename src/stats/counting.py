@@ -74,6 +74,11 @@ S_UNCOVERED = {"V1": "docs_without_v1_theme", "V2": "docs_without_v2_theme", "AN
 COUNTED_GROUP_RULE = "g does not end with 'T' (translated documents are not counted; 'X' is counted)"
 
 _RUN_ID_RE = re.compile(r"\A[0-9a-f]{16}\Z")
+# gkg.THEME_RE・gkg の組の作り方と同じ形（テストで照合する）
+THEME_NAME_RE = re.compile(r"\A[A-Z][A-Z0-9_]{0,159}\Z")
+GROUP_RE = re.compile(r"\A(?:[0-9]{1,2}|X)T?\Z")
+# 中身を読まない決まった行の種類（gkg.serialize_day が書くもの）
+_SKIPPED_TAGS = frozenset({"F", "FD", "C", "L", "P1", "P2", "NC", "NL", "E"})
 _SHA_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 _INT_RE = re.compile(r"\A(?:0|[1-9][0-9]*)\Z")
 
@@ -102,18 +107,33 @@ _CAND = {c[0]: (c[1], c[2]) for c in CANDIDATES}
 REFERENCE_CANDIDATE_IDS = ("C1", "C2", "C3", "C4", "C5", "C6")   # 基準の案 B1〜B5 が選ぶ候補（参考）
 
 # 正式に使う数え方（2026-10-08 オーナー決定。counting.md 0章）。出どころは commit を40桁で指定した
-# reviews/T-028.md の、行の全体が一致する引用の行。
+# reviews/T-028.md の2つの行：オーナーの発言の行（行の全体が一致）と、リードの整理の「決定：」の行
+# （先頭が一致する行がちょうど1つで、DECISION_PHRASES の語句をすべて含む。T-036 差し戻し1回目 中-4）。
 OWNER_DECISION = {
     "numerator_column": "v1_or_v2_docs",
     "denominator": "same",
     "source_commit": "9c85f58f054a679b8e5f40fcd7adbb17536f6366",
     "source_path": "reviews/T-028.md",
     "source_line": "> 作り方2を、新しい候補として加え、正式に使う数え方にしよう",
+    "decision_line_prefix": "- 決定：正式に使う数え方は、",
 }
+# 「決定：」の行の語句と、それが決める OWNER_DECISION の項目と値。official_candidate() は、
+# OWNER_DECISION の分子の欄と分母が、この対応と一致することを求める（中身を出どころの語句で縛る）
+DECISION_PHRASES = (
+    ("V1 か V2 の少なくとも一方", "numerator_column", "v1_or_v2_docs"),
+    ("同じ数え方の全テーマの合計", "denominator", "same"),
+)
 
 
 def official_candidate():
-    """OWNER_DECISION の（分子の欄、分母）に当たる候補の識別子。ちょうど一つでなければ ValueError。"""
+    """OWNER_DECISION の（分子の欄、分母）に当たる候補の識別子。
+
+    OWNER_DECISION の分子の欄と分母が DECISION_PHRASES の対応と一致しない場合と、当たる候補が
+    ちょうど一つでない場合は ValueError。
+    """
+    for _phrase, key, value in DECISION_PHRASES:
+        if OWNER_DECISION.get(key) != value:
+            raise ValueError("OWNER_DECISION の %s が、出どころの語句の対応と一致しない" % key)
     hit = [cid for cid, col, den in CANDIDATES
            if (col, den) == (OWNER_DECISION["numerator_column"], OWNER_DECISION["denominator"])]
     if len(hit) != 1:
@@ -159,9 +179,14 @@ def _int(x, what):
 def parse_day(gz_bytes, expect_day=None, expect_mode=None):
     """日の集計（gzip のバイト列）から、候補と基準に要る行だけを読む。
 
-    読む行：頭の行（#）、V、D、T、S。ほかの行（F、FD、C、L、P1、P2、NC、NL、E）は読み飛ばす。
-    戻り値：{"day", "mode", "docs": {g: n}, "themes": {名前: {g: (v1_docs, v2_docs, v2_mentions)}},
-             "stats": {名前: n}}
+    読む行：頭の行（#）、V、D、T、S。ほかの決まった行（F、FD、C、L、P1、P2、NC、NL、E）は中身を
+    読み飛ばす。知らない種類の行があれば止まる。
+    確かめること（T-036 差し戻し1回目 軽-1）：版3、欄の数、0以上の整数、番号と組の重なり、
+    テーマの名前の形（THEME_NAME_RE）、組の形（GROUP_RE）、T の行の数どうしの関係
+    （max(v1, v2) <= v1_or_v2 <= v1 + v2、v2 <= v2_mentions）、T の行の文書の数がその組の D を超えない、
+    S の docs_without_* がすべての組の D の和を超えない。
+    戻り値：{"day", "mode", "docs": {g: n},
+             "themes": {名前: {g: (v1_docs, v2_docs, v2_mentions, v1_or_v2_docs)}}, "stats": {名前: n}}
     """
     try:
         text = gzip.GzipFile(fileobj=io.BytesIO(gz_bytes), mode="rb")
@@ -213,6 +238,8 @@ def parse_day(gz_bytes, expect_day=None, expect_mode=None):
                 if not (max(v1, v2) <= v12 <= v1 + v2 and v2 <= v2m):
                     raise CountingError("T の行の数どうしの関係が合わない")
                 t_rows.append((f[0], _int(f[1], "T の番号"), nums))
+            elif tag in _SKIPPED_TAGS:
+                continue
             elif tag == "S":
                 f = rest.split("\t")
                 if len(f) != 2:
@@ -220,8 +247,20 @@ def parse_day(gz_bytes, expect_day=None, expect_mode=None):
                 if f[0] in stats:
                     raise CountingError("S の行の名前が重なっている")
                 stats[f[0]] = _int(f[1], "S の数")
+            else:
+                raise CountingError("知らない種類の行がある")
     except (OSError, EOFError, UnicodeDecodeError) as e:
         raise CountingError("日の集計を読めない: %s" % e) from None
+    for name in vocab.values():
+        if not THEME_NAME_RE.fullmatch(name):
+            raise CountingError("V の行のテーマの名前の形が違う")
+    for g in docs:
+        if not GROUP_RE.fullmatch(g):
+            raise CountingError("D の行の組の形が違う")
+    total_docs = sum(docs.values())
+    for name in S_UNCOVERED.values():
+        if stats.get(name, 0) > total_docs:
+            raise CountingError("S の %s が、すべての組の文書の数を超える" % name)
     themes = {}
     for g, i, nums in t_rows:
         if i not in vocab:
@@ -231,6 +270,8 @@ def parse_day(gz_bytes, expect_day=None, expect_mode=None):
             raise CountingError("T の行の（組、テーマ）が重なっている")
         if g not in docs:
             raise CountingError("T の行の組が D に無い")
+        if max(nums[0], nums[1], nums[3]) > docs[g]:
+            raise CountingError("T の行の文書の数が、その組の D を超える")
         per_g[g] = nums
     return {"day": day, "mode": mode, "docs": docs, "themes": themes, "stats": stats}
 
@@ -398,6 +439,26 @@ def fallback_candidate(summaries, bid):
         if usable(summaries, cid):
             return cid
     return None
+
+
+def order5_candidate_status(cid, totals, missing_days, days):
+    """順番5で、候補 cid が手法を作る期間で計算できるか（T-036 差し戻し1回目 中-3。counting.md 4章 (3)）。
+
+    totals：{日付: その候補の分母}。missing_days：欠けた日の集合。days：手法を作る期間の区画のすべての日。
+    欠けた日でない日で分母が 0（または totals に値が無い）の日があれば、正式な候補なら "stop"（順番5を止める）、参考の候補なら "not_computable"
+    （その候補だけ「計算できない（理由）」と記録し、順番5は止めない）。無ければ "ok"。
+    """
+    if cid not in _CAND:
+        raise ValueError("候補の一覧に無い識別子: %r" % (cid,))
+    zero = sorted(d for d in days if d not in missing_days and totals.get(d, 0) <= 0)
+    official = (cid == OFFICIAL_CANDIDATE)
+    if not zero:
+        status = "ok"
+    else:
+        status = "stop" if official else "not_computable"
+    return {"candidate": cid, "official": official, "status": status,
+            "reason": ("欠けた日でない日に分母が 0 の日がある" if zero else None),
+            "zero_days": [str(d) for d in zero]}
 
 
 def coverage(summaries):
@@ -623,7 +684,9 @@ def decide(trial_manifest, official_manifest, read_day_file):
     ときだけ。R が終わっていないのに、R に day の行があるか、ほかの試しの run の run-start がある
     ときは止まる。
     ファイルが無い・sha256 が合わない・頭の行が合わない・git の確かめに通らない・trial_run_ids や
-    trial_manifest_sha256 が合わない・使える候補が無い、は2段目に進まず止まる。
+    trial_manifest_sha256 が合わない・正式な数え方 C7 が計算できない、は2段目に進まず止まる。
+    止まっても、新しい版の順番1b には進まない（正式な数え方 C7 は順番2の入力に依らない）。
+    順番3は、止まった順番2の記録を参照して進む（counting.md 4章 (3)）。
     """
     runs = runs_record(trial_manifest, official_manifest)
     steps = []
@@ -706,7 +769,8 @@ def _decided(out, sel, inputs, results, cov):
 def as_record():
     return {
         "proposed_label": PROPOSED_LABEL,
-        "input_format": "src/collector/gkg.py section 6 day aggregate, header '# gkg-day 2 <day> <mode>'",
+        "input_format": "src/collector/gkg.py section 6 day aggregate, header '# %s %s <day> <mode>'"
+                        % (DAY_FORMAT_NAME, DAY_FORMAT_VERSION),
         "counted_groups": COUNTED_GROUP_RULE,
         "candidates": [
             {"id": cid, "numerator": "sum over counted groups of the T-row column %s, per theme" % col,
@@ -750,7 +814,8 @@ def as_record():
                                 "trial_manifest_sha256 (None for an empty manifest) and trial_run_ids[0] must be "
                                 "the first trial run-start's run_id (None if none); otherwise stopped",
             "step1": "first trial run-start gives R; if R has run-complete: its three day rows and files are the "
-                     "input; any missing file, sha256 or header mismatch, or no usable candidate -> stopped",
+                     "input; any missing file, sha256 or header mismatch, malformed aggregate, or the "
+                     "official candidate not usable on some day -> stopped",
             "wait": "no trial run-start, or R without run-complete, while the official run has not started -> "
                     "pending",
             "step2": "only if the official run has started and either there is no trial run-start, or the only "
@@ -758,6 +823,12 @@ def as_record():
                      "until all three exist; any file or check failure -> stopped",
             "stop_unfinished": "if the official run has started and R has no run-complete while R has a day row "
                                "or another trial run-start exists -> stopped",
+            "stopped": "the stop is recorded and published; it never leads to a new order 1b (the official "
+                       "candidate does not depend on the order 2 input); order 3 references the stopped order 2 "
+                       "record; reference results and coverage come from order 5 instead",
+            "order5": "a non-missing day with zero denominator: official candidate -> order 5 stops and is "
+                      "reported; reference candidate -> recorded as not computable with the days, order 5 "
+                      "continues (order5_candidate_status)",
             "authority": "the sealer's own run of this sealed code on the verified inputs is the result",
             "runs": "both run_ids and the three days' failed_files of both runs are in the output",
         },

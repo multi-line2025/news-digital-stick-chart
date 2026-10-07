@@ -267,6 +267,55 @@ class TestParseDay(unittest.TestCase):
         s = counting.parse_day(self._raw(b"V\t0\tZZA\nD\t1\t3\nT\t1\t0\t1\t1\t2\t1\n"))
         self.assertEqual(s["themes"]["ZZA"]["1"], (1, 1, 2, 1))
 
+    def test_more_format_checks(self):
+        """軽-1：テーマの名前の形、組の形、T の数が組の D を超える、S が D の和を超える、知らない行。"""
+        bad = {
+            "theme_name": b"V\t0\tzza\nD\t1\t3\n",
+            "group": b"D\t1Z\t3\n",
+            "t_over_d": b"V\t0\tZZA\nD\t1\t1\nT\t1\t0\t2\t0\t0\t2\n",
+            "s_over_d": b"D\t1\t3\nS\tdocs_without_any_theme\t4\n",
+            "unknown_tag": b"D\t1\t3\nQ\tx\n",
+        }
+        for name, body in bad.items():
+            with self.subTest(name=name):
+                with self.assertRaises(counting.CountingError):
+                    counting.parse_day(self._raw(body))
+        ok = counting.parse_day(self._raw(b"D\tXT\t3\nD\t12\t1\nS\tdocs_without_any_theme\t4\n"))
+        self.assertEqual(ok["docs"], {"XT": 3, "12": 1})
+
+    def test_honest_rich_aggregate_passes(self):
+        """軽-1：収集係の gkg.py で作った、国・言語・翻訳の情報・組の網・いろいろな組を含む正直な集計を、
+        新しい確かめが誤って止めない。"""
+        ft = FT["2015-03-02"]
+        agg, vocab = gkg.Agg(), {}
+        lines = []
+        for i in range(40):
+            cols = [b""] * gkg.N_COLUMNS
+            tr = (i % 7 == 0)
+            cols[gkg.I_ID] = ("%s-%s%d" % (ft, "T" if tr else "", i)).encode()
+            cols[gkg.I_D21] = ft.encode()
+            cols[gkg.I_COLL] = [b"1", b"2", b"12", b"bad"][i % 4]
+            cols[gkg.I_V1T] = [b"ZZA;ZZB", b"ZZB;ZZC;ZZD", b"", b"ZZA"][i % 4]
+            cols[gkg.I_V2T] = [b"ZZA,1;ZZA,9;ZZE,3", b"ZZC,2", b"ZZD,5;ZZD,6", b""][i % 3]
+            cols[gkg.I_V1LOC] = [b"1#Somewhere#US#US06#0#0#1", b"", b"4#Elsewhere#FR#FR11#0#0#2"][i % 3]
+            cols[gkg.I_TINFO] = b"srclc:fra;eng:GT-FRA 1.0" if tr else b""
+            lines.append(b"\t".join(cols) + b"\n")
+        lines.append(b"too\tfew\n")
+        for line in lines:
+            gkg.add_line(agg, line, ft.encode(), vocab)
+        files = [{"file_time": ft, "result": "ok", "reason": None, "md5": "0" * 32, "size": 1,
+                  "sha256": "0" * 64, "attempts": 1, "docs": {g.decode(): n for g, n in agg.docs.items()}}]
+        data = gkg.serialize_day("2015-03-02", agg, files, "trial")
+        tags = {line.split(b"\t")[0] for line in data.split(b"\n") if line}
+        self.assertTrue({b"C", b"L", b"P1", b"P2", b"NC", b"NL", b"E", b"F", b"FD"} <= tags, tags)
+        s = counting.parse_day(gkg.gzip_bytes(data), expect_day="2015-03-02", expect_mode="trial")
+        self.assertIn("XT", s["docs"])
+        for cid in counting.CANDIDATE_IDS:
+            counting.candidate_counts(s, cid)
+
+    def test_regexes_match_collector(self):
+        self.assertEqual(gkg.THEME_RE.pattern.decode(), counting.THEME_NAME_RE.pattern[2:-2])
+
     def test_coverage(self):
         """欄の手厚さ：S の3つの値と、すべての組の D の和。S の行が無ければ 0（T-036）。"""
         s = base_summaries()[0]
@@ -415,14 +464,15 @@ class TestCriteria(unittest.TestCase):
         out = counting.apply_all(base_summaries())
         self.assertTrue(all(r["official"] is False for r in out.values()))
         # 決定の（分子、分母）を別の候補に変えると、別の候補になる（手で識別子を書く場所が無い）
+        # 決定の中身を出どころの語句の対応と違うものに変えると、正式な候補は決まらない（中-4）
         saved = dict(counting.OWNER_DECISION)
         try:
-            counting.OWNER_DECISION["numerator_column"] = "v1_docs"
-            self.assertEqual(counting.official_candidate(), "C2")
-            self.assertEqual(counting.official_status(), "inconsistent")
-            counting.OWNER_DECISION["denominator"] = "nothing"
-            with self.assertRaises(ValueError):
-                counting.official_candidate()
+            for key, value in (("numerator_column", "v1_docs"), ("denominator", "docs")):
+                counting.OWNER_DECISION.clear()
+                counting.OWNER_DECISION.update(saved)
+                counting.OWNER_DECISION[key] = value
+                with self.assertRaises(ValueError, msg=key):
+                    counting.official_candidate()
         finally:
             counting.OWNER_DECISION.clear()
             counting.OWNER_DECISION.update(saved)
@@ -435,6 +485,13 @@ class TestCriteria(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         lines = r.stdout.decode("utf-8").split("\n")
         self.assertEqual(lines.count(d["source_line"]), 1)
+        # 2つ目の出どころ：リードの整理の「決定：」の行がちょうど1つあり、語句をすべて含む（中-4）
+        dec = [x for x in lines if x.startswith(d["decision_line_prefix"])]
+        self.assertEqual(len(dec), 1)
+        for phrase, key, value in counting.DECISION_PHRASES:
+            self.assertIn(phrase, dec[0], phrase)
+            self.assertEqual(d[key], value, key)
+        self.assertEqual({k for _p, k, _v in counting.DECISION_PHRASES}, {"numerator_column", "denominator"})
 
 
 RID = "0123456789abcdef"
@@ -755,6 +812,26 @@ class TestDecide(unittest.TestCase):
             self.assertEqual(r.returncode, 3)
 
 
+class TestOrder5Status(unittest.TestCase):
+    """中-3：順番5で候補が計算できないときの扱い。"""
+
+    def test_reference_not_computable_does_not_stop(self):
+        import datetime
+        days = [datetime.date(2015, 3, 2) + datetime.timedelta(days=i) for i in range(4)]
+        totals = {days[0]: 5, days[1]: 0, days[2]: 7}         # 2日目が0、4日目は値が無い
+        missing = {days[3]}
+        r = counting.order5_candidate_status("C2", totals, missing, days)
+        self.assertEqual((r["status"], r["official"], r["zero_days"]), ("not_computable", False, ["2015-03-03"]))
+        r = counting.order5_candidate_status("C7", totals, missing, days)
+        self.assertEqual((r["status"], r["official"]), ("stop", True))
+        r = counting.order5_candidate_status("C7", {d: 1 for d in days[:3]}, missing, days)
+        self.assertEqual(r["status"], "ok")
+        r = counting.order5_candidate_status("C4", {d: 1 for d in days[:3]}, set(), days)
+        self.assertEqual((r["status"], r["zero_days"]), ("not_computable", ["2015-03-05"]))
+        with self.assertRaises(ValueError):
+            counting.order5_candidate_status("C9", totals, missing, days)
+
+
 class TestFallback(unittest.TestCase):
     def test_fallback_when_criterion_none(self):
         # V1 がどの記事にも付かない → B3（C1 決め打ち）は該当なし → 代わりは記事の数で割る V2 の C3
@@ -794,6 +871,10 @@ class TestRecordAndDoc(unittest.TestCase):
         rec = json.loads(outs[0])
         self.assertEqual([c["id"] for c in rec["candidates"]], list(counting.CANDIDATE_IDS))
         self.assertEqual((rec["official_candidate"], rec["official_status"]), ("C7", "decided"))
+        # 機械で読む定義が、コードの形式の版と一致する（中-1）
+        self.assertIn("# %s %s <day>" % (counting.DAY_FORMAT_NAME, counting.DAY_FORMAT_VERSION), rec["input_format"])
+        self.assertIn("official candidate not usable", rec["input_rule"]["step1"])
+        self.assertIn("never leads to a new order 1b", rec["input_rule"]["stopped"])
 
     def test_cli_rejects_args(self):
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
