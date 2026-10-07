@@ -1,4 +1,4 @@
-"""テーマの区分表の取得（src/collector/themes.py）のテスト。T-018。ネットワークは使わない。
+"""テーマの区分表の取得（src/collector/themes.py）のテスト。T-018・T-021。ネットワークは使わない。
 
 実行（プロジェクトのルートで）:
     PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/collector -v
@@ -6,6 +6,7 @@
 区分表は架空の表（テーマの名前・説明・件数の欄など）を作り、メモリの上で返す差し替えの通信で
 置き換える。件数の欄の値（目印の数）が、書いたファイルとマニフェストのどこにも無いことを
 確かめる。このファイルには、メールアドレスの形の文字列をそのまま書かない。
+除外の規則の封印の関門（0章）は、関門そのもののテスト（TestExclusionGate）のほかは差し替える。
 """
 
 import datetime
@@ -35,7 +36,7 @@ def _load(name, path):
 themes = _load("themes", os.path.join(SRC, "themes.py"))
 UTC = datetime.timezone.utc
 NOW = datetime.datetime(2026, 10, 8, 1, 2, 3, tzinfo=UTC)
-URL = "https://data.gdeltproject.org/documentation/TEST-THEMES.TXT"
+URL = "https://data.gdeltproject.org/api/v2/guides/LOOKUP-GKGTHEMES.TXT"
 
 
 class NetworkUsed(AssertionError):
@@ -54,6 +55,11 @@ _patches = [mock.patch.object(socket.socket, "connect", _blocked),
 def setUpModule():
     for p in _patches:
         p.start()
+
+
+def no_gate(root):
+    """0章の関門を通ったことにする（関門そのものは TestExclusionGate で確かめる）。"""
+    return None
 
 
 def tearDownModule():
@@ -131,24 +137,110 @@ def xlsx(rows):
 
 class TestUrl(unittest.TestCase):
     def test_allowed_and_rejected(self):
-        self.assertEqual(themes.validate_doc_url(URL), "TEST-THEMES.TXT")
-        for bad in (None, "http://data.gdeltproject.org/documentation/X.TXT",
-                    "https://data.gdeltproject.org/api/v2/guides/LOOKUP-GKGTHEMES.TXT",
-                    "https://data.gdeltproject.org/documentation/../gdeltv2/x.txt",
-                    "https://data.gdeltproject.org/documentation/a/b.txt",
-                    "https://data.gdeltproject.org/documentation/x%2e.txt",
-                    "https://data.gdeltproject.org/documentation/x.txt?y=1",
-                    "https://api.gdeltcloud.com/documentation/x.txt"):
-            with self.assertRaises(themes.ThemesError):
-                themes.validate_doc_url(bad)
-
-    def test_url_not_decided_yet(self):
-        """T-018 では取得しない。THEMES_URL は None で、run は通信の前に止まる。"""
-        self.assertIsNone(themes.THEMES_URL)
-        tr = FakeTransport(GOOD)
+        """T-021：/api/v2/guides/ の下の、全テーマの区分表の1つだけを許す。"""
+        self.assertEqual(themes.ALLOWED_GUIDE_FILES, ("LOOKUP-GKGTHEMES.TXT",))
+        self.assertEqual(themes.THEMES_URL, URL)
+        self.assertEqual(themes.validate_doc_url(URL), "LOOKUP-GKGTHEMES.TXT")
+        g = "https://data.gdeltproject.org/api/v2/guides/"
+        for bad in (None, "http://data.gdeltproject.org/api/v2/guides/LOOKUP-GKGTHEMES.TXT",
+                    "https://data.gdeltproject.org/documentation/LOOKUP-GKGTHEMES.TXT",
+                    "https://data.gdeltproject.org/documentation/TEST-THEMES.TXT",
+                    g + "LOOKUP-LANGUAGES.TXT", g + "LOOKUP-COUNTRIES.TXT",
+                    g + "LOOKUP-IMAGETAGS.TXT", g + "lookup-gkgthemes.txt",
+                    g + "LOOKUP-GKGTHEMES.TXT?x=1", g + "LOOKUP-GKGTHEMES.TXT#x",
+                    g + "../guides/LOOKUP-GKGTHEMES.TXT", g + "x/LOOKUP-GKGTHEMES.TXT",
+                    g + "LOOKUP-GKGTHEMES%2ETXT",
+                    "https://data.gdeltproject.org:443/api/v2/guides/LOOKUP-GKGTHEMES.TXT",
+                    "https://api.gdeltcloud.com/api/v2/guides/LOOKUP-GKGTHEMES.TXT",
+                    "https://data.gdeltproject.org/api/v2/LOOKUP-GKGTHEMES.TXT"):
+            with self.subTest(url=bad):
+                with self.assertRaises(themes.ThemesError):
+                    themes.validate_doc_url(bad)
         with self.assertRaises(themes.ThemesError):
-            themes.run(root="/nonexistent", home="/nonexistent", transport=tr)
-        self.assertEqual(tr.calls, [])
+            themes.urllib_transport(g + "LOOKUP-LANGUAGES.TXT", 1)
+
+
+class TestExclusionGate(unittest.TestCase):
+    """T-021：統計係の除外の規則の封印より前には、区分表を取得しない。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="themes-gate-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.root = os.path.join(self.tmp, "proj")
+        os.makedirs(os.path.join(self.root, "data", "manifest"))
+        self.home = os.path.join(self.tmp, "home")
+        os.makedirs(os.path.join(self.home, *themes.STORE_PARTS))
+        self.ledger = themes._import_ledger()
+
+    def written(self):
+        out = []
+        for top in (self.root, self.home):
+            for d, _ds, fs in os.walk(top):
+                out += fs
+        return out
+
+    def run_themes(self):
+        self.tr = FakeTransport(GOOD)
+        return themes.run(root=self.root, home=self.home, transport=self.tr,
+                          clock=lambda: 0.0, now=lambda: NOW)
+
+    def test_kind_undecided_stops_before_network(self):
+        """今（T-021）は封印係の kind が未定なので、関門が必ず止まる。"""
+        self.assertIsNone(themes.EXCLUSION_RULE_KIND)
+        with self.assertRaisesRegex(themes.ExclusionRulesNotSealed, "まだ決まっていない"):
+            self.run_themes()
+        self.assertEqual(self.tr.calls, [])
+        self.assertEqual(self.written(), [])
+
+    def records(self, kinds):
+        return [{"seq": i + 1, "kind": k} for i, k in enumerate(kinds)]
+
+    def gate_with(self, records, kind="exclusion-rules", allowed=True, root=None):
+        kinds = self.ledger.ALLOWED_KINDS + ((kind,) if allowed else ())
+        with mock.patch.object(themes, "EXCLUSION_RULE_KIND", kind), \
+                mock.patch.object(self.ledger, "ALLOWED_KINDS", kinds), \
+                mock.patch.object(self.ledger, "_gate_root", return_value=root or self.root), \
+                mock.patch.object(self.ledger, "_load_for_gate",
+                                  return_value=(b"", records)) as load:
+            out = self.run_themes()
+        load.assert_called_once_with(root or self.root)
+        return out
+
+    def test_kind_not_in_allowed_list(self):
+        with self.assertRaisesRegex(themes.ExclusionRulesNotSealed, "許可リスト"):
+            self.gate_with(self.records(["periods"]), allowed=False)
+        self.assertEqual(self.tr.calls, [])
+
+    def test_no_record_of_kind(self):
+        with self.assertRaisesRegex(themes.ExclusionRulesNotSealed, "記録.*が無い"):
+            self.gate_with(self.records(["periods", "candidates"]))
+        self.assertEqual(self.tr.calls, [])
+        self.assertEqual(self.written(), [])
+
+    def test_ledger_invalid(self):
+        bad = mock.Mock(side_effect=self.ledger.LedgerError("見本"))
+        with mock.patch.object(themes, "EXCLUSION_RULE_KIND", "periods"), \
+                mock.patch.object(self.ledger, "_gate_root", return_value=self.root), \
+                mock.patch.object(self.ledger, "_load_for_gate", bad):
+            with self.assertRaisesRegex(themes.ExclusionRulesNotSealed, "検証できない"):
+                self.run_themes()
+        self.assertEqual(self.tr.calls, [])
+
+    def test_other_root_refused(self):
+        with self.assertRaisesRegex(themes.ExclusionRulesNotSealed, "root が違う"):
+            self.gate_with(self.records(["periods", "exclusion-rules"]), root=self.tmp)
+        self.assertEqual(self.tr.calls, [])
+
+    def test_passes_with_record(self):
+        e = self.gate_with(self.records(["periods", "exclusion-rules"]))
+        self.assertEqual(len(self.tr.calls), 1)
+        self.assertEqual(e["source_url"], URL)
+
+    def test_gate_is_first_in_run(self):
+        import inspect
+        body = inspect.getsource(themes.run).split('"""', 2)[2]
+        lines = [l.strip() for l in body.splitlines() if l.strip()]
+        self.assertTrue(lines[2].startswith("_exclusion_gate(root)"), lines[:3])
 
 
 class TestClassify(unittest.TestCase):
@@ -183,6 +275,7 @@ class TestClassify(unittest.TestCase):
         with self.assertRaisesRegex(themes.ThemesError, "名前の形に合わない"):
             themes.classify_columns(header, rows)
 
+    @mock.patch.object(themes, "_exclusion_gate", no_gate)
     def test_hidden_counts_never_written(self):
         tmp = tempfile.mkdtemp(prefix="themes-hidden-")
         self.addCleanup(shutil.rmtree, tmp, True)
@@ -202,6 +295,51 @@ class TestClassify(unittest.TestCase):
                 for m in (b"7,123,457", b"8123459", b"12.3k", b"123461", b"Seen in"):
                     self.assertNotIn(m, data)
 
+    def test_unicode_numbers_in_kept_columns(self):
+        """T-018 の監査 軽3：Unicode の数字・上付きの数字・丸付き・分数・ローマ数字・漢数字。"""
+        header = ["Theme", "Description"]
+        for val in ("Seen in \u0661\u0662\u0663 articles", "x\u00b2", "n\u2083", "\u2460 item",
+                    "\u00bd of all", "\u216b", "\u4e00\u4e07 articles", "\uff11\uff12",
+                    "\U0001d7cf", "\u0967\u0968"):
+            with self.subTest(val=val):
+                keep, drop = themes.classify_columns(header, [["QQ_A", val], ["QQ_B", "plain"]])
+                self.assertEqual((keep, drop), ([0], ["Description"]))
+                self.assertTrue(themes.has_numeric(val))
+        for val in ("plain", "Theme of ECON", "a-b_c"):
+            self.assertFalse(themes.has_numeric(val))
+
+    def test_unicode_numeric_header_means_headerless(self):
+        for h in ("\uff11\uff12\uff13", "\u00b2\u00b3", "1 234", "\u0661\u0662", "12.5"):
+            with self.subTest(h=h):
+                with self.assertRaisesRegex(themes.ThemesError, "見出しの行が無い"):
+                    themes.classify_columns(["THEME", h], [["QQ_A", "x"]])
+
+    def test_dropped_header_with_number_is_not_written(self):
+        keep, drop = themes.classify_columns(
+            ["THEME", "Count (1,234,567)", "Mystery\u00b2", "Frequency"],
+            [["QQ_A", "5", "x", "6"]])
+        self.assertEqual(drop, ["column_B", "column_C", "Frequency"])
+
+    def test_sheet_names_with_numbers_are_replaced(self):
+        rows = [["THEME", "DESCRIPTION"], ["QQ_A", "alpha"]]
+        data, n, kept, dropped, replaced = themes.build_output(
+            [("Themes (12,345)", rows), ("Other", [["THEME", "DESCRIPTION"], ["QQ_B", "beta"]])])
+        self.assertTrue(replaced)
+        text = data.decode()
+        self.assertNotIn("12,345", text)
+        self.assertEqual(text.splitlines()[0], "sheet\tTHEME\tDESCRIPTION")
+        self.assertIn("sheet_A\tQQ_A\talpha", text)
+        self.assertIn("sheet_B\tQQ_B\tbeta", text)
+        for name in ("\u2460", "\u00b2x", "\u0661"):
+            _d, _n, _k, _dr, rep2 = themes.build_output([(name, rows), ("Other", rows)])
+            self.assertTrue(rep2, name)
+        data, _n, _k, _d, replaced = themes.build_output([("Alpha", rows), ("Beta", rows)])
+        self.assertFalse(replaced)
+        self.assertIn("Alpha\tQQ_A", data.decode())
+        data, _n, _k, _d, replaced = themes.build_output([("Themes 2024", rows)])
+        self.assertFalse(replaced)                     # シートが1つならシート名は書かない
+        self.assertNotIn("2024", data.decode())
+
     def test_numeric_values_dropped_even_with_keep_header(self):
         keep, drop = themes.classify_columns(["NAME", "TYPE"], [["QQ_X", "12"], ["QQ_Y", "3"]])
         self.assertEqual((keep, drop), ([0], ["TYPE"]))
@@ -220,6 +358,9 @@ class TestClassify(unittest.TestCase):
 
 class RunCase(unittest.TestCase):
     def setUp(self):
+        p = mock.patch.object(themes, "_exclusion_gate", no_gate)
+        p.start()
+        self.addCleanup(p.stop)
         self.tmp = tempfile.mkdtemp(prefix="themes-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.root = os.path.join(self.tmp, "proj")
@@ -267,8 +408,11 @@ class TestRun(RunCase):
         data = xlsx([["NAME", "DESCRIPTION", "NUMARTS"],
                      ["QQ_ALPHA", "Alpha", COUNT_MARKS[0]],
                      ["QQ_BETA_TWO", "Beta", COUNT_MARKS[1]]])
-        e = self.run_themes(data, url=URL.replace(".TXT", ".xlsx"))
+        name = "LOOKUP-GKGTHEMES.xlsx"                 # 形を確かめるためだけに名前を足す
+        with mock.patch.object(themes, "ALLOWED_GUIDE_FILES", themes.ALLOWED_GUIDE_FILES + (name,)):
+            e = self.run_themes(data, url=URL.replace("LOOKUP-GKGTHEMES.TXT", name))
         self.assertEqual(e["dropped_columns"], ["NUMARTS"])
+        self.assertFalse(e["sheet_names_replaced"])
         for data in self.written().values():
             for m in COUNT_MARKS:
                 self.assertNotIn(m.encode(), data)

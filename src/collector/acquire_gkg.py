@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""試運転の手順4：手法を作る期間の GKG を取得して集計する入口のスクリプト（T-018。実行は別のタスク）。
+"""試運転の手順4：手法を作る期間の GKG を取得して集計する入口のスクリプト（T-018・T-021。実行は別のタスク）。
 
 データ出典
     Data: The GDELT Project (https://www.gdeltproject.org/). This project is not
@@ -7,12 +7,23 @@
     データ出典：GDELT Project（https://www.gdeltproject.org/）。本プロジェクトは
     GDELT Project と提携・承認の関係にありません。
 
-使い方（プロジェクトのルートで。引数は受け付けない。手順の全体は src/collector/README.md）
-    env -u GIT_DIR -u GIT_WORK_TREE -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 \\
-        .venv/bin/python -I -B src/collector/acquire_gkg.py
+使い方（プロジェクトのルートで。手順の全体は src/collector/README.md）
+    正式な run（引数なし）
+      env -u GIT_DIR -u GIT_WORK_TREE -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 \\
+          .venv/bin/python -I -B src/collector/acquire_gkg.py
+    試しの run（gkg.py 5.1章。引数は --trial の1つだけ）
+      env -u GIT_DIR -u GIT_WORK_TREE -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 \\
+          .venv/bin/python -I -B src/collector/acquire_gkg.py --trial
+    ほかの引数は受け付けない（終了コード 2。何もしない）。
     終了コード  0: 全部の日が終わった（マニフェストに run-complete）
-                1: 関門で止まった（何も書いていない）
+                1: 関門で止まった（何も書いていない）。または gkg.GkgError で止まった（run-start が
+                   コミットされていない場合は、要求を送る前に止まり、何も書いていない）
+                2: 引数が違う（何もしない）
                 3: 止まる条件（gkg.py 5章）で止まった。同じコードでもう一度実行すると続きから再開する
+                4: 正式な run の run-start を書いて止まった（GKG にはまだ要求を送っていない）。
+                   マニフェストをコミットしてから（リモートがあれば push も）、同じコマンドで
+                   もう一度実行する
+                   （gkg.py 5章。T-018 の監査 軽2）
 
 このスクリプトがすること（この順。途中で止まれば、それより後のことはしない）
     0. 最初に ledger.require_method_access() を引数なしで呼ぶ（T-014）。鎖に method-access の
@@ -28,16 +39,24 @@
              封印の記録のただ1件の acquisition-result の kept_rows_sha256 と同じ。その行の
              acquisition_start_seq が、result の start_seq と同じ。保存先の本体を O_NOFOLLOW で
              読み、sha256 が同じ
-         (4) 保存先 ~/Desktop/news-stick-data/gkg-method がリンクでない既にあるフォルダ
+         (4) 保存先（gkg.py 7章。正式な run は LACIE SHARE の news-stick-data/gkg-method、
+             試しの run は news-stick-data/gkg-trial）：ディスクがマウントされていて読み取り
+             専用でなく、2段のフォルダがリンクでない既にあるフォルダで、名前の大文字と小文字
+             まで同じ（gkg.resolve_paths）。外れていれば、何も書かずに止まる
+         (5) 正式な run では、HEAD のコミットの中のマニフェスト（data/manifest/
+             gdelt-gkg-method.jsonl。無ければ空）を git から読み、gkg.run_gkg に渡す。
+             run-start がコミットされていなければ、gkg.run_gkg が要求を送る前に止まる
     2. gkg.py を、関門で照合したバイト列そのものとして読み込み、3つのファイルを読み直して
        変わっていないことを確かめる。
     3. gkg.run_gkg を1回動かす（取得・集計・保存・マニフェスト。gkg.py の docstring）。
 
 固定するもの（本番では差し替えを受け付けない）
-    - main() は引数を受け付けない。プロジェクトのルートは、このファイルの置き場所から決める。
-      ホームは環境変数 HOME ではなく利用者のデータベース（pwd）から決める。
+    - main() が受け付ける引数は --trial だけ。プロジェクトのルートは、このファイルの置き場所から
+      決める。ホーム（ファイル一覧の本体の置き場所）は環境変数 HOME ではなく利用者の
+      データベース（pwd）から決める。保存先のディスクは gkg.VOLUME_MOUNT に固定する。
     - テストのための差し替えは _acquire(_test=_TestSeams(...)) からだけ渡せる。project と home は
-      一時的なディレクトリの下に限り、本物のプロジェクト・ホームを指せない。写しの中の sealed/・
+      一時的なディレクトリの下に限り、本物のプロジェクト・ホーム・保存先のディスク
+      （/Volumes の下）を指せない。写しの中の sealed/・
       data/・data/manifest/ がリンクのときも拒む。関門 ledger.require_method_access() は、
       本番でもテストでも引数なしで呼ぶ（T-017 で関門は引数を取らなくなった）。関門が読む
       ledger.PROJECT_ROOT と、このスクリプトが使う project の実際の場所が違えば止まる
@@ -84,7 +103,7 @@ CODEGATE_REL = "src/collector/codegate.py"
 # 取得のコードのうち、このファイル以外の4つの sha256。変えたらここも直してコミットする
 # （テストが照合する）。
 PINNED_SHA256 = (
-    (GKG_REL, "559f5d112209c69bd4db923aa87c4c2594274031450e0e965fbeee721871018c"),
+    (GKG_REL, "89a144a46fe5e8c8df5a8042379f46b755ee2dc58b90c1040c1f08a72ab92190"),
     (FILELIST_REL, "afd7a9dd47bc052a691e1a4cd558b211f4d72cf1ce1f451fa9f3016540cd04a7"),
     (PRIVACY_SCAN_REL, "68d8836d56489ca5df9f2f55e24a2642ebf3aa14afdc2e0120577c7b6c6cb887"),
     (CODEGATE_REL, "d422be41dc59c4be50689a2426453db965be506a9981770ab3eb7557ed078769"),
@@ -110,7 +129,8 @@ def production_home():
 # ---------------------------------------------------------------------------
 
 class _Seams:
-    FIELDS = ("project", "home", "transport", "sleep", "clock", "now", "log", "disk_free")
+    FIELDS = ("project", "home", "volume", "transport", "sleep", "clock", "now", "log", "disk_free",
+              "check_volume")
     __slots__ = FIELDS
 
     def __init__(self, **kw):
@@ -128,8 +148,9 @@ def _utc_now():
 
 
 def _production_seams():
-    return _Seams(project=PROJECT, home=production_home(), transport=None, sleep=time.sleep,
-                  clock=time.monotonic, now=_utc_now, log=None, disk_free=None)
+    return _Seams(project=PROJECT, home=production_home(), volume=None, transport=None,
+                  sleep=time.sleep, clock=time.monotonic, now=_utc_now, log=None, disk_free=None,
+                  check_volume=None)
 
 
 class _TestSeams(_Seams):
@@ -145,9 +166,12 @@ def _under_tmp(path):
 def _checked_test_seams(t):
     if type(t) is not _TestSeams:
         raise TypeError("_test には _TestSeams だけを渡せる")
-    for label, p in (("project", t.project), ("home", t.home)):
-        if not _under_tmp(p):
+    for label, p in (("project", t.project), ("home", t.home), ("volume", t.volume)):
+        if not isinstance(p, str) or not _under_tmp(p):
             raise ValueError("テストの %s は、一時的なディレクトリの下でなければならない" % label)
+    vreal = os.path.realpath(t.volume)
+    if vreal == "/Volumes" or vreal.startswith("/Volumes/"):
+        raise ValueError("テストの volume が /Volumes の下（本物のディスク）を指している")
     if os.path.realpath(t.project) == os.path.realpath(PROJECT):
         raise ValueError("テストの project が本物のプロジェクトを指している")
     if os.path.realpath(t.home) == os.path.realpath(production_home()):
@@ -195,6 +219,7 @@ def _load_codegate(project):
 
 
 def _check_code(project):
+    """返り値: (codes, codegate のモジュール)。"""
     cg, cg_source = _load_codegate(project)
     try:
         codes = cg.check_clean(project, CLEAN_PATHS, (CODE_REL,) + tuple(r for r, _ in
@@ -209,7 +234,23 @@ def _check_code(project):
     for rel, want in PINNED_SHA256:
         if _sha256(codes[rel]) != want:
             raise GateError("%s の sha256 が、入口のスクリプトに固定した値と違う" % rel)
-    return codes
+    return codes, cg
+
+
+def _committed_manifest(cg, project, rel):
+    """関門 (5)。rel の HEAD のコミットの中のバイト列。HEAD に無ければ b""。"""
+    try:
+        code, _out = cg.run_git(project, "cat-file", "-e", "HEAD:%s" % rel)
+        if code != 0:
+            return b""
+        code, out = cg.run_git(project, "cat-file", "blob", "HEAD:%s" % rel)
+    except cg.CodeGateError as e:
+        raise GateError(str(e)) from None
+    except (OSError, subprocess.SubprocessError):
+        raise GateError("git の実行に失敗した") from None
+    if code != 0:
+        raise GateError("HEAD のコミットの中のマニフェストを読めない")
+    return out
 
 
 def _read_nofollow(path, what):
@@ -260,59 +301,75 @@ def _check_filelist(project, home, gkg):
     return rows, sha
 
 
-def check_gate(s, method_rec, gkg_loader=None):
-    """関門 (1)〜(4)。通れば dict を返す。"""
+def check_gate(s, method_rec, mode="official"):
+    """関門 (1)〜(5)。通れば dict を返す。"""
     try:
         doc = ledger.read_target_json(s.project, method_rec, ledger.METHOD_ACCESS_KIND)
     except ledger.LedgerError as e:
         raise GateError("method-access の中身を読めない: %s" % e) from None
-    codes = _check_code(s.project)
+    codes, cg = _check_code(s.project)
     gkg = _exec_module("gkg", os.path.join(s.project, GKG_REL), codes[GKG_REL])
     if (doc.get("block_start"), doc.get("block_end")) != gkg.METHOD_BLOCK:
         raise GateError("method-access の区画が、gkg.METHOD_BLOCK と違う")
     rows, fl_sha = _check_filelist(s.project, s.home, gkg)
+    volume = gkg.VOLUME_MOUNT if s.volume is None else s.volume
+    check_volume = gkg.check_volume if s.check_volume is None else s.check_volume
     try:
-        gkg.resolve_paths(s.project, s.home)
+        gkg.resolve_paths(s.project, volume, mode, check_volume)
     except gkg.GkgError as e:
         raise GateError(str(e)) from None
+    committed = None
+    if mode == "official":
+        committed = _committed_manifest(
+            cg, s.project, "/".join(gkg.MANIFEST_DIR_PARTS + (gkg.MANIFEST_NAME,)))
     for rel, data in codes.items():
         with open(os.path.join(s.project, rel), "rb") as f:
             if f.read() != data:
                 raise GateError("関門のあとで取得のコードが変わった: %s" % rel)
     return {"codes": codes, "code_sha256": _sha256(codes[CODE_REL]), "gkg": gkg,
             "filelist_rows": rows, "filelist_sha256": fl_sha, "method_access_seq":
-            method_rec["seq"]}
+            method_rec["seq"], "volume": volume, "check_volume": check_volume,
+            "committed_manifest": committed}
 
 
 # ---------------------------------------------------------------------------
 # 本体
 # ---------------------------------------------------------------------------
 
-def _acquire(_test=None):
-    """手順0 → 関門 → 取得。_test はテストだけが渡す（_TestSeams）。"""
+def _acquire(mode="official", _test=None):
+    """手順0 → 関門 → 取得。mode は official か trial。_test はテストだけが渡す（_TestSeams）。"""
     s = _production_seams() if _test is None else _checked_test_seams(_test)
     method_rec = _method_access_gate(s)
-    gate = check_gate(s, method_rec)
+    if mode not in ("official", "trial"):
+        raise ValueError("mode は official か trial だけ")
+    gate = check_gate(s, method_rec, mode)
     gkg = gate["gkg"]
     kw = {}
     for name in ("transport", "log", "disk_free"):
         v = getattr(s, name)
         if v is not None:
             kw[name] = v
-    return gkg.run_gkg(root=s.project, home=s.home, filelist_rows=gate["filelist_rows"],
+    return gkg.run_gkg(root=s.project, volume=gate["volume"], mode=mode,
+                       filelist_rows=gate["filelist_rows"],
                        filelist_sha256=gate["filelist_sha256"],
                        method_access_seq=gate["method_access_seq"],
-                       code_sha256=gate["code_sha256"], sleep=s.sleep, clock=s.clock,
+                       code_sha256=gate["code_sha256"],
+                       committed_manifest=gate["committed_manifest"],
+                       check_volume=gate["check_volume"], sleep=s.sleep, clock=s.clock,
                        now=s.now, **kw)
 
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
-    if argv:
-        print("引数は受け付けない。手順は src/collector/README.md", file=sys.stderr)
+    if argv == []:
+        mode = "official"
+    elif argv == ["--trial"]:
+        mode = "trial"
+    else:
+        print("受け付ける引数は --trial だけ。手順は src/collector/README.md", file=sys.stderr)
         return 2
     try:
-        out = _acquire()
+        out = _acquire(mode)
     except ledger.MethodAccessRequired as e:
         print("関門で止まった（何も書いていない）: %s" % e, file=sys.stderr)
         return 1
@@ -323,9 +380,17 @@ def main(argv=None):
         if type(e).__name__ == "RunInterrupted":
             print("止まった（同じコードで再実行すると再開する）: %s" % e, file=sys.stderr)
             return 3
+        if type(e).__name__ == "RunStartWritten":
+            print("止まった: %s" % e, file=sys.stderr)
+            return 4
+        if type(e).__name__ == "GkgError":
+            print("止まった（リードに報告。run-start のコミットが無いときは、要求を送る前に"
+                  "止まっている）: %s" % e, file=sys.stderr)
+            return 1
         raise
-    print("run_id: %s 日数: %d ok: %d failed: %d" % (out["run_id"], out["days"], out["files_ok"],
-                                                    out["files_failed"]))
+    print("%s run_id: %s 日数: %d ok: %d failed: %d"
+          % ("正式な run" if mode == "official" else "試しの run", out["run_id"], out["days"],
+             out["files_ok"], out["files_failed"]))
     print("データ出典：GDELT Project（https://www.gdeltproject.org/）")
     return 0
 

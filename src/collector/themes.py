@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GKG のテーマの区分表（名前と説明の一覧）を取得し、件数の欄を捨てて保存する（T-018。コードだけ）。
+"""GKG のテーマの区分表（名前と説明の一覧）を取得し、件数の欄を捨てて保存する（T-018・T-021。コードだけ）。
 
 データ出典
     Data: The GDELT Project (https://www.gdeltproject.org/). This project is not
@@ -7,17 +7,36 @@
     データ出典：GDELT Project（https://www.gdeltproject.org/）。本プロジェクトは
     GDELT Project と提携・承認の関係にありません。
 
-まだ一度も取得していない。T-018 の途中でリードの指示により、区分表の取得は、統計係の除外の
-規則の封印のあとの別のタスクに移った。そのため取得元の URL（THEMES_URL）はまだ決めていない
-（None）。None のままでは run() は通信の前に止まる。URL を決めて THEMES_URL に書き、コミット
-してから実行する。
+まだ一度も取得していない。区分表の取得は、統計係の除外の規則の封印のあとの別のタスクで行う
+（オーナーの決定。reviews/T-016.md の 2026-10-08 の発言：「件数の欄を捨てる条件で、区分表を
+1回取得してよい」。取得元は同じサーバーの /api/v2/guides/）。
+
+------------------------------------------------------------------------
+0. 取得の前の関門（require_exclusion_rules_sealed。T-021）
+------------------------------------------------------------------------
+    区分表は、統計係の除外の規則を封印したあとでだけ取得する（docs/stats/tags-naive.md 5章の
+    順番1：除外の規則を区分表の取得より前に封印する）。run() は、通信の前に最初にこの関門を
+    呼ぶ。関門が確かめること：
+      - 除外の規則の封印の記録の種類（EXCLUSION_RULE_KIND）が決まっている。**T-021 の時点では
+        封印係の側でまだ決まっていない（None）。そのため、今は関門が必ず止まり、区分表は
+        取得できない。** kind が決まったら、その名前をここに書いてコミットする（別のタスク）。
+      - その kind が、封印の記録の種類の許可リスト（src/sealer/ledger.py の ALLOWED_KINDS）に
+        入っている。
+      - 封印の記録（sealed/ledger.jsonl）の鎖と、すべての seq の .ots が検証に通る
+        （ledger._load_for_gate。プロジェクトのルートは ledger.PROJECT_ROOT に固定）。
+      - その kind の記録が1件以上ある。
+      - run() に渡した root が、関門が読んだプロジェクトと同じ。
+    確かめないこと：記録の中身（どの規則を封印したか）の照合。それは封印係が kind と一緒に
+    決める照合の仕組みで行う。
 
 ------------------------------------------------------------------------
 1. 取得元と通信
 ------------------------------------------------------------------------
-    - https://data.gdeltproject.org/documentation/<名前> の形だけを許す（validate_doc_url）。
-      名前は英数字・点・下線・ハイフンだけ（「..」「/」「%」・クエリ・フラグメント・ポートは拒む）。
-      ほかのホスト（gdeltcloud.com を含む）、/api/ などほかのパスは拒む。
+    - https://data.gdeltproject.org/api/v2/guides/<名前> の形で、名前が ALLOWED_GUIDE_FILES
+      （LOOKUP-GKGTHEMES.TXT の1つだけ。全テーマの区分表。オーナーの承認の範囲）に入るものだけを
+      許す（validate_doc_url）。大文字と小文字も同じでなければならない。ほかの名前（言語・国・
+      画像のタグなどの一覧）、ほかのパス（/documentation/ を含む）、ほかのホスト
+      （gdeltcloud.com を含む）、http、ポート・クエリ・フラグメント・「..」・「%」は拒む。
     - 要求は1回だけ（MAX_ATTEMPTS = 1。再試行しない）。リダイレクトとプロキシは使わない。
       待ちの上限は REQUEST_TIMEOUT_SECONDS（60秒）、全体の上限 TOTAL_DEADLINE_SECONDS（300秒）、
       応答の長さの上限 MAX_BYTES（50 MB）。1回だけなので、速度の制限に当たる量ではない。
@@ -39,12 +58,23 @@
         書かないため）。名前の欄が1つも無い場合も止まる。
       - 名前以外の残す欄（説明・種類など）は、数字（半角・全角）を含む値が1つでもあれば、
         欄ごと捨てる（「Seen in 1,234,567 articles」「12.3k」「1 234」のような件数を書かない
-        ため）。止まらずに欄ごと捨てる理由：取得は1回だけなので、止めると名前の欄まで失う。
+        ため）。数字の判定（has_numeric）は、Unicode で数を表す文字すべて（str.isnumeric。
+        半角・全角・アラビア文字などの十進の数字、上付き・下付きの数字（² ₃）、丸付きの数字、
+        分数（½）、ローマ数字（Ⅻ）、漢数字（一・万）など）を数字とみなす（T-021。T-018 の監査
+        軽3）。止まらずに欄ごと捨てる理由：取得は1回だけなので、止めると名前の欄まで失う。
         名前の欄が残れば区分表の目的（除外の規則をテーマの名前に当てる）は果たせ、捨てた欄の
         見出しはマニフェストの dropped_columns に残る。
+      - 見出しの行の判定も同じ数字の判定を使う。見出しの値が、数字と区切り（, . 空白 + - _ '）
+        だけでできていれば（「１２３」「²³」を含む）、見出しの無い形とみなして止まる。
+      - 捨てた欄の見出しの名前はマニフェストの dropped_columns に出す。ただし、見出しに数字が
+        あれば、名前の代わりに欄の位置（column_A、column_B …。英字だけ）を出す（見出しに件数が
+        紛れた形「Count (1,234,567)」を書かないため）。
+      - xlsx のシート名：シートが複数あるときは、シート名を sheet の欄の値として書く。シート名に
+        数字があれば、すべてのシートの名前の代わりに位置（sheet_A、sheet_B …）を書き、
+        マニフェストの sheet_names_replaced を true にする（「Themes (12,345)」を書かないため）。
+        シートが1つのときは、シート名を書かない。
       - 限界：数字を使わずに書いた量（「one million」など）は見分けられない。
-    保存するのは、残した欄の見出しと値だけ。捨てた欄は、見出しの名前だけを報告とマニフェストに
-    出す（値は出さない）。
+    保存するのは、残した欄の見出しと値だけ。
 
 ------------------------------------------------------------------------
 3. 読める形
@@ -85,10 +115,14 @@ import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-THEMES_URL = None          # 取得のタスクで決める（上の注記）
 ALLOWED_HOST = "data.gdeltproject.org"
+# 1章：許す名前（オーナーの承認の範囲：全テーマの区分表だけ）
+ALLOWED_GUIDE_FILES = ("LOOKUP-GKGTHEMES.TXT",)
+THEMES_URL = "https://data.gdeltproject.org/api/v2/guides/" + ALLOWED_GUIDE_FILES[0]
 _DOC_URL_RE = re.compile(
-    r"\Ahttps://data\.gdeltproject\.org/documentation/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\Z")
+    r"\Ahttps://data\.gdeltproject\.org/api/v2/guides/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\Z")
+# 0章：除外の規則の封印の記録の種類。封印係が決める。T-021 の時点では未定（関門が必ず止まる）
+EXCLUSION_RULE_KIND = None
 MAX_ATTEMPTS = 1
 REQUEST_TIMEOUT_SECONDS = 60
 TOTAL_DEADLINE_SECONDS = 300
@@ -104,8 +138,7 @@ DROP_HEADER_RE = re.compile(
     r"hits|popular|\bn\b|cnt|rank|percent|share|ratio", re.I)
 NAME_HEADER_RE = re.compile(
     r"\A(?:theme|themes|name|names|theme ?name|category ?name|tag)\Z", re.I)
-DIGIT_RE = re.compile(r"[0-9\uff10-\uff19]")
-NUMERIC_RE = re.compile(r"\A[-+]?[0-9][0-9,]*(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?\Z")
+NUMBER_SEPARATORS = frozenset(",. +-_'\u00a0\u202f")
 THEME_NAME_RE = re.compile(r"\A[A-Z][A-Z0-9_]{0,159}\Z")
 
 STORE_PARTS = ("Desktop", "news-stick-data")
@@ -117,6 +150,32 @@ CODE_REL = "src/collector/themes.py"
 
 class ThemesError(Exception):
     """止まった。文には、表の値を入れない（見出しの名前だけ）。"""
+
+
+class ExclusionRulesNotSealed(ThemesError):
+    """0章の関門で止まった。通信も書き込みもしていない。"""
+
+
+def has_numeric(text):
+    """2章：数を表す文字（Unicode の Numeric_Type を持つ文字。str.isnumeric）が1つでもあれば True。"""
+    return any(ch.isnumeric() for ch in text)
+
+
+def looks_like_number(text):
+    """2章：数字と区切りだけでできた値（見出しの無い形の判定）。"""
+    t = text.strip()
+    return bool(t) and has_numeric(t) and all(ch.isnumeric() or ch in NUMBER_SEPARATORS
+                                              for ch in t)
+
+
+def _letters(i):
+    """0 → A、25 → Z、26 → AA。位置の名前（数字を使わない）。"""
+    out = ""
+    i += 1
+    while i:
+        i, r = divmod(i - 1, 26)
+        out = chr(65 + r) + out
+    return out
 
 
 def _load_privacy_scan():
@@ -135,8 +194,46 @@ def validate_doc_url(url):
         raise ThemesError("URL が決まっていない")
     m = _DOC_URL_RE.match(url)
     if m is None or ".." in m.group(1):
-        raise ThemesError("URL が data.gdeltproject.org/documentation/ の下の決めた形でない")
+        raise ThemesError("URL が data.gdeltproject.org/api/v2/guides/ の下の決めた形でない")
+    if m.group(1) not in ALLOWED_GUIDE_FILES:
+        raise ThemesError("/api/v2/guides/ の下で許すのは、全テーマの区分表（%s）だけ"
+                          % ", ".join(ALLOWED_GUIDE_FILES))
     return m.group(1)
+
+
+def _import_ledger():
+    sealer = os.path.join(os.path.dirname(os.path.dirname(HERE)), "src", "sealer")
+    if sealer not in sys.path:
+        sys.path.insert(0, sealer)
+    import ledger
+    return ledger
+
+
+def require_exclusion_rules_sealed():
+    """0章の関門。引数は取らない（プロジェクトは ledger.PROJECT_ROOT）。返り値: (記録, root)。"""
+    kind = EXCLUSION_RULE_KIND
+    if kind is None:
+        raise ExclusionRulesNotSealed("除外の規則の封印の記録の種類（kind）が、まだ決まっていない"
+                                      "（封印係）。区分表は取得しない")
+    ledger = _import_ledger()
+    if kind not in ledger.ALLOWED_KINDS:
+        raise ExclusionRulesNotSealed("kind %s が、封印の記録の種類の許可リストに無い" % kind)
+    try:
+        root = ledger._gate_root()
+        _data, records = ledger._load_for_gate(root)
+    except ledger.LedgerError as e:
+        raise ExclusionRulesNotSealed("封印の記録を検証できない: %s" % e) from None
+    recs = [r for r in records if r["kind"] == kind]
+    if not recs:
+        raise ExclusionRulesNotSealed("除外の規則の封印の記録（kind %s）が無い。区分表は取得しない"
+                                      % kind)
+    return recs[0], root
+
+
+def _exclusion_gate(root):
+    _rec, gate_root = require_exclusion_rules_sealed()
+    if os.path.realpath(gate_root) != os.path.realpath(root):
+        raise ExclusionRulesNotSealed("関門が読んだプロジェクトと、run() の root が違う")
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -280,24 +377,20 @@ def read_table(data, name):
 # 2章：欄の分類
 # ---------------------------------------------------------------------------
 
-def _is_numeric_column(values):
-    vals = [v.strip() for v in values if v.strip()]
-    return bool(vals) and all(NUMERIC_RE.match(v) for v in vals)
-
-
 def classify_columns(header, rows):
     """返り値: (残す欄の番号の list, 捨てる欄の見出しの list)。止まるときは ThemesError。"""
     header = [h.strip() for h in header]
     if not header or any(not h for h in header) or len(set(h.lower() for h in header)) != len(header):
         raise ThemesError("見出しの行が無いか、空・重なった見出しがある（件数の欄を見出しで"
                           "確かめられない）")
-    if any(NUMERIC_RE.match(h) for h in header):
+    if any(looks_like_number(h) for h in header):
         raise ThemesError("1行目に数字だけの値がある（見出しの行が無い形とみなして止まる）")
     keep, drop, names = [], [], []
     for i, h in enumerate(header):
         col = [(r[i] if i < len(r) else "").strip() for r in rows]
         if not KEEP_HEADER_RE.match(h) or DROP_HEADER_RE.search(h):
-            drop.append(h)                          # 件数・頻度の欄と、知らない欄
+            # 件数・頻度の欄と、知らない欄。見出しに数字があれば位置の名前で記録する
+            drop.append("column_" + _letters(i) if has_numeric(h) else h)
         elif NAME_HEADER_RE.match(h):
             bad = sum(1 for v in col if not THEME_NAME_RE.match(v))
             if bad:
@@ -305,7 +398,7 @@ def classify_columns(header, rows):
                                   "（件数が紛れている可能性があるので止まる）" % (h, bad))
             keep.append(i)
             names.append(i)
-        elif any(DIGIT_RE.search(v) for v in col):
+        elif any(has_numeric(v) for v in col):
             drop.append(h)                          # 数字の入った値がある欄は欄ごと捨てる
         else:
             keep.append(i)
@@ -315,12 +408,18 @@ def classify_columns(header, rows):
 
 
 def build_output(sheets):
-    """表から残す欄だけの TSV を作る。返り値: (バイト列, 行数, 残した見出し, 捨てた見出し)。"""
+    """表から残す欄だけの TSV を作る。
+
+    返り値: (バイト列, 行数, 残した見出し, 捨てた見出し, シート名を位置に替えたか)。
+    """
     data_sheets = [(n, rows) for n, rows in sheets if rows]
     if not data_sheets:
         raise ThemesError("表に行が無い")
     out_header, out_rows, dropped = None, [], []
     multi = len(data_sheets) > 1
+    replaced = multi and any(has_numeric(n) for n, _rows in data_sheets)
+    if replaced:
+        data_sheets = [("sheet_" + _letters(i), rows) for i, (_n, rows) in enumerate(data_sheets)]
     for sname, rows in data_sheets:
         header, body = rows[0], rows[1:]
         keep, drop = classify_columns(header, body)
@@ -340,7 +439,7 @@ def build_output(sheets):
             out_rows.append(([sname] if multi else []) + vals)
     out_rows.sort()
     text = "\n".join("\t".join(r) for r in [out_header] + out_rows) + "\n"
-    return text.encode("utf-8"), len(out_rows), out_header, dropped
+    return text.encode("utf-8"), len(out_rows), out_header, dropped, replaced
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +480,7 @@ def run(*, root, home, url=None, transport=urllib_transport, clock=time.monotoni
     """1回だけ取得し、件数の欄を捨てて保存する。止まるときは何も書かない（ThemesError）。"""
     url = THEMES_URL if url is None else url
     name = validate_doc_url(url)
+    _exclusion_gate(root)                             # 0章。通信の前に最初に確かめる
     store, manifest = _resolve(root, home)
     stamp = now().astimezone(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     file_name = "gdelt-themes-%s.tsv" % stamp
@@ -391,10 +491,11 @@ def run(*, root, home, url=None, transport=urllib_transport, clock=time.monotoni
     fetched_at = _iso(now())
     sheets = read_table(raw, name)
     del raw                                           # 元の応答はここで手放す
-    data, nrows, kept, dropped = build_output(sheets)
+    data, nrows, kept, dropped, replaced = build_output(sheets)
     del sheets
     entry = {"file_name": file_name, "sha256": hashlib.sha256(data).hexdigest(), "rows": nrows,
              "kept_columns": kept, "dropped_columns": dropped, "fetched_at": fetched_at,
+             "sheet_names_replaced": replaced,
              "source_url": url, "code_path": CODE_REL, "code_sha256": code_sha256(),
              "store_location": STORE_LOCATION_NAME}
     line = (json.dumps(entry, sort_keys=True, ensure_ascii=True) + "\n").encode("ascii")
@@ -421,6 +522,6 @@ def run(*, root, home, url=None, transport=urllib_transport, clock=time.monotoni
 
 
 if __name__ == "__main__":
-    print("区分表の取得は、統計係の除外の規則の封印のあとの別のタスクで行う（THEMES_URL は未定）。",
-          file=sys.stderr)
+    print("区分表の取得は、統計係の除外の規則の封印のあとの別のタスクで行う（除外の規則の封印の"
+          "記録の種類は未定）。", file=sys.stderr)
     sys.exit(2)

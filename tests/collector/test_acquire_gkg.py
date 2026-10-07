@@ -11,7 +11,8 @@
     止まり、何も書かない（TestEndToEnd）
   - 本番の部品は固定で、差し替えは一時的なディレクトリの下しか指せない（TestProductionPath）
 ネットワークは使わない（test_acquire_filelist が socket を塞ぐ。drand・ots・通信は差し替え）。
-本物の sealed/・data/manifest・~/Desktop/news-stick-data には書かない。
+本物の sealed/・data/manifest・~/Desktop/news-stick-data・/Volumes/LACIE SHARE には書かない。
+保存先のディスクは、一時的なディレクトリ（FAT32 のテストではイメージのマウント先）で置き換える。
 """
 
 import hashlib
@@ -50,6 +51,11 @@ ag = _load("acquire_gkg", ENTRY)
 ledger = ag.ledger
 seal_method = importlib.import_module("seal_method")
 gkg = tg.gkg
+
+
+def fake_check_volume(volume):
+    """一時的なディレクトリはマウント先でないので、マウントの検査だけを差し替える。"""
+    return os.lstat(volume).st_dev
 
 
 def filelist_entry(project):
@@ -113,10 +119,19 @@ class E2ECase(taf.CopyCase):
         body = ("\n".join(lines) + "\n").encode()
         self.transport = tf.FakeTransport(tf.FakeResponse(body))
         taf.acq._acquire(_test=self.seams())           # 手順3（seq 3・4）
-        self.gkg_store = os.path.join(self.home, *gkg.STORE_PARTS)
+        self.volume = self.make_volume()
+        self.gkg_store = os.path.join(self.volume, *gkg.STORE_PARTS)
         os.makedirs(self.gkg_store)
+        self.trial_store = os.path.join(self.volume, *gkg.TRIAL_STORE_PARTS)
+        os.makedirs(self.trial_store)
+        self.check_volume = fake_check_volume
         self.gkg_logs = []
         self.clock = tg.FakeClock()
+
+    def make_volume(self):
+        v = os.path.join(self.tmp, "vol")
+        os.makedirs(v)
+        return v
 
     def add_method_access(self):
         rec, _rel, _o = seal_method.seal(self.project, taf.NOW, "ots",
@@ -130,8 +145,21 @@ class E2ECase(taf.CopyCase):
         with mock.patch.object(ledger, "PROJECT_ROOT", self.project):
             return fn(*a, **k)
 
-    def acquire(self, s):
-        return self.run_with_root(ag._acquire, _test=s)
+    def acquire(self, s, mode="official"):
+        return self.run_with_root(ag._acquire, mode, _test=s)
+
+    def commit_manifest(self, msg="run-start"):
+        taf.git(self.project, "add", "data/manifest")
+        taf.git(self.project, "commit", "-q", "-m", msg)
+
+    def acquire_official(self, s):
+        """1回目は run-start を書いて止まる。コミットしてから、もう一度実行する。"""
+        with self.assertRaises(Exception) as cm:
+            self.acquire(s)
+        self.assertEqual(type(cm.exception).__name__, "RunStartWritten")
+        self.assertEqual(self.gtransport.calls, [])
+        self.commit_manifest()
+        return self.acquire(self.gseams())
 
     def gate(self, s):
         return self.run_with_root(lambda: ag.check_gate(s, ag._method_access_gate(s)))
@@ -139,16 +167,27 @@ class E2ECase(taf.CopyCase):
     def gseams(self, **kw):
         self.gtransport = tg.FakeTransport({ts: [tg.ok_response(z)]
                                             for ts, z in self.zips.items()})
-        base = dict(project=self.project, home=self.home, transport=self.gtransport,
-                    sleep=lambda s: None, clock=self.clock, now=lambda: tg.NOW,
-                    log=self.gkg_logs.append, disk_free=lambda p: 100 * 1024 ** 3)
+        base = dict(project=self.project, home=self.home, volume=self.volume,
+                    transport=self.gtransport, sleep=lambda s: None, clock=self.clock,
+                    now=lambda: tg.NOW, log=self.gkg_logs.append,
+                    disk_free=lambda p: 100 * 1024 ** 3, check_volume=self.check_volume)
         base.update(kw)
         return ag._TestSeams(**base)
 
     def gsnapshot(self):
         return {"sealed": taf.tree_files(os.path.join(self.project, "sealed")),
                 "manifest": taf.tree_files(os.path.join(self.project, "data", "manifest")),
-                "store": taf.tree_files(self.gkg_store)}
+                "store": taf.tree_files(self.gkg_store),
+                "trial": taf.tree_files(self.trial_store)}
+
+    def refuse(self, pattern, mode="official", **kw):
+        before = self.gsnapshot()
+        s = self.gseams(**kw)
+        with self.assertRaises(ag.GateError) as cm:
+            self.acquire(s, mode)
+        self.assertRegex(str(cm.exception), pattern)
+        self.assertEqual(self.gtransport.calls, [])
+        self.assertEqual(self.gsnapshot(), before)
 
 
 class TestEndToEnd(E2ECase):
@@ -164,11 +203,13 @@ class TestEndToEnd(E2ECase):
 
     def test_full_run(self):
         rec = self.add_method_access()
-        out = self.acquire(self.gseams())
+        out = self.acquire_official(self.gseams())
         self.assertEqual(out["files_ok"], len(self.zips))
         self.assertEqual(sorted(self.gtransport.calls), sorted(self.zips))
         man = gkg.read_jsonl(os.path.join(self.project, "data", "manifest", gkg.MANIFEST_NAME))
-        self.assertEqual([e["kind"] for e in man], ["run-start", "day", "day", "run-complete"])
+        self.assertEqual([e["kind"] for e in man],
+                         ["run-start", "run-resume", "day", "day", "run-complete"])
+        self.assertEqual(man[0]["store_location"], "LACIE SHARE:/news-stick-data/gkg-method")
         with open(ENTRY, "rb") as f:
             entry_sha = hashlib.sha256(f.read()).hexdigest()
         self.assertEqual(man[0]["code_sha256"], entry_sha)
@@ -180,6 +221,8 @@ class TestEndToEnd(E2ECase):
         written = {}
         for top in (self.gkg_store, os.path.join(self.project, "data", "manifest")):
             for n in os.listdir(top):
+                if n.startswith("._"):
+                    continue                           # macOS の付属のファイル（FAT32）
                 with open(os.path.join(top, n), "rb") as f:
                     b = f.read()
                 written[n] = tg.gzip.decompress(b) if n.endswith(".gz") else b
@@ -189,15 +232,43 @@ class TestEndToEnd(E2ECase):
             for mk in tg.all_markers():
                 self.assertNotIn(mk, data, (name, mk))
             self.assertNotIn(self.home.encode(), data, name)
+            self.assertNotIn(self.volume.encode(), data, name)
+            self.assertNotIn(self.tmp.encode(), data, name)
 
-    def refuse(self, pattern, **kw):
+    def test_uncommitted_run_start_stops_before_any_request(self):
+        """T-018 の監査 軽2：run-start をコミットしないまま再実行しても、要求を送らない。"""
+        self.add_method_access()
+        with self.assertRaises(Exception) as cm:
+            self.acquire(self.gseams())
+        self.assertEqual(type(cm.exception).__name__, "RunStartWritten")
         before = self.gsnapshot()
-        s = self.gseams(**kw)
-        with self.assertRaises(ag.GateError) as cm:
-            self.acquire(s)
-        self.assertRegex(str(cm.exception), pattern)
+        with self.assertRaises(Exception) as cm:
+            self.acquire(self.gseams())
+        self.assertEqual(type(cm.exception).__name__, "GkgError")
+        self.assertIn("コミットされていない", str(cm.exception))
         self.assertEqual(self.gtransport.calls, [])
         self.assertEqual(self.gsnapshot(), before)
+
+    def test_trial_run_then_official(self):
+        self.add_method_access()
+        out = self.acquire(self.gseams(), mode="trial")
+        self.assertEqual(out["days"], 2)               # 写しの一覧の2日は、どちらも試しの run の日
+        self.assertEqual({c[:8] for c in self.gtransport.calls}, {"20150302", "20150303"})
+        tm0 = gkg.read_jsonl(os.path.join(self.project, "data", "manifest",
+                                          gkg.TRIAL_MANIFEST_NAME))[0]
+        self.assertEqual((tm0["official"], tm0["trial"]), (False, True))
+        self.assertFalse(os.path.exists(os.path.join(self.project, "data", "manifest",
+                                                     gkg.MANIFEST_NAME)))
+        tm = gkg.read_jsonl(os.path.join(self.project, "data", "manifest",
+                                         gkg.TRIAL_MANIFEST_NAME))
+        self.assertEqual(tm[0]["store_location"], "LACIE SHARE:/news-stick-data/gkg-trial")
+        self.assertEqual(os.listdir(self.gkg_store), [])
+        self.commit_manifest("試しの run")
+        out = self.acquire_official(self.gseams())
+        self.assertEqual(out["days"], len(self.DAYS))
+        with self.assertRaises(Exception) as cm:
+            self.acquire(self.gseams(), mode="trial")
+        self.assertIn("試しの run はしない", str(cm.exception))
 
     def test_gate_conditions(self):
         self.add_method_access()
@@ -222,8 +293,16 @@ class TestEndToEnd(E2ECase):
             f.write(data[:-1])
         # 保存先が無い
         os.rmdir(self.gkg_store)
-        self.refuse("gkg-method")
+        self.refuse("gkg-method が無い")
         os.makedirs(self.gkg_store)
+        os.rmdir(self.trial_store)
+        self.refuse("gkg-trial が無い", mode="trial")
+        os.makedirs(self.trial_store)
+        # 保存先のディスクがマウントされていない・読み取り専用（本物の検査を使う）
+        self.refuse("マウントされていない", check_volume=None)
+        with mock.patch.object(os.path, "ismount", return_value=True), \
+                mock.patch.object(os, "statvfs", return_value=mock.Mock(f_flag=os.ST_RDONLY)):
+            self.refuse("読み取り専用", check_volume=None)
         self.gate(self.gseams())
 
     def test_project_root_must_match(self):
@@ -239,7 +318,7 @@ class TestEndToEnd(E2ECase):
                                return_value={"block_start": "2015-03-01",
                                              "block_end": "2020-12-14"}):
             with self.assertRaisesRegex(ag.GateError, "区画"):
-                ag.check_gate(self.gseams(), rec)
+                ag.check_gate(self.gseams(), rec, "official")
 
     def test_two_filelist_manifest_lines_refused(self):
         self.add_method_access()
@@ -249,6 +328,45 @@ class TestEndToEnd(E2ECase):
         with open(p, "ab") as f:
             f.write(line)
         self.refuse("ちょうど1行")
+
+
+@unittest.skipUnless(os.environ.get(tg.FAT32_ENV), "FAT32 のイメージのマウント先が渡されていない "
+                     "（%s。手順は src/collector/README.md 7章）" % tg.FAT32_ENV)
+class TestEndToEndOnFat32(E2ECase):
+    """FAT32 のイメージを保存先のディスクにして、関門（本物の check_volume）から取得まで通す（T-021）。
+
+    TMPDIR をイメージのある場所（scratchpad）にして実行する（テストの差し替えは一時的な
+    ディレクトリの下しか指せないため）。
+    """
+
+    def make_volume(self):
+        v = tg._fat32_mount(tg.FAT32_ENV)
+        base = os.path.join(v, gkg.STORE_PARTS[0])
+        if os.path.lexists(base):
+            self.fail("イメージの直下に news-stick-data が既にある（前のテストの残り）")
+        self.addCleanup(shutil.rmtree, base, True)     # テスト用のイメージの中だけ
+        return v
+
+    def setUp(self):
+        super().setUp()
+        self.check_volume = None                       # 関門と取得で本物の gkg.check_volume
+
+    def test_trial_and_official_on_fat32(self):
+        self.add_method_access()
+        self.acquire(self.gseams(), mode="trial")
+        self.commit_manifest("試しの run")
+        out = self.acquire_official(self.gseams())
+        self.assertEqual(out["files_ok"], len(self.zips))
+        man = gkg.read_jsonl(os.path.join(self.project, "data", "manifest", gkg.MANIFEST_NAME))
+        for e in man:
+            if e["kind"] == "day":
+                with open(os.path.join(self.gkg_store, e["file_name"]), "rb") as f:
+                    self.assertEqual(hashlib.sha256(f.read()).hexdigest(), e["sha256"])
+
+    def test_case_variant_folder_refused_by_gate(self):
+        self.add_method_access()
+        os.rename(self.gkg_store, os.path.join(os.path.dirname(self.gkg_store), "Gkg-Method"))
+        self.refuse("大文字と小文字")
 
 
 class TestCodeScope(unittest.TestCase):
@@ -270,15 +388,34 @@ class TestProductionPath(unittest.TestCase):
     def test_main_rejects_arguments(self):
         never = mock.Mock(side_effect=AssertionError("呼んではいけない"))
         with mock.patch.object(ag, "_acquire", never), mock.patch("sys.stderr"):
-            for argv in (["--root", "/tmp/x"], ["-h"], ["x"]):
+            for argv in (["--root", "/tmp/x"], ["-h"], ["x"], ["--trial", "x"], ["--official"],
+                         ["--TRIAL"], ["trial"]):
                 self.assertEqual(ag.main(argv), 2)
         never.assert_not_called()
+
+    def test_main_modes(self):
+        done = {"run_id": "a" * 16, "days": 1, "files_ok": 1, "files_failed": 0}
+        got = mock.Mock(return_value=done)
+        with mock.patch.object(ag, "_acquire", got), mock.patch("sys.stdout"):
+            self.assertEqual(ag.main([]), 0)
+            self.assertEqual(ag.main(["--trial"]), 0)
+        self.assertEqual([c.args for c in got.call_args_list], [("official",), ("trial",)])
+        with mock.patch.object(ledger, "require_method_access", return_value={"seq": 1}), \
+                mock.patch.object(ag, "check_gate", side_effect=AssertionError("進まない")):
+            with self.assertRaises(ValueError):
+                ag._acquire("other")
 
     def test_main_exit_codes(self):
         with mock.patch.object(ag, "_acquire", mock.Mock(side_effect=gkg.RunInterrupted("x"))), \
                 mock.patch("sys.stderr"):
             self.assertEqual(ag.main([]), 3)
         with mock.patch.object(ag, "_acquire", mock.Mock(side_effect=ag.GateError("x"))), \
+                mock.patch("sys.stderr"):
+            self.assertEqual(ag.main([]), 1)
+        with mock.patch.object(ag, "_acquire", mock.Mock(side_effect=gkg.RunStartWritten("x"))), \
+                mock.patch("sys.stderr"):
+            self.assertEqual(ag.main([]), 4)
+        with mock.patch.object(ag, "_acquire", mock.Mock(side_effect=gkg.GkgError("x"))), \
                 mock.patch("sys.stderr"):
             self.assertEqual(ag.main([]), 1)
         boom = RuntimeError("見本")
@@ -294,6 +431,8 @@ class TestProductionPath(unittest.TestCase):
         self.assertEqual(s.project, PROJECT)
         self.assertEqual(s.home, pwd.getpwuid(os.getuid()).pw_dir)
         self.assertIsNone(s.transport)
+        self.assertIsNone(s.volume)                    # 関門で gkg.VOLUME_MOUNT に決まる
+        self.assertIsNone(s.check_volume)              # 関門で gkg.check_volume に決まる
         self.assertIs(s.sleep, time.sleep)
         self.assertIs(type(s), ag._Seams)
         with self.assertRaises(AttributeError):
@@ -310,15 +449,16 @@ class TestProductionPath(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp, True)
 
         def seams(**kw):
-            base = dict(project=tmp, home=tmp, transport=None, sleep=None, clock=None, now=None,
-                        log=None, disk_free=None)
+            base = dict(project=tmp, home=tmp, volume=tmp, transport=None, sleep=None,
+                        clock=None, now=None, log=None, disk_free=None, check_volume=None)
             base.update(kw)
             return ag._TestSeams(**base)
 
         gate = mock.Mock(side_effect=AssertionError("関門まで進んではいけない"))
         with mock.patch.object(ledger, "require_method_access", gate):
             for bad in (seams(project=PROJECT), seams(home=pwd.getpwuid(os.getuid()).pw_dir),
-                        seams(project="/")):
+                        seams(project="/"), seams(volume="/Volumes/LACIE SHARE"),
+                        seams(volume=None), seams(volume="/Volumes")):
                 with self.assertRaises(ValueError):
                     ag._acquire(_test=bad)
             for bad in (ag._production_seams(), object()):

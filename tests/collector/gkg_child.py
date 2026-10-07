@@ -82,14 +82,25 @@ def main():
                 mutation()
                 return real(*a, **k)
             gkg.aggregate_zip = aggregate
+        def check_volume(v):
+            return os.lstat(v).st_dev        # 一時的なディレクトリはマウント先でないため
+
+        def run(committed):
+            return gkg.run_gkg(
+                root=cfg["root"], volume=cfg["volume"],
+                filelist_rows=[tuple(r) for r in cfg["rows"]],
+                filelist_sha256="c" * 64, method_access_seq=5, code_sha256=cfg["code_sha"],
+                committed_manifest=committed, check_volume=check_volume,
+                transport=transport, sleep=sleep, clock=lambda: clock[0], now=lambda: now,
+                log=report["logs"].append, disk_free=lambda p: 100 * 1024 ** 3)
+
         try:
             if cfg["mode"] == "run":
-                out = gkg.run_gkg(
-                    root=cfg["root"], home=cfg["home"],
-                    filelist_rows=[tuple(r) for r in cfg["rows"]],
-                    filelist_sha256="c" * 64, method_access_seq=5, code_sha256=cfg["code_sha"],
-                    transport=transport, sleep=sleep, clock=lambda: clock[0], now=lambda: now,
-                    log=report["logs"].append, disk_free=lambda p: 100 * 1024 ** 3)
+                try:
+                    out = run(b"")
+                except gkg.RunStartWritten:        # run-start をコミットしたとみなして続ける
+                    out = run(gkg.read_bytes_nofollow(os.path.join(
+                        cfg["root"], "data", "manifest", gkg.MANIFEST_NAME)))
                 report["out"] = dict(out)
             else:
                 ts, data = sorted(zips.items())[0]

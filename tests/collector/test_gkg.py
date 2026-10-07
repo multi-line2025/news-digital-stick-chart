@@ -22,6 +22,7 @@ import json
 import os
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -488,6 +489,14 @@ class TestFetch(unittest.TestCase):
 
 # --- 取得の全体 --------------------------------------------------------------------
 
+def fake_check_volume(volume):
+    """一時的なディレクトリはマウント先でないので、マウントの検査だけを差し替える（本物は TestVolume）。"""
+    st = os.lstat(volume)
+    if not os.path.isdir(volume) or os.path.islink(volume):
+        raise gkg.GkgError("見本：フォルダでない")
+    return st.st_dev
+
+
 class RunCase(unittest.TestCase):
     DAYS = ("20150302", "20150303")
     N = 4
@@ -498,9 +507,12 @@ class RunCase(unittest.TestCase):
         self.root = os.path.join(self.tmp, "proj")
         os.makedirs(os.path.join(self.root, "data", "manifest"))
         os.makedirs(os.path.join(self.root, ".git"))
-        self.home = os.path.join(self.tmp, "home")
-        self.store = os.path.join(self.home, *gkg.STORE_PARTS)
+        self.volume = os.path.join(self.tmp, "vol")
+        self.store = os.path.join(self.volume, *gkg.STORE_PARTS)
         os.makedirs(self.store)
+        self.trial_store = os.path.join(self.volume, *gkg.TRIAL_STORE_PARTS)
+        os.makedirs(self.trial_store)
+        self.check_volume = fake_check_volume
         self.zips = {}
         for d in self.DAYS:
             for i in range(self.N):
@@ -524,17 +536,34 @@ class RunCase(unittest.TestCase):
     def sleep(self, s):
         self.clock.t += s
 
-    def run_gkg(self, **kw):
+    def manifest_path(self, name=None):
+        return os.path.join(self.root, "data", "manifest", name or gkg.MANIFEST_NAME)
+
+    def committed_now(self):
+        """作業ツリーのマニフェストの全部をコミットした、とみなしたバイト列。"""
+        return gkg.read_bytes_nofollow(self.manifest_path())
+
+    def run_once(self, **kw):
         self.transport = FakeTransport(self.responses)
-        args = dict(root=self.root, home=self.home, filelist_rows=self.rows,
+        args = dict(root=self.root, volume=self.volume, filelist_rows=self.rows,
                     filelist_sha256="c" * 64, method_access_seq=5, code_sha256=CODE_SHA,
                     transport=self.transport, sleep=self.sleep, clock=self.clock,
-                    now=lambda: NOW, log=self.logs.append, disk_free=self.disk_free)
+                    now=lambda: NOW, log=self.logs.append, disk_free=self.disk_free,
+                    check_volume=self.check_volume, committed_manifest=self.committed_now())
         args.update(kw)
         return gkg.run_gkg(**args)
 
-    def manifest(self):
-        return gkg.read_jsonl(os.path.join(self.root, "data", "manifest", gkg.MANIFEST_NAME))
+    def run_gkg(self, **kw):
+        """正式な run：最初は run-start を書いて止まるので、コミットしたとみなして続ける。"""
+        try:
+            return self.run_once(**kw)
+        except gkg.RunStartWritten:
+            self.assertEqual(self.transport.calls, [])
+            kw.pop("committed_manifest", None)
+            return self.run_once(**kw)
+
+    def manifest(self, name=None):
+        return gkg.read_jsonl(self.manifest_path(name))
 
     def fetch_log(self):
         return gkg.read_jsonl(os.path.join(self.store, gkg.fetch_log_name(RUN_ID)))
@@ -555,17 +584,20 @@ class TestRun(RunCase):
     def test_normal_run(self):
         done = self.run_gkg()
         m = self.manifest()
-        self.assertEqual([e["kind"] for e in m], ["run-start", "day", "day", "run-complete"])
+        self.assertEqual([e["kind"] for e in m],
+                         ["run-start", "run-resume", "day", "day", "run-complete"])
         self.assertEqual(m[0]["files_selected"], len(self.zips))
+        self.assertEqual(m[0]["store_location"], "LACIE SHARE:/news-stick-data/gkg-method")
+        self.assertTrue(all(e["official"] for e in m))
         self.assertEqual(done["files_ok"], len(self.zips))
         self.assertEqual(sorted(os.listdir(self.store)),
                          sorted([gkg.fetch_log_name(RUN_ID)]
                                 + [gkg.day_file_name(RUN_ID, "%s-%s-%s" % (d[:4], d[4:6], d[6:]))
                                    for d in self.DAYS]))
-        for e in m[1:3]:
+        for e in m[2:4]:
             with open(os.path.join(self.store, e["file_name"]), "rb") as f:
                 self.assertEqual(hashlib.sha256(f.read()).hexdigest(), e["sha256"])
-        log = self.fetch_log()
+        log = [e for e in self.fetch_log() if e["result"] != "attempt"]
         self.assertEqual(len(log), len(self.zips))
         for e in log:
             self.assertEqual(e["sha256"], hashlib.sha256(self.zips[e["file_time"]]).hexdigest())
@@ -585,14 +617,15 @@ class TestRun(RunCase):
             self.assertEqual(privacy_scan.find_in_bytes(data), {}, name)
             for mk in all_markers():
                 self.assertNotIn(mk, data, (name, mk))
-            self.assertNotIn(self.home.encode(), data, name)
+            self.assertNotIn(self.volume.encode(), data, name)
             self.assertNotIn(self.root.encode(), data, name)
+            self.assertNotIn(self.tmp.encode(), data, name)
 
     def test_missing_file_is_recorded(self):
         ts = ts_of(self.DAYS[0], 2)
         self.responses[ts] = [FakeResponse(status=404)]
         self.run_gkg()
-        log = {e["file_time"]: e for e in self.fetch_log()}
+        log = {e["file_time"]: e for e in self.fetch_log() if e["result"] != "attempt"}
         self.assertEqual((log[ts]["result"], log[ts]["reason"]), ("failed", "http_404"))
         day = [e for e in self.manifest() if e.get("kind") == "day"][0]
         self.assertEqual((day["files_listed"], day["files_ok"], day["files_failed"]),
@@ -606,24 +639,25 @@ class TestRun(RunCase):
         self.rows.append((ts, "gkg", 1, "f" * 32))
         self.run_gkg()
         self.assertNotIn(ts, self.transport.calls)
-        log = {e["file_time"]: e for e in self.fetch_log()}
+        log = {e["file_time"]: e for e in self.fetch_log() if e["result"] != "attempt"}
         self.assertEqual(log[ts]["reason"], "ambiguous_listing")
 
     def test_failed_files_are_not_retried_on_resume(self):
         """failed は再開しても取り直さない。止まった日の ok のファイルは取り直す。"""
         bad = ts_of(self.DAYS[0], 1)
         self.responses[bad] = [FakeResponse(status=404)]
-        self.low_after = 1
+        self.low_after = 2          # run-start と run-resume の確かめは通し、日の集計の前で止める
         with self.assertRaises(gkg.RunInterrupted):        # 日の集計を書く前に止まる
             self.run_gkg()
-        self.assertEqual([e["kind"] for e in self.manifest()], ["run-start"])
+        self.assertEqual([e["kind"] for e in self.manifest()], ["run-start", "run-resume"])
         self.responses[bad] = [ok_response(self.zips[bad])]   # 相手が直っても
         self.low_after = None
         self.run_gkg()
         self.assertNotIn(bad, self.transport.calls)          # 取り直さない
         self.assertIn(ts_of(self.DAYS[0], 0), self.transport.calls)   # ok は取り直す
         kinds = [e["kind"] for e in self.manifest()]
-        self.assertEqual(kinds, ["run-start", "run-resume", "day", "day", "run-complete"])
+        self.assertEqual(kinds, ["run-start", "run-resume", "run-resume", "day", "day",
+                                 "run-complete"])
         day = [e for e in self.manifest() if e.get("kind") == "day"][0]
         self.assertEqual(day["files_failed"], 1)
 
@@ -651,7 +685,7 @@ class TestRun(RunCase):
             self.responses[ts] = [FakeResponse(status=503)]
         with self.assertRaises(gkg.RunInterrupted):
             self.run_gkg()
-        self.assertEqual([e["kind"] for e in self.manifest()], ["run-start"])
+        self.assertEqual([e["kind"] for e in self.manifest()], ["run-start", "run-resume"])
         inter = [e["file_time"] for e in self.fetch_log() if e["result"] == "interrupted"]
         self.assertEqual(inter, streak)
 
@@ -687,7 +721,7 @@ class TestRun(RunCase):
         self.assertEqual([d["day"] for d in days], ["2015-03-02", "2015-03-03"])
 
     def test_new_run_refused_even_if_first_did_not_finish(self):
-        self.low_after = 1
+        self.low_after = 2          # run-start と run-resume の確かめは通し、日の集計の前で止める
         with self.assertRaises(gkg.RunInterrupted):
             self.run_gkg()
         self.low_after = None
@@ -711,7 +745,7 @@ class TestRun(RunCase):
                 self.run_gkg()
 
     def test_resume_requires_same_inputs(self):
-        self.low_after = 1
+        self.low_after = 2          # run-start と run-resume の確かめは通し、日の集計の前で止める
         with self.assertRaises(gkg.RunInterrupted):
             self.run_gkg()
         self.low_after = None
@@ -719,16 +753,16 @@ class TestRun(RunCase):
             self.run_gkg(filelist_sha256="d" * 64)
 
     def test_store_checks(self):
-        shutil.rmtree(self.store)
-        with self.assertRaisesRegex(gkg.GkgError, "無い"):
+        os.rename(self.store, self.store + "-moved")
+        with self.assertRaisesRegex(gkg.GkgError, "gkg-method が無い"):
             self.run_gkg()
         os.makedirs(os.path.join(self.tmp, "else"))
         os.symlink(os.path.join(self.tmp, "else"), self.store)
         with self.assertRaisesRegex(gkg.GkgError, "シンボリックリンク"):
             self.run_gkg()
-        os.remove(self.store)
-        os.makedirs(self.store)
-        os.makedirs(os.path.join(self.home, "Desktop", ".git"))
+        os.rename(self.store, self.store + "-link")
+        os.rename(self.store + "-moved", self.store)
+        os.makedirs(os.path.join(self.volume, ".git"))
         with self.assertRaisesRegex(gkg.GkgError, "Git の作業ツリー"):
             self.run_gkg()
         self.assertEqual(self.manifest(), [])
@@ -742,6 +776,512 @@ class TestRun(RunCase):
             self.run_gkg()
         with open(os.path.join(SRC, "gkg.py"), encoding="utf-8") as f:
             self.assertNotIn("import tempfile", f.read())
+
+
+# --- T-021：保存先のディスク（外付け・FAT32） -------------------------------------------
+
+class Killed(BaseException):
+    """プロセスを止めたことの見本（Ctrl-C・停電）。取得のコードの except Exception に捕まらない。"""
+
+
+class TestVolume(unittest.TestCase):
+    """本物の check_volume（マウントと読み取り専用の検査）。一時的なディレクトリだけを使う。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="gkg-vol-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_constants(self):
+        self.assertEqual(gkg.VOLUME_MOUNT, "/Volumes/LACIE SHARE")
+        self.assertEqual(gkg.STORE_PARTS, ("news-stick-data", "gkg-method"))
+        self.assertEqual(gkg.TRIAL_STORE_PARTS, ("news-stick-data", "gkg-trial"))
+        self.assertEqual(gkg.STORE_LOCATION_NAME, "LACIE SHARE:/news-stick-data/gkg-method")
+        self.assertEqual(gkg.TRIAL_STORE_LOCATION_NAME, "LACIE SHARE:/news-stick-data/gkg-trial")
+        for name in (gkg.STORE_LOCATION_NAME, gkg.TRIAL_STORE_LOCATION_NAME):
+            self.assertNotIn("/Volumes", name)
+            self.assertNotIn("/Users", name)
+        self.assertEqual(gkg.FAT32_MAX_FILE_BYTES, 4 * 1024 ** 3 - 1)
+
+    def test_not_mounted_or_missing_or_link(self):
+        with self.assertRaisesRegex(gkg.GkgError, "マウントされていない"):
+            gkg.check_volume(self.tmp)                 # 普通のフォルダ（マウント先でない）
+        with self.assertRaisesRegex(gkg.GkgError, "つながっていない"):
+            gkg.check_volume(os.path.join(self.tmp, "none"))
+        link = os.path.join(self.tmp, "link")
+        os.symlink(self.tmp, link)
+        with self.assertRaisesRegex(gkg.GkgError, "シンボリックリンク"):
+            gkg.check_volume(link)
+
+    def test_read_only(self):
+        with mock.patch.object(gkg.os.path, "ismount", return_value=True):
+            self.assertEqual(gkg.check_volume(self.tmp), os.lstat(self.tmp).st_dev)
+            ro = mock.Mock(f_flag=os.ST_RDONLY)
+            with mock.patch.object(gkg.os, "statvfs", return_value=ro):
+                with self.assertRaisesRegex(gkg.GkgError, "読み取り専用"):
+                    gkg.check_volume(self.tmp)
+
+    def test_resolve_paths_uses_real_check(self):
+        """既定の check_volume は本物：マウント先でない一時的なディレクトリでは止まる。"""
+        root = os.path.join(self.tmp, "proj")
+        os.makedirs(os.path.join(root, "data", "manifest"))
+        os.makedirs(os.path.join(self.tmp, "vol", *gkg.STORE_PARTS))
+        with self.assertRaisesRegex(gkg.GkgError, "マウントされていない"):
+            gkg.resolve_paths(root, os.path.join(self.tmp, "vol"))
+        with self.assertRaisesRegex(gkg.GkgError, "official か trial"):
+            gkg.resolve_paths(root, os.path.join(self.tmp, "vol"), "other", fake_check_volume)
+
+    def test_fat32_dir_entries_bound(self):
+        """8章：正式な run の保存先の項目の数（付属の ._ のファイルを含む）が FAT32 の上限に収まる。"""
+        days = (gkg.METHOD_BLOCK_END - gkg.DATA_START).days + 1
+        self.assertEqual(days, 2115)
+        names = [gkg.day_file_name("0" * 16, "2015-03-02")] * days + [gkg.fetch_log_name("0" * 16)]
+
+        def entries(n):                 # 長い名前は13字ごとに1項目、それに短い名前の1項目
+            return -(-len(n) // 13) + 1
+        total = sum(entries(n) + entries("._" + n) for n in names)
+        self.assertLess(total, gkg.FAT32_MAX_DIR_ENTRIES)
+        for n in names[:1] + names[-1:]:
+            self.assertEqual(n, n.lower())             # 大文字と小文字でぶつからない
+
+
+class TestStoreGuard(RunCase):
+    """保存先のディスクが外れた・読み取り専用・別のものに変わったら、書かずに止まる。"""
+
+    def store_files(self):
+        out = {}
+        for n in os.listdir(self.store):
+            with open(os.path.join(self.store, n), "rb") as f:
+                out[n] = f.read()
+        return out
+
+    def test_unmounted_at_start_writes_nothing(self):
+        def gone(v):
+            raise gkg.GkgError("見本：マウントされていない")
+        self.check_volume = gone
+        with self.assertRaisesRegex(gkg.GkgError, "見本"):
+            self.run_gkg()
+        self.assertEqual(self.manifest(), [])
+        self.assertEqual(os.listdir(self.store), [])
+
+    def test_unmounted_mid_run_stops_before_writing(self):
+        state = {"ok": True, "calls": 0}
+
+        def flaky(v):
+            if not state["ok"]:
+                raise gkg.GkgError("見本：外れた")
+            return fake_check_volume(v)
+        self.check_volume = flaky
+        inner = FakeTransport(self.responses)
+
+        def transport(url, timeout):
+            state["calls"] += 1
+            state["ok"] = False                        # 1本目を受け取った直後に外れる
+            return inner(url, timeout)
+        with self.assertRaisesRegex(gkg.RunInterrupted, "外れたか"):
+            self.run_gkg(transport=transport)
+        self.assertEqual(state["calls"], 1)            # 2本目の要求は送らない
+        log = self.fetch_log()
+        self.assertEqual([e["result"] for e in log], ["attempt"])
+        state["ok"] = True
+        done = self.run_gkg()                          # つなぎ直して再開する
+        self.assertEqual(done["files_failed"], 0)
+        first = sorted(self.zips)[0]
+        rec = [e for e in self.fetch_log() if e["file_time"] == first and e["result"] == "ok"]
+        self.assertEqual(rec[-1]["attempts"], 2)       # 止まる前の試行を引き継いだ
+
+    def test_store_replaced_mid_run(self):
+        inner = FakeTransport(self.responses)
+        moved = []
+
+        def transport(url, timeout):
+            if not moved:
+                os.rename(self.store, self.store + "-old")
+                os.makedirs(self.store)                # 同じ名前の別のフォルダ
+                moved.append(1)
+            return inner(url, timeout)
+        with self.assertRaisesRegex(gkg.RunInterrupted, "違うものになった"):
+            self.run_gkg(transport=transport)
+        self.assertEqual(os.listdir(self.store), [])
+
+    def test_other_device_refused(self):
+        self.check_volume = lambda v: fake_check_volume(v) + 1
+        with self.assertRaisesRegex(gkg.GkgError, "LACIE SHARE の上に無い"):
+            self.run_gkg()
+        self.assertEqual(self.manifest(), [])
+
+    def test_case_variant_folder_refused(self):
+        os.rename(self.store, os.path.join(os.path.dirname(self.store), "GKG-METHOD"))
+        with self.assertRaisesRegex(gkg.GkgError, "大文字と小文字|が無い"):
+            self.run_gkg()
+        self.assertEqual(self.manifest(), [])
+
+    def test_fat32_file_limit(self):
+        """書けば上限を超える取得の記録は書かず、書けなければ要求も送らない。"""
+        with mock.patch.object(gkg, "FAT32_MAX_FILE_BYTES", 10):
+            with self.assertRaisesRegex(gkg.RunInterrupted, "FAT32"):
+                self.run_gkg()
+        self.assertEqual(self.transport.calls, [])
+        self.assertEqual(os.listdir(self.store), [gkg.fetch_log_name(RUN_ID)])
+        self.assertEqual(self.store_files()[gkg.fetch_log_name(RUN_ID)], b"")
+        with mock.patch.object(gkg, "FAT32_MAX_FILE_BYTES", 10):
+            with self.assertRaisesRegex(gkg.RunInterrupted, "FAT32"):
+                gkg.write_new_file(self.store, "x.tsv.gz", b"a" * 11)
+        self.assertFalse(os.path.exists(os.path.join(self.store, "x.tsv.gz")))
+
+    def test_os_error_while_writing_becomes_interrupted(self):
+        real = gkg.write_new_file
+
+        def broken(store, name, data):
+            raise OSError(5, "見本：入出力の誤り")
+        with mock.patch.object(gkg, "write_new_file", broken):
+            with self.assertRaisesRegex(gkg.RunInterrupted, "書けなかった"):
+                self.run_gkg()
+        self.assertIs(gkg.write_new_file, real)
+
+
+class TestAttempts(RunCase):
+    """T-018 の監査 軽1：試行のたびに記録を書き、再開のときに試行の回数を引き継ぐ。"""
+
+    def attempts_of(self, ts=None):
+        return [e for e in self.fetch_log()
+                if e["result"] == "attempt" and (ts is None or e["file_time"] == ts)]
+
+    def test_attempt_line_written_before_every_request(self):
+        bad = ts_of(self.DAYS[0], 1)
+        self.responses[bad] = [FakeResponse(status=503), ok_response(self.zips[bad])]
+        inner = FakeTransport(self.responses)
+        seen = []
+
+        def transport(url, timeout):
+            ts = url.rsplit("/", 1)[1][:14]
+            last = self.fetch_log()[-1]
+            seen.append((last["result"], last["file_time"], last["attempt"]))
+            return inner(url, timeout)
+        self.run_gkg(transport=transport)
+        self.assertEqual(len(seen), len(inner.calls))
+        n = {}
+        for (result, ft, attempt), ts in zip(seen, inner.calls):
+            n[ts] = n.get(ts, 0) + 1
+            self.assertEqual((result, ft, attempt), ("attempt", ts, n[ts]))
+        self.assertEqual(len(self.attempts_of()), len(inner.calls))
+
+    def test_kill_during_retry_wait_keeps_count(self):
+        bad = sorted(self.zips)[0]
+        self.responses[bad] = [FakeResponse(status=503)]
+
+        def sleep_kill(s):
+            if s == gkg.RETRY_WAIT_SECONDS[0]:
+                raise Killed()                         # 再試行を待っているあいだに止める
+            self.clock.t += s
+        with self.assertRaises(Killed):
+            self.run_gkg(sleep=sleep_kill)
+        self.assertEqual(len(self.attempts_of(bad)), 1)
+        waits = []
+
+        def sleep_rec(s):
+            waits.append(s)
+            self.clock.t += s
+        self.run_gkg(sleep=sleep_rec)                  # 相手は直っていない
+        self.assertEqual(self.transport.calls.count(bad), gkg.MAX_ATTEMPTS_PER_FILE - 1)
+        self.assertEqual(len(self.attempts_of(bad)), gkg.MAX_ATTEMPTS_PER_FILE)
+        rec = [e for e in self.fetch_log() if e["file_time"] == bad and e["result"] == "failed"]
+        self.assertEqual(rec[-1]["attempts"], gkg.MAX_ATTEMPTS_PER_FILE)
+        self.assertEqual(waits[0], gkg.RETRY_WAIT_SECONDS[0])   # 引き継いだ待ち時間を待つ
+
+    def test_exhausted_attempts_are_not_requested_again(self):
+        bad = sorted(self.zips)[0]
+        inner = FakeTransport(self.responses)
+        n = [0]
+
+        def transport(url, timeout):
+            if url.rsplit("/", 1)[1][:14] == bad:
+                n[0] += 1
+                if n[0] == gkg.MAX_ATTEMPTS_PER_FILE:
+                    raise Killed()                     # 最後の試行の途中で止める
+                return FakeResponse(status=503)
+            return inner(url, timeout)
+        with self.assertRaises(Killed):
+            self.run_gkg(transport=transport)
+        self.assertEqual(len(self.attempts_of(bad)), gkg.MAX_ATTEMPTS_PER_FILE)
+        self.run_gkg()
+        self.assertNotIn(bad, self.transport.calls)
+        rec = [e for e in self.fetch_log() if e["file_time"] == bad and e["result"] == "failed"]
+        self.assertEqual((rec[-1]["reason"], rec[-1]["attempts"]),
+                         ("attempts_exhausted", gkg.MAX_ATTEMPTS_PER_FILE))
+
+    def test_interrupted_resets_count_once(self):
+        """interrupted（1回だけの取り直し）のあとは、試行の回数を 0 から数える。"""
+        times = sorted(self.zips)
+        for ts in times[:gkg.MAX_CONSECUTIVE_TRANSIENT_FAILURES]:
+            self.responses[ts] = [FakeResponse(status=503)]
+        with self.assertRaises(gkg.RunInterrupted):
+            self.run_gkg()
+        for ts in times:
+            self.responses[ts] = [ok_response(self.zips[ts])]
+        self.run_gkg()
+        self.assertEqual(self.transport.calls.count(times[0]), 1)
+        self.assertEqual(len(self.attempts_of(times[0])), gkg.MAX_ATTEMPTS_PER_FILE + 1)
+
+    def test_fetch_file_used_argument(self):
+        data = self.zips[sorted(self.zips)[0]]
+        entry = {"file_time": sorted(self.zips)[0], "size": len(data),
+                 "md5": hashlib.md5(data).hexdigest(), "ambiguous": False}
+        tr = FakeTransport({entry["file_time"]: [FakeResponse(status=503)]})
+        got = []
+        r = gkg.fetch_file(entry, tr, self.sleep, self.clock, gkg.Pacer(self.clock, self.sleep),
+                           lambda m: None, used=gkg.MAX_ATTEMPTS_PER_FILE)
+        self.assertEqual((r.result, r.reason, tr.calls), ("failed", "attempts_exhausted", []))
+        r = gkg.fetch_file(entry, tr, self.sleep, self.clock, gkg.Pacer(self.clock, self.sleep),
+                           lambda m: None, used=1, on_attempt=got.append)
+        self.assertEqual(got, [2, 3])
+        self.assertEqual(r.attempts, gkg.MAX_ATTEMPTS_PER_FILE)
+
+
+class TestRunStartCommit(RunCase):
+    """T-018 の監査 軽2：正式な run の run-start は、コミットしてからでないと取得を始めない。"""
+
+    def test_first_run_writes_start_and_stops(self):
+        with self.assertRaises(gkg.RunStartWritten):
+            self.run_once()
+        self.assertEqual(self.transport.calls, [])
+        self.assertEqual([e["kind"] for e in self.manifest()], ["run-start"])
+        self.assertTrue(self.manifest()[0]["official"])
+        self.assertEqual(os.listdir(self.store), [])
+
+    def test_uncommitted_or_rewritten_start_refused(self):
+        with self.assertRaises(gkg.RunStartWritten):
+            self.run_once(committed_manifest=b"")
+        data = self.committed_now()
+        for committed, pattern in ((b"", "コミットされていない"), (None, "受け取っていない"),
+                                   (data.replace(b"run-start", b"run-xtart"), "書き換わっている"),
+                                   (data[:-1], "改行")):
+            with self.subTest(committed=committed and committed[:10]):
+                with self.assertRaisesRegex(gkg.GkgError, pattern):
+                    self.run_once(committed_manifest=committed)
+                self.assertEqual(self.transport.calls, [])
+        self.assertEqual([e["kind"] for e in self.manifest()], ["run-start"])
+        self.assertEqual(os.listdir(self.store), [])
+        done = self.run_once(committed_manifest=data)
+        self.assertEqual(done["files_ok"], len(self.zips))
+
+    def test_deleting_first_start_after_commit_is_refused(self):
+        with self.assertRaises(gkg.RunStartWritten):
+            self.run_once()
+        committed = self.committed_now()
+        with open(self.manifest_path(), "wb") as f:     # コミットのあとで消して作り直す
+            f.write(b"")
+        with self.assertRaises(gkg.RunStartWritten):
+            self.run_once(committed_manifest=b"", code_sha256="cd" * 32)
+        with self.assertRaisesRegex(gkg.GkgError, "書き換わっている"):
+            self.run_once(committed_manifest=committed, code_sha256="cd" * 32)
+
+    def test_check_committed_start_unit(self):
+        line = (json.dumps({"kind": "run-start", "run_id": RUN_ID}) + "\n").encode()
+        other = (json.dumps({"kind": "run-resume"}) + "\n").encode()
+        gkg.check_committed_start(line + other, line)
+        gkg.check_committed_start(line, line)
+        for m, c in ((line, b""), (line + other, other), (other, other)):
+            with self.assertRaises(gkg.GkgError):
+                gkg.check_committed_start(m, c)
+
+
+class TestTrial(RunCase):
+    """5.1章：試しの run。日・保存先・マニフェストが別で、正式な run の判定に数えない。"""
+
+    DAYS = ("20150302", "20150303", "20150304", "20150305")
+    N = 2
+
+    def run_trial(self, **kw):
+        kw.setdefault("committed_manifest", None)
+        return self.run_once(mode="trial", **kw)
+
+    def test_trial_then_official(self):
+        done = self.run_trial()
+        self.assertEqual(sorted({c[:8] for c in self.transport.calls}),
+                         ["20150302", "20150303", "20150304"])
+        tm = self.manifest(gkg.TRIAL_MANIFEST_NAME)
+        self.assertEqual([e["kind"] for e in tm], ["run-start", "day", "day", "day",
+                                                   "run-complete"])
+        self.assertTrue(all(e["official"] is False for e in tm))
+        self.assertEqual(tm[0]["trial"], True)
+        self.assertEqual(tm[0]["trial_days"], list(gkg.TRIAL_DAYS))
+        self.assertEqual(tm[0]["store_location"], "LACIE SHARE:/news-stick-data/gkg-trial")
+        self.assertEqual(done["days"], 3)
+        self.assertFalse(os.path.exists(self.manifest_path()))   # 正式な run には何も書かない
+        self.assertEqual(os.listdir(self.store), [])
+        self.assertEqual(len([n for n in os.listdir(self.trial_store) if "-day-" in n]), 3)
+        self.assertIsNone(gkg.official_run_id(self.manifest()))
+        out = self.run_gkg()                                      # 正式な run は全部の日を取る
+        self.assertEqual(out["days"], len(self.DAYS))
+        self.assertEqual(sorted(set(self.transport.calls)), sorted(self.zips))
+        m = self.manifest()
+        self.assertEqual(gkg.official_run_id(m), RUN_ID)
+        self.assertTrue(m[0]["official"])
+        self.assertNotIn("trial", m[0])
+        with self.assertRaisesRegex(gkg.GkgError, "試しの run はしない"):
+            self.run_trial()                                      # 正式な run のあとは試さない
+
+    def test_trial_refused_after_official_start(self):
+        with self.assertRaises(gkg.RunStartWritten):
+            self.run_once()
+        with self.assertRaisesRegex(gkg.GkgError, "試しの run はしない"):
+            self.run_trial()
+        self.assertFalse(os.path.exists(self.manifest_path(gkg.TRIAL_MANIFEST_NAME)))
+        self.assertEqual(os.listdir(self.trial_store), [])
+
+    def test_trial_needs_its_own_folder(self):
+        os.rename(self.trial_store, self.trial_store + "-x")
+        with self.assertRaisesRegex(gkg.GkgError, "gkg-trial が無い"):
+            self.run_trial()
+        self.assertEqual(self.transport.calls, [])
+
+    def test_trial_days_are_first_three_days_of_method_block(self):
+        first = [(gkg.DATA_START + datetime.timedelta(days=i)).isoformat() for i in range(3)]
+        self.assertEqual(gkg.TRIAL_DAYS, tuple(first))
+        for d in gkg.TRIAL_DAYS:
+            self.assertTrue(gkg.METHOD_BLOCK[0] <= d <= gkg.METHOD_BLOCK[1])
+        plan = {d: [] for d in ("2015-03-02", "2015-03-03", "2015-03-04", "2015-03-05",
+                                "2020-12-14")}
+        self.assertEqual(list(gkg.trial_plan(plan)), list(gkg.TRIAL_DAYS))
+        with mock.patch.object(gkg, "TRIAL_DAYS", ("2020-12-15",)):
+            with self.assertRaisesRegex(gkg.GkgError, "期間の外"):
+                gkg.trial_plan(plan)
+
+
+# --- T-021：FAT32 のイメージの上での検査（環境変数でイメージのマウント先を渡したときだけ） -----
+
+FAT32_ENV = "GKG_FAT32_TEST_VOLUME"
+FAT32_RO_ENV = "GKG_FAT32_TEST_VOLUME_RO"
+
+
+def _fat32_mount(env):
+    """環境変数のマウント先が、本物のディスクでない msdos のマウント先なら、その realpath を返す。"""
+    v = os.environ.get(env)
+    if not v:
+        return None
+    real = os.path.realpath(v)
+    if real == "/Volumes" or real.startswith("/Volumes/"):
+        raise RuntimeError("テストに本物のディスク（/Volumes の下）を渡してはいけない")
+    out = subprocess.run(["/sbin/mount"], capture_output=True, timeout=30).stdout.decode()
+    lines = [l for l in out.splitlines() if (" on %s (" % real) in l]
+    if len(lines) != 1 or "(msdos," not in lines[0]:
+        raise RuntimeError("%s が msdos（FAT32）のマウント先でない" % env)
+    if not os.path.ismount(real):
+        raise RuntimeError("%s がマウント先でない" % env)
+    return v
+
+
+@unittest.skipUnless(os.environ.get(FAT32_ENV), "FAT32 のイメージのマウント先が渡されていない "
+                     "（%s。手順は src/collector/README.md 7章）" % FAT32_ENV)
+class TestOnFat32(RunCase):
+    """FAT32 のイメージの上で、本物の check_volume を使って、書き込みと関門の検査を確かめる（8章）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.volume = _fat32_mount(FAT32_ENV)
+        base = os.path.join(self.volume, gkg.STORE_PARTS[0])
+        if os.path.lexists(base):
+            self.fail("イメージの直下に news-stick-data が既にある（前のテストの残り）")
+        self.store = os.path.join(self.volume, *gkg.STORE_PARTS)
+        self.trial_store = os.path.join(self.volume, *gkg.TRIAL_STORE_PARTS)
+        os.makedirs(self.store)
+        os.makedirs(self.trial_store)
+        self.addCleanup(shutil.rmtree, base, True)     # テスト用のイメージの中だけ
+        self.check_volume = gkg.check_volume           # 本物
+
+    def test_full_trial_and_official_runs(self):
+        self.run_once(mode="trial", committed_manifest=None)
+        done = self.run_gkg()
+        self.assertEqual(done["files_ok"], len(self.zips))
+        for name in (gkg.TRIAL_MANIFEST_NAME, gkg.MANIFEST_NAME):
+            folder = self.trial_store if name == gkg.TRIAL_MANIFEST_NAME else self.store
+            for e in self.manifest(name):
+                if e["kind"] == "day":
+                    p = os.path.join(folder, e["file_name"])
+                    self.assertTrue(e["file_name"] in os.listdir(folder))
+                    st = os.lstat(p)
+                    self.assertTrue(stat.S_ISREG(st.st_mode))
+                    self.assertEqual(st.st_nlink, 1)
+                    with open(p, "rb") as f:
+                        self.assertEqual(hashlib.sha256(f.read()).hexdigest(), e["sha256"])
+        with open(os.path.join(self.store, gkg.fetch_log_name(RUN_ID)), "rb") as f:
+            self.assertEqual(hashlib.sha256(f.read()).hexdigest(), done["fetch_log_sha256"])
+        for name, data in self.written_fat().items():
+            self.assertEqual(privacy_scan.find_in_bytes(data), {}, name)
+            for mk in all_markers():
+                self.assertNotIn(mk, data, (name, mk))
+            self.assertNotIn(self.volume.encode(), data, name)
+
+    def written_fat(self):
+        out = {}
+        for top in (self.store, self.trial_store, os.path.join(self.root, "data")):
+            for d, _ds, fs in os.walk(top):
+                for n in fs:
+                    if n.startswith("._"):
+                        continue                       # macOS の付属のファイル（8章）
+                    with open(os.path.join(d, n), "rb") as f:
+                        b = f.read()
+                    out[os.path.join(d, n)] = gzip.decompress(b) if n.endswith(".gz") else b
+        out["log"] = "\n".join(self.logs).encode()
+        return out
+
+    def test_symlinked_store_refused(self):
+        os.rename(self.store, self.store + "-real")
+        os.symlink(self.store + "-real", self.store)   # msdos のドライバが作る印のリンク
+        self.assertTrue(stat.S_ISLNK(os.lstat(self.store).st_mode))
+        with self.assertRaisesRegex(gkg.GkgError, "シンボリックリンク"):
+            self.run_gkg()
+        self.assertEqual(self.manifest(), [])
+
+    def test_symlinked_fetch_log_refused(self):
+        target = os.path.join(self.volume, gkg.STORE_PARTS[0], "elsewhere.jsonl")
+        os.symlink(target, os.path.join(self.store, gkg.fetch_log_name(RUN_ID)))
+        with self.assertRaisesRegex(gkg.GkgError, "開けない"):
+            self.run_gkg()
+        self.assertEqual(self.transport.calls, [])
+        self.assertFalse(os.path.lexists(target))
+
+    def test_case_variant_store_refused(self):
+        os.rename(self.store, os.path.join(os.path.dirname(self.store), "GKG-METHOD"))
+        self.assertTrue(os.path.isdir(self.store))     # FAT32 は大文字と小文字を区別しない
+        with self.assertRaisesRegex(gkg.GkgError, "大文字と小文字"):
+            self.run_gkg()
+        self.assertEqual(self.manifest(), [])
+
+    def test_case_insensitive_names_do_not_overwrite(self):
+        gkg.write_new_file(self.store, "a.txt", b"one")
+        with self.assertRaisesRegex(gkg.GkgError, "中身の違う"):
+            gkg.write_new_file(self.store, "A.TXT", b"two")
+        with open(os.path.join(self.store, "a.txt"), "rb") as f:
+            self.assertEqual(f.read(), b"one")
+
+    def test_store_id_is_stable_while_mounted(self):
+        p1 = gkg.resolve_paths(self.root, self.volume, "official", gkg.check_volume)
+        gkg.write_new_file(self.store, "x.bin", b"x" * 100000)
+        gkg.append_store_jsonl(p1, os.path.join(self.store, "y.jsonl"), {"a": 1}, "見本")
+        p2 = gkg.resolve_paths(self.root, self.volume, "official", gkg.check_volume)
+        self.assertEqual(p1["store_id"], p2["store_id"])
+
+    def test_kill_during_retry_wait_on_fat32(self):
+        bad = sorted(self.zips)[0]
+        self.responses[bad] = [FakeResponse(status=503)]
+
+        def sleep_kill(s):
+            if s == gkg.RETRY_WAIT_SECONDS[0]:
+                raise Killed()
+            self.clock.t += s
+        with self.assertRaises(Killed):
+            self.run_gkg(sleep=sleep_kill)
+        self.run_gkg()
+        self.assertEqual(self.transport.calls.count(bad), gkg.MAX_ATTEMPTS_PER_FILE - 1)
+
+
+@unittest.skipUnless(os.environ.get(FAT32_RO_ENV), "読み取り専用の FAT32 のイメージが渡されていない")
+class TestOnFat32ReadOnly(unittest.TestCase):
+    def test_read_only_volume_refused(self):
+        v = _fat32_mount(FAT32_RO_ENV)
+        with self.assertRaisesRegex(gkg.GkgError, "読み取り専用"):
+            gkg.check_volume(v)
 
 
 CHILD_SCRIPT = os.path.join(HERE, "gkg_child.py")
@@ -762,11 +1302,11 @@ class ChildRun:
 
     def __call__(self, mode="run", mutation=None, source_mutation=None):
         tops = {k: tempfile.mkdtemp(prefix="gkg-child-%s-" % k)
-                for k in ("root", "home", "outside", "code")}
+                for k in ("root", "vol", "outside", "code")}
         try:
             mdir = os.path.join(tops["root"], "data", "manifest")
             os.makedirs(mdir)
-            store = os.path.join(tops["home"], *gkg.STORE_PARTS)
+            store = os.path.join(tops["vol"], *gkg.STORE_PARTS)
             os.makedirs(store)
             zips = {}
             for d in self.DAYS:
@@ -797,7 +1337,7 @@ class ChildRun:
             vio = tempfile.TemporaryFile()
             try:
                 cfg = {"report_fd": report.fileno(), "violation_fd": vio.fileno(),
-                       "gkg_path": gkg_path, "root": tops["root"], "home": tops["home"],
+                       "gkg_path": gkg_path, "root": tops["root"], "volume": tops["vol"],
                        "outside": tops["outside"], "mode": mode, "mutation": mutation,
                        "allowed": allowed, "code_sha": CODE_SHA, "now": NOW.isoformat(),
                        "rows": rows,
@@ -818,7 +1358,7 @@ class ChildRun:
             rep = json.loads(raw)
             rep["violations"] = [json.loads(l) for l in vraw.decode("ascii").splitlines()]
             files = {}
-            for k in ("root", "home", "outside"):
+            for k in ("root", "vol", "outside"):
                 for d, _ds, fs in os.walk(tops[k]):
                     for n in fs:
                         with open(os.path.join(d, n), "rb") as f:
@@ -856,7 +1396,7 @@ class TestChildGuard(unittest.TestCase):
         self.assertEqual(rep["out"]["files_ok"], 4)
         self.assertEqual(r["outside"], [])
         self.assertEqual(sorted(n.split(os.sep)[0] for n in r["files"]),
-                         ["home"] * 3 + ["root"])
+                         ["root"] + ["vol"] * 3)
         self.check_clean_outputs(r)
 
     def test_aggregate_under_guard_writes_nothing(self):
@@ -881,7 +1421,7 @@ class TestChildGuard(unittest.TestCase):
     def test_leak_into_store_dir_with_other_name_is_caught(self):
         """保存先のフォルダの中でも、決まった名前以外のファイルには書けない。"""
         leak = ('            fr.data = None',
-                '            open(os.path.join(os.path.dirname(log_path), "raw.zip"), "wb")'
+                '            open(os.path.join(os.path.dirname(ctx["log_path"]), "raw.zip"), "wb")'
                 '.write(fr.data)\n            fr.data = None')
         r = self.child("run", source_mutation=[leak])
         self.assertTrue(r["report"]["violations"])
