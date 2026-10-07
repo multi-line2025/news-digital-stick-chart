@@ -1080,6 +1080,69 @@ def check_gkg_run_order(records):
     return runs
 
 
+GKG_MANIFESTS = {"trial": "data/manifest/gdelt-gkg-trial.jsonl",
+                 "official": "data/manifest/gdelt-gkg-method.jsonl"}
+
+
+def check_gkg_manifests(records, read_json, manifests):
+    """gkg-run-start の記録と、収集係のマニフェストの run-start の行を照らす（T-041。T-031 の監査 中1 の残り）。
+
+    manifests：{"trial": バイト列か None, "official": バイト列か None}（None はマニフェストが無い）。
+    マニフェストのある mode について、次のどれかなら LedgerError：
+      - run-start の行に gkg_run_seq（正の整数）と gkg_run_record_sha256（64 桁）が無い。
+      - その seq の記録が無いか、kind が gkg-run-start でない、行の正規の形の sha256 が違う、
+        中身の mode・run_id が行と違う（収集係の gkg.check_sealed_run と同じ照らし方）。
+      - run-start の行の異なる run_id の数が、その mode の gkg-run-start の記録の件数と違う
+        （試しの run の回数は「異なる run_id の数」。同じ run_id の行が 2 行以上あるのは正直な
+        やり直しとして通す）。
+    返り値: {mode: (異なる run_id の数, 行の数) か None（マニフェストが無い）}。
+    """
+    by_seq = {r["seq"]: r for r in records}
+    out = {}
+    for mode in ("trial", "official"):
+        body = manifests.get(mode)
+        if body is None:
+            out[mode] = None
+            continue
+        path = GKG_MANIFESTS[mode]
+        ids, n = set(), 0
+        for i, raw in enumerate(body.split(b"\n"), 1):
+            if not raw.strip():
+                continue
+            try:
+                row = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                raise LedgerError("%s の %d 行目が JSON として読めない" % (path, i)) from None
+            if not isinstance(row, dict) or row.get("kind") != "run-start":
+                continue
+            n += 1
+            seq, sha = row.get("gkg_run_seq"), row.get("gkg_run_record_sha256")
+            if type(seq) is not int or seq < 1 or not isinstance(sha, str) or not HEX64.match(sha):
+                raise LedgerError("%s の %d 行目（run-start）に gkg_run_seq・gkg_run_record_sha256 が無いか、形が違う"
+                                  % (path, i))
+            rec = by_seq.get(seq)
+            if rec is None or rec["kind"] != GKG_RUN_KIND:
+                raise LedgerError("%s の %d 行目の gkg_run_seq %d の記録が、gkg-run-start でない（または無い）"
+                                  % (path, i, seq))
+            if sha256_hex(canonical_line(rec)) != sha:
+                raise LedgerError("%s の %d 行目の gkg_run_record_sha256 が、seq %d の記録の行と一致しない"
+                                  % (path, i, seq))
+            doc = read_json(rec, GKG_RUN_KIND)
+            if doc.get("mode") != mode or doc.get("mode") != row.get("mode") \
+                    or doc.get("run_id") != row.get("run_id"):
+                raise LedgerError("%s の %d 行目（mode %r・run_id %r）が、seq %d の gkg-run-start（mode %r・run_id %r）と"
+                                  "合わない" % (path, i, row.get("mode"), row.get("run_id"), seq,
+                                                doc.get("mode"), doc.get("run_id")))
+            ids.add(row["run_id"])
+        recs = [r for r in records if r["kind"] == GKG_RUN_KIND
+                and read_json(r, GKG_RUN_KIND).get("mode") == mode]
+        if len(ids) != len(recs):
+            raise LedgerError("%s の run-start の異なる run_id の数 %d が、mode %s の gkg-run-start の記録の件数 %d と"
+                              "違う" % (path, len(ids), mode, len(recs)))
+        out[mode] = (len(ids), n)
+    return out
+
+
 def check_gkg_run_modes(modes):
     """modes：[(seq, mode)]（seq の順）。official は 1 件だけ、trial は official より前だけ。T-031。"""
     official = [seq for seq, mode in modes if mode == "official"]
@@ -1413,11 +1476,11 @@ def check_stats_order(records, read_json):
         新しい版の扱いは別に決める）。
       - 各記録の中身が check_order1_doc・check_order1b_doc に通る。
       - stats-order1・stats-order1b の記録は、最初の method-access より前にある。
+      - 最初の method-access の前に、stats-order1 の記録がある（T-041）。
       - 最初の gkg-run-start の前に、stats-order1b の記録がある。
     区分表の取得は ledger に記録を書かない（収集係はマニフェスト data/manifest/gdelt-themes.jsonl に
     書く）ので、区分表の取得との前後は git の履歴で照らす（check_order1_before_themes。verify と
-    seal_stats が行う）。method-access の前に stats-order1 を求めることは、まだしない
-    （収集係のテストを直すタスクのあとに入れる。リードの指示）。
+    seal_stats が行う）。
     返り値: {"order1": [記録], "order1b": [記録]}。
     """
     o1 = [r for r in records if r["kind"] == ORDER1_KIND]
@@ -1435,6 +1498,11 @@ def check_stats_order(records, read_json):
         if m is not None and r["seq"] > m["seq"]:
             raise LedgerError("%s の記録（seq %d）が、最初の method-access の記録（seq %d）より後にある。順番1・1b は"
                               "データに触れる前に封印する決まり" % (r["kind"], r["seq"], m["seq"]))
+    if m is not None and not any(r["seq"] < m["seq"] for r in o1):
+        # T-041：収集係のテストが method-access の前に順番1・1b を置く形になったので、T-037 で保留した
+        # 「順番1 が無ければ method-access も止まる」を入れた
+        raise LedgerError("最初の method-access の記録（seq %d）より前に、stats-order1（順番1）の記録が無い"
+                          % m["seq"])
     if g is not None and not any(r["seq"] < g["seq"] for r in o1b):
         raise LedgerError("最初の gkg-run-start の記録（seq %d）より前に、stats-order1b（順番1b）の記録が無い"
                           % g["seq"])

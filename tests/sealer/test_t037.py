@@ -39,6 +39,7 @@ from test_ledger import T0, H  # noqa: E402
 ledger = tl.ledger
 import seal_acquisition  # noqa: E402,F401
 import seal_gkg_run  # noqa: E402
+import seal_method  # noqa: E402
 import seal_stats  # noqa: E402
 
 DOC = os.path.join(tl.PROJECT, "docs", "verify", "periods-seal.md")
@@ -314,17 +315,24 @@ class TestThemesByGit(StatsCase):
 
 
 class TestWithoutOrder1(StatsCase):
-    def test_gkg_refused_without_order1(self):
-        """順番1 が無ければ gkg-run-start は drand の前に止まる。method-access は止めない（リードの指示。
-        収集係のテストを直すタスクのあとに入れる）が、そのあとでは順番1 を書けない。"""
+    def test_method_and_gkg_refused_without_order1(self):
+        """T-041：順番1 が無ければ、method-access の書く仕組み（drand の前）・関門・verify が止まり、
+        gkg-run-start も drand の前に止まる。そのあとでは順番1 も書けない。"""
         self.base()
-        m, _r, _o = self.method(T0 + 3 * H)
-        self.commit("順番1 の無いまま手順4")
-        self.refuses(lambda: self.gkg_run(T0 + 4 * H, m["seq"], nocall=True),
+        self.refuses(lambda: seal_method.seal(self.root, T0 + 3 * H, "ots", drand_fetch=t17.NoCall(),
+                                              runner=tw.FakeOts()),
+                     "stats-order1（順番1）の記録が無い。手順4は、順番1 の封印の後")
+        m = self._append_doc(ledger.METHOD_ACCESS_KIND,
+                             self._drand_doc(ledger.METHOD_ACCESS_KIND, ROUND, None), T0 + 3 * H)
+        self.commit("順番1 の無いまま手順4（書く仕組みを飛ばした）")
+        with self.assertRaisesRegex(ledger.MethodAccessRequired,
+                                    "最初の method-access の記録（seq %d）より前に、stats-order1" % m):
+            self.method_gate()
+        self.verify_fails(("stats-order", "all"),
+                          "最初の method-access の記録（seq %d）より前に、stats-order1（順番1）の記録が無い" % m)
+        self.refuses(lambda: self.gkg_run(T0 + 4 * H, m, nocall=True),
                      "除外の規則の kind（stats-order1）の記録が無い")
         self.refuses(lambda: self.order1(T0 + 4 * H), "method-access の記録がある")
-        o = self.add_order1(T0 + 4 * H)
-        self.verify_fails(("stats-order", "all"), "stats-order1 の記録（seq %d）が、最初の method-access" % o)
 
     def test_gkg_refused_without_order1b(self):
         self.base()
@@ -574,7 +582,9 @@ class TestStatsOrderVerify(t14.Case):
     def test_order1_after_method_access_fails(self):
         self.seal()
         self.step3(T0 + H, order1=False)
-        self.method(T0 + 3 * H)
+        # T-041：書く仕組みは順番1 の無い method-access を書かないので、飛ばして足す
+        self._append_doc(ledger.METHOD_ACCESS_KIND,
+                         self._drand_doc(ledger.METHOD_ACCESS_KIND, ROUND, None), T0 + 3 * H)
         o = self.add_order1(T0 + 4 * H)
         self.verify_fails(("stats-order", "all"), "stats-order1 の記録（seq %d）が、最初の method-access" % o)
 

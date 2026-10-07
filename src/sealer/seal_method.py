@@ -8,8 +8,8 @@ method-access は、手法を作る期間の区画（periods の 1 件目の出�
 使い方（プロジェクトのルートで。ots と drand の通信を使うので .venv の python で実行する）
     PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_method.py seal
         1. 記録の鎖と .ots を検証する。periods の記録が無ければ止める。
-        2. candidates の記録と acquisition-result の記録が、それぞれ 1 件以上なければ止める
-           （drand を取りにいく前に止める）。
+        2. candidates の記録と acquisition-result の記録が、それぞれ 1 件以上なければ止める。
+           stats-order1（順番1）の記録が無ければ止める（T-041）。どれも drand を取りにいく前に止める。
         3. drand（quicknet）の最新の回を取る。
         4. 中身 {"kind", "step": 4, "block_start", "block_end", "drand", "ledger_head"} を作る。
            block_start・block_end は periods の 1 件目の出力の method の区画で、引数では渡せない。
@@ -49,6 +49,10 @@ def seal(project, now, ots_cmd, drand_fetch=None, runner=subprocess.run):
             raise ledger.LedgerError("%s の記録が無い。手順4は、候補の封印と手順3の取得の記録の"
                                      "後に行う決まり。追記しない" % need)
     ledger.check_candidates_ready(project, records, len(records) + 1)
+    if ledger.first_order1(records) is None:
+        # T-041：method-access の前に順番1（stats-order1）が要る。drand を取りにいく前に止める
+        raise ledger.LedgerError("stats-order1（順番1）の記録が無い。手順4は、順番1 の封印の後に行う決まり。"
+                                 "追記しない")
     block_start, block_end = ledger.method_block_of(project, records)
     doc = {
         "kind": ledger.METHOD_ACCESS_KIND,

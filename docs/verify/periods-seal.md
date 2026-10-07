@@ -1,4 +1,4 @@
-# 期間の区切りと候補の封印を検証する手順（T-005、T-007、T-008、T-009、T-013、T-014、T-017、T-023、T-027、T-031、T-037）
+# 期間の区切りと候補の封印を検証する手順（T-005、T-007、T-008、T-009、T-013、T-014、T-017、T-023、T-027、T-031、T-037、T-041）
 
 この文書は、第三者が次のことを自分で確かめるための手順である。
 
@@ -816,10 +816,20 @@ grep -n '"kind":"gkg-run-start"' sealed/ledger.jsonl | cut -d: -f1 || true
 - 出力の「試しの run N 回、正式な run M 回」は、記録の件数から数える（自己申告ではない）。各 run の行に、seq、`run_id`、`code_sha256`（とコードのパス）、日（試しの run の日。正式な run は区画の全体）、一覧の sha256、`method-access` の seq、除外の規則の記録の seq を並べる。
 - `code_sha256` は、その記録を含むコミットの中の取得のコードと照らせる（`git show <コミット>:src/collector/acquire_gkg.py | shasum -a 256`）。
 
+### 収集係のマニフェストとの照合（T-041。T-031 の監査 中1 の残り）
+
+収集係の GKG の取得（`src/collector/acquire_gkg.py`）は、GKG に要求を送る前に `seal_gkg_run.start` を呼び、マニフェスト（試しの run は `data/manifest/gdelt-gkg-trial.jsonl`、正式な run は `data/manifest/gdelt-gkg-method.jsonl`）の run-start の行に、その記録の seq（`gkg_run_seq`）と行の sha256（`gkg_run_record_sha256`）を書く（src/collector/README.md 6.5.5）。`verify.py gkg-runs`（と `all`）は、作業ツリーのマニフェストと記録を照らす（`ledger.check_gkg_manifests`）。
+
+- 各 run-start の行の `gkg_run_seq` の記録があり、kind が `gkg-run-start`、行の正規の形の sha256 が `gkg_run_record_sha256` と同じ、中身の `mode`（そのマニフェストの mode）と `run_id` が行と同じであること（収集係の `gkg.check_sealed_run` と同じ照らし方）。
+- 試しの run の数え方は「**異なる run_id の数**」である。マニフェストの run-start の行の異なる run_id の数が、その mode の `gkg-run-start` の記録の件数と同じであること。同じ run_id の run-start の行が2行以上あるのは、正直なやり直しとして通す（同じ run の記録を指す）。
+- 記録を書かずに行った試しの run は、run-start の行が記録を指せないか、数が合わないので見つかる。
+- マニフェストが無い mode は照らさず、「照らさなかった」と表示し、`all` の最後の行にも出す（13章の区分表と同じ形。終了コードは 0 のまま）。
+- 限界：コミットと、記録のハッシュの公開（X への投稿）の前に、記録の末尾の行と中身のファイルとマニフェストの行をまとめて戻すことは見つけられない。戻したあとの記録とマニフェストは、互いにつじつまが合うからである。7章の「別の系列が無かったこと」と同じ限界で、記録の先頭のハッシュを公開した時点より前の部分だけが固まる。末尾の行と中身とマニフェストの行をまとめて戻すことを見つけるには、投稿したハッシュと照らす（docs/verify/x-post.md）。
+
 ### 示せないこと
 
 - **除外の規則の記録の中身。** `exclusion_rule_seq` が `stats-order1` の最初の記録であることは照合する（T-037）。その記録の10件の sha256 が、統計係の表と同じであることは、`stats-order1` を書く仕組みが書く前に確かめる（13章）。gkg-run-start の照合は、その中身を作業ツリーと照らし直さない（3章 (1) の手順で別に照らす。docs/stats/seal-order1.md 3章 (1)）。
-- **記録に無い run。** `gkg-run-start` を書かずに GKG に要求を送ることは、記録からは検出できない（10章の関門の限界と同じ）。数えられるのは、記録に残した run だけである。
+- **記録に無い run。** `gkg-run-start` を書かずに GKG に要求を送ることは、記録からは検出できない（10章の関門の限界と同じ）。数えられるのは、記録に残した run だけである。マニフェストに run-start の行を書いた run は、上の「収集係のマニフェストとの照合」で、記録が無ければ見つかる（T-041）。マニフェストにも書かなかった run は見つからない。
 - **threshold-access の後の取得の続き（T-037。T-031 の監査 軽4）。** `gkg-run-start` は run の最初の実行で書き、再開では書かない。そのため、`threshold-access` より前に始めた run を、`threshold-access` の後に再開して続けること（正式な run の2回目の実行を含む）は、この記録からは検出できない。照らせるのは、収集係のマニフェスト（run-resume・day の行の時刻と commit）だけである。
 - **試しの run の日。** `trial_days` は、収集係の `TRIAL_DAYS`（2015-03-02・03・04 の3日）とちょうど同じでなければならない（`ledger.TRIAL_DAYS`。T-037。T-031 の監査 軽1）。値は `ledger.py` に写してあり、テスト（`tests/sealer/test_t037.py` の `TestTrialDaysMatchCollector`）が `src/collector/gkg.py` と同じことを確かめる。
 - **run を始めたあとの経過。** 記録が示すのは、run の開始が drand の回の公開時刻より後（drand の署名を確かめた場合に限る）で、その seq の `.ots` の確定時刻＋2時間より前（ヘッダが本当の鎖にある場合に限る）だったことまでである。run の結果は、収集係のマニフェスト（src/collector/README.md）で扱う。
@@ -856,6 +866,7 @@ grep -n '"kind":"gkg-run-start"' sealed/ledger.jsonl | cut -d: -f1 || true
 - `counting`（キーはこの6個：`candidate_ids`・`criteria_ids`・`official_candidate`・`official_status`・`output_sha256`・`owner_decision`）：`PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/stats/counting.py` を引数なしで実行した出力から、候補の識別子（C1〜C7）、参考の基準の案の識別子（B1〜B5）、正式な数え方（`official_status` が "decided" で、候補の中にあり、`ledger.ORDER1B_OFFICIAL_CANDIDATE` の "C7"（`counting.OFFICIAL_CANDIDATE` と同じ。2026-10-08 オーナー決定）と一致すること。C1 などなら、書く仕組みも照合も止まる。T-037 再提出1回目 中-A）、出力の sha256。`owner_decision` は、正式な数え方の出どころの照らし方（`{"source", "source_line", "decision_line"}`。`ledger.OWNER_DECISION`：`9c85f58f054a679b8e5f40fcd7adbb17536f6366:reviews/T-028.md` で、オーナーの発言の行がちょうど1行、`- 決定：正式に使う数え方は、` で始まる行がちょうど1行で、その行に `V1 か V2 の少なくとも一方` と `同じ数え方の全テーマの合計` の両方を含むこと。counting.md 0章 (1)）。
 - `approvals`：B (ii) の照らし方（必ず入れる）と、呼ぶ側が渡すほかの照らし方（任意。無くてよい）。順番1b の承認事項へのオーナーの承認は、呼ぶ側に頼らず、下の `owner_approval` で照らす。
 - `owner_approval`：順番1b の承認事項へのオーナーの承認の照らし方（`{"source", "heading", "line"}`。`ledger.OWNER_APPROVAL_1B`。T-037 再提出1回目 中-B）。`git show a970019c61808738b02629b14f68b3171c4ddd57:reviews/T-036.md` の中で、`> 承認します` の行がちょうど1つあり、その行より前で最も近い `## ` の見出しが `## 2026-10-08 オーナーの発言（原文のまま記録。順番1b の承認事項）` と行の全体で一致し、その見出しの行もちょうど1つあること。書く仕組みが照らして結果を写し、`check_order1b_doc`（verify・関門・書く仕組み）が決まった値と一致することを求める。
+- **verify の `owner_approval` と `owner_decision` の照合は、記録に写した値と定数を比べるもの**である（T-041。T-037 の監査 軽-b）。書く仕組みは、封印のときに `git show` で reviews/ の行を照らして結果を写す。`check_order1b_doc` は、写した値が `ledger.OWNER_APPROVAL_1B`・`ledger.OWNER_DECISION` の決まった値と同じことだけを確かめ、reviews/ のファイルは読まない。第三者は、`git show a970019c61808738b02629b14f68b3171c4ddd57:reviews/T-036.md` と `git show 9c85f58f054a679b8e5f40fcd7adbb17536f6366:reviews/T-028.md` を自分で見て、照らした行がその中にあることを確かめる。
 - `order1_ref`：順番1 の記録があれば、その `{"seq", "record_sha256"}`。無ければ null。
 - `checks`：`worktree_clean`・`not_shallow`・`method_access_absent`・`gkg_manifests_absent`（どれも true）。
 
@@ -880,7 +891,7 @@ rec, rel, ots_path = seal_stats.seal_order1b(project, files, approvals, now, ots
   - F のどの commit についても、その親（`git rev-parse <C>^@`）のうち少なくとも一つの版の `sealed/ledger.jsonl` に、`stats-order1` の記録の行（正規の形のバイト列）がある。F が空でないのに `stats-order1` が無いとき、親の無い commit が F にあるときも失敗する（seal-order1.md 3章 (2) と同じ考え方）。
   - 作業ツリーのマニフェストの各行の `exclusion_rule_seq`・`exclusion_rule_record_sha256` が、`stats-order1` の記録の seq と行の sha256 と一致する（`ledger.check_themes_manifest_refs`）。
   - git の履歴が無いところ（`.git` の無い写し）では、この照合を行わず、そう表示する（止めない）。`verify.py all` は最後の行に「ただし、次は照らさなかった（終了コード 0 は、照らした検査がすべて通ったことだけを示す）：区分表の取得と順番1 の前後」と出す。**終了コード 0 は、照らした検査がすべて通ったことだけを示す。** 照らさなかったものがあるかは、出力の最後の行で確かめる（T-037 再提出1回目 軽2）。`--rev auto` は git の履歴を要るので、第三者は履歴のある clone で確かめる。
-  - **浅い clone では照らせない。** マニフェストに行がある commit の親が取れないためで、`verify.py stats-order`（と `all`）は「浅い clone である。区分表の取得との前後の照合には履歴が要る」と出して終了コード 1 で止まる。`--depth` を付けずに clone する（`git fetch --unshallow` でもよい）（T-037 再提出1回目 軽1）。
+  - **浅い clone では照らせない。** `verify.py stats-order`（と `all`）は、git の履歴があって浅い clone のとき、マニフェストに行のある commit が0件でも、浅い clone なら止まる（「浅い clone である。区分表の取得との前後の照合には履歴が要る」と出して終了コード 1。照合を始める前に `git rev-parse --is-shallow-repository` で確かめるため。浅い clone では、行のある commit が本当に0件かどうかも、親の版も確かめられない）。`--depth` を付けずに clone する（`git fetch --unshallow` でもよい）（T-037 再提出1回目 軽1、T-041 で書き方を実際の条件に合わせた）。
   - 書く仕組みの側は、`seal_order1` が、区分表のマニフェストが作業ツリーにも履歴にも無いことを確かめる（2章の項目2）。
   - **この照合の根拠と限界（T-037 再提出1回目 中-C）。**
     - 根拠：区分表のマニフェストの各行には `exclusion_rule_record_sha256`（`stats-order1` の記録の行の sha256）が入り、上の照合はそれが記録と一致することを求める。sha256 は、記録の行ができる前には作れない（記録の行には、直前の行のハッシュ `prev_hash` と `recorded_at`、中身のファイル（封印した時点の HEAD と10件の sha256 を含む）の sha256 が入る）。そのため、照合に通る行は、`stats-order1` の記録ができたあとに書かれたものである。「マニフェストの行を書いたのは順番1 より後」は、暗号的に言える。
@@ -888,7 +899,7 @@ rec, rel, ots_path = seal_stats.seal_order1b(project, files, approvals, now, ots
     - 限界(2)：照らせるのは、マニフェストの行を**コミットした位置**だけで、区分表を**取得した時点**ではない。取得してから、順番1 のあとにマニフェストを書いてコミットすれば、照合は通る。マニフェストを通さない取得（収集係のコードを通らない取得）は、どこにも跡が残らない。
     - 限界(3)：照らせるのは、clone から辿れる commit（`git log --all` に出るもの）だけである。clone に含まれないブランチや、公開していない commit は照らせない。
     - したがって、この照合が示すのは「公開された履歴の中で、マニフェストの行は順番1 の記録を含む commit の後に入り、その行の中身は順番1 の記録を前提に作られた」ことまでで、「区分表の取得そのものが順番1 より後だった」ことの証明ではない。
-- **`method-access` の前に `stats-order1` を求めることは、まだしていない**（リードの指示。収集係のテスト `tests/collector/test_acquire_gkg.py` の `E2ECase` が、順番1 の無い写しに `method-access` を書くため。収集係のテストを直すタスクのあとに入れる）。そのため、順番1 より前に `method-access` を書くことは止まらない。その場合、順番1 は書けず（2章の項目2）、`gkg-run-start` も書けないので、追記のみの記録が先へ進めなくなる。
+- **最初の method-access の前に `stats-order1` の記録が要る**（T-041。T-037 で保留していたもの。収集係のテストが、method-access の前に `stats-order1` と `stats-order1b` の記録を置く形になった（T-032）ので入れた）。`seal_method.py` は、`stats-order1` が無ければ drand を取りにいく前に止まる。書く仕組みを飛ばして足した `method-access` は、`method-access` の関門（`require_method_access`）、ほかの書く仕組み、`verify.py stats-order` と `all` が止める（`ledger.check_stats_order`）。テストは `tests/sealer/test_t037.py` の `TestWithoutOrder1.test_method_and_gkg_refused_without_order1`。
 
 ### 確かめるコマンド
 

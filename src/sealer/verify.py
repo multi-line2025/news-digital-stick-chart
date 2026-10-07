@@ -499,11 +499,33 @@ def cmd_method(st, _a):
     print(ledger.DRAND_NOT_VERIFIED)
 
 
+def gkg_manifests_check(st):
+    """gkg-run-start の記録と、収集係のマニフェストの run-start の行の照合（T-041）。マニフェストが
+    無い mode は照らさず、そう表示して all の最後にも出す。"""
+    manifests = {}
+    for mode, rel in ledger.GKG_MANIFESTS.items():
+        path = os.path.join(st.root, rel)
+        manifests[mode] = None
+        if os.path.isfile(path) and not os.path.islink(path):
+            with open(path, "rb") as f:
+                manifests[mode] = f.read()
+    got = ledger.check_gkg_manifests(st.records, st.file_json, manifests)
+    for mode, res in got.items():
+        rel = ledger.GKG_MANIFESTS[mode]
+        if res is None:
+            st.unchecked.append("%s の run-start の行と gkg-run-start の記録の照合（マニフェストが無い）" % rel)
+            print("照らさなかった：%s が無いので、run-start の行と gkg-run-start の記録の照合をしていない" % rel)
+        else:
+            print("%s：run-start の行 %d 行、異なる run_id %d 個。どの行も、kind・mode・run_id の合う gkg-run-start の"
+                  "記録を指し、異なる run_id の数は %s の記録の件数と同じ" % (rel, res[1], res[0], mode))
+
+
 def cmd_gkg_runs(st, _a):
-    """GKG の取得の run の開始（kind が gkg-run-start）の照合と一覧。T-031。"""
+    """GKG の取得の run の開始（kind が gkg-run-start）の照合と一覧。T-031、T-041。"""
     runs = ledger.check_gkg_runs(st.records, st.file_json)
+    gkg_manifests_check(st)
     if not runs:
-        print("gkg-run-start の記録：なし（照合するものが無い）")
+        print("gkg-run-start の記録：なし")
         return
     trials = [(r, d) for r, d in runs if d["mode"] == "trial"]
     officials = [(r, d) for r, d in runs if d["mode"] == "official"]
