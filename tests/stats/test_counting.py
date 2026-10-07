@@ -869,8 +869,11 @@ class TestOrder2Record(unittest.TestCase):
         self.assertIn("largest seq", rec["order3_gate"])
         self.assertIn("rechecks the timing condition", rec["order3_gate"])
         self.assertIn("every order 3 attempt, stopped or passed, is recorded", rec["order3_gate"])
-        self.assertIn("not part of what the owner approved", rec["outside_owner_approval"])
-        self.assertIn("is part of the approval", rec["outside_owner_approval"])
+        self.assertIn("inside the owner's approval (item 3)", rec["outside_owner_approval"])
+        self.assertIn("recording the stopped order 3 attempt", rec["outside_owner_approval"])
+        self.assertIn("Outside the approval", rec["outside_owner_approval"])
+        self.assertIn("recording passed order 3 attempts", rec["outside_owner_approval"])
+        self.assertIn("same as git log --all", rec["order3_gate"])
         self.assertIn("whatever its seq", rec["order2_record_rule"])
 
 
@@ -886,6 +889,7 @@ def tcheck(ref, ok=True, reason=None):
     return {"ok": ok, "ref_1b_seq": ref, "head": H3,
             "f_set": [{"commit": H2, "parents": [H1]}],
             "refs": [{"ref": "refs/heads/main", "commit": H3}],
+            "worktree_heads": [H3],
             "reason": reason if not ok else None}
 
 
@@ -940,11 +944,49 @@ class TestOrder3Gate(unittest.TestCase):
     def test_no_records_or_no_1b(self):
         self.assertFalse(counting.order3_gate([3], [], tcheck(3), [])["may_seal"])
         self.assertFalse(counting.order3_gate([3], [rec2(8, "pending", 3)], tcheck(3), [])["may_seal"])
-        self.assertFalse(counting.order3_gate([], [], tcheck(3), [])["may_seal"])
+        self.assertFalse(counting.order3_gate([], [], tcheck(None, ok=False, reason="無い"), [])["may_seal"])
 
     def test_timing_check_must_match_reference(self):
         with self.assertRaises(ValueError):
             counting.order3_gate([3, 15], [], tcheck(3), [])
+        with self.assertRaises(ValueError):
+            counting.order3_gate([], [], tcheck(3), [])            # 1b が無いのに ref_1b_seq がある
+
+    def test_stopped_reasons_in_record(self):
+        """T-040 軽-1：止まった場合の record の reason を確かめる。"""
+        cases = [
+            (([], [], tcheck(None, ok=False, reason="1b が無い"), []), "順番1b の記録が無い"),
+            (([3], [rec2(9, "decided", 3)], tcheck(3), [att(10, 3, False)]), "恒久"),
+            (([3], [rec2(9, "decided", 3)], tcheck(3, ok=False, reason="RX"), []), "RX"),
+            (([3], [rec2(9, "stopped", 3, "a")], tcheck(3), []), "(a) 時機の条件で止まった順番2の記録"),
+            (([3], [], tcheck(3), []), "順番2の記録が無い"),
+        ]
+        for args, word in cases:
+            g = counting.order3_gate(*args)
+            self.assertFalse(g["may_seal"])
+            self.assertEqual(g["record"]["reason"], g["reason"])
+            self.assertIn(word, g["record"]["reason"], word)
+            self.assertFalse(g["record"]["may_seal"])
+
+    def test_no_1b_attempt_round_trip(self):
+        """T-040 軽-2：順番1b が無いときの試みの記録が、次の order3_attempts に噛み合う。"""
+        g = counting.order3_gate([], [], tcheck(None, ok=False, reason="1b が無い"), [])
+        a = counting.attempt_from_record(4, g["record"])
+        self.assertEqual(a, {"seq": 4, "ref_1b_seq": None, "may_seal": False, "timing_ok": False})
+        g2 = counting.order3_gate([5], [rec2(9, "decided", 5)], tcheck(5), [a])
+        self.assertTrue(g2["may_seal"])           # 1b の無い時の試みは、あとの1b を止めない
+        # 通常の記録からも作れ、timing_ok は timing_check.ok から取る
+        g3 = counting.order3_gate([5], [rec2(9, "decided", 5)], tcheck(5, ok=False, reason="R"), [])
+        a3 = counting.attempt_from_record(12, g3["record"])
+        self.assertEqual(a3, {"seq": 12, "ref_1b_seq": 5, "may_seal": False, "timing_ok": False})
+        self.assertFalse(counting.order3_gate([5], [rec2(9, "decided", 5)], tcheck(5), [a3])["may_seal"])
+        with self.assertRaises(ValueError):
+            counting.attempt_from_record(1, {"may_seal": False})
+        bad = dict(g3["record"], ref_1b_seq=7)
+        with self.assertRaises(ValueError):
+            counting.attempt_from_record(13, bad)
+        with self.assertRaises(ValueError):
+            counting.check_timing_check(tcheck(None, ok=True))
 
     def test_inconsistent_inputs(self):
         """軽-D：つじつまの合わない入力は ValueError。"""
@@ -956,6 +998,9 @@ class TestOrder3Gate(unittest.TestCase):
             ([3], [rec2(9, "decided", 3)], tcheck(3), [att(9, 3, True)]), # seq の重なり
             ([3], [rec2(3, "decided", 3)], tcheck(3), []),               # 1b と seq が重なる
             ([3], [], tcheck(3), [att(9, 3, False, may_seal=True)]),      # 破れなのに通った試み
+            ([1, 5], [rec2(5, "decided", 1)], tcheck(5), []),            # 別の1b の seq と重なる（T-040 軽-1）
+            ([1, 5], [], tcheck(5), [att(5, 1, True)]),                  # 試みが別の1b の seq と重なる
+            ([3], [], tcheck(3), [att(9, None, True)]),                  # 1b の無い試みで timing_ok が True
         )
         for args in bad:
             with self.assertRaises(ValueError, msg=args):
@@ -980,12 +1025,66 @@ class TestOrder3Gate(unittest.TestCase):
             dict(good, refs=[]), dict(good, refs=[{"ref": "", "commit": H3}]),
             dict(good, refs=[{"ref": "a", "commit": H3}, {"ref": "a", "commit": H2}]),
             dict(good, reason="x"), dict(good, ok=False, reason=None), dict(good, ref_1b_seq="3"),
+            dict(good, worktree_heads=[]), dict(good, worktree_heads=[H3, H3]), dict(good, worktree_heads=["x"]),
             {k: v for k, v in good.items() if k != "refs"},
         ]
         for v in variants:
             with self.assertRaises(ValueError, msg=v):
                 counting.check_timing_check(v)
         counting.check_timing_check(dict(good, f_set=[]))      # F の集合が空なのはありうる
+
+
+class TestFScope(unittest.TestCase):
+    """T-040 中-1 (b)：F を数える範囲（refs と各 worktree の HEAD から辿れる commit）が、`git log --all` と
+    同じになること。ブランチ、タグ、stash、別の worktree（ブランチの上と、切り離した HEAD）を持つ作り物の
+    リポジトリで確かめる。"""
+
+    def test_refs_and_worktree_heads_equal_log_all(self):
+        base = os.environ.get("STATS_TEST_TMPDIR") or os.environ.get("TMPDIR")
+        if not base:
+            self.skipTest("一時フォルダの場所（STATS_TEST_TMPDIR か TMPDIR）を指定して流す")
+        ident = ["-c", "user.name=Multi-line", "-c",
+                 "user.email=197505900+multi-line2025@users.noreply.github.com", "-c", "commit.gpgsign=false"]
+        with tempfile.TemporaryDirectory(dir=base) as d:
+            repo = os.path.join(d, "r")
+
+            def git(*args, cwd=None):
+                r = subprocess.run(["git", *ident, *args], cwd=cwd or repo, capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                return r.stdout
+
+            def commit(msg, cwd=None):
+                with open(os.path.join(cwd or repo, "f.txt"), "a") as f:
+                    f.write(msg + "\n")
+                git("add", "f.txt", cwd=cwd)
+                git("commit", "-q", "-m", msg, cwd=cwd)
+
+            os.makedirs(repo)
+            git("init", "-q")
+            commit("a")
+            git("branch", "side")
+            git("tag", "t1")
+            commit("b")
+            with open(os.path.join(repo, "f.txt"), "a") as f:
+                f.write("stash\n")
+            git("stash", "-q")
+            wt1, wt2 = os.path.join(d, "w1"), os.path.join(d, "w2")
+            git("worktree", "add", "-q", wt1, "side")
+            commit("on-side", cwd=wt1)
+            git("worktree", "add", "-q", "--detach", wt2, "HEAD")
+            commit("detached", cwd=wt2)
+            refs = [line.split()[1] for line in git("for-each-ref", "--format=%(refname) %(objectname)").splitlines()]
+            heads = [line.split()[1] for line in git("worktree", "list", "--porcelain").splitlines()
+                     if line.startswith("HEAD ")]
+            starts = sorted(set(refs) | set(heads))
+            by_starts = set(git("rev-list", *starts).split())
+            by_all = set(git("rev-list", "--all").split())
+            self.assertEqual(by_starts, by_all)
+            # 切り離した worktree の commit は、for-each-ref だけでは辿れない（worktree の HEAD が要る）
+            only_refs = set(git("rev-list", *sorted(set(refs))).split())
+            self.assertLess(only_refs, by_all)
+            git("worktree", "remove", "--force", wt1)
+            git("worktree", "remove", "--force", wt2)
 
 
 class TestApproval1b(unittest.TestCase):

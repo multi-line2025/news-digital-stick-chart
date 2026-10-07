@@ -531,22 +531,29 @@ def check_timing_check(tc):
     """順番3の時点で封印係が時機の条件を確かめた内容（timing_check）の形を確かめる。合わなければ ValueError。
 
     tc = {"ok": True/False,                       確かめた結果
-          "ref_1b_seq": 整数,                      確かめた順番1b の記録の seq
+          "ref_1b_seq": 整数か None,               確かめた順番1b の記録の seq（順番1b の記録が無ければ None。
+                                                   そのとき ok は False）
           "head": 40桁,                            確かめたときの HEAD
           "f_set": [{"commit": 40桁, "parents": [40桁, ...]}, ...],
                                                    確かめた F の集合（seal-order1.md 3章 (2) の時機の条件）。
                                                    各 commit の ID と親。重なりなし
           "refs": [{"ref": 参照の名前, "commit": 40桁}, ...],
                                                    `git for-each-ref` の参照の一覧（名前の重なりなし。空でない）
+          "worktree_heads": [40桁, ...],           `git worktree list --porcelain` の各 worktree の HEAD
+                                                   （重なりなし。空でない。T-040）。F を数える範囲は、refs と
+                                                   worktree_heads から辿れる commit（`git log --all` と同じ。
+                                                   counting.md 4章 (3)）
           "reason": ok が False なら空でない文字列、True なら None}
     """
-    keys = ("f_set", "head", "ok", "reason", "ref_1b_seq", "refs")
+    keys = ("f_set", "head", "ok", "reason", "ref_1b_seq", "refs", "worktree_heads")
     if not isinstance(tc, dict) or tuple(sorted(tc)) != keys:
         raise ValueError("timing_check のキーが決まった %d 個（%s）でない" % (len(keys), "、".join(keys)))
     if not isinstance(tc["ok"], bool):
         raise ValueError("timing_check.ok が True か False でない")
-    if type(tc["ref_1b_seq"]) is not int:
-        raise ValueError("timing_check.ref_1b_seq が整数でない")
+    if tc["ref_1b_seq"] is not None and type(tc["ref_1b_seq"]) is not int:
+        raise ValueError("timing_check.ref_1b_seq が整数か None でない")
+    if tc["ref_1b_seq"] is None and tc["ok"]:
+        raise ValueError("順番1b の記録が無い（ref_1b_seq が None）のに、timing_check.ok が True")
     if not isinstance(tc["head"], str) or not _HEX40_RE.fullmatch(tc["head"]):
         raise ValueError("timing_check.head が40桁の16進でない")
     if not isinstance(tc["f_set"], list):
@@ -571,6 +578,10 @@ def check_timing_check(tc):
         if r["ref"] in names:
             raise ValueError("timing_check.refs の名前が重なっている")
         names.add(r["ref"])
+    wh = tc["worktree_heads"]
+    if not isinstance(wh, list) or not wh or len(set(wh)) != len(wh) \
+            or not all(isinstance(x, str) and _HEX40_RE.fullmatch(x) for x in wh):
+        raise ValueError("timing_check.worktree_heads が、重ならない40桁の16進の空でない一覧でない")
     if tc["ok"]:
         if tc["reason"] is not None:
             raise ValueError("timing_check.ok が True なのに reason がある")
@@ -583,12 +594,31 @@ def _check_order3_attempt(r):
     keys = ("may_seal", "ref_1b_seq", "seq", "timing_ok")
     if not isinstance(r, dict) or tuple(sorted(r)) != keys:
         raise ValueError("順番3の試みの記録のキーが決まった %d 個（%s）でない" % (len(keys), "、".join(keys)))
-    if type(r["seq"]) is not int or type(r["ref_1b_seq"]) is not int:
-        raise ValueError("順番3の試みの記録の seq・ref_1b_seq が整数でない")
+    if type(r["seq"]) is not int:
+        raise ValueError("順番3の試みの記録の seq が整数でない")
+    if r["ref_1b_seq"] is not None and type(r["ref_1b_seq"]) is not int:
+        raise ValueError("順番3の試みの記録の ref_1b_seq が整数か None でない")
     if not isinstance(r["may_seal"], bool) or not isinstance(r["timing_ok"], bool):
         raise ValueError("順番3の試みの記録の may_seal・timing_ok が True か False でない")
     if r["may_seal"] and not r["timing_ok"]:
         raise ValueError("順番3の試みの記録で、timing_ok が False なのに may_seal が True")
+    if r["ref_1b_seq"] is None and (r["may_seal"] or r["timing_ok"]):
+        raise ValueError("順番1b の記録が無いときの試みの記録で、may_seal か timing_ok が True")
+
+
+def attempt_from_record(seq, record):
+    """封印係が ledger に書いた順番3の試みの記録（order3_gate() の record）と、その記録の seq から、
+    order3_gate() の order3_attempts の1要素を作る（T-040 軽-2）。timing_ok は record の timing_check.ok。"""
+    if not isinstance(record, dict) or sorted(record) != ["chosen_order2_seq", "may_seal", "reason",
+                                                          "ref_1b_seq", "timing_check"]:
+        raise ValueError("順番3の試みの記録のキーが、order3_gate() の record と違う")
+    check_timing_check(record["timing_check"])
+    if record["timing_check"]["ref_1b_seq"] != record["ref_1b_seq"]:
+        raise ValueError("順番3の試みの記録の ref_1b_seq と timing_check.ref_1b_seq が違う")
+    out = {"seq": seq, "ref_1b_seq": record["ref_1b_seq"], "may_seal": record["may_seal"],
+           "timing_ok": record["timing_check"]["ok"]}
+    _check_order3_attempt(out)
+    return out
 
 
 def order3_gate(order1b_seqs, order2_records, timing_check, order3_attempts):
@@ -602,7 +632,8 @@ def order3_gate(order1b_seqs, order2_records, timing_check, order3_attempts):
       ledger の seq と git の親子の関係だけで決まる）を確かめ直した内容（check_timing_check() の形）。
       真偽値だけでなく、確かめた F の集合・HEAD・参照の一覧を組で受け取り、記録に写す。
     order3_attempts：これまでの順番3の試みの記録（封印係が ledger に書いたもの）の一覧。各要素は
-      {"seq", "ref_1b_seq", "may_seal", "timing_ok"}。
+      {"seq", "ref_1b_seq", "may_seal", "timing_ok"}で、attempt_from_record() で記録から作る
+      （timing_ok は記録の timing_check.ok。順番1b の記録が無かった試みは ref_1b_seq が None）。
     規則：
       1. 参照する順番1b の記録は、order1b_seqs の最大の seq（順番2と同じ決め方）。無ければ封印しない。
       2. 順番2の記録は、ref_1b_seq がその seq のものだけを数える。
@@ -639,6 +670,11 @@ def order3_gate(order1b_seqs, order2_records, timing_check, order3_attempts):
         seqs.add(r["seq"])
     for r in order3_attempts:
         _check_order3_attempt(r)
+        if r["ref_1b_seq"] is None:
+            if r["seq"] in seqs:
+                raise ValueError("seq %d が重なっている" % r["seq"])
+            seqs.add(r["seq"])
+            continue
         if r["ref_1b_seq"] not in known:
             raise ValueError("順番3の試みの記録の ref_1b_seq %d が、どの順番1b の記録にも無い" % r["ref_1b_seq"])
         if r["seq"] <= r["ref_1b_seq"]:
@@ -654,10 +690,12 @@ def order3_gate(order1b_seqs, order2_records, timing_check, order3_attempts):
         return {"may_seal": ok, "ref_1b_seq": ref, "chosen": chosen, "reason": reason, "record": rec}
 
     if not order1b_seqs:
+        if timing_check["ref_1b_seq"] is not None:
+            raise ValueError("順番1b の記録が無いのに、timing_check.ref_1b_seq が None でない")
         return result(False, None, None, "順番1b の記録が無い")
     ref = max(order1b_seqs)
     if timing_check["ref_1b_seq"] != ref:
-        raise ValueError("timing_check.ref_1b_seq %d が、参照する順番1b の記録の seq %d と違う"
+        raise ValueError("timing_check.ref_1b_seq %r が、参照する順番1b の記録の seq %d と違う"
                          % (timing_check["ref_1b_seq"], ref))
     if any(r["ref_1b_seq"] == ref and not r["timing_ok"] for r in order3_attempts):
         return result(False, ref, None, "(a) 前の順番3の試みで、時機の条件の破れが記録されている（恒久に止まる）")
@@ -1042,17 +1080,19 @@ def as_record():
         "order3_gate": "order 3 references the order 1b record with the largest seq at the time of order 3 (same "
                        "rule as order 2) and counts only order 2 records that reference it; the sealer rechecks the "
                        "timing condition (a) for that order 1b record at order 3 and passes what it checked (F set "
-                       "with parents, HEAD, git for-each-ref refs); every order 3 attempt, stopped or passed, is "
+                       "with parents, HEAD, git for-each-ref refs, worktree HEADs; F is counted over commits "
+                       "reachable from those refs and worktree HEADs, the same as git log --all); every order 3 attempt, stopped or passed, is "
                        "recorded in the ledger with that content; once an attempt recorded a broken timing "
                        "condition, order 3 stays stopped for that order 1b record; if any of the order 2 records "
                        "stopped on (a), order 3 is not sealed; otherwise order2_record_rule (order3_gate)",
-        "outside_owner_approval": "details added after the owner's approval of order 1b by the lead's assignment "
-                                  "(T-038, T-039), not part of what the owner approved: the smallest-seq rule for "
-                                  "order 2 records, the largest-seq rule for the referenced order 1b record, "
-                                  "counting only order 2 records whose ref_1b_seq is that record, rechecking the "
-                                  "timing condition at order 3, and recording every order 3 attempt. Stopping, "
-                                  "publishing and leaving the decision to the owner when the timing condition is "
-                                  "broken is part of the approval",
+        "outside_owner_approval": "inside the owner's approval (item 3): when the timing condition is found "
+                                  "broken, stop, publish (recording the stopped order 3 attempt) and leave the "
+                                  "decision to the owner. Outside the approval, details added by the lead's "
+                                  "assignment (T-038 to T-040): the smallest-seq rule for order 2 records, the "
+                                  "largest-seq rule for the referenced order 1b record, counting only order 2 "
+                                  "records whose ref_1b_seq is that record, rechecking the timing condition at "
+                                  "order 3, recording passed order 3 attempts, and the content of the attempt "
+                                  "record (timing_check, git bundle)",
         "order2_record_rule": "among the order 2 records for the referenced order 1b record, ignore status "
                               "pending; order 3 references the one with the smallest seq (decided, or stopped "
                               "of kind b or c); if there is none, order 3 is not sealed; if any of those records "
