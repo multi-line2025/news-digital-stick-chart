@@ -281,10 +281,16 @@
         取り直して作った集計が、既にある日の集計と、F の行の attempts の欄のほかがすべて同じなら、
         既にあるファイルをそのまま使い、day の行に reused_existing_day_file: true を書く
         （attempts の欄は、信用しない範囲の試行の行を数えるかどうかで変わるため比べない）。
-        中身が違えば止まる（上書きしない）。
+        中身が違えば止まる（上書きしない）。取り直しで結果が変わると、何回再開しても止まり続ける
+        （README 6.7 の次の手）。使った日の集計の F の行の attempts と、day の行の failed_files の
+        attempts（今回の取り直しの数）は違うことがある。
+      - 取得の記録の行の形（T-026 軽-4。_check_log_lines）：結果の行の reason が決まった語
+        （valid_reason）で、attempts が 0〜MAX_ATTEMPTS_PER_FILE の整数であること、attempt の行の
+        attempt が 1〜MAX_ATTEMPTS_PER_FILE の整数であること、file_time が14桁の数字であることを
+        確かめ、合わなければ止まる。偽の行の任意の語や数が failed_files に載らないようにする。
         試しの run のマニフェストは、正式な run の前まではコミットを求めない（5.1章の照合で補う）。
-      - 主な防御は手元の検査ではなく、day の行の failed_files（その日の failed のファイルの
-        file_time・reason・attempts の一覧）である。第三者は、封印済みのファイル一覧と GDELT の
+      - 主な防御は手元の検査ではなく、day の行の failed_files（その日の failed のファイルの一覧。
+        各項目は file_time・reason・attempts・requests_sent・listed_size・listed_md5）である。第三者は、封印済みのファイル一覧と GDELT の
         サーバーと照らして、そのファイルが今は取れるかを確かめられる（README 6.5.1）。
     ディスクの同一性（軽3。オーナーの決定「記録に残さず、公開もしない」2026-10-08）
       - VolumeUUID は、マニフェスト・取得の記録・日の集計・ログのどこにも書かない。
@@ -1496,11 +1502,68 @@ def check_log_checkpoint(log_path, mine):
     return size
 
 
+def _exception_names(classes):
+    out, todo = set(), list(classes)
+    while todo:
+        c = todo.pop()
+        if c.__name__ not in out:
+            out.add(c.__name__)
+            todo.extend(c.__subclasses__())
+    return frozenset(out)
+
+
+# 5.2章（T-026 軽-4）：取得の記録の結果の行の reason として認める語。このモジュールが書く語だけ。
+# network_ のあとは、READ_ERRORS とその子の例外の名前（標準ライブラリのもの）だけを認める。
+_NETWORK_ERROR_NAMES = _exception_names(READ_ERRORS)
+_FORMAT_REASONS = frozenset({"zip", "zip_members", "zip_member_name", "zip_encrypted",
+                             "too_large_unzipped", "zip_read"})
+_FIXED_REASONS = frozenset({"", "retry_after_too_long", "attempts_exhausted", "ambiguous_listing",
+                            "content_encoding", "size_mismatch", "md5_mismatch", "too_large",
+                            "consecutive_transient_failures"})
+_HTTP_REASON_RE = re.compile(r"\Ahttp_(?:[0-9]{3}|None)\Z")
+_RESULTS = frozenset({"ok", "failed", "interrupted"})
+
+
+def valid_reason(reason):
+    """reason が、このモジュールが書く決まった語の形なら True。"""
+    if not isinstance(reason, str):
+        return False
+    if reason in _FIXED_REASONS or _HTTP_REASON_RE.match(reason):
+        return True
+    if reason.startswith("network_"):
+        return reason[len("network_"):] in _NETWORK_ERROR_NAMES
+    if reason.startswith("format_"):
+        return reason[len("format_"):] in _FORMAT_REASONS
+    return False
+
+
 def _check_log_lines(entries, run_id, mode):
-    """取得の記録の行が、どれもこの run_id と mode のものであること（中2）。"""
+    """取得の記録の行が、どれもこの run_id と mode のもので、決まった形であること。
+
+    中2：run_id と mode。T-026 軽-4：結果の行（ok・failed・interrupted）の reason が決まった語で、
+    attempts が 0〜MAX_ATTEMPTS_PER_FILE の整数であること。attempt の行の attempt が
+    1〜MAX_ATTEMPTS_PER_FILE の整数であること。file_time が14桁の数字であること。合わなければ
+    止まる（day の行の failed_files に、決まった形でない語や数が載らないようにするため）。
+    """
     for e in entries:
         if e.get("run_id") != run_id or e.get("mode") != mode:
             raise GkgError("取得の記録に、別の run か別の mode（試しの run と正式な run）の行がある")
+        ft = e.get("file_time")
+        if not (isinstance(ft, str) and re.fullmatch(r"[0-9]{14}", ft)):
+            raise GkgError("取得の記録に、file_time の形が違う行がある（リードに報告）")
+        result = e.get("result")
+        if result == "attempt":
+            n = e.get("attempt")
+            if type(n) is not int or not 1 <= n <= MAX_ATTEMPTS_PER_FILE:
+                raise GkgError("取得の記録の attempt の行の回数の形が違う（リードに報告）")
+        elif result in _RESULTS:
+            n = e.get("attempts")
+            if type(n) is not int or not 0 <= n <= MAX_ATTEMPTS_PER_FILE:
+                raise GkgError("取得の記録の結果の行の attempts の形が違う（リードに報告）")
+            if not valid_reason(e.get("reason")):
+                raise GkgError("取得の記録の結果の行の reason が、決まった語でない（リードに報告）")
+        else:
+            raise GkgError("取得の記録に、知らない result の行がある（リードに報告）")
 
 
 def chain_exclusion_ref(root):

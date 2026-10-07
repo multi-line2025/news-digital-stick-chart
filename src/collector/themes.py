@@ -49,8 +49,8 @@
       1段目の前提（T-026 軽-3）：git log --all -- data/manifest/gdelt-themes.jsonl が空である
       こと（マニフェストを git mv で別の名前に移しても、元の名前の履歴が残るので止まる）と、
       保存先（~/Desktop/news-stick-data）に gdelt-themes- で始まるファイルが無いこと。
-      限界：履歴そのものを書き換えること（git reset・rebase・filter-branch など）は見分けられない。失敗した取得も、試行の行として記録に残る。
-      取得に成功すれば、結果の行（kind が result）を書く。
+      限界：履歴そのものを書き換えること（git reset・rebase・filter-branch など）は見分けられない。
+      失敗した取得は fetch と failed の行として記録に残る。
       限界（前提 → 結論）：通信のあとの行（fetch・failed）は、コミットする前は作業ツリーに
       だけある → その行を消して HEAD と同じ形に戻すと、もう一度通信できる。2段目のあとすぐに
       コミットする。

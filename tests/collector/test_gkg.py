@@ -1635,11 +1635,8 @@ class Kill9(BaseException):
     """kill -9 の見本。run-stop も書かれない（_write_stop を外して使う）。"""
 
 
-class TestRound3Reproductions(RunCase):
-    """差し戻し3回目：監査係の再現（scratchpad/exp4）。止まるものと、止まらずに記録に残るもの。"""
-
-    DAYS = ("20150302", "20150303", "20150304")
-    N = 3
+class _ForgeMixin:
+    """監査の再現で使う部品（取得の記録への偽の行、kill -9 の見本）。"""
 
     def lp(self):
         return os.path.join(self.store, gkg.fetch_log_name(RUN_ID))
@@ -1665,6 +1662,13 @@ class TestRound3Reproductions(RunCase):
         with mock.patch.object(gkg, "_write_stop", lambda *a, **k: None):
             with self.assertRaises(Kill9):
                 self.run_gkg(transport=transport)
+
+
+class TestRound3Reproductions(_ForgeMixin, RunCase):
+    """差し戻し3回目：監査係の再現（scratchpad/exp4）。止まるものと、止まらずに記録に残るもの。"""
+
+    DAYS = ("20150302", "20150303", "20150304")
+    N = 3
 
     def test_Y1_forged_failed_in_tail_is_not_laundered_by_two_resumes(self):
         target = ts_of(self.DAYS[2], 1)
@@ -1870,6 +1874,125 @@ class TestT026(RunCase):
         rec = [f for f in day["failed_files"] if f["file_time"] == target][0]
         self.assertEqual(rec["requests_sent"], len(sent))
         self.assertLess(rec["attempts"], rec["requests_sent"])
+
+
+class TestT026Round2(_ForgeMixin, RunCase):
+    """T-026 差し戻し1回目：reason・attempts の形（軽-4）、取り直しで結果が変わる正直な再開（軽-2）。"""
+
+    DAYS = ("20150302", "20150303", "20150304")
+    N = 3
+
+    def forge_in_trusted(self, **changes):
+        """監査の probe_c：kill -9 のあと、偽の行を足し、コミット前の day の行の控えを書き直す。"""
+        target = ts_of(self.DAYS[2], 1)
+        self.kill_at(ts_of(self.DAYS[1], 0))
+        self.append_log(dict(self.forged(target), **changes))
+        lines = open(self.manifest_path(), "rb").read().splitlines()
+        last = json.loads(lines[-1])
+        self.assertEqual(last["kind"], "day")
+        with open(self.lp(), "rb") as f:
+            data = f.read()
+        last["fetch_log_size"] = len(data)
+        last["fetch_log_sha256"] = hashlib.sha256(data).hexdigest()
+        lines[-1] = json.dumps(last, sort_keys=True).encode()
+        with open(self.manifest_path(), "wb") as f:
+            f.write(b"\n".join(lines) + b"\n")
+
+    def test_forged_reason_with_free_words_is_refused(self):
+        self.forge_in_trusted(reason="Taro_Example")
+        with self.assertRaisesRegex(gkg.GkgError, "決まった語でない"):
+            self.run_once()
+        self.assertEqual(self.transport.calls, [])
+        for e in self.manifest():
+            self.assertNotIn("Taro_Example", json.dumps(e))
+
+    def test_forged_network_reason_with_free_words_is_refused(self):
+        self.forge_in_trusted(reason="network_TaroExample")
+        with self.assertRaisesRegex(gkg.GkgError, "決まった語でない"):
+            self.run_once()
+
+    def test_forged_attempts_out_of_range_is_refused(self):
+        for bad in (999, -1, "1", 1.0, True):
+            with self.subTest(bad=bad):
+                self.tearDown_reset()
+                self.forge_in_trusted(attempts=bad)
+                with self.assertRaisesRegex(gkg.GkgError, "attempts の形"):
+                    self.run_once()
+
+    def tearDown_reset(self):
+        shutil.rmtree(self.tmp, True)
+        self.setUp()
+
+    def test_attempt_line_count_out_of_range_is_refused(self):
+        self.kill_at(ts_of(self.DAYS[1], 0))
+        self.append_log({"run_id": RUN_ID, "mode": "official", "file_time": ts_of(self.DAYS[2], 0),
+                         "result": "attempt", "attempt": 0, "at": "2026-10-08T00:00:00Z"})
+        with self.assertRaisesRegex(gkg.GkgError, "attempt の行の回数"):
+            self.run_once()
+
+    def test_valid_reason_vocabulary(self):
+        for r in ("", "http_404", "http_503", "http_None", "http_302", "network_URLError",
+                  "network_ConnectionResetError", "network_TimeoutError", "network_IncompleteRead",
+                  "retry_after_too_long", "attempts_exhausted", "ambiguous_listing",
+                  "content_encoding", "size_mismatch", "md5_mismatch", "too_large",
+                  "format_zip", "format_zip_read", "format_too_large_unzipped",
+                  "consecutive_transient_failures"):
+            self.assertTrue(gkg.valid_reason(r), r)
+        for r in ("Taro_Example", "http_4040", "http_x", "network_", "network_Taro",
+                  "format_other", "format_", None, 404, "ok"):
+            self.assertFalse(gkg.valid_reason(r), r)
+
+
+class TestChangedResultOnHonestResume(RunCase):
+    """T-026 差し戻し1回目 軽-2（監査の probe_b4）：日の集計を書いたあと day の行の前に kill -9 し、
+    取り直しで結果が変わると、何回再開しても止まり続ける。日の集計を保存先の外へ移せば続けられる。"""
+
+    DAYS = ("20150302", "20150303")
+    N = 3
+
+    def kill_after_dayfile(self):
+        day = "2015-03-02"
+        real = gkg.append_jsonl
+
+        def app(path, obj, what, *a, **k):
+            if obj.get("kind") == "day" and obj.get("day") == day:
+                raise Kill9()
+            return real(path, obj, what, *a, **k)
+        with mock.patch.object(gkg, "append_jsonl", app), \
+                mock.patch.object(gkg, "_write_stop", lambda *a, **k: None):
+            with self.assertRaises(Kill9):
+                self.run_gkg()
+
+    def check_stuck_then_move_out(self):
+        for _i in range(2):
+            with self.assertRaisesRegex(gkg.GkgError, "取り直した集計と中身が違う"):
+                self.run_once()
+        name = gkg.day_file_name(RUN_ID, "2015-03-02")
+        os.rename(os.path.join(self.store, name), os.path.join(self.tmp, "moved-" + name))
+        return self.run_once()
+
+    def test_failed_then_ok(self):
+        ft = ts_of(self.DAYS[0], 1)
+        self.responses[ft] = [FakeResponse(status=503)]
+        self.kill_after_dayfile()
+        self.responses[ft] = [ok_response(self.zips[ft])]
+        done = self.check_stuck_then_move_out()
+        self.assertEqual(done["files_failed"], 0)
+
+    def test_failed_reason_changes(self):
+        ft = ts_of(self.DAYS[0], 1)
+        self.responses[ft] = [FakeResponse(status=503)]
+        self.kill_after_dayfile()
+        self.responses[ft] = [FakeResponse(status=502)]
+        done = self.check_stuck_then_move_out()
+        self.assertEqual(done["files_failed"], 1)
+
+    def test_ok_then_failed(self):
+        ft = ts_of(self.DAYS[0], 1)
+        self.kill_after_dayfile()
+        self.responses[ft] = [FakeResponse(status=503)]
+        done = self.check_stuck_then_move_out()
+        self.assertEqual(done["files_failed"], 1)
 
 
 class TestRound3Trial(RunCase):
