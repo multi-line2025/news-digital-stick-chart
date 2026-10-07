@@ -152,23 +152,30 @@ class TestExclusionGateFirst(unittest.TestCase):
             self.gate_with("boom", ag.PROJECT)
 
 
-class TestVolumeIdentity(unittest.TestCase):
-    """差し戻し1回目 軽3：diskutil で形式と VolumeUUID を読む（ここでは diskutil を差し替える）。"""
+class TestFilesystemCheck(unittest.TestCase):
+    """ディスクの形式だけを diskutil で確かめる（ここでは diskutil を差し替える）。
+    VolumeUUID は取り出さず、返しもしない（オーナーの決定「記録に残さず、公開もしない」）。"""
 
     def run_with(self, info, code=0):
         out = types.SimpleNamespace(returncode=code, stdout=plistlib.dumps(info))
         with mock.patch.object(ag.subprocess, "run", return_value=out) as r:
-            v = ag.volume_identity("/x")
+            v = ag.check_filesystem("/x")
         self.assertEqual(r.call_args.args[0], [ag.DISKUTIL, "info", "-plist", "/x"])
         return v
 
     def test_cases(self):
-        self.assertEqual(self.run_with({"FilesystemType": "msdos", "VolumeUUID": "U-1"}), "U-1")
+        self.assertIsNone(self.run_with({"FilesystemType": "msdos", "VolumeUUID": "U-1"}))
         for info, code, pattern in (({"FilesystemType": "exfat", "VolumeUUID": "U"}, 0, "msdos"),
-                                    ({"FilesystemType": "msdos"}, 0, "VolumeUUID"),
+                                    ({"VolumeUUID": "U"}, 0, "msdos"),
                                     ({"FilesystemType": "msdos", "VolumeUUID": "U"}, 1, "読めない")):
             with self.assertRaisesRegex(ag.GateError, pattern):
                 self.run_with(info, code)
+
+    def test_no_volume_uuid_in_entry_code(self):
+        with open(ENTRY, encoding="utf-8") as f:
+            code = f.read().split('"""', 2)[2]
+        self.assertNotIn("volume_id", code)
+        self.assertNotIn('get("VolumeUUID")', code)
 
 
 class TestMethodAccessFirst(unittest.TestCase):
@@ -226,7 +233,7 @@ class E2ECase(taf.CopyCase):
         p = mock.patch.object(ag, "_exec_module", exec_module)
         p.start()
         self.addCleanup(p.stop)
-        self.volume_id = lambda v: "TEST-VOLUME-UUID"
+        self.fs_check = lambda v: None
         self.zips = {}
         for d in self.DAYS:
             for i in range(3):
@@ -291,7 +298,7 @@ class E2ECase(taf.CopyCase):
                     transport=self.gtransport, sleep=lambda s: None, clock=self.clock,
                     now=lambda: tg.NOW, log=self.gkg_logs.append,
                     disk_free=lambda p: 100 * 1024 ** 3, check_volume=self.check_volume,
-                    volume_id=self.volume_id)
+                    fs_check=self.fs_check)
         base.update(kw)
         return ag._TestSeams(**base)
 
@@ -480,7 +487,7 @@ class TestEndToEndOnFat32(E2ECase):
     def setUp(self):
         super().setUp()
         self.check_volume = None                       # 関門と取得で本物の gkg.check_volume
-        self.volume_id = None                          # 本物の diskutil で VolumeUUID を読む
+        self.fs_check = None                           # 本物の diskutil で形式を確かめる
 
     def test_trial_and_official_on_fat32(self):
         self.add_method_access()
@@ -489,7 +496,21 @@ class TestEndToEndOnFat32(E2ECase):
         out = self.acquire_official(self.gseams())
         self.assertEqual(out["files_ok"], len(self.zips))
         man = gkg.read_jsonl(os.path.join(self.project, "data", "manifest", gkg.MANIFEST_NAME))
-        self.assertRegex(man[0]["volume_id"], r"\A[0-9A-F-]{36}\Z")
+        # オーナーの決定：イメージの VolumeUUID が、どの記録にも書かれていないこと
+        info = plistlib.loads(subprocess.run(["/usr/sbin/diskutil", "info", "-plist", self.volume],
+                                             capture_output=True, timeout=60).stdout)
+        uuid = info["VolumeUUID"].encode()
+        for top in (os.path.join(self.project, "data", "manifest"), self.gkg_store,
+                    self.trial_store):
+            for n in os.listdir(top):
+                with open(os.path.join(top, n), "rb") as f:
+                    b = f.read()
+                if n.endswith(".gz") and not n.startswith("._"):   # ._ は macOS の付属のファイル
+                    b = tg.gzip.decompress(b)
+                for form in (uuid, uuid.lower(), hashlib.sha256(uuid).hexdigest().encode()):
+                    self.assertNotIn(form, b, n)
+                self.assertNotIn(b"volume_id", b, n)
+        self.assertNotIn(uuid, "\n".join(self.gkg_logs).encode())
         for e in man:
             if e["kind"] == "day":
                 with open(os.path.join(self.gkg_store, e["file_name"]), "rb") as f:
@@ -574,6 +595,7 @@ class TestProductionPath(unittest.TestCase):
         self.assertIsNone(s.transport)
         self.assertIsNone(s.volume)                    # 関門で gkg.VOLUME_MOUNT に決まる
         self.assertIsNone(s.check_volume)              # 関門で gkg.check_volume に決まる
+        self.assertIsNone(s.fs_check)                  # 関門で check_filesystem に決まる
         self.assertIs(s.sleep, time.sleep)
         self.assertIs(type(s), ag._Seams)
         with self.assertRaises(AttributeError):
@@ -592,7 +614,7 @@ class TestProductionPath(unittest.TestCase):
         def seams(**kw):
             base = dict(project=tmp, home=tmp, volume=tmp, transport=None, sleep=None,
                         clock=None, now=None, log=None, disk_free=None, check_volume=None,
-                        volume_id=None)
+                        fs_check=None)
             base.update(kw)
             return ag._TestSeams(**base)
 

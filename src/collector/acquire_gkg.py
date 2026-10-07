@@ -53,8 +53,9 @@
              試しの run は news-stick-data/gkg-trial）：ディスクがマウントされていて読み取り
              専用でなく、2段のフォルダがリンクでない既にあるフォルダで、名前の大文字と小文字
              まで同じ（gkg.resolve_paths）。外れていれば、何も書かずに止まる。
-             さらに diskutil でディスクの形式（msdos）と VolumeUUID を読む。形式が msdos で
-             なければ止まる。VolumeUUID は run-start に書き、再開のたびに照らす（gkg.py 5.2章）
+             さらに diskutil でディスクの形式を読み、msdos（FAT32）でなければ止まる。形式は
+             どの記録にも書かない。VolumeUUID は取り出さない・書かない（オーナーの決定。ディスクの
+             同一性は、保存先の中の印のファイルで確かめる。gkg.py 5.2章）
          (5) 正式な run では、HEAD のコミットの中のマニフェスト（data/manifest/
              gdelt-gkg-method.jsonl と gdelt-gkg-trial.jsonl。無ければ空）を git から読み、
              gkg.run_gkg に渡す。run-start がコミットされていなければ、また試しの run の
@@ -119,7 +120,7 @@ DISKUTIL_TIMEOUT_SECONDS = 60
 # 取得のコードのうち、このファイル以外の4つの sha256。変えたらここも直してコミットする
 # （テストが照合する）。
 PINNED_SHA256 = (
-    (GKG_REL, "5fb1d56655619678603f3452c1b933727ec9aadc9784090511f030e4437dd39d"),
+    (GKG_REL, "87285d562ecdfcdde1cad539c5d077e30bb3310ff0f4ee7096f375e69c6cd1ed"),
     (FILELIST_REL, "afd7a9dd47bc052a691e1a4cd558b211f4d72cf1ce1f451fa9f3016540cd04a7"),
     (PRIVACY_SCAN_REL, "68d8836d56489ca5df9f2f55e24a2642ebf3aa14afdc2e0120577c7b6c6cb887"),
     (CODEGATE_REL, "d422be41dc59c4be50689a2426453db965be506a9981770ab3eb7557ed078769"),
@@ -147,7 +148,7 @@ def production_home():
 
 class _Seams:
     FIELDS = ("project", "home", "volume", "transport", "sleep", "clock", "now", "log", "disk_free",
-              "check_volume", "volume_id")
+              "check_volume", "fs_check")
     __slots__ = FIELDS
 
     def __init__(self, **kw):
@@ -167,7 +168,7 @@ def _utc_now():
 def _production_seams():
     return _Seams(project=PROJECT, home=production_home(), volume=None, transport=None,
                   sleep=time.sleep, clock=time.monotonic, now=_utc_now, log=None, disk_free=None,
-                  check_volume=None, volume_id=None)
+                  check_volume=None, fs_check=None)
 
 
 class _TestSeams(_Seams):
@@ -217,8 +218,12 @@ def _exclusion_gate(s, codes):
     return themes.exclusion_rule_ref(rec)
 
 
-def volume_identity(volume):
-    """関門 (4)。diskutil でディスクの形式と VolumeUUID を読む。形式が msdos でなければ止まる。"""
+def check_filesystem(volume):
+    """関門 (4)。diskutil でディスクの形式だけを読み、msdos（FAT32）でなければ止まる。
+
+    diskutil の出力のうち、FilesystemType だけを見る。ほかの値（VolumeUUID など）は取り出さず、
+    どこにも書かない（オーナーの決定「記録に残さず、公開もしない」）。
+    """
     import plistlib
     try:
         r = subprocess.run([DISKUTIL, "info", "-plist", volume], capture_output=True,
@@ -229,12 +234,10 @@ def volume_identity(volume):
         info = None
     if not isinstance(info, dict):
         raise GateError("保存先のディスクの情報を diskutil で読めない")
-    if info.get("FilesystemType") != "msdos":
+    fs = info.get("FilesystemType")
+    del info
+    if fs != "msdos":
         raise GateError("保存先のディスクの形式が msdos（FAT32）でない")
-    uuid = info.get("VolumeUUID")
-    if not isinstance(uuid, str) or not uuid:
-        raise GateError("保存先のディスクの VolumeUUID が無い")
-    return uuid
 
 
 def _method_access_gate(s):
@@ -371,7 +374,7 @@ def check_gate(s, method_rec, mode="official", code=None):
         gkg.resolve_paths(s.project, volume, mode, check_volume)
     except gkg.GkgError as e:
         raise GateError(str(e)) from None
-    volume_id = (volume_identity if s.volume_id is None else s.volume_id)(volume)
+    (check_filesystem if s.fs_check is None else s.fs_check)(volume)
     committed = committed_trial = None
     if mode == "official":
         committed = _committed_manifest(
@@ -385,8 +388,7 @@ def check_gate(s, method_rec, mode="official", code=None):
     return {"codes": codes, "code_sha256": _sha256(codes[CODE_REL]), "gkg": gkg,
             "filelist_rows": rows, "filelist_sha256": fl_sha, "method_access_seq":
             method_rec["seq"], "volume": volume, "check_volume": check_volume,
-            "committed_manifest": committed, "committed_trial_manifest": committed_trial,
-            "volume_id": volume_id}
+            "committed_manifest": committed, "committed_trial_manifest": committed_trial}
 
 
 # ---------------------------------------------------------------------------
@@ -415,7 +417,7 @@ def _acquire(mode="official", _test=None):
                        code_sha256=gate["code_sha256"],
                        committed_manifest=gate["committed_manifest"],
                        committed_trial_manifest=gate["committed_trial_manifest"],
-                       volume_id=gate["volume_id"], exclusion_rule=exclusion_rule,
+                       exclusion_rule=exclusion_rule,
                        check_volume=gate["check_volume"], sleep=s.sleep, clock=s.clock,
                        now=s.now, **kw)
 

@@ -266,10 +266,19 @@
       - 限界：kill -9・停電のあとは、控えより後ろに足した attempt の行を見分けられない（その
         ファイルの試行の回数が増える。最悪の場合、要求を送らずに attempts_exhausted になる）。
         試しの run のマニフェストは、正式な run の前まではコミットを求めない（5.1章の照合で補う）。
-    ディスクの識別子（軽3）
-      - 入口のスクリプトが diskutil で読んだ VolumeUUID（volume_id）を run-start に書き、
-        再開のたびに同じであることを確かめる。違うディスク（同じ名前の別のディスク・
-        フォーマットし直したディスク）なら止まる。形式が msdos でなければ、関門で止まる。
+    ディスクの同一性（軽3。オーナーの決定「記録に残さず、公開もしない」2026-10-08）
+      - VolumeUUID は、マニフェスト・取得の記録・日の集計・ログのどこにも書かない。
+      - 代わりに、run を始めるとき（run-start の行を書く前）に、保存先のフォルダの中に印の
+        ファイル gkg-<mode>-<run_id>-volume-mark を作り、乱数（secrets.token_hex(32)）を書く。
+        印の値も、そのハッシュも、マニフェストには書かない（Git に入らず、公開されない）。
+      - 再開のたびに、保存先のフォルダに印のファイルがあり、通常のファイル（リンクでない）で、
+        決めた形（16進64字と改行）であることを確かめる。無ければ、run-start のときと違うディスク
+        （同じ名前の別のディスク・フォーマットし直したディスク）とみなして止まる。
+      - 印の値と照らす相手は、公開される場所には置けないので、確かめるのは「同じ印のファイルが
+        保存先にあること」までである。保存先のフォルダごと別のディスクに写したものは、同じ
+        ディスクとして通る（中身は同じなので、取得の記録の控えの照合は続けて働く）。
+      - ディスクの形式（msdos でなければ止まる）は、入口のスクリプトの関門で確かめる（記録には
+        何も書かない）。
     0バイトの日の集計（軽3）
       - 日の集計のファイルを作った直後（中身を書く前）に止まると、0バイトのファイルが残る。
         再開のときに同じ名前の0バイトのファイルがあれば、消さずに、そこへ中身を書き足す
@@ -428,6 +437,7 @@ import itertools
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import stat
@@ -1467,6 +1477,49 @@ def chain_exclusion_ref(root):
     return themes.exclusion_rule_ref(rec)
 
 
+_MARK_RE = re.compile(rb"\A[0-9a-f]{64}\n\Z")
+
+
+def volume_mark_name(run_id, mode="official"):
+    """5.2章：ディスクの同一性の印のファイルの名前（保存先のフォルダの中。Git に入らない）。"""
+    store_spec(mode)
+    return "gkg-%s-%s-volume-mark" % (mode, run_id)
+
+
+def write_volume_mark(paths, run_id, mode):
+    """5.2章：run を始めるときに、乱数の印を保存先に書く。値はどの記録にも書かない。"""
+    _guard_store(paths)
+    path = os.path.join(paths["store"], volume_mark_name(run_id, mode))
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o644)
+    except FileExistsError:
+        raise GkgError("run-start の前なのに、ディスクの印のファイルが既にある（リードに報告）") from None
+    except OSError:
+        raise GkgError("ディスクの印のファイルを書けない") from None
+    try:
+        _write_all(fd, (secrets.token_hex(32) + "\n").encode("ascii"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def check_volume_mark(paths, run_id, mode):
+    """5.2章：再開のときに、印のファイルが保存先にあり、決めた形であることを確かめる。"""
+    path = os.path.join(paths["store"], volume_mark_name(run_id, mode))
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        raise GkgError("保存先にディスクの印のファイルが無い（run-start のときと違うディスク。"
+                       "リードに報告）") from None
+    with os.fdopen(fd, "rb") as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            raise GkgError("ディスクの印のファイルが通常のファイルでない")
+        data = f.read(200)
+    if not _MARK_RE.match(data):
+        raise GkgError("ディスクの印のファイルの形が違う（リードに報告）")
+
+
 def check_exclusion_record(root, ref, s0):
     """5.3章（差し戻し2回目 中-B）：渡された除外の規則の封印の記録が、鎖の上の記録であること。
 
@@ -1482,7 +1535,8 @@ def check_exclusion_record(root, ref, s0):
         raise GkgError("除外の規則の封印の記録が、run-start に書いたものと違う")
 
 
-_TRIAL_FILE_RE = re.compile(r"\Agkg-trial-([0-9a-f]{16})-(?:day-\d{8}\.tsv\.gz|fetch-log\.jsonl)\Z")
+_TRIAL_FILE_RE = re.compile(
+    r"\Agkg-trial-([0-9a-f]{16})-(?:day-\d{8}\.tsv\.gz|fetch-log\.jsonl|volume-mark)\Z")
 
 
 def check_trial_folder(root, volume, check_volume, trial_bytes, trial_run_ids):
@@ -1529,7 +1583,7 @@ def _trial_info(paths):
 
 def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, code_sha256,
             mode="official", committed_manifest=None, committed_trial_manifest=None,
-            volume_id=None, exclusion_rule=None, transport=urllib_transport, sleep=time.sleep, clock=time.monotonic,
+            exclusion_rule=None, transport=urllib_transport, sleep=time.sleep, clock=time.monotonic,
             now=lambda: datetime.datetime.now(datetime.timezone.utc), log=_stderr_log,
             disk_free=_disk_free, check_volume=check_volume):
     """5章の取得の全体。全部の日が終われば dict を返す。
@@ -1537,7 +1591,6 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
     止まる条件では RunInterrupted。正式な run の最初の実行は、run-start を書いたところで
     RunStartWritten（5章）。mode が trial なら 5.1章の試しの run。
     committed_trial_manifest：HEAD の試しの run のマニフェスト（正式な run だけ。5.1章）。
-    volume_id：保存先のディスクの識別子（入口のスクリプトが diskutil で読む。7章）。
     exclusion_rule：除外の規則の封印の記録の {"seq", "record_sha256"}（5.3章）。ここでも鎖の上の
       記録と照らす（関門を通らずにこの関数を呼んでも、取得は始まらない）。
     """
@@ -1578,9 +1631,8 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
         check_trial_folder(root, volume, check_volume, trial_bytes, trial["trial_run_ids"])
     if start:
         s0 = start[0]
-        for k in ("code_sha256", "filelist_sha256", "method_access_seq", "mode", "volume_id"):
-            want = volume_id if k == "volume_id" else base[k]
-            if s0.get(k) != want:
+        for k in ("code_sha256", "filelist_sha256", "method_access_seq", "mode"):
+            if s0.get(k) != base[k]:
                 raise GkgError("再開しようとした run の %s が、最初の run-start と違う" % k)
         if mode == "official":
             current = read_bytes_nofollow(paths["manifest"])
@@ -1593,6 +1645,7 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
             if s0.get("trial_run_ids") != trial["trial_run_ids"]:
                 raise GkgError("試しの run の一覧が、正式な run の run-start のあとで変わった")
         check_exclusion_record(root, exclusion_rule, s0)
+        check_volume_mark(paths, run_id, mode)
         trusted_size = check_log_checkpoint(log_path, mine)
         if disk_free(paths["store"]) < MIN_FREE_DISK_BYTES:
             raise RunInterrupted("保存先のディスクの空きが足りない")
@@ -1606,11 +1659,12 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
         if os.path.lexists(log_path):
             raise GkgError("run-start の前なのに、取得の記録が既にある（リードに報告）")
         check_exclusion_record(root, exclusion_rule, None)
+        write_volume_mark(paths, run_id, mode)
         size, sha = _log_state(log_path)
         trusted_size = size
         head = dict(base, kind="run-start", started_at=_iso(now()), files_selected=n_files,
                     days=len(plan), block_start=METHOD_BLOCK[0], block_end=METHOD_BLOCK[1],
-                    store_location=paths["location"], volume_id=volume_id,
+                    store_location=paths["location"],
                     fetch_log_size=size, fetch_log_sha256=sha,
                     exclusion_rule_seq=exclusion_rule["seq"],
                     exclusion_rule_record_sha256=exclusion_rule["record_sha256"])

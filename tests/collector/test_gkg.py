@@ -561,7 +561,7 @@ class RunCase(unittest.TestCase):
                     check_volume=self.check_volume, committed_manifest=self.committed_now(),
                     committed_trial_manifest=gkg.read_bytes_nofollow(
                         self.manifest_path(gkg.TRIAL_MANIFEST_NAME)),
-                    volume_id="TEST-VOLUME-UUID", exclusion_rule=self.excl)
+                    exclusion_rule=self.excl)
         args.update(kw)
         return gkg.run_gkg(**args)
 
@@ -603,7 +603,7 @@ class TestRun(RunCase):
         self.assertTrue(all(e["official"] for e in m))
         self.assertEqual(done["files_ok"], len(self.zips))
         self.assertEqual(sorted(os.listdir(self.store)),
-                         sorted([gkg.fetch_log_name(RUN_ID)]
+                         sorted([gkg.fetch_log_name(RUN_ID), gkg.volume_mark_name(RUN_ID)]
                                 + [gkg.day_file_name(RUN_ID, "%s-%s-%s" % (d[:4], d[4:6], d[6:]))
                                    for d in self.DAYS]))
         for e in m[2:4]:
@@ -935,7 +935,7 @@ class TestStoreGuard(RunCase):
             with self.assertRaisesRegex(gkg.RunInterrupted, "FAT32"):
                 self.run_gkg()
         self.assertEqual(self.transport.calls, [])
-        self.assertEqual(os.listdir(self.store), [gkg.fetch_log_name(RUN_ID)])
+        self.assertEqual(sorted(os.listdir(self.store)), sorted([gkg.fetch_log_name(RUN_ID), gkg.volume_mark_name(RUN_ID)]))
         self.assertEqual(self.store_files()[gkg.fetch_log_name(RUN_ID)], b"")
         with mock.patch.object(gkg, "FAT32_MAX_FILE_BYTES", 10):
             with self.assertRaisesRegex(gkg.RunInterrupted, "FAT32"):
@@ -1060,7 +1060,7 @@ class TestRunStartCommit(RunCase):
         self.assertEqual(self.transport.calls, [])
         self.assertEqual([e["kind"] for e in self.manifest()], ["run-start"])
         self.assertTrue(self.manifest()[0]["official"])
-        self.assertEqual(os.listdir(self.store), [])
+        self.assertEqual(os.listdir(self.store), [gkg.volume_mark_name(RUN_ID)])
 
     def test_uncommitted_or_rewritten_start_refused(self):
         with self.assertRaises(gkg.RunStartWritten):
@@ -1074,7 +1074,7 @@ class TestRunStartCommit(RunCase):
                     self.run_once(committed_manifest=committed)
                 self.assertEqual(self.transport.calls, [])
         self.assertEqual([e["kind"] for e in self.manifest()], ["run-start"])
-        self.assertEqual(os.listdir(self.store), [])
+        self.assertEqual(os.listdir(self.store), [gkg.volume_mark_name(RUN_ID)])
         done = self.run_once(committed_manifest=data)
         self.assertEqual(done["files_ok"], len(self.zips))
 
@@ -1228,7 +1228,7 @@ class TestModeMarks(RunCase):
     def test_names_and_lines_carry_mode(self):
         self.run_once(mode="trial", committed_manifest=None)
         names = sorted(os.listdir(self.trial_store))
-        self.assertEqual(names, sorted([gkg.fetch_log_name(RUN_ID, "trial")]
+        self.assertEqual(names, sorted([gkg.fetch_log_name(RUN_ID, "trial"), gkg.volume_mark_name(RUN_ID, "trial")]
                                        + [gkg.day_file_name(RUN_ID, d, "trial")
                                           for d in ("2015-03-02", "2015-03-03")]))
         for n in names:
@@ -1297,13 +1297,56 @@ class TestTrialRecordInOfficial(RunCase):
 class TestVolumeIdAndEmptyFile(RunCase):
     """差し戻し1回目 軽3：ディスクの識別子を実行をまたいで照らす。0バイトの日の集計の扱い。"""
 
-    def test_other_volume_id_refused_on_resume(self):
+    def mark_path(self, mode="official"):
+        folder = self.store if mode == "official" else self.trial_store
+        return os.path.join(folder, gkg.volume_mark_name(RUN_ID, mode))
+
+    def test_mark_written_but_not_recorded(self):
+        """オーナーの決定：ディスクの印は保存先にだけ置き、記録には値もハッシュも書かない。"""
         with self.assertRaises(gkg.RunStartWritten):
             self.run_once()
-        self.assertEqual(self.manifest()[0]["volume_id"], "TEST-VOLUME-UUID")
-        with self.assertRaisesRegex(gkg.GkgError, "volume_id"):
-            self.run_once(volume_id="OTHER-UUID")
+        with open(self.mark_path(), "rb") as f:
+            mark = f.read()
+        self.assertRegex(mark, rb"\A[0-9a-f]{64}\n\Z")
+        self.run_once()
+        token = mark.strip()
+        digests = [hashlib.sha256(x).hexdigest().encode() for x in (mark, token)]
+        for name, data in self.written().items():
+            if name == self.mark_path():
+                continue
+            self.assertNotIn(token, data, name)
+            for d in digests:
+                self.assertNotIn(d, data, name)
+            self.assertNotIn(b"volume_id", data, name)
+            self.assertNotIn(b"VolumeUUID", data, name)
+            self.assertNotIn(b"TEST-VOLUME", data, name)
+
+    def test_other_disk_without_mark_refused_on_resume(self):
+        with self.assertRaises(gkg.RunStartWritten):
+            self.run_once()
+        os.rename(self.mark_path(), self.mark_path() + "-aside")   # 別のディスクの形
+        with self.assertRaisesRegex(gkg.GkgError, "印のファイルが無い"):
+            self.run_once()
         self.assertEqual(self.transport.calls, [])
+
+    def test_bad_mark_refused(self):
+        with self.assertRaises(gkg.RunStartWritten):
+            self.run_once()
+        with open(self.mark_path(), "wb") as f:
+            f.write(b"x\n")
+        with self.assertRaisesRegex(gkg.GkgError, "印のファイルの形"):
+            self.run_once()
+        os.remove(self.mark_path())
+        os.symlink(self.mark_path() + "-elsewhere", self.mark_path())
+        with self.assertRaisesRegex(gkg.GkgError, "印のファイルが無い"):
+            self.run_once()
+
+    def test_existing_mark_before_start_refused(self):
+        with open(self.mark_path(), "wb") as f:
+            f.write(b"0" * 64 + b"\n")
+        with self.assertRaisesRegex(gkg.GkgError, "印のファイルが既にある"):
+            self.run_once()
+        self.assertEqual(self.manifest(), [])
 
     def test_empty_day_file_is_filled_not_replaced(self):
         name = gkg.day_file_name(RUN_ID, "2015-03-02")
@@ -1750,7 +1793,8 @@ class ChildRun:
             allowed = []
             if mode == "run":
                 allowed = [os.path.join(os.path.realpath(mdir), gkg.MANIFEST_NAME),
-                           os.path.join(real_store, gkg.fetch_log_name(RUN_ID))]
+                           os.path.join(real_store, gkg.fetch_log_name(RUN_ID)),
+                           os.path.join(real_store, gkg.volume_mark_name(RUN_ID))]
                 allowed += [os.path.join(real_store, gkg.day_file_name(
                     RUN_ID, "%s-%s-%s" % (d[:4], d[4:6], d[6:]))) for d in self.DAYS]
             report = tempfile.TemporaryFile()
@@ -1816,7 +1860,7 @@ class TestChildGuard(unittest.TestCase):
         self.assertEqual(rep["out"]["files_ok"], 4)
         self.assertEqual(r["outside"], [])
         self.assertEqual(sorted(n.split(os.sep)[0] for n in r["files"]),
-                         ["root"] + ["vol"] * 3)
+                         ["root"] + ["vol"] * 4)
         self.check_clean_outputs(r)
 
     def test_aggregate_under_guard_writes_nothing(self):
