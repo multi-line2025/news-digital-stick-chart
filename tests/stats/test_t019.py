@@ -485,8 +485,9 @@ def seal_target_bytes():
 
 class TestSealTargets(unittest.TestCase):
     def test_digest_script_agrees(self):
-        # src/stats/order1_digests.py（seal-order1.md 3章の照合に使う）が、このテストの中の別の実装と
-        # 同じ値を出すこと。CLI の出力も同じ。
+        # src/stats/order1_digests.py が、このテストの中の別の実装と同じ値を出すこと。CLI の出力も同じ。
+        # order1_digests.py は封印の対象の外なので、封印係の照合（seal-order1.md 2章の項目6、3章 (1) の
+        # 手順3）の根拠にはしない。封印係は自分のコードで計算し、このスクリプトの値は比べる参考に限る（T-025 L1）。
         import order1_digests
         want = {k: _sha256(v) for k, v in seal_target_bytes().items()}
         self.assertEqual(order1_digests.digests(PROJECT), want)
@@ -553,8 +554,13 @@ class TestSealTargets(unittest.TestCase):
 #       ctypes・通信などの事象を集め、許可リストと照らす（audit_sealed_tests）。
 #   (b) ソースの検査：二つのテストのソースを ast で調べ、使ってよいモジュールと os・subprocess・sys の
 #       使い方を許可リストに限る（sealed_test_source_problems）。audit hook で見えない読み方
-#       （os.stat、os.path.exists など）と、見張りの有無で振る舞いを変える書き方を、ここで禁じる。
-# 限界は docs/stats/tags-naive.md 5章 (1) の後の「限界」に書いた。
+#       （os.stat、os.path.exists など）と os.environ をそのまま読む書き方は、名前 os・sys から書いた
+#       ものに限って、ここで止まる。許可したほかのモジュールの属性を通る os・sys の使い方
+#       （unittest.loader.os.stat など）、許可した形で読んだ環境変数による分岐、日付による分岐は、
+#       (a) でも (b) でも止まらない（T-025 L2）。
+# 限界は docs/stats/tags-naive.md 5章 (1) の後の「限界」に書いた。今の二つの封印するテストに限界に
+# 当たる書き方が無いことは、test_sealed_tests_have_no_limit_patterns で確かめる。補う手順は、対象だけを
+# 置いた写しで見張りなしに流すこと（seal-order1.md 2章の項目10、test_sealed_tests_pass_in_targets_only_copy）。
 # ---------------------------------------------------------------------------
 
 # 子プロセス（と、その子の Python）に audit hook を入れる sitecustomize。
@@ -994,6 +1000,80 @@ def make_targets_only_copy(dst, extra=()):
 
 # 封印の対象のうち git の履歴から読むもの（1cb463a:… と 2d23cdf:…）の commit の40桁の ID。
 ORDER1_HISTORY_COMMITS = ("1cb463acfcf15ba315e6c454625ad681e86bbc2a", "2d23cdf6e01de5129fc7b0a5d85e89bf02e892c6")
+
+
+# 限界に当たる書き方（docs/stats/tags-naive.md 5章 (1) の限界）を ast で探す（T-025 L3）。
+_LIMIT_VIA_ATTRS = frozenset({"os", "_os", "sys", "_sys", "environ", "modules"})
+_LIMIT_CLOCK_ATTRS = frozenset({"today", "now", "utcnow", "time"})
+
+
+def limit_pattern_problems(source):
+    """限界に当たる書き方の一覧（空なら無い）。
+
+    - os・sys 以外の名前から、os・_os・sys・_sys・environ・modules に至る属性の参照
+      （unittest.loader.os.stat、random._os、exclusion.sys.modules など）
+    - today・now・utcnow・time の属性（日付・時刻による分岐の材料）
+    - os.environ を、子プロセスに渡す dict(os.environ, ...) の最初の引数の外で使うこと、または
+      dict(os.environ, ...) の戻り値から値を読むこと（.get や添字。環境変数による分岐の材料）
+    """
+    tree = ast.parse(source)
+    parents = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+    problems = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            if node.attr in _LIMIT_CLOCK_ATTRS:
+                problems.append("時刻の属性 %s（%d行）" % (node.attr, node.lineno))
+            if node.attr in _LIMIT_VIA_ATTRS:
+                base = node.value
+                while isinstance(base, ast.Attribute):
+                    base = base.value
+                root = base.id if isinstance(base, ast.Name) else type(base).__name__
+                if root not in ("os", "sys"):
+                    problems.append("%s を通る %s（%d行）" % (root, node.attr, node.lineno))
+                elif root == "os" and node.attr == "environ":
+                    call = parents.get(node)
+                    ok = (isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == "dict"
+                          and call.args and call.args[0] is node)
+                    if ok:
+                        user = parents.get(call)
+                        # dict(os.environ, ...) は、変数に入れるか、関数の引数に渡すだけを許す。
+                        if isinstance(user, (ast.Attribute, ast.Subscript)):
+                            ok = False
+                    if not ok:
+                        problems.append("os.environ の読み方（%d行）" % node.lineno)
+    return problems
+
+
+class TestSealedTestsLimitPatterns(unittest.TestCase):
+    """tags-naive.md 5章 (1)：今の二つの封印するテストに、限界に当たる書き方が無いこと（T-025 L3）。"""
+
+    CONTROLS = {
+        "unittest.loader.os.stat": 'unittest.loader.os.stat("x")',
+        "random._os": 'random._os.stat("x")',
+        "exclusion.sys.modules": 'y = "sitecustomize" in exclusion.sys.modules',
+        "date.today": 'y = datetime.date.today()',
+        "datetime.now": 'y = datetime.datetime.now()',
+        "dict_environ_get": 'y = dict(os.environ).get("A")',
+        "dict_environ_args_get": 'y = dict(os.environ, A="1").get("B")',
+        "environ_direct": 'y = os.environ.get("A")',
+        "environ_subscript": 'y = os.environ["A"]',
+        "dict_environ_subscript": 'y = dict(os.environ)["A"]',
+    }
+
+    def test_sealed_tests_have_no_limit_patterns(self):
+        for rel in SEALED_TEST_FILES:
+            with open(os.path.join(PROJECT, rel), encoding="utf-8") as f:
+                self.assertEqual(limit_pattern_problems(f.read()), [], rel)
+
+    def test_limit_pattern_check_catches_controls(self):
+        allowed = 'env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")\nsubprocess.run(["x"], env=dict(os.environ, A="1"))\n'
+        self.assertEqual(limit_pattern_problems(allowed), [])
+        for name, body in self.CONTROLS.items():
+            with self.subTest(name=name):
+                self.assertTrue(limit_pattern_problems(allowed + body + "\n"), name)
 
 
 class TestTargetsOnlyCopy(unittest.TestCase):
