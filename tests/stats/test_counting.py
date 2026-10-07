@@ -134,6 +134,8 @@ class TestCandidates(unittest.TestCase):
             "C4": ({"ZZA": 2, "ZZB": 1, "ZZC": 2, "ZZD": 1}, 6),
             "C5": ({"ZZA": 3, "ZZB": 1, "ZZC": 2, "ZZD": 1}, 6),
             "C6": ({"ZZA": 3, "ZZB": 1, "ZZC": 2, "ZZD": 1}, 7),
+            # C7：V1 か V2 の少なくとも一方。ZZB は1行目（両方）と3行目（V1 だけ）で2、ZZD は4行目（V2 だけ）で1
+            "C7": ({"ZZA": 2, "ZZB": 2, "ZZC": 2, "ZZD": 1}, 7),
         }
         for cid in counting.CANDIDATE_IDS:
             with self.subTest(cid=cid):
@@ -160,14 +162,32 @@ class TestCandidates(unittest.TestCase):
 
     def test_unknown_candidate(self):
         with self.assertRaises(ValueError):
-            counting.candidate_counts(base_summaries()[0], "C7")
+            counting.candidate_counts(base_summaries()[0], "C8")
 
     def test_candidate_table(self):
-        self.assertEqual(counting.CANDIDATE_IDS, ("C1", "C2", "C3", "C4", "C5", "C6"))
+        self.assertEqual(counting.CANDIDATE_IDS, ("C1", "C2", "C3", "C4", "C5", "C6", "C7"))
+        self.assertEqual(counting.REFERENCE_CANDIDATE_IDS, counting.CANDIDATE_IDS[:6])
         cols = {c[1] for c in counting.CANDIDATES}
         self.assertEqual(cols, set(counting.COLUMNS))
+        old = counting.COLUMNS[:3]
         self.assertEqual({(c[1], c[2]) for c in counting.CANDIDATES},
-                         {(a, b) for a in counting.COLUMNS for b in counting.DENOMINATORS})
+                         {(a, b) for a in old for b in counting.DENOMINATORS} | {("v1_or_v2_docs", "same")})
+
+    def test_c7_counts_once_when_both(self):
+        """C7 は、同じ文書で V1 と V2 の両方に付いても1回。V1 から V2 へ移っても数が変わらない。"""
+        both = [("1", "ZZA", "ZZA,1", False)] * 4
+        v1only = [("1", "ZZA", "", False)] * 4
+        v2only = [("1", "", "ZZA,1", False)] * 4
+        vals = []
+        for rows in (both, v1only, v2only):
+            s = counting.parse_day(make_day("2015-03-02", rows))
+            vals.append(counting.candidate_counts(s, "C7")[0]["ZZA"])
+        self.assertEqual(vals, [4, 4, 4])
+
+    def test_names_differ_counted_separately(self):
+        """限界（収集係の README 6.5.4）：V1 と V2 で名前が違えば、別々のテーマとして数える。"""
+        s = counting.parse_day(make_day("2015-03-02", [("1", "ZZA", "ZZAB,1", False)] * 2))
+        self.assertEqual(counting.candidate_counts(s, "C7"), ({"ZZA": 2, "ZZAB": 2}, 4))
 
 
 class TestDenominatorChanges(unittest.TestCase):
@@ -217,7 +237,7 @@ class TestParseDay(unittest.TestCase):
             counting.parse_day(bad)
 
     def _raw(self, body):
-        return gzip.compress(b"#\tgkg-day\t2\t2015-03-02\ttrial\n" + body, mtime=0)
+        return gzip.compress(b"#\tgkg-day\t3\t2015-03-02\ttrial\n" + body, mtime=0)
 
     def test_malformed_rows(self):
         cases = [
@@ -234,6 +254,28 @@ class TestParseDay(unittest.TestCase):
             with self.subTest(body=body):
                 with self.assertRaises(counting.CountingError):
                     counting.parse_day(self._raw(body))
+
+    def test_version_3_only_and_row_relations(self):
+        """版3（T-035）だけを読む。T の行の数どうしの関係が合わなければ止まる。"""
+        old = gzip.compress(b"#\tgkg-day\t2\t2015-03-02\ttrial\n", mtime=0)
+        with self.assertRaises(counting.CountingError):
+            counting.parse_day(old)
+        for nums in (b"2\t1\t1\t1", b"1\t2\t2\t1", b"1\t1\t1\t3", b"1\t2\t1\t2"):
+            with self.subTest(nums=nums):
+                with self.assertRaises(counting.CountingError):
+                    counting.parse_day(self._raw(b"V\t0\tZZA\nD\t1\t3\nT\t1\t0\t" + nums + b"\n"))
+        s = counting.parse_day(self._raw(b"V\t0\tZZA\nD\t1\t3\nT\t1\t0\t1\t1\t2\t1\n"))
+        self.assertEqual(s["themes"]["ZZA"]["1"], (1, 1, 2, 1))
+
+    def test_coverage(self):
+        """欄の手厚さ：S の3つの値と、すべての組の D の和。S の行が無ければ 0（T-036）。"""
+        s = base_summaries()[0]
+        # BASE_ROWS：V1 が空は4・5行目、V2 が空は5行目、どちらも空は5行目。7文書（翻訳の組も含む）
+        self.assertEqual(counting.coverage([s]), {"docs_all_groups": 7, "docs_without_v1_theme": 2,
+                                                  "docs_without_v2_theme": 1, "docs_without_any_theme": 1})
+        bare = counting.parse_day(self._raw(b"D\t1\t3\n"))
+        self.assertEqual(counting.coverage([bare]), {"docs_all_groups": 3, "docs_without_v1_theme": 0,
+                                                     "docs_without_v2_theme": 0, "docs_without_any_theme": 0})
 
     def test_ignores_other_tables(self):
         s = base_summaries()[0]
@@ -346,7 +388,7 @@ class TestCriteria(unittest.TestCase):
                 self.assertTrue(r["candidate"] is None or r["candidate"] in counting.CANDIDATE_IDS, bid)
                 base = counting.CRITERIA[bid](s)
                 self.assertEqual({k: r[k] for k in base}, base)
-                self.assertEqual(r["official"], bid == counting.OFFICIAL_CRITERION)
+                self.assertIs(r["official"], False)
                 self.assertEqual(r["decided"], base["candidate"] or counting.fallback_candidate(s, bid))
 
     def test_input_must_be_trial_days_in_order(self):
@@ -364,10 +406,35 @@ class TestCriteria(unittest.TestCase):
             self.assertEqual(list(inspect.signature(fn).parameters), ["summaries"], bid)
 
     def test_official_undecided(self):
-        self.assertIsNone(counting.OFFICIAL_CRITERION)
-        self.assertEqual(counting.official_criterion_status(), "undecided")
-        self.assertFalse(hasattr(counting, "RECOMMENDED_CRITERION"))
-        self.assertEqual(counting.ANSWER_TO_CRITERION, (("(イ)", "B1"), ("(ウ)", "B2")))
+        """正式な数え方は OWNER_DECISION から機械的に決まる C7。B1〜B5 を正式に書き入れる場所は無い（T-028 軽-2）。"""
+        self.assertEqual(counting.OFFICIAL_CANDIDATE, "C7")
+        self.assertEqual(counting.official_candidate(), "C7")
+        self.assertEqual(counting.official_status(), "decided")
+        for name in ("OFFICIAL_CRITERION", "RECOMMENDED_CRITERION", "ANSWER_TO_CRITERION"):
+            self.assertFalse(hasattr(counting, name), name)
+        out = counting.apply_all(base_summaries())
+        self.assertTrue(all(r["official"] is False for r in out.values()))
+        # 決定の（分子、分母）を別の候補に変えると、別の候補になる（手で識別子を書く場所が無い）
+        saved = dict(counting.OWNER_DECISION)
+        try:
+            counting.OWNER_DECISION["numerator_column"] = "v1_docs"
+            self.assertEqual(counting.official_candidate(), "C2")
+            self.assertEqual(counting.official_status(), "inconsistent")
+            counting.OWNER_DECISION["denominator"] = "nothing"
+            with self.assertRaises(ValueError):
+                counting.official_candidate()
+        finally:
+            counting.OWNER_DECISION.clear()
+            counting.OWNER_DECISION.update(saved)
+
+    def test_owner_decision_source_line(self):
+        """OWNER_DECISION の出どころの行が、その commit の reviews/T-028.md にちょうど1つある。"""
+        d = counting.OWNER_DECISION
+        r = subprocess.run(["git", "show", "%s:%s" % (d["source_commit"], d["source_path"])],
+                           capture_output=True, cwd=PROJECT)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = r.stdout.decode("utf-8").split("\n")
+        self.assertEqual(lines.count(d["source_line"]), 1)
 
 
 RID = "0123456789abcdef"
@@ -622,6 +689,25 @@ class TestDecide(unittest.TestCase):
         tm = manifest(trial_rows(RID, counting.TRIAL_DAYS, shas=tsha))
         self.assertEqual(self.decide(tm, self.om(tm, [RID]), files)["status"], "stopped")
 
+    def test_coverage_in_output(self):
+        out = self.decide(self.tm, b"")
+        self.assertEqual([c["day"] for c in out["coverage"]], list(counting.TRIAL_DAYS))
+        self.assertEqual(out["coverage"][0]["docs_without_any_theme"], 1)
+        self.assertEqual((out["official_candidate"], out["official_status"]), ("C7", "decided"))
+
+    def test_official_not_computable_stops(self):
+        """C7 が入力のある日で計算できない（テーマの付いた文書が無い）なら止まる（4章 (3)）。"""
+        rows = {d: BASE_ROWS for d in counting.TRIAL_DAYS}
+        files, shas = {}, {}
+        for d in counting.TRIAL_DAYS:
+            gz = make_day(d, BASE_ROWS if d != "2015-03-03" else [("1", "", "", False)], mode="trial")
+            files[("trial", counting.trial_day_file_name(RID, d))] = gz
+            shas[d] = hashlib.sha256(gz).hexdigest()
+        tm = manifest(trial_rows(RID, counting.TRIAL_DAYS, shas=shas))
+        out = counting.decide(tm, b"", _reader(files))
+        self.assertEqual(out["status"], "stopped")
+        self.assertIn("C7", out["steps"][-1]["reason"])
+
     def test_runs_record(self):
         """中-B2：二つの run_id と、両方の run の3日の failed_files を出力に入れる。"""
         ff = {"2015-03-03": [{"file_time": "20150303000000", "reason": "http_404", "attempts": 1}]}
@@ -691,7 +777,7 @@ class TestFallback(unittest.TestCase):
         self.assertEqual(counting.FALLBACK_ORDER["B2"], ("C1", "C3", "C2", "C4", "C5", "C6"))
         self.assertEqual(set(counting.FALLBACK_ORDER), set(counting.CRITERIA_IDS))
         for order in counting.FALLBACK_ORDER.values():
-            self.assertEqual(sorted(order), sorted(counting.CANDIDATE_IDS))
+            self.assertEqual(sorted(order), sorted(counting.REFERENCE_CANDIDATE_IDS))
 
 
 def json_rows(m):
@@ -707,7 +793,7 @@ class TestRecordAndDoc(unittest.TestCase):
         self.assertEqual(outs[0].decode("utf-8"), counting.canonical_json())
         rec = json.loads(outs[0])
         self.assertEqual([c["id"] for c in rec["candidates"]], list(counting.CANDIDATE_IDS))
-        self.assertEqual(rec["official_criterion_status"], "undecided")
+        self.assertEqual((rec["official_candidate"], rec["official_status"]), ("C7", "decided"))
 
     def test_cli_rejects_args(self):
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
@@ -741,11 +827,14 @@ class TestRecordAndDoc(unittest.TestCase):
         self.assertEqual([r[0] for r in rows], ["`%s`" % b for b in counting.CRITERIA_IDS])
         self.assertEqual(len(rows), len(counting.CRITERIA_IDS))
 
-    def test_doc_answer_table_and_no_recommendation(self):
-        """オーナーへの問いは一つで、答えと基準の対応は表だけにある。おすすめは書かない（差し戻し3回目）。"""
-        rows = self._table("answer")
-        self.assertEqual([(r[0], r[1]) for r in rows],
-                         [(a, "`%s`" % b) for a, b in counting.ANSWER_TO_CRITERION])
+    def test_doc_official_and_no_recommendation(self):
+        """正式な数え方の写しと、おすすめが無いこと（T-036）。"""
+        rows = self._table("official")
+        self.assertEqual(rows, [["`%s`" % counting.OFFICIAL_CANDIDATE,
+                                 "`%s`" % counting.OWNER_DECISION["numerator_column"],
+                                 "`%s`" % counting.OWNER_DECISION["denominator"],
+                                 "`%s`" % counting.OWNER_DECISION["source_commit"],
+                                 "`%s`" % counting.OWNER_DECISION["source_line"]]])
         with open(DOC, encoding="utf-8") as f:
             text = f.read()
         for word in ("おすすめ", "推奨", "読みA", "読みB"):

@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""報道量の数え方の候補と、候補から一つを選ぶ基準の案（T-028。順番1b で封印する提案）。
+"""報道量の数え方の候補と、正式に使う数え方、参考の基準の案（T-028・T-036。順番1b で封印する提案）。
 
 文書は docs/stats/counting.md。ここの定数と関数が正本で、文書の表はその写しである
 （tests/stats/test_counting.py で照合する）。
 
 - この版は「提案」で、オーナーの承認のあと封印係が順番1b で封印する。統計係は封印しない。
-- 正式に使う基準はオーナーが決める。決まるまで OFFICIAL_CRITERION は None で、
-  official_criterion_status() は "undecided" を返す。"undecided" のまま封印しない
-  （docs/stats/seal-order1.md 3章 (3) の4）。
+- 正式に使う数え方は、2026-10-08 のオーナーの決定（OWNER_DECISION）で決め打ちにした。分子は
+  T の行の v1_or_v2_docs（V1 か V2 の少なくとも一方にそのテーマが付いた文書の数）、分母は同じ欄の
+  全テーマの合計。正式な候補 OFFICIAL_CANDIDATE は、この決定の（分子の欄、分母）に当たる候補を
+  CANDIDATES から機械的に引いて決まる（official_candidate()）。手で候補の識別子を書く場所は無い
+  （T-028 の監査の軽-2）。B1〜B5 と、C7 のほかの候補は、比べるための参考で、正式ではない。
 - GKG のデータ、区分表、ネットワークには触れていない。このモジュールは現在の日時を読まない。
 - 入力の形は、収集係の日の集計（src/collector/gkg.py 6章、serialize_day が書く形。形式の版
-  "gkg-day" 2）である。gkg.py は読み込まない（取り込むと、収集係のコードが変わったときに、この
+  "gkg-day" 3。T-035）である。gkg.py は読み込まない（取り込むと、収集係のコードが変わったときに、この
   ファイルの sha256 が同じでも結果が変わりうるため）。形が合うことは、テストが gkg.serialize_day
   で作った日の集計で確かめる。
 
@@ -19,12 +21,12 @@
   reviews/T-016.md（コミット 4e7c511）：オーナーの発言は「翻訳の記事については案aで良いです」で、
   案a の中身（v0 では翻訳の記事を使わない）は、同じ節のリードの理解の行にある。数える組は
   COUNTED_GROUP_RULE（g の最後の文字が T でないもの。形の違う X も含む）。
-    分子：日の集計の T の行の、v1_docs・v2_docs・v2_mentions のどれか一つの欄を、数える組で
-          足したもの（テーマごと）。
+    分子：日の集計の T の行の、v1_docs・v2_docs・v2_mentions・v1_or_v2_docs のどれか一つの欄を、
+          数える組で足したもの（テーマごと）。正式に使うのは C7（v1_or_v2_docs、分母 same）。
     分母："docs"（D の行の文書数を、数える組で足したもの）か、"same"（分子と同じ欄を、
           数える組とすべてのテーマで足したもの）。
 
-基準の案（CRITERIA）
+基準の案（CRITERIA。B1〜B5 はどれも比べるための参考で、正式ではない。T-036）
   入力は3日分（TRIAL_DAYS）の日の集計。どの run の集計にするかは decide() の規則（1段目は最初の
   試しの run、2段目は正式な run の同じ3日）で、マニフェストだけから決まる。出力は候補の識別子
   ちょうど一つ。基準が該当なしなら FALLBACK_ORDER[基準] の順で使える最初の候補（apply_all の decided）。
@@ -32,10 +34,11 @@
 
 使い方
   .venv/bin/python -B src/stats/counting.py
-      候補と基準の案の定義を JSON（キー順・UTF-8）で出力する（データは読まない）
+      候補・正式な数え方・参考の基準の案の定義を JSON（キー順・UTF-8）で出力する（データは読まない）
   .venv/bin/python -B src/stats/counting.py apply <試しの run のマニフェスト> <正式な run のマニフェスト>
           <試しの run の保存先> <正式な run の保存先>
-      順番2の当てはめ（封印係が当てはめ直すときに使う）。マニフェストは、git の確かめに通った
+      順番2の当てはめ（封印係が当てはめ直すときに使う。正式な数え方が入力で計算できるかの確かめ、
+      参考の基準の案の結果、欄の手厚さ）。マニフェストは、git の確かめに通った
       コミットした版を渡す（通らなければ FAILED、HEAD にファイルが無ければ EMPTY と書く。
       それ以外で読めないパスは、確かめに通らないものとして止まる）。結果を JSON で出力する。終了コードは
       decided 0、stopped 1、pending 3。
@@ -58,15 +61,15 @@ Fr = fractions.Fraction
 # ---------------------------------------------------------------------------
 
 DAY_FORMAT_NAME = "gkg-day"
-DAY_FORMAT_VERSION = "2"
+DAY_FORMAT_VERSION = "3"
 TRIAL_MODE = "trial"
 OFFICIAL_MODE = "official"
 # gkg.TRIAL_DAYS と同じ（tests/stats/test_counting.py で照合する）
 TRIAL_DAYS = ("2015-03-02", "2015-03-03", "2015-03-04")
 TRIAL_MANIFEST_PATH = "data/manifest/gdelt-gkg-trial.jsonl"
-COLUMNS = ("v1_docs", "v2_docs", "v2_mentions")       # T の行の3つの数の欄（この順）
+COLUMNS = ("v1_docs", "v2_docs", "v2_mentions", "v1_or_v2_docs")   # T の行の4つの数の欄（この順。版3）
 DENOMINATORS = ("docs", "same")
-S_UNCOVERED = {"V1": "docs_without_v1_theme", "V2": "docs_without_v2_theme"}
+S_UNCOVERED = {"V1": "docs_without_v1_theme", "V2": "docs_without_v2_theme", "ANY": "docs_without_any_theme"}
 
 COUNTED_GROUP_RULE = "g does not end with 'T' (translated documents are not counted; 'X' is counted)"
 
@@ -92,18 +95,39 @@ CANDIDATES = (
     ("C4", "v2_docs", "same"),
     ("C5", "v2_mentions", "docs"),
     ("C6", "v2_mentions", "same"),
+    ("C7", "v1_or_v2_docs", "same"),       # T-036。2026-10-08 のオーナーの決定で正式に使う
 )
 CANDIDATE_IDS = tuple(c[0] for c in CANDIDATES)
 _CAND = {c[0]: (c[1], c[2]) for c in CANDIDATES}
+REFERENCE_CANDIDATE_IDS = ("C1", "C2", "C3", "C4", "C5", "C6")   # 基準の案 B1〜B5 が選ぶ候補（参考）
+
+# 正式に使う数え方（2026-10-08 オーナー決定。counting.md 0章）。出どころは commit を40桁で指定した
+# reviews/T-028.md の、行の全体が一致する引用の行。
+OWNER_DECISION = {
+    "numerator_column": "v1_or_v2_docs",
+    "denominator": "same",
+    "source_commit": "9c85f58f054a679b8e5f40fcd7adbb17536f6366",
+    "source_path": "reviews/T-028.md",
+    "source_line": "> 作り方2を、新しい候補として加え、正式に使う数え方にしよう",
+}
+
+
+def official_candidate():
+    """OWNER_DECISION の（分子の欄、分母）に当たる候補の識別子。ちょうど一つでなければ ValueError。"""
+    hit = [cid for cid, col, den in CANDIDATES
+           if (col, den) == (OWNER_DECISION["numerator_column"], OWNER_DECISION["denominator"])]
+    if len(hit) != 1:
+        raise ValueError("オーナーの決定に当たる候補が、ちょうど一つでない")
+    return hit[0]
+
+
+OFFICIAL_CANDIDATE = official_candidate()
 
 # ---------------------------------------------------------------------------
 # 基準の案
 # ---------------------------------------------------------------------------
 
 CRITERIA_IDS = ("B1", "B2", "B3", "B4", "B5")
-# オーナーへの問いの答えと基準の対応（counting.md 冒頭の表。T-028 差し戻し3回目）
-ANSWER_TO_CRITERION = (("(イ)", "B1"), ("(ウ)", "B2"))
-OFFICIAL_CRITERION = None          # オーナーが決める。決まるまで None（"undecided"）
 B4_SPREAD_LIMIT = Fr(11, 10)       # 1日あたりのテーマの数の、最大と最小の比の上限
 B5_MENTION_LIMIT = Fr(21, 20)      # 言及の回数と文書の数の比の上限
 # 基準の結果が該当なしのときの代わり：この順で、入力のすべての日で使える最初の候補（T-028 差し戻し1回目 中3）
@@ -113,12 +137,9 @@ _FB_DOCS = ("C1", "C3", "C2", "C4", "C5", "C6")     # 分母「全体の記事�
 FALLBACK_ORDER = {"B1": _FB_SAME, "B2": _FB_DOCS, "B3": _FB_DOCS, "B4": _FB_DOCS, "B5": _FB_SAME}
 
 
-def official_criterion_status():
-    if OFFICIAL_CRITERION is None:
-        return "undecided"
-    if OFFICIAL_CRITERION not in CRITERIA_IDS:
-        raise ValueError("OFFICIAL_CRITERION が基準の案の一覧に無い")
-    return "decided"
+def official_status():
+    """正式な数え方が決まっているか。OWNER_DECISION から機械的に決まるので、決まっていれば "decided"。"""
+    return "decided" if official_candidate() == OFFICIAL_CANDIDATE else "inconsistent"
 
 
 class CountingError(Exception):
@@ -152,7 +173,7 @@ def parse_day(gz_bytes, expect_day=None, expect_mode=None):
         raise CountingError("頭の行が無い")
     h = head.rstrip(b"\n").decode("ascii", "replace").split("\t")
     if len(h) != 5 or h[0] != "#" or h[1] != DAY_FORMAT_NAME or h[2] != DAY_FORMAT_VERSION:
-        raise CountingError("頭の行の形式が gkg-day 2 でない")
+        raise CountingError("頭の行の形式が gkg-day 3 でない")
     day, mode = h[3], h[4]
     if expect_day is not None and day != expect_day:
         raise CountingError("頭の行の日 %s が、求めた日 %s と違う" % (day, expect_day))
@@ -183,10 +204,15 @@ def parse_day(gz_bytes, expect_day=None, expect_mode=None):
                 docs[f[0]] = _int(f[1], "D の文書数")
             elif tag == "T":
                 f = rest.split("\t")
-                if len(f) != 5:
+                if len(f) != 6:
                     raise CountingError("T の行の欄の数が違う")
-                t_rows.append((f[0], _int(f[1], "T の番号"),
-                               tuple(_int(x, "T の数") for x in f[2:5])))
+                nums = tuple(_int(x, "T の数") for x in f[2:6])
+                v1, v2, v2m, v12 = nums
+                # 数どうしの関係（版3）：両方に付いても1回なので max(v1, v2) <= v12 <= v1 + v2。
+                # 言及の回数は文書の数以上（v2 <= v2m）。合わなければ形が違う
+                if not (max(v1, v2) <= v12 <= v1 + v2 and v2 <= v2m):
+                    raise CountingError("T の行の数どうしの関係が合わない")
+                t_rows.append((f[0], _int(f[1], "T の番号"), nums))
             elif tag == "S":
                 f = rest.split("\t")
                 if len(f) != 2:
@@ -374,8 +400,13 @@ def fallback_candidate(summaries, bid):
     return None
 
 
-def any_usable(summaries):
-    return any(usable(summaries, cid) for cid in CANDIDATE_IDS)
+def coverage(summaries):
+    """欄の手厚さ（T-036。順番2・順番5の記録に入れる）：入力の日々の合計で、すべての組の文書の数と、
+    テーマが一つも付かない文書の数（V1・V2・どちらにも）。S の行が無ければ 0。"""
+    out = {"docs_all_groups": sum(sum(s["docs"].values()) for s in summaries)}
+    for key, name in sorted(S_UNCOVERED.items()):
+        out[name] = sum(s["stats"].get(name, 0) for s in summaries)
+    return out
 
 
 def apply_all(summaries):
@@ -389,7 +420,7 @@ def apply_all(summaries):
         else:
             fb = fallback_candidate(summaries, bid)
             r["decided"], r["decided_by"] = fb, ("fallback" if fb is not None else "none")
-        r["official"] = (bid == OFFICIAL_CRITERION)
+        r["official"] = False       # B1〜B5 はどれも参考（T-036）
         out[bid] = r
     return out
 
@@ -570,9 +601,9 @@ def _load(sel, read_day_file):
 
 def _apply_input(sel, read_day_file):
     summaries, inputs = _load(sel, read_day_file)
-    if not any_usable(summaries):
-        raise CountingError("入力の3日で、使える候補が一つも無い")
-    return inputs, apply_all(summaries)
+    if not usable(summaries, OFFICIAL_CANDIDATE):
+        raise CountingError("入力の3日で、正式な数え方 %s が計算できない" % OFFICIAL_CANDIDATE)
+    return inputs, apply_all(summaries), [dict(coverage([s]), day=s["day"]) for s in summaries]
 
 
 def decide(trial_manifest, official_manifest, read_day_file):
@@ -584,7 +615,9 @@ def decide(trial_manifest, official_manifest, read_day_file):
     status：
       "decided"  入力が決まり、すべての基準の案を当てはめた
       "pending"  入力がまだそろっていない。そろってから同じ手順をもう一度行う
-      "stopped"  止まる。新しい版の順番1b へ（counting.md 4章 (3)）
+      "stopped"  止まる。参考の基準の結果と欄の手厚さは、この入力からは出さない。止まった事実を
+                 記録して公開する（counting.md 4章 (3)。正式な数え方 C7 は順番1b で決まっているので
+                 変わらない）
     2段目（正式な run の同じ3日）に進むのは、正式な run の run-start があり、かつ (a) 試しの run の
     run-start が一つも無いか、(b) 試しの run の run-start が R の一つだけで、R に day の行が一つも無い
     ときだけ。R が終わっていないのに、R に day の行があるか、ほかの試しの run の run-start がある
@@ -597,8 +630,7 @@ def decide(trial_manifest, official_manifest, read_day_file):
 
     def out(status, **kw):
         d = {"proposed_label": PROPOSED_LABEL, "status": status, "steps": steps, "runs": runs,
-             "official_criterion": OFFICIAL_CRITERION,
-             "official_criterion_status": official_criterion_status()}
+             "official_candidate": OFFICIAL_CANDIDATE, "official_status": official_status()}
         d.update(kw)
         return d
 
@@ -631,10 +663,10 @@ def decide(trial_manifest, official_manifest, read_day_file):
     if trial["status"] == "complete":
         steps.append({"step": TRIAL_MODE, "run_id": trial["run_id"]})
         try:
-            inputs, results = _apply_input(trial, read_day_file)
+            inputs, results, cov = _apply_input(trial, read_day_file)
         except CountingError as e:  # ファイルが無い・読めない・sha256・頭の行・候補なし：止まる
             return stop("1段目の入力を使えない: %s" % e)
-        return _decided(out, trial, inputs, results)
+        return _decided(out, trial, inputs, results, cov)
     # 試しの run が無いか、終わっていない
     if start is None:
         steps.append({"step": "wait", "reason": trial["status"]})
@@ -656,16 +688,15 @@ def decide(trial_manifest, official_manifest, read_day_file):
     except CountingError as e:
         return stop(str(e))
     try:
-        inputs, results = _apply_input(sel, read_day_file)
+        inputs, results, cov = _apply_input(sel, read_day_file)
     except CountingError as e:
         return stop("2段目の入力を使えない: %s" % e)
-    return _decided(out, sel, inputs, results)
+    return _decided(out, sel, inputs, results, cov)
 
 
-def _decided(out, sel, inputs, results):
-    official = results[OFFICIAL_CRITERION]["decided"] if OFFICIAL_CRITERION else None
+def _decided(out, sel, inputs, results, cov):
     return out("decided", input_mode=sel["mode"], input_run_id=sel["run_id"], inputs=inputs,
-               results=results, official_candidate=official)
+               results=results, coverage=cov)
 
 
 # ---------------------------------------------------------------------------
@@ -703,9 +734,14 @@ def as_record():
         },
         "criteria_ids": list(CRITERIA_IDS),
         "fallback_order": {k: list(v) for k, v in sorted(FALLBACK_ORDER.items())},
-        "answer_to_criterion": [list(x) for x in ANSWER_TO_CRITERION],
-        "official_criterion": OFFICIAL_CRITERION,
-        "official_criterion_status": official_criterion_status(),
+        "official_candidate": OFFICIAL_CANDIDATE,
+        "official_status": official_status(),
+        "owner_decision": dict(OWNER_DECISION),
+        "reference_only": "B1-B5 and every candidate other than the official one are references for "
+                          "comparison, not official",
+        "coverage": "S rows docs_without_v1_theme, docs_without_v2_theme, docs_without_any_theme (0 if absent) "
+                    "and D of all groups, recorded in order 2 (per input day) and order 5 (per calendar "
+                    "quarter of the period and for the whole period)",
         "trial_days": list(TRIAL_DAYS),
         "input_rule": {
             "manifests": "HEAD versions of the trial and official manifests; each must equal the working tree "
