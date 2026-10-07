@@ -1018,20 +1018,41 @@ def _is_dict_environ_call(node):
             and node.args[0].value.id == "os")
 
 
+def _is_subprocess_run(call):
+    """call が subprocess.run(...)（名前 subprocess の属性 run の呼び出し）か。"""
+    return (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "run"
+            and isinstance(call.func.value, ast.Name) and call.func.value.id == "subprocess")
+
+
+def _is_env_kw_of_subprocess_run(node, parents):
+    """node が subprocess.run(...) のキーワード引数 env= の値そのものか。"""
+    user = parents.get(node)
+    return (isinstance(user, ast.keyword) and user.arg == "env" and user.value is node
+            and _is_subprocess_run(parents.get(user)))
+
+
 def limit_pattern_problems(source):
-    """限界に当たる書き方の一覧（空なら無い）。
+    """限界に当たる書き方の一覧（空なら無い）。確かめるのは次の三つだけである。
 
     - os・sys 以外の名前から、os・_os・sys・_sys・environ・modules に至る属性の参照
       （unittest.loader.os.stat、random._os、exclusion.sys.modules など）
     - 日付・時刻を読む属性（today、now、time、monotonic、fromtimestamp など。_LIMIT_CLOCK_ATTRS）
-    - os.environ の使い方。許すのは次の形だけで、ほかはすべて問題とする。
+    - os.environ の使い方。許すのは次の形だけで、ほかはすべて問題とする（T-028 で T-025 の監査の中1を直した）。
       * os.environ は dict(os.environ, ...) の最初の引数としてだけ現れる。
-      * dict(os.environ, ...) の結果は、(a) 呼び出しのキーワード引数 env= の値に直接書くか、
-        (b) 一つの名前への単純な代入（env = dict(os.environ, ...)）の右辺に書く。
+      * dict(os.environ, ...) の結果は、(a) subprocess.run(...) のキーワード引数 env= の値に直接書くか、
+        (b) 一つの名前への単純な代入（env = dict(os.environ, ...)）の右辺に書く。(b) の代入は、
+        クラスの本体に直接置かない（クラスの属性になり、self.env などの属性として読めるため）。
       * (b) の名前は、ファイルの中で、その代入のほかに代入されず、読み出しはすべて
-        呼び出しのキーワード引数 env= の値そのもの（env=env）である。
+        subprocess.run(...) のキーワード引数 env= の値そのもの（env=env）である。
+      * (b) の名前と同じ名前の属性（self.env、C.env など）は、ファイルのどこにも現れない。
       これで、env.get(...)、env[...]、"X" in env、len(dict(os.environ))、for k in dict(os.environ)、
-      str(dict(os.environ)) のように、環境変数の値や名前を読む書き方は、すべて問題になる。
+      str(dict(os.environ))、f(env=dict(os.environ))（subprocess.run 以外の呼び出し）、クラスの属性に
+      入れて self.env で読む書き方は、問題になる。
+
+    確かめないこと：subprocess という名前が本物の subprocess モジュールを指すか（import の別名や
+    代入で置き換えたもの）、名前のつながりの外で値を読む書き方（globals()、locals()、vars() など、
+    名前を文字列で引くもの）。これらは今の二つの封印するテストには無い（test_sealed_tests_have_no_limit_patterns
+    は、この関数の結果が空であることだけを確かめる）。
     """
     tree = ast.parse(source)
     parents = {}
@@ -1056,11 +1077,13 @@ def limit_pattern_problems(source):
                     if not (_is_dict_environ_call(call) and call.args[0] is node):
                         problems.append("os.environ の読み方（%d行）" % node.lineno)
         if _is_dict_environ_call(node):
-            user = parents.get(node)
-            if isinstance(user, ast.keyword) and user.arg == "env" and isinstance(parents.get(user), ast.Call):
+            if _is_env_kw_of_subprocess_run(node, parents):
                 continue
+            user = parents.get(node)
             if (isinstance(user, ast.Assign) and user.value is node and len(user.targets) == 1
                     and isinstance(user.targets[0], ast.Name)):
+                if isinstance(parents.get(user), ast.ClassDef):
+                    problems.append("dict(os.environ, ...) をクラスの本体で代入している（%d行）" % node.lineno)
                 env_names[user.targets[0].id] = env_names.get(user.targets[0].id, 0) + 1
                 continue
             problems.append("dict(os.environ, ...) の使い方（%d行）" % node.lineno)
@@ -1071,10 +1094,10 @@ def limit_pattern_problems(source):
             problems.append("名前 %s に dict(os.environ, ...) のほかの代入がある" % name)
         for n in ast.walk(tree):
             if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Load):
-                user = parents.get(n)
-                if not (isinstance(user, ast.keyword) and user.arg == "env" and user.value is n
-                        and isinstance(parents.get(user), ast.Call)):
+                if not _is_env_kw_of_subprocess_run(n, parents):
                     problems.append("名前 %s の読み方（%d行）" % (name, n.lineno))
+            if isinstance(n, ast.Attribute) and n.attr == name:
+                problems.append("名前 %s と同じ名前の属性（%d行）" % (name, n.lineno))
     return problems
 
 
@@ -1112,6 +1135,18 @@ class TestSealedTestsLimitPatterns(unittest.TestCase):
         "two_targets": 'env = e2 = dict(os.environ, A="1")',
         "unpack": 'env, e2 = dict(os.environ, A="1"), 1',
         "other_kw_direct": 'f(x=dict(os.environ, A="1"))',
+        # T-025 再提出1回目の監査の中1で示された書き方（T-028 で足した）：env= を持つ呼び出しが
+        # subprocess.run でないもの、クラスの本体の代入と、同じ名前の属性での読み出し
+        "env_kw_other_func": 'def f(**kw):\n    return kw["env"].get("B")\ny = f(env=dict(os.environ, A="1"))',
+        "var_env_kw_other_func": ('env = dict(os.environ, A="1")\ndef f(env=None):\n    return None\n'
+                                  'y = f(env=env)'),
+        "env_kw_other_run": 'y = runner.run(["x"], env=dict(os.environ, A="1"))',
+        "class_body_self_attr": ('class C:\n    env = dict(os.environ, A="1")\n    def m(self):\n'
+                                 '        subprocess.run(["x"], env=self.env)\n        return self.env.get("B")'),
+        "same_name_attr": ('env = dict(os.environ, A="1")\nsubprocess.run(["x"], env=env)\n'
+                           'class C:\n    pass\nC.env = {}\ny = C.env'),
+        # T-025 再提出1回目の監査の軽5：time.time() の対照
+        "time.time": 'y = time.time()',
     }
 
     def test_sealed_tests_have_no_limit_patterns(self):
