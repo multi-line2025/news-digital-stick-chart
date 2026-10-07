@@ -111,6 +111,35 @@ class TestGkgManifests(t31.GkgCase):
                 self.verify_fails(("gkg-runs",), "1 行目の trial_run_ids %r が、official の記録（seq %d）より前の"
                                   % (bad, off["seq"]))
 
+    def test_trial_run_ids_follow_seq_order_after_reuse(self):
+        """T-046（T-043 の監査 軽-A、scratchpad/a43probe）：記録だけ書いて止まった run A → 別の run B →
+        A に戻して使い回す、の流れでは、マニフェストの行の順（B, A）と記録の seq の順（A, B）がずれる。
+        trial_run_ids は seq の順（収集係の T-045 の並べ方）で比べるので、seq の順なら通り、行の順なら止まる。"""
+        self.ready()
+        path = os.path.join(self.root, t31.tw.CODE_REL)
+        with open(path, encoding="utf-8") as f:
+            orig = f.read()
+        a, _r, _o = self.start_run(T0 + 4 * H, manifest=False)          # A：記録だけ（行の前で止まった）
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(orig + "# B\n")
+        self.commit("B")
+        b, _r, _o = self.start_run(T0 + 5 * H)                          # B：記録と行
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(orig)
+        self.commit("A に戻す")
+        a2, _r, _o = self.start_run(T0 + 6 * H)                         # A を使い回し、行を足す
+        self.assertEqual(a2, a)
+        off, _r, _o = self.start_run(T0 + 7 * H, mode="official", manifest=False)
+        run_id = lambda r: ledger.read_target_json(self.root, r, ledger.GKG_RUN_KIND)["run_id"]  # noqa: E731
+        seq_order = [run_id(a), run_id(b)]
+        row_order = [run_id(b), run_id(a)]
+        self.write_manifest(OFFICIAL, [self.row(off, trial_run_ids=seq_order)])
+        out = self.verify_ok("gkg-runs")
+        self.assertIn("%s：run-start の行 2 行、異なる run_id 2 個" % TRIAL, out)
+        self.write_manifest(OFFICIAL, [self.row(off, trial_run_ids=row_order)])
+        self.verify_fails(("gkg-runs",), "1 行目の trial_run_ids %r が、official の記録（seq %d）より前の"
+                          % (row_order, off["seq"]))
+
     def test_probe_a41_stamp_failure_then_retry(self):
         """中-1：監査のプローブの流れ（stamp の失敗 → .ots を stamp.py で作り直す → 同じ run_id でやり直す →
         別の run）で、記録が先へ進めなくならず、verify が通る。"""
@@ -237,7 +266,9 @@ class TestDocT043(unittest.TestCase):
                        "記録が0件でマニフェストも無い mode は照らさず", "通常のファイルでない",
                        "`trial_run_ids` が、`official` の記録より前の `trial` の記録の run_id の一覧",
                        "第三者は、マニフェストのコミットのあとで照らす",
-                       "最初の method-access の前に `stats-order1b` の記録も要る"):
+                       "最初の method-access の前に `stats-order1b` の記録も要る",
+                       "関門で照らすのは T-046 から", "収集係が T-045 で決めた並べ方",
+                       "`test_trial_run_ids_follow_seq_order_after_reuse`"):
             self.assertIn(phrase, self.text)
         self.assertNotIn("- マニフェストが無い mode は照らさず、", self.text)
 

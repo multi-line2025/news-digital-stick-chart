@@ -343,8 +343,8 @@ class TestWithoutOrder1(StatsCase):
         self.refuses(lambda: self.order1(T0 + 4 * H), "method-access の記録がある")
 
     def test_method_and_gkg_refused_without_order1b(self):
-        """T-043（T-041 の監査 軽-4）：順番1b が無ければ、method-access の書く仕組み（drand の前）と verify が
-        止まる（関門はまだ照らさない）。書く仕組みを飛ばして method-access を足しても、gkg-run-start は止まる。"""
+        """T-043（T-041 の監査 軽-4）・T-046：順番1b が無ければ、method-access の書く仕組み（drand の前）・
+        関門・verify が止まる。書く仕組みを飛ばして method-access を足しても、gkg-run-start は止まる。"""
         self.base()
         self.order1()
         self.refuses(lambda: seal_method.seal(self.root, T0 + 4 * H, "ots", drand_fetch=t17.NoCall(),
@@ -354,8 +354,8 @@ class TestWithoutOrder1(StatsCase):
                              self._drand_doc(ledger.METHOD_ACCESS_KIND, ROUND, None), T0 + 4 * H)
         self.commit("手順4（書く仕組みを飛ばした）")
         msg = "最初の method-access の記録（seq %d）より前に、stats-order1b（順番1b）の記録が無い" % m
-        # 関門では、まだ照らさない（収集係のテストとの兼ね合い。ledger.check_stats_order の注記）
-        self.method_gate()
+        with self.assertRaisesRegex(ledger.MethodAccessRequired, re.escape(msg)):     # T-046：関門でも照らす
+            self.method_gate()
         self.verify_fails(("stats-order", "all"), msg)
         self.refuses(lambda: self.gkg_run(T0 + 5 * H, m, nocall=True), "順番1b（stats-order1b）の記録が無い")
 
