@@ -32,7 +32,6 @@ import datetime
 import fractions
 import json
 import math
-import re
 import sys
 
 PROPOSED_LABEL = "tagrules-v1"
@@ -48,237 +47,19 @@ K_ARTICLES_PER_DAY = 10
 MIN_COUNT_PER_QUARTER = 1
 
 # ---------------------------------------------------------------------------
-# 除外する規則の語の一覧（docs/stats/tags-naive.md 2章）
-# 語は大文字の英字と数字。空白で区切ったものは語の並び（連続して現れたときだけ一致）。
-# 語の形の変化（複数形・活用形）は inflections() の規則で機械的に作る。
-# 区分の名前は報告のためのもので、有効な区分のどれに当たっても同じく外す。
+# 除外の規則は exclusion.py に分けた（T-022）。ここでは名前を引き継いで使う。
 # ---------------------------------------------------------------------------
 
-EXCLUSION_TERMS = {
-    "politics_election": (
-        "ELECTION", "ELECTORAL", "ELECTED", "ELECTING", "VOTE", "BALLOT", "REFERENDUM", "POLL",
-        "CANDIDATE", "INAUGURATION", "POLITICS", "POLITICAL", "POLITICIAN",
-        "PARLIAMENT", "PARLIAMENTARY", "LEGISLATURE", "LEGISLATIVE", "LEGISLATOR",
-        "CONGRESS", "SENATE", "SENATOR", "LAWMAKER", "PRESIDENT", "PRESIDENTIAL",
-        "PRIME MINISTER", "MINISTER", "CHANCELLOR", "GOVERNOR", "MAYOR", "LEADER",
-        "HEAD OF STATE", "CABINET", "COUP", "IMPEACH", "IMPEACHMENT", "REGIME",
-        "DICTATOR", "DICTATORSHIP", "PROTEST", "DEMONSTRATOR", "SANCTION",
-        "DIPLOMACY", "DIPLOMATIC", "DIPLOMAT", "EMBASSY", "AMBASSADOR", "PROPAGANDA",
-        "LOBBYING", "LOBBYIST",
-    ),
-    "conflict_violence": (
-        "WAR", "WARFARE", "MILITARY", "ARMY", "ARMED", "NAVY", "NAVAL", "AIR FORCE",
-        "SOLDIER", "TROOP", "MILITIA", "INSURGENCY", "INSURGENT", "INSURRECTION",
-        "REBEL", "REBELLION", "GUERRILLA", "SEPARATIST", "TERROR", "TERRORISM",
-        "TERRORIST", "EXTREMISM", "EXTREMIST", "JIHAD", "JIHADIST", "CONFLICT",
-        "VIOLENCE", "VIOLENT", "ATTACK", "BOMB", "BOMBING", "EXPLOSIVE", "EXPLOSION",
-        "WEAPON", "GUN", "GUNMAN", "GUNMEN", "GUNFIRE", "FIREARM", "SHOOTING",
-        "SHOOTER", "SNIPER", "MISSILE", "ARTILLERY", "AIRSTRIKE", "KILL", "KILLING", "MASSACRE",
-        "GENOCIDE", "SLAUGHTER", "MANSLAUGHTER", "ASSASSIN", "ASSASSINATE", "ASSASSINATION",
-        "EXECUTION", "BEHEADING", "STABBING", "LYNCHING", "CEASEFIRE", "PEACEKEEPING",
-        "PEACEKEEPER", "INVASION", "HOSTAGE", "TORTURE", "RIOT", "UNREST",
-        "CRACKDOWN", "PERSECUTION", "SIEGE", "BLOCKADE", "DEFENSE", "DEFENCE",
-        "CONSCRIPTION", "REFUGEE", "DISPLACED", "ETHNIC CLEANSING",
-    ),
-    "crime": (
-        "CRIME", "CRIMINAL", "MURDER", "HOMICIDE", "ASSAULT", "ROBBERY", "THEFT",
-        "THIEF", "THIEVES", "BURGLARY", "FRAUD", "EMBEZZLEMENT", "CORRUPTION",
-        "BRIBERY", "BRIBE", "SMUGGLING", "SMUGGLER", "TRAFFICKING", "TRAFFICKER",
-        "NARCOTICS", "CARTEL", "GANG", "MAFIA", "LAUNDERING", "EXTORTION", "KIDNAP",
-        "KIDNAPPING", "KIDNAPPED", "KIDNAPPER", "ABDUCTION", "RAPE", "HARASSMENT",
-        "ABUSE", "ARREST", "DETAIN", "DETAINEE", "DETENTION", "POLICE", "PRISON",
-        "JAIL", "INCARCERATION", "PROSECUTION", "PROSECUTOR", "INDICTMENT", "FELONY",
-        "PIRACY", "SCAM", "VANDALISM", "ARSON", "POACHING", "COUNTERFEIT",
-        "ESPIONAGE", "TREASON", "VICTIM", "CYBERCRIME",
-    ),
-    "specific_person": (
-        "POPE", "KING", "QUEEN", "PRINCE", "PRINCESS", "MONARCH", "MONARCHY", "ROYAL",
-        "EMPEROR", "EMPRESS", "CELEBRITY",
-    ),
-    "disaster": (
-        "DISASTER", "EARTHQUAKE", "TSUNAMI", "FLOOD", "HURRICANE", "TYPHOON",
-        "CYCLONE", "TORNADO", "WILDFIRE", "FIRE", "DROUGHT", "LANDSLIDE", "MUDSLIDE",
-        "SINKHOLE", "VOLCANO", "VOLCANIC", "ERUPTION", "AVALANCHE", "HEATWAVE",
-        "HEAT WAVE", "STORM", "BLIZZARD", "FAMINE", "CRASH", "DERAILMENT",
-        "SHIPWRECK", "ACCIDENT", "EVACUATION", "CASUALTY", "FATALITY", "INJURED",
-        "DEATH", "DEAD",
-    ),
-    "disease_general": (
-        "EPIDEMIC", "PANDEMIC", "OUTBREAK", "DISEASE", "INFECTION", "INFECTIOUS",
-        "CONTAGION", "CONTAGIOUS", "VIRUS", "PATHOGEN", "VACCINE", "VACCINATION",
-        "QUARANTINE",
-    ),
-    # 病名。過去の流行の知識から選んだ（文書 7章）。入れるかはオーナーが選ぶ（2章 (4)）。
-    "disease_named": (
-        "INFLUENZA", "FLU", "EBOLA", "ZIKA", "CHOLERA", "MALARIA", "MEASLES", "HIV",
-        "TUBERCULOSIS", "POLIO", "CORONAVIRUS", "COVID", "SARS", "SARSCOV", "MERS",
-        "PLAGUE", "DENGUE", "ANTHRAX", "SMALLPOX", "HEPATITIS", "MENINGITIS", "RABIES",
-        "H1N1", "H5N1",
-    ),
-    # CLAUDE.md の五つの区分の外。オーナーの承認が要る（文書 2章 (5)）。
-    "ethnic_religious_group": (
-        "ETHNIC", "ETHNICITY", "TRIBE", "TRIBAL", "RELIGION", "RELIGIOUS", "SECTARIAN",
-    ),
-}
-
-# 区分と CLAUDE.md の五つの区分の対応。None は五つの区分の外。
-CLAUDE_CATEGORY_OF = {
-    "politics_election": "政治・選挙",
-    "conflict_violence": "紛争・暴力",
-    "crime": "犯罪",
-    "specific_person": "特定の人物",
-    "disaster": "災害・感染症",
-    "disease_general": "災害・感染症",
-    "disease_named": "災害・感染症",
-    "ethnic_religious_group": None,
-}
-CLAUDE_CATEGORIES = ("政治・選挙", "紛争・暴力", "犯罪", "特定の人物", "災害・感染症")
-
-# オーナーが選ぶ区分（文書 0章の7・8）。**未決**。今の既定は仮の値（両方を有効）。
-# 封印の前に、オーナーの決定をこの定数とテストの OWNER_CHOICE に反映する（文書 2章 (8)）。
-OPTIONAL_CATEGORIES = ("disease_named", "ethnic_religious_group")
-ENABLED_OPTIONAL_CATEGORIES = ("disease_named", "ethnic_religious_group")
-
-# 照合に使う欄。区分表のこの二つの欄だけを使う（ほかの欄は、あっても使わない）。
-MATCH_FIELDS = ("name", "description")
-
-# くっつき一致（名前の欄だけ。文書 2章 (1)）の数値。
-# 先頭での一致は、この文字数以上の語だけ。
-PREFIX_MIN_LEN = 6
-# 先頭でも末尾でも、名前の語から一覧の語を除いた残りが、この文字数以上の英字であること。
-GLUE_MIN_REST = 4
-# 末尾での一致を使わない語：4文字以下で、英語の語尾（ING, ED, ER, S）で終わる語（今は KING・SARS・MERS）。
-# 短い語が別の語の語尾として偶然現れるのを防ぐため（BREAKING, SPEAKING など）。
-SUFFIX_BLOCK_MAX_LEN = 4
-SUFFIX_BLOCK_ENDINGS = ("ING", "ED", "ER", "S")
-# くっつき一致を使う欄。
-GLUE_FIELDS = ("name",)
-
-_PIECES = re.compile(r"[A-Z]+|[0-9]+")
-_TERM_OK = re.compile(r"\A[A-Z0-9]+( [A-Z0-9]+)*\Z")
+from exclusion import (  # noqa: E402,F401
+    CLAUDE_CATEGORIES, CLAUDE_CATEGORY_OF, ENABLED_OPTIONAL_CATEGORIES, EXCLUSION_TERMS,
+    GLUE_FIELDS, GLUE_MIN_REST, MATCH_FIELDS, OPTIONAL_CATEGORIES, OWNER_CHOICE_SOURCE,
+    PREFIX_MIN_LEN, SUFFIX_BLOCK_ENDINGS, SUFFIX_BLOCK_MAX_LEN, _suffix_allowed, _term_match,
+    _word_matches, enabled_categories, exclusion_matches, inflections, is_excluded,
+    optional_choice_status, tokens,
+)
+import exclusion  # noqa: E402
 
 ONE_DAY = datetime.timedelta(days=1)
-
-
-def tokens(text):
-    """大文字にし、英字の続きと数字の続きを一つずつの語にした並び。
-
-    英字と数字以外（下線・空白・記号）は区切りとして捨てる。英字と数字の境目でも区切る
-    （ELECTION2016 -> ELECTION, 2016）。None や空は空の並び。
-    """
-    if not text:
-        return ()
-    return tuple(_PIECES.findall(text.upper()))
-
-
-def inflections(word):
-    """語の形の変化（複数形・活用形）の集合。word 自身は含めない。英字だけの語に作る。
-
-    - 常に +S
-    - S, X, Z, CH, SH, O で終わる語に +ES
-    - 子音 + Y で終わる語に Y を IES, IED に替えた形
-    - E で終わる語に +D, +R, +RS と、E を除いて +ING
-    - それ以外の語に +ED, +ING, +ER, +ERS
-    子音を重ねる形（KIDNAP -> KIDNAPPING）は作らない（必要なものは語の一覧に書いた）。
-    """
-    if not word.isalpha():
-        return frozenset()
-    out = {word + "S"}
-    if word.endswith(("S", "X", "Z", "CH", "SH", "O")):
-        out.add(word + "ES")
-    if len(word) >= 2 and word.endswith("Y") and word[-2] not in "AEIOU":
-        out.update({word[:-1] + "IES", word[:-1] + "IED"})
-    if word.endswith("E"):
-        out.update({word + "D", word + "R", word + "RS", word[:-1] + "ING"})
-    else:
-        out.update({word + "ED", word + "ING", word + "ER", word + "ERS"})
-    return frozenset(out)
-
-
-def _suffix_allowed(word):
-    return not (len(word) <= SUFFIX_BLOCK_MAX_LEN and word.endswith(SUFFIX_BLOCK_ENDINGS))
-
-
-def _word_matches(word, tok, glue=True):
-    """一つの語 word が、一つの語 tok に当たるか。当たり方の名前か None。
-
-    exact       tok == word
-    inflection  tok が word の形の変化
-    glue        （glue が真で、word と tok が英字だけのとき）
-                - 先頭：len(word) >= PREFIX_MIN_LEN で、tok が word で始まり、残りが GLUE_MIN_REST 文字以上
-                - 末尾：_suffix_allowed(word) で、tok が word か word の形の変化で終わり、
-                  その前の残りが GLUE_MIN_REST 文字以上
-    """
-    if tok == word:
-        return "exact"
-    if tok in inflections(word):
-        return "inflection"
-    if not (glue and word.isalpha() and tok.isalpha()):
-        return None
-    if len(word) >= PREFIX_MIN_LEN and tok.startswith(word) and len(tok) - len(word) >= GLUE_MIN_REST:
-        return "glue-prefix"
-    if _suffix_allowed(word):
-        for form in (word,) + tuple(sorted(inflections(word))):
-            if tok.endswith(form) and len(tok) - len(form) >= GLUE_MIN_REST:
-                return "glue-suffix"
-    return None
-
-
-def _term_match(term, toks, glue=True):
-    """語（または語の並び）term が、語の並び toks に当たるか。当たり方の名前か None。
-
-    - 語が一つ：どれかの語に _word_matches が当たれば一致。
-    - 語の並び：並びが連続して現れれば一致（最後の語だけ形の変化を認める）。
-      加えて、glue が真のとき（名前の欄だけ）、並びをつなげた一語（AIR FORCE -> AIRFORCE）を、
-      語が一つの場合と同じ規則で照合する。語がくっついた形への対応は、すべて名前の欄だけに使う。
-    """
-    tt = tokens(term)
-    if len(tt) == 1:
-        for t in toks:
-            how = _word_matches(tt[0], t, glue)
-            if how:
-                return how
-        return None
-    n = len(tt)
-    for i in range(len(toks) - n + 1):
-        seg = toks[i:i + n]
-        if seg[:-1] == tt[:-1] and (seg[-1] == tt[-1] or seg[-1] in inflections(tt[-1])):
-            return "exact" if seg[-1] == tt[-1] else "inflection"
-    joined = "".join(tt)
-    if glue and joined.isalpha():
-        for t in toks:
-            how = _word_matches(joined, t, glue)
-            if how:
-                return "joined-" + how
-    return None
-
-
-def enabled_categories(optional=None):
-    opt = ENABLED_OPTIONAL_CATEGORIES if optional is None else tuple(optional)
-    for c in opt:
-        if c not in OPTIONAL_CATEGORIES:
-            raise ValueError("選べる区分ではない: %r" % c)
-    return tuple(c for c in EXCLUSION_TERMS if c not in OPTIONAL_CATEGORIES or c in opt)
-
-
-def exclusion_matches(name, description=None, optional=None):
-    """名前と説明に一致した語の一覧 [(区分, 語, 欄, 当たり方)]。順番は区分・語・欄の定義順。
-
-    optional：有効にする選べる区分（既定は ENABLED_OPTIONAL_CATEGORIES）。
-    """
-    fields = {"name": tokens(name), "description": tokens(description)}
-    out = []
-    for cat in enabled_categories(optional):
-        for term in EXCLUSION_TERMS[cat]:
-            for f in MATCH_FIELDS:
-                how = _term_match(term, fields[f], f in GLUE_FIELDS)
-                if how:
-                    out.append((cat, term, f, how))
-    return out
-
-
-def is_excluded(name, description=None, optional=None):
-    return bool(exclusion_matches(name, description, optional))
 
 
 # ---------------------------------------------------------------------------
@@ -421,11 +202,26 @@ def build_tag_list(themes, counts, totals, missing_days, block_start, block_end,
     }
 
 
+def _input_signature(result):
+    return (result["block_start"], result["block_end"], result["a"], result["n_med"],
+            frozenset(r["name"] for r in result["themes"]))
+
+
 def compare_lists(old_result, new_result):
-    """二つの版の build_tag_list() の結果を比べ、出入りしたテーマを返す（名前の順）。"""
+    """二つの build_tag_list() の結果を比べ、出入りしたテーマを返す（名前の順）。
+
+    二つが同じ入力から作られたことを、区画（block_start, block_end）・a・n_med・テーマの集合で
+    確かめ、違えば止まる。戻り値には、両方の enabled_optional_categories を入れる
+    （1cb463a の版の結果のように、その値を持たない結果は None）。
+    """
+    if _input_signature(old_result) != _input_signature(new_result):
+        raise ValueError("二つの結果の入力が違う（区画・a・n_med・テーマの集合のどれか）")
     old, new = set(old_result["tag_list"]), set(new_result["tag_list"])
     return {"only_in_old": sorted(old - new), "only_in_new": sorted(new - old),
-            "in_both": len(old & new)}
+            "in_both": len(old & new),
+            "enabled_optional_categories": {
+                "old": old_result.get("enabled_optional_categories"),
+                "new": new_result.get("enabled_optional_categories")}}
 
 
 def as_record():
@@ -444,34 +240,7 @@ def as_record():
             "universe": "union of themes in the category table and themes appearing in method-block data",
             "data_scope": "method block only; any date outside the block in the inputs stops the build",
         },
-        "exclusion": {
-            "fields": list(MATCH_FIELDS),
-            "tokenize": "uppercase; maximal runs of A-Z and of 0-9 are tokens (letter/digit boundary "
-                        "splits); every other character is a separator",
-            "inflections": "+S always; +ES after S/X/Z/CH/SH/O; consonant+Y -> IES, IED; ending E -> +D, "
-                           "+R, +RS, drop E +ING; otherwise +ED, +ING, +ER, +ERS; letters only; no "
-                           "consonant doubling",
-            "match": "single word: token equals the word or an inflection of it; in the name field only "
-                     "(glue), both alphabetic: prefix if len(word) >= %d and the rest has >= %d letters; "
-                     "suffix (word or an inflection of it) if the rest before it has >= %d letters, except "
-                     "words of <= %d letters ending in %s; phrase: contiguous tokens (last may be "
-                     "inflected), or (name field only) the joined phrase matched as a single word"
-                     % (PREFIX_MIN_LEN, GLUE_MIN_REST, GLUE_MIN_REST, SUFFIX_BLOCK_MAX_LEN,
-                        "/".join(SUFFIX_BLOCK_ENDINGS)),
-            "prefix_min_len": PREFIX_MIN_LEN,
-            "glue_min_rest": GLUE_MIN_REST,
-            "suffix_block": {"max_len": SUFFIX_BLOCK_MAX_LEN, "endings": list(SUFFIX_BLOCK_ENDINGS)},
-            "glue_fields": list(GLUE_FIELDS),
-            "category_to_claude": CLAUDE_CATEGORY_OF,
-            "claude_categories": list(CLAUDE_CATEGORIES),
-            "optional_categories": list(OPTIONAL_CATEGORIES),
-            "enabled_optional_categories": list(ENABLED_OPTIONAL_CATEGORIES),
-            "optional_choice_status": "undecided",
-            "terms": {k: list(v) for k, v in EXCLUSION_TERMS.items()},
-            "per_theme_exceptions": "none",
-            "organizations": "no separate rule; excluded only when a term of a category matches",
-            "direction": "over-exclusion preferred (e.g. DEFENSE, DEATH, VACCINE, FIRE also hit neutral themes)",
-        },
+        "exclusion": exclusion.as_record(),
         "counting": "numerator and denominator of r(d) follow the counting method sealed by the collector "
                     "(T-018); this record is sealed only after, or together with, that counting method",
         "changes_after_seeing_table": "only fixes of defects reproducible by a test (exception, crash on "
@@ -487,20 +256,6 @@ def as_record():
 
 def canonical_json():
     return json.dumps(as_record(), ensure_ascii=False, sort_keys=True, indent=2) + "\n"
-
-
-def _validate_terms():
-    seen = set()
-    for cat, terms in EXCLUSION_TERMS.items():
-        for t in terms:
-            if not _TERM_OK.match(t):
-                raise ValueError("語の形が違う: %r" % t)
-            if t in seen:
-                raise ValueError("語が重複している: %r" % t)
-            seen.add(t)
-
-
-_validate_terms()
 
 
 def main(argv=None):

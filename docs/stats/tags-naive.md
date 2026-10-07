@@ -1,25 +1,35 @@
-# タグの一覧の規則、素朴な予測、採点計画の一部（T-019）
+# タグの一覧の規則、素朴な予測、採点計画の一部（T-019〜T-022）
 
-仮の名前：tagrules-v1（タグの一覧の規則）、naive-v1（素朴な予測）、scoring-partial-v1（採点計画の一部）。
+仮の名前：exclusion-v1（除外の規則）、tagrules-v1（タグを入れる規則）、naive-v1（素朴な予測）、scoring-partial-v1（採点計画の一部）。
 どれも正式な版の番号ではない。正式な番号は、封印係の追記のみの記録で何件目かによって決まる。
 
 この文書は、手順4（手法を作る期間のデータで試運転する）の前に決めて封印する「決め方」をまとめた提案である。
 数値のうち A（＝最低の報道量 V）だけは、ここで決めた式に手法を作る期間のデータを入れて決まる。
 
-- 値と語の一覧は `src/stats/tagrules.py`・`src/stats/naive.py`・`src/stats/scoring.py` の定数で、この文書の表はその写しである。`tests/stats/test_t019.py` で照合する。
+- 値と語の一覧は `src/stats/exclusion.py`（除外の規則）・`src/stats/tagrules.py`（入れる規則）・`src/stats/naive.py`・`src/stats/scoring.py` の定数で、この文書の表はその写しである。`tests/stats/test_exclusion.py` と `tests/stats/test_t019.py` で照合する。
+- 除外の規則を `exclusion.py` に分けたのは T-022 である。除外の規則と K を別々に封印するため（5章）。規則の中身は変えていない。
 - GDELT のデータ、ファイル一覧、テーマの区分表、ネットワークは使っていない（7章）。
-- 封印はしていない。封印は、オーナーの承認のあと封印係が行う（5章）。
+- 封印はしていない。封印は封印係が行う（5章）。
 
 再計算の手順（プロジェクトのルートで）：
 
 ```
+PYTHONDONTWRITEBYTECODE=1 python3 -B src/stats/exclusion.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B src/stats/tagrules.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B src/stats/naive.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B src/stats/scoring.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/stats -v
 ```
 
-## 0. オーナーに承認をお願いしたい点
+## 0. オーナーの承認事項と決定
+
+**2026-10-08 のオーナーの決定**（reviews/T-020.md「2026-10-08 オーナーの発言」）：
+- 7（病名の扱い）：**案B**。病名の区分 `disease_named` は使わない。
+- 8（民族・宗教の集団）：**除外の区分に加える**。CLAUDE.md の「除外する規則」にも、リードが書き足した。
+- そのほかの項目（1〜6・9〜18）は、すべて承認された。
+- 決定はコードの `exclusion.ENABLED_OPTIONAL_CATEGORIES = ("ethnic_religious_group",)` と、出どころの `exclusion.OWNER_CHOICE_SOURCE` に反映した（2章 (8)）。
+
+以下は承認をお願いしたときの項目で、記録のために残す。
 
 タグの一覧（1章・2章）
 1. **A の決め方**（1章 (2)）：A = 10 ÷ N_med。N_med は、手法を作る期間の区画のうち欠けた日でない日の、全体の報道量の中央値。「全体の報道量が普段どおりの日に、1日あたり平均10件」に当たる比率である。V は A と同じ値にする（T-011 で決定済み）。
@@ -35,12 +45,12 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/stats -v
    - 形の変化を使った末尾の一致と、先頭の一致による外しすぎ：SKYSCRAPER（RAPE の形の変化 RAPER が末尾にある）、PAINKILLER（KILLER）、SOFTSKILLS（KILLS）、CABINETMAKER（CABINET が先頭）、REGIMENTAL（REGIME が先頭）、PROTESTANTISM（PROTEST が先頭）。規則は変えず、外しすぎの方向の誤りとして開示する。既知の取りこぼし：GUNCONTROL、COUPATTEMPT、HIVAIDS、CARBOMB、MINISTERIAL、DEADLY。
 5. **外しすぎの方向を選ぶ方針**（2章 (1)・(3)）：5つの区分のテーマが一覧に残るより、関係の無いテーマが外れる方を選ぶ。たとえば DEFENSE（法廷の弁護側も外れる）、DEATH と DEAD（訃報も外れる）、VACCINE（予防接種の制度も外れる）、FIRE（解雇の意味の FIRED も外れる）、ATTACK（HEARTATTACK の心臓発作も外れる）、LEADER（LEADERSHIP も外れる）、VIRUS（ANTIVIRUS も外れる）、STORM（BRAINSTORM も外れる）。
 6. **語の一覧**（2章 (2)）。1cb463a の版からの変更は、出どころを付けて 2章 (7) の表にまとめた（CRISISLEX と ELECT を外し、ASSASSINATION、EXECUTION、STABBING、EXPLOSION、CRASH、ELECTED、MANSLAUGHTER、KILLING などを足した。CYBERCRIME は 0e14f3b で語の一覧から消した。0e14f3b では、くっつき一致が説明の欄にも掛かっていたので、説明の欄でも外れていた。247fc1d でくっつき一致を名前の欄だけにしたときに、説明の欄の cybercrime で外れなくなる後戻りが出た。T-020 で語の一覧に戻した）。
-7. **病名の扱い**（2章 (4)）：**未決**。次の二つから選んでほしい。今のコードの既定は案A だが、これは仮の値で、オーナーの決定ではない。
+7. **病名の扱い**（2章 (4)）：**決定：案B**（2026-10-08）。尋ねたときは次の二つから選んでもらった。当時のコードの既定は案A（仮の値）だった。
    - 案A：一般の語（DISEASE、VIRUS、EPIDEMIC など）に加えて、病名（EBOLA、ZIKA、COVID など）の区分 `disease_named` も使う。
    - 案B：一般の語だけを使い、`disease_named` を使わない。
    - 病名は過去の流行の知識から選んだ（7章）。案Bなら、その知識は規則に入らない。代わりに、名前と説明に一般の語が無い病気のテーマが一覧に残る。
-   - 案Bを選んだ場合のコードとテストの直し方、開示の手順は 2章 (8)。
-8. **民族・宗教の集団の区分を足すか**（2章 (5)）：**未決**。CLAUDE.md の5つの区分の外にある。統計係の推奨は「足す」。今のコードの既定は「足す」だが、これは仮の値で、オーナーの決定ではない。足す場合は CLAUDE.md の決定事項の変更になる。足さない場合のコードとテストの直し方、開示の手順は 2章 (8)。
+   - 決定の反映（コードとテストの直し方、開示）の手順は 2章 (8)。
+8. **民族・宗教の集団の区分を足すか**（2章 (5)）：**決定：加える**（2026-10-08。CLAUDE.md も書き足された）。尋ねたときは CLAUDE.md の5つの区分の外にあり、統計係の推奨は「足す」、当時のコードの既定も「足す」（仮の値）だった。足すことは CLAUDE.md の決定事項の変更だったので、リードが書き足した。決定の反映の手順は 2章 (8)。
 9. **組織名**（2章 (5)）：別の規則を作らない。5つの区分の語に当たる組織のテーマだけが外れる。
 10. **区分表を見たあとの変更の範囲**（2章 (6)）：**テストで再現できる不具合の修正だけ** を認める（例外が出る、空の名前で落ちる、など）。語、数値（PREFIX_MIN_LEN、GLUE_MIN_REST など）、当たり方の種類は変えない。
     - 危うさ：区分表を見たあとで規則を変えると、名前を見ながら、どのテーマを外すかを実質的に選べる。たとえば GLUE_MIN_REST を4から3に変えるだけで、特定の名前の群れを外したり残したりできる。語を一つ足すのも同じである。数値と当たり方を変えないのは、この余地を無くすためである。
@@ -143,6 +153,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/stats -v
 
 ### (2) 語の一覧
 
+今の設定で使う区分は、`disease_named` を除くすべて（2026-10-08 のオーナーの決定）。`disease_named` の語は記録のために残している。
+
 <!-- table:terms -->
 | 区分 | CLAUDE.md の区分 | 語 |
 |---|---|---|
@@ -153,7 +165,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/stats -v
 | disaster | 災害・感染症 | DISASTER, EARTHQUAKE, TSUNAMI, FLOOD, HURRICANE, TYPHOON, CYCLONE, TORNADO, WILDFIRE, FIRE, DROUGHT, LANDSLIDE, MUDSLIDE, SINKHOLE, VOLCANO, VOLCANIC, ERUPTION, AVALANCHE, HEATWAVE, HEAT WAVE, STORM, BLIZZARD, FAMINE, CRASH, DERAILMENT, SHIPWRECK, ACCIDENT, EVACUATION, CASUALTY, FATALITY, INJURED, DEATH, DEAD |
 | disease_general | 災害・感染症 | EPIDEMIC, PANDEMIC, OUTBREAK, DISEASE, INFECTION, INFECTIOUS, CONTAGION, CONTAGIOUS, VIRUS, PATHOGEN, VACCINE, VACCINATION, QUARANTINE |
 | disease_named | 災害・感染症 | INFLUENZA, FLU, EBOLA, ZIKA, CHOLERA, MALARIA, MEASLES, HIV, TUBERCULOSIS, POLIO, CORONAVIRUS, COVID, SARS, SARSCOV, MERS, PLAGUE, DENGUE, ANTHRAX, SMALLPOX, HEPATITIS, MENINGITIS, RABIES, H1N1, H5N1 |
-| ethnic_religious_group | （5つの区分の外） | ETHNIC, ETHNICITY, TRIBE, TRIBAL, RELIGION, RELIGIOUS, SECTARIAN |
+| ethnic_religious_group | 民族・宗教の集団 | ETHNIC, ETHNICITY, TRIBE, TRIBAL, RELIGION, RELIGIOUS, SECTARIAN |
 
 ### (3) 語の選び方と、区分ごとの境目
 語は、区分の意味から英語の語を挙げて選んだ。区分表は見ていない。ただし、語を選ぶのに使った知識は一般の英語だけではない（7章）。
@@ -172,21 +184,21 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/stats -v
 
 ### (4) 病名（案A と案B）
 - 病名（`disease_named` の行）は、一般の英語の語ではなく、過去の流行の知識から選んだ（7章）。CLAUDE.md の「データ源の区分を使って機械的に判定する」に照らすと、知識から名前を選ぶことは、テーマを名指しする判断に近づく。
-- そのため、次の二つを並べてオーナーに選んでもらう。
-  - 案A（今のコードの既定。仮の値で、オーナーの決定ではない）：`disease_general` と `disease_named` の両方を使う。名前と説明に一般の語が無い病気のテーマも外れる。
+- そのため、次の二つを並べてオーナーに選んでもらった。**オーナーは案B を選んだ**（2026-10-08）。
+  - 案A（当時のコードの既定。仮の値だった）：`disease_general` と `disease_named` の両方を使う。名前と説明に一般の語が無い病気のテーマも外れる。
   - 案B：`disease_general` だけを使う。知識から選んだ病名は規則に入らない。代わりに、名前が病名だけで説明にも一般の語が無いテーマは一覧に残る。
-- どちらを選ぶかは、封印の前に `ENABLED_OPTIONAL_CATEGORIES` に反映する（手順は (8)）。区分表を見る前なので、どちらを選んでも選び出しにはならない。
+- 決定は `ENABLED_OPTIONAL_CATEGORIES` に反映した（手順は (8)）。区分表を見る前の決定なので、選び出しにはならない。`disease_named` の語は、記録のために一覧に残す（使わない）。
 
 ### (5) 組織名と民族集団のテーマ（T-001 の申し送り）
 T-001 の報告では、テーマの欄に組織名と民族集団が入ることがある（codebook）。
 
-**民族・宗教の集団：外す区分を足すことを推奨する（オーナーの承認が要る）**
-- CLAUDE.md の5つの区分は「特定の人物」で、集団は入らない。そのため、この区分を足すことは CLAUDE.md の決定事項の変更になる。
-- 推奨の理由：
+**民族・宗教の集団：外す区分に加える（2026-10-08 オーナー決定）**
+- 尋ねたときの CLAUDE.md の5つの区分は「特定の人物」で、集団は入らなかった。そのため、この区分を足すことは CLAUDE.md の決定事項の変更だった。オーナーが加えることを決め、リードが CLAUDE.md の「除外する規則」に書き足した。今の `CLAUDE_CATEGORY_OF` では、この区分は「民族・宗教の集団」に対応する。
+- 推奨した理由：
   - 特定の民族・宗教の集団が来週ニュースになる、という予言を公開すること自体に、迫害や衝突を予告する読まれ方をする危うさがある。
   - そうしたテーマの報道が跳ねるのは、多くが紛争・暴力や犯罪の報道と重なると考えられる。しかし、その重なりは区分表の名前と説明の語では捕まえられない。
 - 語は `ethnic_religious_group` の行（ETHNIC、RELIGIOUS など）。言語の分類（言語の名前）は入れていない。言語の名前は、場所や報道の言語として付くことが多いと考えたため。
-- オーナーが足さないと決めた場合は、`ENABLED_OPTIONAL_CATEGORIES` からこの区分を除いた版を封印する（手順は (8)）。
+- 決定は `ENABLED_OPTIONAL_CATEGORIES` に反映した（手順は (8)）。
 
 **組織名：別の規則を作らない**
 - 組織そのものは、CLAUDE.md の5つの区分に入らない。武装集団や政党などの組織のテーマは、TERROR、POLITICAL などの語で外れる。
@@ -208,7 +220,7 @@ T-001 の報告では、テーマの欄に組織名と民族集団が入るこ�
 - 版の番号は、追記のみの記録で、この規則の封印が何件目かで決まる。
 
 ### (7) 版ごとの差分と出どころ
-1cb463a（初回の提出）、0e14f3b（再提出1回目）、247fc1d（再提出2回目）、今回の版（T-020）の差分。出どころは「区分の意味」（区分の意味から統計係が挙げた）、「監査の例」（差し戻しで示された例。監査係は記憶にある名前で照合を試していた）、「記憶の名前による照合」（統計係が記憶にある名前を照合に通した結果から変えたもの）のどれか。「記憶の名前による照合」に当たる変更は無い。統計係が記憶にある名前で試したのは 0e14f3b の語と規則を決めたあとで、その結果を見て語や規則を変えてはいない（7章）。
+1cb463a（初回の提出）、0e14f3b（再提出1回目）、247fc1d（再提出2回目）、ecd745f と 2f4b3ce（T-020）、今回の版（T-022）の差分。出どころは「区分の意味」（区分の意味から統計係が挙げた）、「監査の例」（差し戻しで示された例。監査係は記憶にある名前で照合を試していた）、「記憶の名前による照合」（統計係が記憶にある名前を照合に通した結果から変えたもの）のどれか。「記憶の名前による照合」に当たる変更は無い。統計係が記憶にある名前で試したのは 0e14f3b の語と規則を決めたあとで、その結果を見て語や規則を変えてはいない（7章）。
 
 1cb463a から 0e14f3b
 
@@ -240,7 +252,7 @@ T-001 の報告では、テーマの欄に組織名と民族集団が入るこ�
 | 変えた規則 | 4文字以下で ING・ED・ER・S で終わる語は末尾で当たらない | 区分の意味（作った名前 BREAKING、SPEAKING などで確かめた） |
 | 変えた規則 | くっつき一致は名前の欄だけ | 監査の例（SOLAR_ENERGY の説明） |
 
-247fc1d から今回の版（T-020）
+247fc1d から 2f4b3ce（T-020）
 
 | 種類 | 中身 | 出どころ |
 |---|---|---|
@@ -249,27 +261,41 @@ T-001 の報告では、テーマの欄に組織名と民族集団が入るこ�
 | 開示だけ | 形の変化を使った末尾の一致と先頭の一致の外しすぎ（SKYSCRAPER など6つ）を既知の例に足した。規則は変えていない | 監査の例 |
 | 開示だけ | 末尾の一致を使わない語は KING・SARS・MERS の三つ（前回「KING だけ」と書いたのは誤り）。規則は変えていない | 監査の例 |
 
-- 選べる区分（病名と民族・宗教）をすべて有効にしたとき、1cb463a の版の語（CRISISLEX を除く）が今回の版でもすべて外れることを、テスト `test_v1_terms_still_excluded` で確かめている。オーナーが案Bを選ぶか、民族・宗教の区分を足さないと決めた場合は、その区分の語（1cb463a の病名と ETHNIC などの語）は外れなくなる。これは後戻りではなく、選択の結果として 2章 (8) の手順で開示する。名前の欄（語を下線でつないだ名前）と、説明の欄（語をそのまま置いた説明と、文の中に置いた説明）の両方を見る。
+2f4b3ce から今回の版（T-022。オーナーの決定の反映と、封印の準備）
 
-### (8) オーナーが選べる区分を外す場合の手順
-対象は、案B（`disease_named` を使わない。0章の7）を選んだ場合と、民族・宗教の区分（`ethnic_religious_group`）を足さないと決めた場合。どちらも、区分表を見る前に、封印の前に行う。
+| 種類 | 中身 | 出どころ |
+|---|---|---|
+| 変えた設定 | `ENABLED_OPTIONAL_CATEGORIES` を仮の値（両方を有効）から `("ethnic_religious_group",)` に変えた。病名の区分は使わない | オーナーの決定（2026-10-08） |
+| 足した定数 | `OWNER_CHOICE_SOURCE`（決定の出どころ）。`optional_choice_status()` はその有無から計算する | リードの指示（T-020 の監査 M-1） |
+| 変えた対応 | `ethnic_religious_group` の CLAUDE.md の区分を「民族・宗教の集団」にした（CLAUDE.md の書き足しに合わせた） | オーナーの決定（2026-10-08） |
+| ファイルの分け直し | 除外の規則を `tagrules.py` から `exclusion.py` に、そのテストを `test_exclusion.py` に分けた。語・数値・当たり方は変えていない | 区分の意味（K と別に封印するため。5章） |
+| 変えた関数 | `compare_lists()` が、二つの結果が同じ入力から作られたことを確かめ、両方の設定を出力に入れる | リードの指示（T-020 の監査 L-1） |
 
-1. `src/stats/tagrules.py` の `ENABLED_OPTIONAL_CATEGORIES` から、その区分を除く。語の一覧（`EXCLUSION_TERMS`）は変えない。選ばれなかった区分の語も、封印する記録に残す。
-2. `tests/stats/test_t019.py` の `OWNER_CHOICE` を同じ値に直し、`OWNER_CHOICE_SOURCE` に決定の記録（reviews/ のファイルと見出し）を書く。テスト `test_owner_choice` が、二つが同じであることと、出力の JSON の `enabled_optional_categories` を確かめる。
-   - 今の `OWNER_CHOICE` は、オーナーの決定ではなく仮の値（今の既定と同じ、両方を有効）で、`OWNER_CHOICE_SOURCE` は None（未決）である。出力の JSON の `optional_choice_status` も "undecided" になっている。決定を反映するときに "decided" に直す。
-3. ほかのテストは直さない。規則そのもののテスト（既知の例、1cb463a の語の後戻り、くっつき一致など）は、選べる区分をすべて有効にした状態（`ALL`）で行っており、オーナーの選択に依らない。
-4. 選択で結果が変わる例は、下の表のとおり。テスト `test_option_sensitive_examples` が、区分を有効にすれば外れ、外せば残ることを確かめる。選択を変えても、この表とテストは直さない。
-5. 開示：
-   - 0章の7・8 の答えと、`ENABLED_OPTIONAL_CATEGORIES` の値を、封印の記録に書く。
-   - 区分表の取得のあと、オーナーの選択どおりの設定と、選べる区分をすべて有効にした設定の両方で `build_tag_list()` を実行し、`compare_lists()` で出入りしたテーマを公開する。選択によって一覧に残ったテーマが分かるようにするため。呼び方は次のとおり（入力は同じものを渡す）。
+- 選べる区分（病名と民族・宗教）をすべて有効にしたとき、1cb463a の版の語（CRISISLEX を除く）が今回の版でもすべて外れることを、テスト `test_v1_terms_still_excluded` で確かめている。オーナーは案Bを選んだので、今の設定では 1cb463a の病名（EBOLA、ZIKA、COVID など）だけで当たるテーマは外れない。これは後戻りではなく、選択の結果として 2章 (8) の手順で開示する。民族・宗教の区分は使うので、ETHNIC などの語は今の設定でも外れる。名前の欄（語を下線でつないだ名前）と、説明の欄（語をそのまま置いた説明と、文の中に置いた説明）の両方を見る。
+
+### (8) 選べる区分の決定を反映する手順
+対象は、選べる区分（`disease_named`、`ethnic_religious_group`）についてオーナーが決めたとき。オーナーが仮の値を変えた場合も、仮の値どおりに承認した場合も、同じ手順で行う。どちらも、区分表を見る前に、封印の前に行う。
+
+1. `src/stats/exclusion.py` の `ENABLED_OPTIONAL_CATEGORIES` を、オーナーの決定に合わせる。仮の値どおりに承認された場合は、値は変わらない。語の一覧（`EXCLUSION_TERMS`）は変えない。使わない区分の語も、封印する記録に残す。
+2. `exclusion.OWNER_CHOICE_SOURCE` に、決定の記録の出どころを書く（「reviews/ のファイル名」と「見出し」を空白でつないだ文字列）。**仮の値どおりに承認された場合も、必ず書く。** 出どころが無ければ、状態 `optional_choice_status()` は "undecided" のままで、出力の JSON にもそう出る。状態は出どころの有無から計算し、直書きしない。封印係は "undecided" の出力の封印を拒む（封印係への申し送り）。
+3. `tests/stats/test_exclusion.py` の `OWNER_CHOICE` を、同じ値に直す。テストが次を確かめる。
+   - `test_owner_choice`：`ENABLED_OPTIONAL_CATEGORIES` と `OWNER_CHOICE` が同じで、出力の JSON の `enabled_optional_categories`・`owner_choice_source`・`optional_choice_status` がそれに合うこと。
+   - `test_owner_choice_source`：出どころのファイルが reviews/ にあり、その見出しがちょうど一つあり、その節にオーナーの決定の文（原文の引用）が含まれること。決定の文は、オーナーの発言の原文をテストに書き写す。
+   - `test_status_is_computed_from_source`：出どころを消すと "undecided" になること。
+4. ほかのテストは直さない。規則そのもののテスト（既知の例、1cb463a の語の後戻り、くっつき一致など）は、選べる区分をすべて有効にした状態（`ALL`）で行っており、オーナーの選択に依らない。
+5. 選択で結果が変わる例は、下の表のとおり。テスト `test_option_sensitive_examples` が、区分を有効にすれば外れ、外せば残ることを確かめる。選択を変えても、この表とテストは直さない。
+6. 開示：
+   - 0章の7・8 の答えと、`ENABLED_OPTIONAL_CATEGORIES` と `OWNER_CHOICE_SOURCE` の値は、除外の規則の出力の JSON に入り、そのまま封印される。
+   - 区分表の取得のあと、オーナーの選択どおりの設定と、選べる区分をすべて有効にした設定の両方で `build_tag_list()` を実行し、`compare_lists()` で出入りしたテーマを公開する。呼び方は次のとおり（入力は同じものを渡す）。
      ```
      chosen = tagrules.build_tag_list(themes, counts, totals, missing, start, end)
      allset = tagrules.build_tag_list(themes, counts, totals, missing, start, end,
                                       optional=tagrules.OPTIONAL_CATEGORIES)
      moved = tagrules.compare_lists(allset, chosen)
      ```
-     一つ目は `optional` を渡さないので、`ENABLED_OPTIONAL_CATEGORIES`（オーナーの選択）を使う。どちらの戻り値にも、使った設定が `enabled_optional_categories` として入るので、出力の中身から二つを見分けられる（テスト `test_two_settings_distinguishable`）。三つ（chosen、allset、moved）をすべて封印の記録に入れて公開する。
+     一つ目は `optional` を渡さないので、`ENABLED_OPTIONAL_CATEGORIES`（オーナーの選択）を使う。どちらの戻り値にも、使った設定が `enabled_optional_categories` として入る（テスト `test_two_settings_distinguishable`）。`compare_lists()` は、二つが同じ入力（区画・a・n_med・テーマの集合）から作られたことを確かめ、違えば止まる。戻り値には、両方の `enabled_optional_categories` が入る（テスト `test_compare_lists_requires_same_input`）。三つ（chosen、allset、moved）をすべて封印の記録に入れて公開する。
    - 採点に使うのは、オーナーの選択どおりの一覧だけ。比べた結果を見て、選択を変えない。
+7. 今回（2026-10-08）の反映：案B と民族・宗教の集団の追加により、`ENABLED_OPTIONAL_CATEGORIES` を仮の値（両方を有効）から `("ethnic_religious_group",)` に変えた。`OWNER_CHOICE_SOURCE` は "reviews/T-020.md 2026-10-08 オーナーの発言" である（T-022）。
 
 <!-- table:option-sensitive -->
 | 区分を外すと残る例 | 名前 |
@@ -417,45 +443,73 @@ CLAUDE.md の定義（直近の報道量、季節性、予定された行事＝�
 
 ## 5. 封印の手順と順番（封印係への申し送り）
 
-封印は封印係の仕組みで行う。記録の種類（kind）の名前と照合の仕組みは、封印係が決める。統計係からの提案は次のとおり。
+封印は封印係の仕組みで行う。記録の種類（kind）の名前と照合の仕組みは、封印係が決める。統計係からの提案は次のとおり（T-022 で整理した）。
 
 | 順番 | 封印するもの | 時機 |
 |---|---|---|
-| 0 | 報道量の数え方（r(d) の分子と分母の単位。収集係が T-018 で決める） | 1 と同時か、1 より前 |
-| 1 | この文書、3つのコードの出力（JSON）、3つのコード、`tests/stats/test_t019.py` | 0 の封印のあと（同時でもよい）。**テーマの区分表の取得（T-018 の acquisition-start）より前**、かつ method-access より前 |
-| 2 | 区分表を見たあとの変更（2章 (6) の二つだけ。あれば） | method-access より前。オーナーの承認のあと |
-| 3 | 手法を作る期間の区画の欠けた日の一覧（candidates.md 3章 (5)） | 4 より前 |
-| 4 | タグの一覧の結果（`build_tag_list()` の出力。A = V、テーマごとの判定と理由を含む）と、入力のデータのハッシュ | 手法を作る期間のデータで作ったあと、モデルより前 |
-| 5 | 冷却と「対象なし」の規則の改訂（4章 (3)。あれば） | 最初の threshold-access より前 |
-| 6 | `naive_history_days = 399`（periods のきっかけの値） | 最初の threshold-access より前 |
-| 7 | 素朴な予測の最後の版と、21組の係数 | 最初の threshold-access より前 |
+| 1 | **除外の規則**：`src/stats/exclusion.py`、その出力（JSON）、`tests/stats/test_exclusion.py`。比べるための **1cb463a の版**（`git show 1cb463a:src/stats/tagrules.py` とその出力）。オーナーの決定の記録（`git show 2d23cdf:reviews/T-020.md`）。対象と sha256 は下の表 | **今すぐ封印できる。** テーマの区分表の取得（T-018 の acquisition-start）より前に、必ず封印する |
+| 2 | 報道量の数え方（r(d) の分子と分母の単位。収集係が決める） | オーナーの以前の決定で「試運転のあとで決める」。3 と同時か、3 より前 |
+| 3 | **入れる規則**（K = 10 を含む）：`src/stats/tagrules.py`、その出力、この文書、`tests/stats/test_t019.py` | 2 の封印のあと（同時でもよい）。4・5 より前 |
+| 4 | 手法を作る期間の区画の欠けた日の一覧（candidates.md 3章 (5)） | 5 より前 |
+| 5 | タグの一覧の結果（`build_tag_list()` の出力。A = V、テーマごとの判定と理由を含む）、1 と 3 の記録の参照、入力のデータのハッシュ、二つの版と二つの設定の比べた結果 | 3・4 のあと、モデルより前 |
+| 6 | 冷却と「対象なし」の規則の改訂（4章 (3)。あれば） | 最初の threshold-access より前 |
+| 7 | `naive_history_days = 399`（periods のきっかけの値） | 最初の threshold-access より前 |
+| 8 | 素朴な予測の最後の版（`src/stats/naive.py`、`src/stats/scoring.py` とその出力）と、21組の係数 | 最初の threshold-access より前 |
 
-- 0 を 1 より前にする理由：K = 10 の意味（1日あたり10件）は数え方に依る。数え方が決まる前に K を封印すると、あとで数え方を選ぶことで A を動かせる。統計係の側では、**数え方が封印されるまで K を封印しない**。
-- 1 を区分表の取得より前にする理由：区分表を見てから語を決めると、名前を見ながら一件ずつ外すのと区別がつかない。記録の順番（1 の記録が区分表の取得の記録より前にあること）で、第三者が確かめられる。0 の封印が遅れる場合は、1 を待ち、区分表の取得も 1 のあとまで待つ。
-- 3 を 4 より前にする理由：タグの一覧の結果（存在の条件と平均）は、欠けた日の一覧に依る。一覧の結果を見てから欠けた日を決め直す余地を無くすため。
-- 4 では、規則（1 と 2）と結果をまとめて一つの記録にする（CLAUDE.md「入れる規則・除外する規則・その結果の一覧を、まとめて封印する」）。結果を再計算できるように、入力（区分表と、手法を作る期間の日ごとの件数と全体の報道量）のハッシュも入れる。
-- **二つの版の封印**：順番1では、最終の版に加えて、1cb463a の版（`git show 1cb463a:src/stats/tagrules.py` とその出力）も封印する。統計係と監査係が記憶にある名前で照合を試したあとに語と規則が変わったので、変わる前の版の結果も並べて示せるようにするため。
-- **二つの版の一覧の比べ方**（順番4のとき）：
+**除外の規則と K を分けて封印してよいか（判断：分けてよい。分けるべきである）**
+- 前提1：除外の規則は、テーマの名前と説明の語だけで決まる（2章）。報道量の数え方にも、K にも依らない。
+- 前提2：A（= K ÷ N_med）は全体の報道量の中央値だけで決まり、除外の規則に依らない（1章 (2)）。存在の条件も除外の規則に依らない。
+- 前提1・2 から、二つを別の時点で封印しても、片方の封印のあとに、もう片方を使って封印済みのものを動かすことはできない。
+- 前提3：除外の規則は区分表の取得より前に封印しなければならない（区分表を見てから語や規則を決める余地を無くすため）。K は数え方の封印より前に封印してはならない（数え方を選ぶことで A を動かせるため）。数え方はオーナーの以前の決定で「試運転のあとで決める」ので、K の封印は試運転のあとになる。試運転には区分表が要る。
+- 前提3 から、二つを一つの記録にまとめると、除外の規則の封印が試運転のあとまで遅れ、区分表の取得より前という条件を満たせない。そのため分ける。
+- CLAUDE.md の「入れる規則・除外する規則・その結果の一覧を、まとめて封印する」は、順番5で満たす。順番5の記録に、1 と 3 の記録（seq と sha256）を参照として入れ、結果と一緒に封印する。
+- 分けるためにしたこと：除外の規則を `exclusion.py` に、そのテストを `test_exclusion.py` に分けた（T-022）。この二つと出力には K の値が入っていない（テスト `test_no_k_in_output`）。`tagrules.py` は `exclusion.py` を読み込んで使い、出力の中に除外の規則の出力をそのまま入れる（テスト `test_tagrules_output`）。
+- 限界：K = 10 は、オーナーが承認した値（0章1）で、git の履歴にもある。それでも、封印による時刻証明は順番3まで付かない。順番3の前に K を変えることは、オーナーの承認を得た新しい版としてだけ認め、変えた場合は前の値と並べて公開する。1cb463a の版の `tagrules.py` には K = 10 が入っているが、順番1でのこのファイルの封印は比べるためのもので、K を採用する記録ではない（採用は順番3）。
+
+**順番1の対象と sha256**（テスト `test_seal_targets` が、今のファイルと git の履歴から計算し直して照合する）
+
+<!-- table:seal-targets -->
+| 対象 | sha256 |
+|---|---|
+| `src/stats/exclusion.py` | `547655abba9724d41270a458615401c735e324731f9a249480096470a155b361` |
+| `tests/stats/test_exclusion.py` | `5297f90695cc2004dc15e6d7e42c46ecd4fce80921028dba0e42691589ad2997` |
+| `src/stats/exclusion.py の出力` | `db393275ed929efc8e34c46085eed8ef0e3321b2e3749183065426c52bff46fe` |
+| `1cb463a:src/stats/tagrules.py` | `f7c325cb21bcf39c42e6d785deacbe47eacec7fb2834d2927634e446b62ce57a` |
+| `1cb463a:src/stats/tagrules.py の出力` | `98926edbbbc7ac0375aee97aa7be0b1a5e3fcf3bc4acbadfa99f5d17362f7b8a` |
+| `2d23cdf:reviews/T-020.md` | `0b80ec29a994e04224900b3aafbc56a78d5cd9d4cee6e8d3df6c82a211cf46e7` |
+
+- 出力の JSON は、プロジェクトのルートで `PYTHONDONTWRITEBYTECODE=1 python3 -B src/stats/exclusion.py` の標準出力のバイト列。1cb463a の版の出力は、そのファイルを取り出して（`git show 1cb463a:src/stats/tagrules.py > tagrules.py`）、同じように引数なしで実行した標準出力のバイト列。
+- 封印の前に、封印係の側で次を確かめることを提案する。
+  - 出力の JSON の `optional_choice_status` が "decided" で、`owner_choice_source` の記録が実在すること。"undecided" なら封印を拒む。
+  - 上の sha256 が、封印する時点の HEAD のファイルと一致すること。
+- **二つの版の封印と比べ方**：順番1で、最終の版に加えて 1cb463a の版も封印する。統計係と監査係が記憶にある名前で照合を試したあとに語と規則が変わったので、変わる前の版の結果も並べて示せるようにするため。順番5で次を行う。
   1. 区分表と手法を作る期間のデータを取得したあと、同じ入力で、最終の版の `build_tag_list()` と、1cb463a の版の `build_tag_list()` を両方実行する。1cb463a の版は、git の履歴からそのファイルを取り出して実行する（区分は1cb463a の版の定義のまま）。
-  2. `compare_lists()` で、片方の版だけで一覧に入ったテーマを出す。
-  3. 二つの版の出力と、出入りしたテーマの一覧を、順番4の記録に入れて封印し、公開する。0e14f3b の版も、同じ手順で計算して公開する（封印の対象にはしない。git の履歴で時刻が分かる）。
-  4. 採点に使うのは最終の版の一覧だけ。比べた結果を見て、版を選び直すことはしない。
-- 検証の手順（docs/verify/）で、4 の結果が、封印した規則のコードと封印した入力から同じに再計算できることを確かめる手順を作ることを提案する。
+  2. `compare_lists()` で、片方の版だけで一覧に入ったテーマを出す。`compare_lists()` は二つが同じ入力から作られたことを確かめる。1cb463a の版の結果には設定の値が無いので、`enabled_optional_categories` の old は None になる。
+  3. 二つの版の出力と、出入りしたテーマの一覧を、順番5の記録に入れて封印し、公開する。0e14f3b の版と 247fc1d の版も、同じ手順で計算して公開する（封印の対象にはしない。git の履歴で時刻が分かる）。
+  4. 二つの設定（オーナーの選択どおりと、選べる区分をすべて有効）の比べた結果も、同じ記録に入れる（2章 (8) の手順6）。
+  5. 採点に使うのは最終の版で、オーナーの選択どおりの一覧だけ。比べた結果を見て、版や設定を選び直すことはしない。
+- 検証の手順（docs/verify/）で、5 の結果が、封印した規則のコードと封印した入力から同じに再計算できることを確かめる手順を作ることを提案する。
 
 ## 6. 方針書との関係
-- CLAUDE.md の5つの区分の外の区分（民族・宗教の集団）を足す点は、CLAUDE.md の決定事項の変更になる。オーナーの承認を得るまで、この行は提案である（0章の8）。
-- 病名の区分（disease_named）は、CLAUDE.md の「災害・感染症」の範囲だが、語を知識から選んだ点でオーナーの選択に委ねる（0章の7）。
-- 一度跳ねたタグの冷却は、CLAUDE.md の「予言の対象」に条件を一つ足すことになる。CLAUDE.md の「採点計画で必ず扱うこと」が、この扱いを採点計画で決めるとしているので、その範囲の提案とした。
+- 民族・宗教の集団の区分は、尋ねたときは CLAUDE.md の5つの区分の外だった。2026-10-08 のオーナーの決定で加わり、CLAUDE.md の「除外する規則」にもリードが書き足した。今は CLAUDE.md の区分の一つである。
+- 病名の区分（disease_named）は、CLAUDE.md の「災害・感染症」の範囲だが、語を知識から選んだ点でオーナーの選択に委ね、オーナーは使わないこと（案B）を選んだ。CLAUDE.md の書き足しにも「病名は使わず一般の語だけで照合する」とある。
+- 一度跳ねたタグの冷却は、CLAUDE.md の「予言の対象」に条件を一つ足すことになる。CLAUDE.md の「採点計画で必ず扱うこと」が、この扱いを採点計画で決めるとしているので、その範囲の提案とした。オーナーは承認した（0章15）。
+- 除外の規則と入れる規則を別々に封印する点は、CLAUDE.md の「まとめて封印する」を順番5の記録で満たす形にした（5章）。
 - それ以外は、CLAUDE.md と docs/method.md の範囲で決めた。
 
 ## 7. 使った情報（データを見ていないことの宣言）
-- 次の文書と発言だけを使った：CLAUDE.md、docs/method.md、docs/stats/periods.md、docs/stats/candidates.md、src/stats/periods.py、src/stats/candidates.py、reviews/T-001.md・T-011.md・T-016.md・T-019.md。
+- 次の文書と発言だけを使った。
+  - CLAUDE.md（2026-10-08 にリードが「除外する規則」を書き足した版を含む）、docs/method.md、docs/stats/periods.md、docs/stats/candidates.md、src/stats/periods.py、src/stats/candidates.py
+  - reviews/T-001.md・T-004.md・T-011.md・T-016.md（オーナーの発言と申し送り）
+  - reviews/T-019.md（採点と差し戻しの指示。監査係の所見と、監査係が作った名前の例を含む）
+  - reviews/T-020.md（採点と差し戻しの指示、2026-10-08 のオーナーの決定）
+  - 1cb463a・0e14f3b・247fc1d・ecd745f・2f4b3ce の自分のコードと文書（版の差分を作るため）
 - GDELT のデータ、ファイル一覧、テーマの区分表、GDELT のどのページにもアクセスしていない。ネットワークは使っていない。
-- 3つのコードは、データのファイルを開かず、現在の日時を読まない（テスト `TestNoDataNoNetwork`）。
+- 4つのコード（exclusion.py、tagrules.py、naive.py、scoring.py）は、データのファイルを開かず、現在の日時を読まない（テスト `TestNoDataNoNetwork`、`TestExclusionNoDataNoNetwork`）。テストの `test_owner_choice_source` は reviews/T-020.md を読む。これはオーナーの決定の記録で、データではない。
 
 **語の一覧に入った知識**（区分表は見ていないが、次の知識が語の選び方に入った）：
 - 英語の語彙。
-- **病名は、過去の流行の知識から選んだ。** EBOLA、ZIKA、COVID、SARS、MERS、H1N1、H5N1 などは、実際に大きく報じられた流行を知っていたから挙げた語である。そのため、病名の区分を使うかを案A・案Bとしてオーナーに選んでもらう（2章 (4)）。
+- **病名は、過去の流行の知識から選んだ。** EBOLA、ZIKA、COVID、SARS、MERS、H1N1、H5N1 などは、実際に大きく報じられた流行を知っていたから挙げた語である。そのため、病名の区分を使うかを案A・案Bとしてオーナーに選んでもらい、オーナーは使わないこと（案B）を選んだ（2章 (4)）。今の設定では、この知識は除外の判定に入らない。
 - **GDELT のテーマ名の形の知識。** テーマ名が、分類の体系の名前を頭に付け、下線で語をつないだ形（TAX_ETHNICITY_…、TAX_FNCACT_…、WB_…、CRISISLEX_… など）であること、KILL、ARREST、PROTEST などの一般の語がそのままテーマ名にもなっていることを知っている。この知識は、次の点で語の選び方に入った。
   - 民族の区分に ETHNICITY を入れたこと、POLICE や LEADER などの役職・立場の語を入れたこと。
   - 下線で区切る照合を基本にしたこと。
