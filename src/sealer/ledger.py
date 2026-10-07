@@ -7,7 +7,8 @@
 1 行の形（キーはこの 6 つだけ。ほかのキーがあれば検証で失敗にする）
     seq          通し番号。1 から始まり、行の順に 1 ずつ増える。
     prev_hash    直前の行のバイト列（末尾の改行を含めない）の sha256。1 行目は 0 が 64 個。
-    kind         種類。許可リスト（ALLOWED_KINDS）の 7 つだけ。それ以外は検証で失敗にする。
+    kind         種類。許可リスト（ALLOWED_KINDS）の 8 つだけ。それ以外は検証で失敗にする。
+                 gkg-run-start（GKG の取得の run の開始。T-031）を加えた。
                  periods / periods-triggers / threshold-access / acquisition-start /
                  acquisition-result / candidates（T-013）/ method-access（T-014）
     targets      対象のファイルの一覧。各要素は {"path", "role", "sha256"}。
@@ -141,8 +142,9 @@ ACQ_START_KIND = "acquisition-start"
 ACQ_RESULT_KIND = "acquisition-result"
 CANDIDATES_KIND = "candidates"
 METHOD_ACCESS_KIND = "method-access"
+GKG_RUN_KIND = "gkg-run-start"      # T-031：GKG の取得の run（試し・正式）の開始
 ALLOWED_KINDS = (PERIODS_KIND, TRIGGERS_KIND, THRESHOLD_ACCESS_KIND, ACQ_START_KIND,
-                 ACQ_RESULT_KIND, CANDIDATES_KIND, METHOD_ACCESS_KIND)
+                 ACQ_RESULT_KIND, CANDIDATES_KIND, METHOD_ACCESS_KIND, GKG_RUN_KIND)
 
 # stamp で使う公開カレンダー（ots の既定と同じ 4 つ）と、その集約先が返す Pending の宛先
 # （実体のカレンダー）。stamp.py はこの左側に送る。.ots の Pending の宛先は右側に限る。
@@ -381,9 +383,9 @@ DRAND_NOT_VERIFIED = ("drand の署名（BLS）は、オフラインでは検証
 #   drand の回の公開時刻が後なら、失敗にする。
 DRAND_HEADER_SLACK = datetime.timedelta(hours=2)
 
-DRAND_RECORD_KINDS = (THRESHOLD_ACCESS_KIND, ACQ_START_KIND, METHOD_ACCESS_KIND)
+DRAND_RECORD_KINDS = (THRESHOLD_ACCESS_KIND, ACQ_START_KIND, METHOD_ACCESS_KIND, GKG_RUN_KIND)
 # drand を持つ記録のうち、中身に step を持つものと、その値。
-DRAND_RECORD_STEP = {ACQ_START_KIND: 3, METHOD_ACCESS_KIND: 4}
+DRAND_RECORD_STEP = {ACQ_START_KIND: 3, METHOD_ACCESS_KIND: 4, GKG_RUN_KIND: 4}
 
 
 def drand_round_time(chain_hash, round_no):
@@ -916,6 +918,151 @@ def check_method_access_doc(root, records, record, doc):
     return got
 
 
+# ---------------------------------------------------------------- GKG の取得の run の開始（T-031）
+
+# 中身のキー（決まった 13 個だけ）。公開してよい値だけで、パスはリポジトリの中の相対パス
+# （取得のコード）に限る。保存先のディスク、ユーザー名、VolumeUUID などは入れない。
+GKG_RUN_DOC_KEYS = ("code_path", "code_sha256", "drand", "exclusion_rule_record_sha256",
+                    "exclusion_rule_seq", "filelist_sha256", "kind", "ledger_head",
+                    "method_access_seq", "mode", "run_id", "step", "trial_days")
+GKG_RUN_MODES = ("trial", "official")
+RUN_ID_RE = re.compile(r"\A[0-9a-f]{16}\Z")
+DAY_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}\Z")
+
+
+def _first_of_kind(records, kind):
+    return next((r for r in records if r["kind"] == kind), None)
+
+
+def check_gkg_run_doc(records, record, doc, read_json):
+    """gkg-run-start の中身を照合する（drand と ledger_head は check_drand_record）。T-031。
+
+    read_json(記録, role) は、記録の対象のファイルを sha256 を照合して JSON で返す関数。
+    次のどれかなら LedgerError。
+      - キーが GKG_RUN_DOC_KEYS の 13 個と一致しない。kind が記録と違う。step が 4 でない。
+      - mode が trial・official のどちらでもない。
+      - code_path が相対パスの正規の形でない。code_sha256 が 64 桁の16進でない。
+      - run_id が 16 桁の16進でない、または code_sha256 の先頭 16 桁と違う（収集係の run_id の
+        決め方。src/collector/gkg.py 5章）。
+      - filelist_sha256 が、この記録より前の acquisition-result の kept_rows_sha256 のどれとも違う
+        （手順3で封印したファイル一覧と同じ一覧を使うこと）。
+      - method_access_seq が、最初の method-access の記録の seq でない。
+      - trial_days：mode が trial なら、日付（YYYY-MM-DD）の、狭義に増える空でない一覧で、すべて
+        periods の 1 件目の method の区画の中。mode が official なら null。
+      - exclusion_rule_seq が、この記録より前の記録の seq でない。exclusion_rule_record_sha256 が、
+        その記録の行の正規の形（canonical_line）の sha256 と違う。
+        限界：その記録の kind が「除外の規則」の kind であることは照合しない（除外の規則の kind は
+        まだ決まっていない。src/collector/themes.py の EXCLUSION_RULE_KIND）。
+    返り値: 中身の dict（そのまま）。
+    """
+    seq = record["seq"]
+    _check_doc_kind(record, doc)
+    if not isinstance(doc, dict) or tuple(sorted(doc)) != GKG_RUN_DOC_KEYS:
+        raise LedgerError("seq %d の gkg-run-start の中身のキーが、決まった %d 個（%s）と一致しない"
+                          % (seq, len(GKG_RUN_DOC_KEYS), "、".join(GKG_RUN_DOC_KEYS)))
+    if type(doc["step"]) is not int or doc["step"] != 4:
+        raise LedgerError("seq %d の gkg-run-start の step が 4 でない" % seq)
+    mode = doc["mode"]
+    if mode not in GKG_RUN_MODES:
+        raise LedgerError("seq %d の gkg-run-start の mode が trial・official のどちらでもない" % seq)
+    acquisition_start_fields({"fetch": {"code_path": doc["code_path"],
+                                        "code_sha256": doc["code_sha256"]}})
+    if not isinstance(doc["run_id"], str) or not RUN_ID_RE.match(doc["run_id"]) \
+            or doc["run_id"] != doc["code_sha256"][:16]:
+        raise LedgerError("seq %d の gkg-run-start の run_id が、code_sha256 の先頭 16 桁と一致しない"
+                          % seq)
+    fl = doc["filelist_sha256"]
+    kept = []
+    for r in records:
+        if r["kind"] == ACQ_RESULT_KIND and r["seq"] < seq:
+            kept.append(acquisition_result_fields(r, read_json(r, ACQ_RESULT_KIND))[1])
+    if not isinstance(fl, str) or not HEX64.match(fl) or fl not in kept:
+        raise LedgerError("seq %d の gkg-run-start の filelist_sha256 が、それより前の acquisition-result "
+                          "の kept_rows_sha256 のどれとも一致しない" % seq)
+    m = _first_of_kind(records, METHOD_ACCESS_KIND)
+    if m is None or type(doc["method_access_seq"]) is not int or doc["method_access_seq"] != m["seq"]:
+        raise LedgerError("seq %d の gkg-run-start の method_access_seq %r が、最初の method-access の"
+                          "記録の seq（%s）と違う" % (seq, doc["method_access_seq"],
+                                                    "無し" if m is None else m["seq"]))
+    days = doc["trial_days"]
+    if mode == "official":
+        if days is not None:
+            raise LedgerError("seq %d の gkg-run-start（official）の trial_days が null でない" % seq)
+    else:
+        versions = records_of_kind(records, PERIODS_KIND)
+        if not versions:
+            raise LedgerError("periods の記録が無い")
+        start, end = blocks_of(read_json(versions[0][1], "output"))[METHOD_BLOCK]
+        ok = (isinstance(days, list) and days and all(isinstance(d, str) and DAY_RE.match(d)
+                                                      for d in days)
+              and all(a < b for a, b in zip(days, days[1:])))
+        if ok:
+            for d in days:
+                try:
+                    datetime.date.fromisoformat(d)
+                except ValueError:
+                    ok = False
+        if not ok:
+            raise LedgerError("seq %d の gkg-run-start（trial）の trial_days が、日付（YYYY-MM-DD）の"
+                              "増える空でない一覧でない" % seq)
+        outside = [d for d in days if not start <= d <= end]
+        if outside:
+            raise LedgerError("seq %d の gkg-run-start（trial）の trial_days %s が、手法を作る期間の"
+                              "区画 %s〜%s の外" % (seq, ", ".join(outside), start, end))
+    ex = doc["exclusion_rule_seq"]
+    target = next((r for r in records if r["seq"] == ex), None) if type(ex) is int else None
+    if target is None or not ex < seq:
+        raise LedgerError("seq %d の gkg-run-start の exclusion_rule_seq %r が、それより前の記録の seq で"
+                          "ない" % (seq, ex))
+    if doc["exclusion_rule_record_sha256"] != sha256_hex(canonical_line(target)):
+        raise LedgerError("seq %d の gkg-run-start の exclusion_rule_record_sha256 が、seq %d の記録の行の"
+                          "sha256 と一致しない" % (seq, ex))
+    return doc
+
+
+def check_gkg_run_order(records):
+    """gkg-run-start の順序の照合。T-031。返り値: gkg-run-start の記録の一覧。
+      - どの gkg-run-start も、最初の method-access の記録より後にあること。
+      - mode が official の記録は 1 件だけ（0 件は可）。
+      - mode が trial の記録は、official の記録より前にだけある。
+    mode は記録の中身にあるので、modes（{seq: mode}）を渡す形にせず、check_gkg_run_modes で行う。
+    ここでは位置（method-access の後）だけを確かめる。
+    """
+    runs = [r for r in records if r["kind"] == GKG_RUN_KIND]
+    if not runs:
+        return runs
+    m = _first_of_kind(records, METHOD_ACCESS_KIND)
+    for r in runs:
+        if m is None or r["seq"] < m["seq"]:
+            raise LedgerError("gkg-run-start の記録（seq %d）が、最初の method-access の記録%sより前にある。"
+                              "GKG の取得は手順4の記録の後に行う決まり"
+                              % (r["seq"], "" if m is None else "（seq %d）" % m["seq"]))
+    return runs
+
+
+def check_gkg_run_modes(modes):
+    """modes：[(seq, mode)]（seq の順）。official は 1 件だけ、trial は official より前だけ。T-031。"""
+    official = [seq for seq, mode in modes if mode == "official"]
+    if len(official) > 1:
+        raise LedgerError("mode が official の gkg-run-start が %d 件ある（seq %s）。正式な run は 1 件だけ"
+                          % (len(official), ", ".join(map(str, official))))
+    if official:
+        late = [seq for seq, mode in modes if mode == "trial" and seq > official[0]]
+        if late:
+            raise LedgerError("mode が trial の gkg-run-start（seq %s）が、official の記録（seq %d）より後に"
+                              "ある。試しの run は正式な run の前にだけ行う決まり"
+                              % (", ".join(map(str, late)), official[0]))
+
+
+def check_gkg_runs(records, read_json):
+    """すべての gkg-run-start の中身と順序を照合する（drand・ledger_head は別）。T-031。
+    返り値: [(記録, 中身)]。"""
+    runs = check_gkg_run_order(records)
+    out = [(r, check_gkg_run_doc(records, r, read_json(r, GKG_RUN_KIND), read_json)) for r in runs]
+    check_gkg_run_modes([(r["seq"], d["mode"]) for r, d in out])
+    return out
+
+
 # ---------------------------------------------------------------- periods の検査
 
 TRIGGER_KEYS = ("last_read_offset_days", "naive_history_days", "network_window_days",
@@ -1001,20 +1148,30 @@ def judge_deadline_status(output, decided, adopted_triggers):
                       "periods-triggers の記録と一致する"]
 
 
-def check_deadline_statuses(records, read_json):
-    """threshold-access の記録があるとき、すべての periods の版の deadline_status を、
-    verify.py periods と同じ規則（judge_deadline_status。採用された periods-triggers と比べる）で
-    照合する。T-027 の差し戻し1回目の中1 (ii)。食い違いがあれば LedgerError。
+def check_deadline_statuses(records, read_json, provisional=False):
+    """すべての periods の版の deadline_status を、verify.py periods と同じ規則
+    （judge_deadline_status）で照合する。T-027 の差し戻し1回目の中1 (ii)、T-031。
+    食い違いがあれば LedgerError。
 
-    書く仕組み（seal_access）と threshold-access の関門が使う。verify periods に通らない記録の
-    まま、閾値を決める期間に進まないため。periods の 1 件目の deadline_status が null でない
-    ことも失敗にする（verify periods と同じ）。threshold-access が無ければ何もしない。
+    比べる相手の periods-triggers：
+      - threshold-access の記録があれば、採用された periods-triggers（verify periods と同じ）。
+      - 無ければ、provisional が偽なら何もしない（seal_access・threshold-access の関門の場合。
+        追記した後の記録には threshold-access があるので、照合は行われる）。provisional が真なら、
+        仮の採用として、今ある periods-triggers の最後の記録と比べる（method-access の関門。T-031。
+        このあと periods-triggers を足さずに threshold-access を足したときと同じ結論になる）。
+    確かめる範囲（T-031 の軽2 で明記）：
+      - 各版の rebuild_triggers・deadline_status の形と、その申告が記録から決まる値と一致すること
+      - periods の 1 件目の deadline_status が null であること
+    確かめないこと：区画の境目（check_blocks。seal_periods と verify periods が行う）、対象の
+    ファイルの sha256 の照合のほか（read_json が行う）。
     どの periods-triggers と比べるべきか（docs/stats/periods.md 8章 (2) の「記録に追記した値」）は、
     統計係の判断を待っている。決まるまでは verify periods と同じ規則を使う。
     """
     rec, _cand, cut = adoption(records, TRIGGERS_KIND)
     if cut is None:
-        return
+        if not provisional:
+            return
+        rec = _last_of_kind(records, TRIGGERS_KIND)
     values = None if rec is None else triggers_values(read_json(rec, "triggers"))
     versions = records_of_kind(records, PERIODS_KIND)
     problems = []
@@ -1025,8 +1182,78 @@ def check_deadline_statuses(records, read_json):
         _expected, probs = judge_deadline_status(out, True, values)
         problems += ["%d 件目（seq %d）: %s" % (v, r["seq"], p) for p in probs]
     if problems:
-        raise LedgerError("periods の deadline_status の照合に通らない（verify.py periods と同じ規則）: %s"
-                          % "; ".join(problems))
+        raise LedgerError("periods の deadline_status の照合に通らない（verify.py periods と同じ規則%s）: %s"
+                          % ("。threshold-access がまだ無いので、periods-triggers の最後の記録を仮の採用として"
+                             "比べた" if cut is None else "", "; ".join(problems)))
+
+
+def _last_of_kind(records, kind):
+    found = None
+    for r in records:
+        if r["kind"] == kind:
+            found = r
+    return found
+
+
+def check_periods_version_append(records, read_json, output):
+    """periods の 2 件目以降の版を書く前の照合（seal_periods が使う）。T-031（T-027 の監査 中1）。
+
+    threshold-access の記録がまだ無いときだけ行う（その後の版は採用されず、verify periods が
+    今までどおり照合する）。output は書こうとしている出力（dict）。次のどれかなら LedgerError。
+      - rebuild_triggers がすべて null（または無い）のに、deadline_status が null でない。
+      - deadline_status が before_deadline で、
+          (a) periods-triggers の記録が無いか、その最後の記録の値と rebuild_triggers が違う
+              （先にきっかけの値を追記してから作り直す決まり。docs/stats/periods.md 8章 (2)）。
+          (b) 既にある before_deadline の版の rebuild_triggers と違う（違うと、どちらかの版が
+              verify periods で「申告と一致しない」になり、記録から消せない）。
+          (c) rebuild_triggers の J が null でなく、candidates の J の最大と違う（candidates の
+              記録が無いうちは照合しない。J の照合は method-access・threshold-access の時点で
+              check_horizon_embargo が行う）。
+      - deadline_status が after_deadline で、rebuild_triggers が periods-triggers の最後の記録の
+        値と同じ（採用されると「after_deadline と申告しているが一致する」で失敗する）。
+      - deadline_status がそれ以外。
+    after_deadline は、期限（最初の threshold-access）の後の作り直し（オーナーの承認が要る。
+    periods.md 8章 (2)）のための申告で、期限の前に使ってはいけない。この照合は申告の形が記録と
+    矛盾しないことしか確かめず、期限の前に after_deadline を使ったかどうかは止めない
+    （docs/verify/periods-seal.md 9章）。
+    """
+    if first_threshold_access(records) is not None:
+        return
+    status = output.get("deadline_status")
+    trig = output.get("rebuild_triggers")
+    if not isinstance(trig, dict) or not any(v is not None for v in trig.values()):
+        if status is not None:
+            raise LedgerError("きっかけの値が無いのに deadline_status が %r。書かない" % (status,))
+        return
+    last = _last_of_kind(records, TRIGGERS_KIND)
+    last_values = None if last is None else triggers_values(read_json(last, "triggers"))
+    shown = json.dumps(trig, sort_keys=True)
+    if status == "before_deadline":
+        if last_values is None or dict(trig) != dict(last_values):
+            raise LedgerError("before_deadline の版の rebuild_triggers %s が、periods-triggers の最後の記録%s"
+                              "と一致しない。先にきっかけの値を seal_triggers.py で追記してから作り直す。書かない"
+                              % (shown, "（無し）" if last is None else "（seq %d、%s）"
+                                 % (last["seq"], json.dumps(last_values, sort_keys=True))))
+        for v, r in records_of_kind(records, PERIODS_KIND):
+            out = read_json(r, "output")
+            other = out.get("rebuild_triggers")
+            if out.get("deadline_status") == "before_deadline" and isinstance(other, dict) \
+                    and dict(other) != dict(trig):
+                raise LedgerError("既にある before_deadline の版（%d 件目、seq %d）の rebuild_triggers %s と、"
+                                  "書こうとしている版の %s が違う。どちらかが verify.py periods で失敗し続ける"
+                                  "ので書かない" % (v, r["seq"], json.dumps(other, sort_keys=True), shown))
+        j = trig.get("last_read_offset_days")
+        j_max = candidates_j_max(records, read_json)
+        if j is not None and j_max is not None and j != j_max:
+            raise LedgerError("before_deadline の版の J（last_read_offset_days %r）が、candidates の J の最大 "
+                              "%d と違う。書かない" % (j, j_max))
+    elif status == "after_deadline":
+        if last_values is not None and dict(trig) == dict(last_values):
+            raise LedgerError("after_deadline の版の rebuild_triggers %s が、periods-triggers の最後の記録"
+                              "（seq %d）と同じ。採用されると「after_deadline と申告しているが一致する」で"
+                              "失敗するので書かない" % (shown, last["seq"]))
+    else:
+        raise LedgerError("きっかけの値があるのに deadline_status が %r。書かない" % (status,))
 
 
 def check_triggers_against_rebuilds(records, read_json, values):
@@ -1430,6 +1657,8 @@ def require_method_access():
         （check_method_access_order）。acquisition-start と result の対応が正しいこと
       - 候補の順序：candidates が最初の acquisition-start より前にあり、形の照合に通ること
       - J とエンバーゴ（T-017、T-023）：check_horizon_embargo（require_threshold_access と同じ）
+      - periods の deadline_status（T-031）：check_deadline_statuses(provisional=True)。
+        threshold-access がまだ無ければ、periods-triggers の最後の記録を仮の採用として比べる
       - sealed/ と記録のファイルの実体が、プロジェクトの下にあること（check_sealed_inside）
     記録が無ければ、先に src/sealer/seal_method.py で method-access を追記する。
 
@@ -1462,6 +1691,9 @@ def require_method_access():
         check_acquisition_pairs(records, refs)
         check_candidates_ready(root, records, rec["seq"])
         check_horizon_embargo(records, lambda r, role: read_target_json(root, r, role))
+        # T-031（T-027 の監査 中1）：仮の採用（periods-triggers の最後の記録）での deadline_status
+        check_deadline_statuses(records, lambda r, role: read_target_json(root, r, role),
+                                provisional=True)
     except MethodAccessRequired:
         raise
     except LedgerError as e:

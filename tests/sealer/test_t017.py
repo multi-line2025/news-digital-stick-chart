@@ -204,6 +204,31 @@ class TestHorizonEmbargo(t14.Case):
         tl.stamp.stamp_seq(self.ledger, seq, "ots", runner=tl.FakeRun())
         return seq
 
+    def raw_periods(self, args, now):
+        """periods の版を、書く仕組み（seal_periods）を通さずに足す（書く仕組みを飛ばした場合の
+        再現）。T-031：seal_periods に書く前の照合が入ったので、その照合を飛ばした記録を作るため。"""
+        out = tl.seal_periods.run_periods(self.root, list(args))
+        sha = ledger.sha256_hex(out)
+        rel = "sealed/periods-output-%s.json" % sha
+        ledger.write_once(os.path.join(self.root, rel), out)
+        targets = [{"path": p, "role": r, "sha256": ledger.sha256_file(os.path.join(self.root, p))}
+                   for p, r in tl.seal_periods.SOURCES]
+        targets.append({"path": rel, "role": "output", "sha256": sha})
+        ledger.append_record(self.ledger, ledger.PERIODS_KIND, targets, "", now)
+        seq = len(self.records())
+        tl.stamp.stamp_seq(self.ledger, seq, "ots", runner=tl.FakeRun())
+        return seq
+
+    def assert_periods_writer_refuses(self, args, now, msg):
+        """seal_periods が msg を含む理由で、何も書かずに止まること。"""
+        before, data = self.snapshot(), self.ledger_bytes()
+        sha = ledger.sha256_hex(tl.seal_periods.run_periods(self.root, list(args)))
+        with self.assertRaises(ledger.LedgerError) as cm:
+            self.seal(args=list(args), sha=sha, now=now, with_cand=False)
+        self.assertIn(msg, str(cm.exception))
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.ledger_bytes(), data)
+
     def test_real_values_within(self):
         """本物の封印の値：candidates の J の最大 56、periods の 1 件目の embargo_days 90。
         どのファイルを使うかは、本物の記録の順番（periods の 1 件目、すべての candidates）で選ぶ
@@ -302,7 +327,9 @@ class TestHorizonEmbargo(t14.Case):
         self.raw_triggers(T0 + 3 * H, last_read_offset_days=100)
         self.add_access(T0 + 4 * H, 30_000_000)
         self.verify_fails(("candidates",), "seq 5、100")
-        self.assertEqual(run_verify(self.root, "all").returncode, 1)
+        # T-031（T-027 の監査 軽3）：all の失敗も文言まで確かめる。all は periods の照合を先にするので、
+        # 2 件目（J 120 の版）の申告が採用された triggers（J 100）と一致しないことで止まる
+        self.verify_fails(("all",), "2 件目: before_deadline と申告しているが")
 
     def test_triggers_after_deadline_fails(self):
         self.seal_long()

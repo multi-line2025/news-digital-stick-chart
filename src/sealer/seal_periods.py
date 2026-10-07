@@ -111,6 +111,9 @@ def seal(project, expect_sha, extra_args, now, ots_cmd, runner=subprocess.run):
         problems = ledger.check_blocks(json.loads(first_bytes.decode("utf-8")), output)
         if problems:
             raise ledger.LedgerError("区画の境目が最初の版と違う: " + "; ".join(problems))
+        # T-031（T-027 の監査 中1）：threshold-access より前の 2 件目以降の版の、書く前の照合
+        ledger.check_periods_version_append(
+            records, lambda r, role: ledger.read_target_json(project, r, role), output)
 
     # 5
     out_rel = "sealed/periods-output-%s.json" % out_sha

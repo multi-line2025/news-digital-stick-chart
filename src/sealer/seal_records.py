@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""threshold-access・acquisition-start・acquisition-result・method-access を書く共通の手順。
+"""threshold-access・acquisition-start・acquisition-result・method-access・gkg-run-start を書く共通の手順。
 T-009、T-014。
 
-使うのは seal_access.py、seal_acquisition.py、seal_method.py。中身の形と照合は
+使うのは seal_access.py、seal_acquisition.py、seal_method.py、seal_gkg_run.py（T-031）。中身の形と照合は
 docs/verify/periods-seal.md 7章、ledger.py の check_drand_record・acquisition_result_fields・
 check_acquisition_pairs と同じ。
 
@@ -23,6 +23,9 @@ check_acquisition_pairs と同じ。
        - method-access：ledger_head、drand、step = 4、区画（periods の 1 件目の method の区画）、
          その前に candidates と acquisition-result の記録があること（T-014）、
          J とエンバーゴの照合（T-017、T-023。ledger.check_horizon_embargo）
+       - gkg-run-start（T-031）：ledger_head、drand、step = 4、中身の 13 個のキーと値
+         （ledger.check_gkg_run_doc）、順序（method-access より後、official は 1 件だけ、
+         trial は official より前だけ。ledger.check_gkg_runs）
        - acquisition-result：start_seq・kept_rows_sha256 の形、start が実在し、result が後にあり、
          一つの start に result が一つだけであること
      どれかが通らなければ、何も書かずに止める。
@@ -52,7 +55,7 @@ import stamp  # noqa: E402
 
 
 WRITTEN_KINDS = (ledger.THRESHOLD_ACCESS_KIND, ledger.ACQ_START_KIND, ledger.ACQ_RESULT_KIND,
-                 ledger.METHOD_ACCESS_KIND)
+                 ledger.METHOD_ACCESS_KIND, ledger.GKG_RUN_KIND)
 
 
 def _paths(project):
@@ -125,6 +128,14 @@ def check_new(project, data_after, records_after, rec, doc):
     elif kind == ledger.ACQ_START_KIND:
         ledger.acquisition_start_fields(doc)
         ledger.check_candidates_order(records_after)
+    elif kind == ledger.GKG_RUN_KIND:
+        # T-031：中身のキー・run_id・一覧・method-access・試しの日・除外の規則の記録と、順序
+        # （method-access より後、official は 1 件だけ、trial は official より前だけ）
+        def read(r, role):
+            if r["seq"] == rec["seq"]:
+                return doc
+            return ledger.read_target_json(project, r, role)
+        ledger.check_gkg_runs(records_after, read)
     elif kind == ledger.METHOD_ACCESS_KIND:
         ledger.check_method_access_doc(project, records_after, rec, doc)
         ledger.check_method_access_order(records_after)

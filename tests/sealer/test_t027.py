@@ -240,7 +240,9 @@ class TestRebuildAfterMethod(t23.JCase):
         関門も、verify periods と同じ照合で止まる（差し戻し1回目の中1 (ii)・軽1）。"""
         self.to_method()
         self.raw_triggers(T0 + 6 * H, last_read_offset_days=120, network_window_days=500)
-        self.rebuilt_with_network(T0 + 7 * H)
+        # T-031：seal_periods も、既にある before_deadline の版と違う版を拒むので、飛ばして足す
+        self.assert_periods_writer_refuses(self.J_NW, T0 + 7 * H, "既にある before_deadline の版")
+        self.raw_periods(self.J_NW, T0 + 7 * H)
         msg = "2 件目（seq 4）: before_deadline と申告しているが"
         self.assert_writer_refuses(lambda: self.write_access(T0 + 8 * H), msg)
         self.add_access(T0 + 8 * H, ROUND)
@@ -345,7 +347,9 @@ class TestDeadlineRepro(t23.JCase):
             "periods の 2 件目（seq %d）が before_deadline で、その rebuild_triggers" % prec["seq"])
         # 飛ばして作った場合：seal_access・関門・verify が止まる
         self.raw_triggers(T0 + 6 * H, network_window_days=500, same_week_years=3)
-        self.rebuilt(["--nwonly", "--sw3", "before_deadline"], T0 + 7 * H)
+        self.assert_periods_writer_refuses(["--nwonly", "--sw3", "before_deadline"], T0 + 7 * H,
+                                           "既にある before_deadline の版")
+        self.raw_periods(["--nwonly", "--sw3", "before_deadline"], T0 + 7 * H)   # T-031
         msg = "2 件目（seq %d）: before_deadline と申告しているが" % prec["seq"]
         self.assert_writer_refuses(lambda: self.write_access(T0 + 8 * H), msg)
         self.add_access(T0 + 8 * H, ROUND)
@@ -413,7 +417,7 @@ class TestDocT027(unittest.TestCase):
 
     def test_known_gap_statement(self):
         self.assertIn("未解決（T-027 で報告）", self.text)
-        self.assertIn("決まるまでの扱い（T-027 の差し戻し1回目の中1 (ii)）", self.text)
+        self.assertIn("決まるまでの扱い（T-027 の差し戻し1回目の中1 (ii)", self.text)   # T-031 で見出しに足した
         self.assertIn("今の本物の記録（J の最大 56）でも、正直な流れで入りうる", self.text)
         self.assertIn("T-027 の初回のコミット（58df044）の説明の訂正", self.text)
 

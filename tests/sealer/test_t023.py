@@ -110,7 +110,9 @@ class TestAuditP2(JCase):
             lambda: seal_triggers.seal(self.root, {"last_read_offset_days": 120}, T0 + 4 * H, None),
             "method-access の記録（seq 5）がある")
         self.raw_triggers(T0 + 4 * H, last_read_offset_days=120)
-        self.rebuilt_periods(T0 + 5 * H)
+        # T-031：seal_periods も、候補の J の最大（28）と違う J の版を拒むので、飛ばして足す
+        self.assert_periods_writer_refuses(["--j120", "before_deadline"], T0 + 5 * H, "candidates の J の最大 28 と違う")
+        self.raw_periods(["--j120", "before_deadline"], T0 + 5 * H)
         self.verify_fails(("candidates", "all"), "最初の method-access（seq 5）より後にある")
         self.assert_gates_stop("最初の method-access", threshold=False)
         self.assert_writer_refuses(lambda: self.write_access(T0 + 6 * H), "最初の method-access")
@@ -123,7 +125,8 @@ class TestAuditP2(JCase):
         method-access より前に置いても、値の照合で失敗する（位置の照合に頼らない）。"""
         self.seal()
         self.raw_triggers(T0 + H / 2, last_read_offset_days=120)
-        self.rebuilt_periods(T0 + H)
+        self.assert_periods_writer_refuses(["--j120", "before_deadline"], T0 + H, "candidates の J の最大 28 と違う")
+        self.raw_periods(["--j120", "before_deadline"], T0 + H)    # T-031：書く仕組みを飛ばして足す
         self.step3(T0 + 2 * H)
         self.assert_writer_refuses(lambda: self.method(T0 + 4 * H), "と等しくない")
         self.add_method(T0 + 4 * H, ROUND)
@@ -154,7 +157,10 @@ class TestJEquality(JCase):
         """作り直しが要る場合（J の最大 120）も、大きすぎる J（150）は失敗。"""
         self.seal_long()
         self.seal_triggers(T0 + H, last_read_offset_days=150)
-        self.rebuilt_periods(T0 + 2 * H)
+        # T-031：rebuild_triggers（J 120）が periods-triggers の最後の記録（J 150）と違うので、
+        # seal_periods は拒む。飛ばして足す
+        self.assert_periods_writer_refuses(["--j120", "before_deadline"], T0 + 2 * H, "periods-triggers の最後の記録")
+        self.raw_periods(["--j120", "before_deadline"], T0 + 2 * H)
         self.add_access(T0 + 3 * H, ROUND)
         self.verify_fails(("candidates",), "last_read_offset_days 150 が、candidates の J の最大 120 と"
                                            "等しくない")

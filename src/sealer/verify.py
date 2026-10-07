@@ -18,6 +18,9 @@
     python3 -B src/sealer/verify.py method             method-access（手順4の開始）の ledger_head・
                                                        drand の回・区画、その前に candidates と
                                                        acquisition-result があること（T-014）
+    python3 -B src/sealer/verify.py gkg-runs           GKG の取得の run の開始（gkg-run-start。T-031）の
+                                                       ledger_head・drand・中身・順序。試しの run の回数と、
+                                                       各 run の run_id・code_sha256・日を並べる
     python3 -B src/sealer/verify.py periods            区画の境目と deadline_status の照合
     python3 -B src/sealer/verify.py candidates         閾値と判定期間の候補の記録の形・出力の形、
                                                        最初の acquisition-start より前にあること（T-013）、
@@ -430,6 +433,32 @@ def cmd_method(st, _a):
     print(ledger.DRAND_NOT_VERIFIED)
 
 
+def cmd_gkg_runs(st, _a):
+    """GKG の取得の run の開始（kind が gkg-run-start）の照合と一覧。T-031。"""
+    runs = ledger.check_gkg_runs(st.records, st.file_json)
+    if not runs:
+        print("gkg-run-start の記録：なし（照合するものが無い）")
+        return
+    trials = [(r, d) for r, d in runs if d["mode"] == "trial"]
+    officials = [(r, d) for r, d in runs if d["mode"] == "official"]
+    print("GKG の取得の run の開始（gkg-run-start）：試しの run %d 回、正式な run %d 回"
+          "（記録の件数から数える）" % (len(trials), len(officials)))
+    for r, d in runs:
+        own = st.times.get(r["seq"])
+        t, state = ledger.check_drand_record(st.data, r, d, own)
+        print("  seq %d  %s  run_id %s  code_sha256 %s（%s）  日 %s  一覧 %s  method-access seq %d  "
+              "除外の規則の記録 seq %d"
+              % (r["seq"], "試しの run（trial）" if d["mode"] == "trial" else "正式な run（official）",
+                 d["run_id"], d["code_sha256"], d["code_path"],
+                 "、".join(d["trial_days"]) if d["trial_days"] else "（区画の全体）",
+                 d["filelist_sha256"], d["method_access_seq"], d["exclusion_rule_seq"]))
+        _print_drand(r, t, state, own)
+    print("順序：どの gkg-run-start も最初の method-access より後。official は %s。trial は official "
+          "より前だけ。除外の規則の記録の kind は、まだ照合しない（kind が決まっていない）。"
+          % ("1 件" if officials else "まだ無い"))
+    print(ledger.DRAND_NOT_VERIFIED)
+
+
 def cmd_periods(st, _a):
     versions = ledger.records_of_kind(st.records, ledger.PERIODS_KIND)
     if not versions:
@@ -550,6 +579,7 @@ def cmd_all(st, a):
     cmd_access(st, a)
     cmd_acquisition(st, a)
     cmd_method(st, a)
+    cmd_gkg_runs(st, a)
     cmd_periods(st, a)
     cmd_candidates(st, a)
     cmd_adopted(st, a)
@@ -563,8 +593,8 @@ def main(argv=None):
     p.add_argument("--root", default=os.getcwd())
     sub = p.add_subparsers(dest="cmd", required=True)
     parsers = {}
-    for name in ("chain", "anchors", "targets", "access", "acquisition", "method", "periods",
-                 "candidates", "adopted", "all"):
+    for name in ("chain", "anchors", "targets", "access", "acquisition", "method", "gkg-runs",
+                 "periods", "candidates", "adopted", "all"):
         s = sub.add_parser(name, allow_abbrev=False)
         s.add_argument("--btc-header", type=_parse_header_arg, action="append",
                        help="高さ=80 バイトのヘッダの16進。.ots の中の Bitcoin の証明と照合する")
@@ -576,6 +606,7 @@ def main(argv=None):
     a = p.parse_args(argv)
     fn = {"chain": cmd_chain, "anchors": cmd_anchors, "targets": cmd_targets,
           "access": cmd_access, "acquisition": cmd_acquisition, "method": cmd_method,
+          "gkg-runs": cmd_gkg_runs,
           "periods": cmd_periods,
           "candidates": cmd_candidates, "adopted": cmd_adopted,
           "all": cmd_all}[a.cmd]

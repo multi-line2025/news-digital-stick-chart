@@ -15,7 +15,7 @@ T-008：区切りは最初の threshold-access の記録。acquisition-start の
 acquisition-result の対応、drand の照合の幅（幅の中は通り、外は失敗）、許可リストに無い kind を
 拒むことを確かめる。
 T-014：acquisition-start の前に candidates が要ること（SealCase.add_cand で足す）、kind の許可リストが
-method-access を含む 7 つであること。
+method-access・gkg-run-start（T-031）を含む 8 つであること。
 """
 
 import contextlib
@@ -290,11 +290,11 @@ class TestChain(LedgerCase):
             ledger.append_record(self.path, "acquisition", [target("b")], "", T0 + H)
         self.assertEqual(len(self.lines()), 1)
 
-    def test_allowed_kinds_are_the_seven(self):
+    def test_allowed_kinds_are_the_eight(self):
         self.assertEqual(set(ledger.ALLOWED_KINDS),
                          {"periods", "periods-triggers", "threshold-access",
                           "acquisition-start", "acquisition-result", "candidates",
-                          "method-access"})
+                          "method-access", "gkg-run-start"})     # T-031：gkg-run-start を加えた
         self.assertNotIn("acquisition", ledger.ALLOWED_KINDS)
         self.add(n=1)
         for i, k in enumerate(ledger.ALLOWED_KINDS):
@@ -875,6 +875,9 @@ if "--nwonly" in sys.argv:      # T-027 の差し戻し1回目（監査の probe
 if "--sw3" in sys.argv:
     trig["same_week_years"] = 3
     status = sys.argv[-1]
+if "--j60" in sys.argv:         # T-031（監査の probe_r1.py の S2 と同じ）
+    trig["last_read_offset_days"] = 60
+    status = sys.argv[-1]
 print(json.dumps({"deadline_status": status, "rebuild_triggers": trig,
     "rules": {"embargo_days": embargo},
     "periods": [{"name": n, "block_start": s, "block_end": e} for n, s, e in blocks]}))
@@ -1290,9 +1293,11 @@ def adoption_lines(text):
 
 
 class TestAuditRepro(SealCase):
-    """seq 1 periods、seq 2 periods、seq 3 periods-triggers、seq 4 candidates、
+    """seq 1 periods、seq 2 periods-triggers、seq 3 periods、seq 4 candidates、
     seq 5 threshold-access、seq 6 periods。
-    どの操作でも、採用は periods = seq 2、periods-triggers = seq 3 のまま。
+    どの操作でも、採用は periods = seq 3、periods-triggers = seq 2 のまま。
+    T-031：作り直した版は、先に periods-triggers を追記してから書く決まり（seal_periods の書く前の
+    照合）になったので、seq 2 と seq 3 の順を入れ替えた。
     T-017：threshold-access の前に candidates が要る（verify access の照合）ので seq 4 に足した。
     T-023：J とエンバーゴの照合（採用される triggers の J = candidates の J の最大、採用される
     periods の embargo_days = max(90, J の最大)）に通るよう、candidates の J の最大を seq 3 の
@@ -1302,10 +1307,10 @@ class TestAuditRepro(SealCase):
 
     def build(self, round_no=ACQ_ROUND):
         self.seal()
+        self.seal_triggers(T0 + H, last_read_offset_days=120)
         j120 = ["--j120", "before_deadline"]
         self.seal(args=j120, sha=ledger.sha256_hex(seal_periods.run_periods(self.root, j120)),
-                  now=T0 + H)
-        self.seal_triggers(T0 + 2 * H, last_read_offset_days=120)
+                  now=T0 + 2 * H)
         self.add_cand(T0 + 2 * H + H / 2, output=CAND_J120)   # T-023：J の最大 120
         self.add_access(T0 + 3 * H, round_no)
         args = ["--j120", "before_deadline"]
@@ -1335,8 +1340,8 @@ class TestAuditRepro(SealCase):
     def assertAdoption(self, out):
         lines = adoption_lines(out)
         self.assertEqual(len(lines), 2, out)
-        self.assertTrue(lines[0].startswith("  periods: 採用 = seq 2（2 件目"), lines)
-        self.assertTrue(lines[1].startswith("  periods-triggers: 採用 = seq 3（1 件目"), lines)
+        self.assertTrue(lines[0].startswith("  periods: 採用 = seq 3（2 件目"), lines)
+        self.assertTrue(lines[1].startswith("  periods-triggers: 採用 = seq 2（1 件目"), lines)
         return lines
 
     def test_baseline_all_pending(self):

@@ -547,7 +547,7 @@ class TestDocStatements(unittest.TestCase):
             self.assertIn(phrase, self.text)
 
     def test_kind_count_is_seven(self):
-        self.assertIn("下の表の7つだけ", self.text)
+        self.assertIn("下の表の8つだけ", self.text)   # T-031：gkg-run-start を加えた
         self.assertIn("| `method-access` |", self.text)
 
 
