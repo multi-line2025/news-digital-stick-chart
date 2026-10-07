@@ -9,7 +9,10 @@
 - メールアドレス・絶対パス・UUID・IPv4・この機械に固有の文字列が入ると止まり、何も出力しないこと
 - 本物の記録で投稿文が作れ、ハッシュが記録の先頭 N 行・seq N の .ots の対象と同じであること
 - 壊した記録（書き換え・切り詰め・コミットしていない変更）では投稿文を作らないこと
-- 手順書の塊を、リポジトリの複製の中でそのまま実行し、壊した複製・違う投稿の値では失敗すること
+- 手順書の塊を、文書のとおりファイルに保存し、-e を付けずに bash と zsh で実行する（S-1）。
+  壊した複製・違う投稿の値では終了コード 1 で止まり、どの検査が合わないかを出すこと
+- 投稿の一覧を投稿の決まり（すべての記録を recorded_at から 24 時間以内。seq 1〜4 は決まりの前の
+  例外）と照らすこと（M-2。2026-10-08 オーナー決定）
 """
 
 import contextlib
@@ -96,16 +99,17 @@ class TestWeight(unittest.TestCase):
     def test_nfc_before_counting(self):
         self.assertEqual(self.W("e\u0301"), 1)   # 合成すると é の 1 文字
 
-    def test_url_is_23(self):
-        self.assertEqual(self.W("https://www.gdeltproject.org/"), 23)
+    def test_url_is_max_of_length_and_23(self):
+        """L-2：X がリンクにしてもしなくても少なく数えないよう、max(実際の長さ, 23)。"""
+        self.assertEqual(self.W("https://www.gdeltproject.org/"), 29)
         self.assertEqual(self.W("http://a.co"), 23)
-        self.assertEqual(self.W("https://example.org/" + "x" * 200), 23)
+        self.assertEqual(self.W("https://example.org/" + "x" * 200), 220)
 
     def test_url_trailing_punctuation_not_in_url(self):
-        # "(" 1 + URL 23 + ")." 2
-        self.assertEqual(self.W("(https://www.gdeltproject.org/)."), 26)
-        # 全角の括弧で終わる（日本語の引用の形）。"（" 2 + URL 23 + "）。" 4
-        self.assertEqual(self.W("（https://www.gdeltproject.org/）。"), 29)
+        # "(" 1 + URL 29 + ")." 2
+        self.assertEqual(self.W("(https://www.gdeltproject.org/)."), 32)
+        # 全角の括弧で終わる（日本語の引用の形）。"（" 2 + URL 29 + "）。" 4
+        self.assertEqual(self.W("（https://www.gdeltproject.org/）。"), 35)
 
     def test_bare_domain_counts_at_least_23(self):
         self.assertEqual(self.W("ledger.jsonl"), 23)
@@ -119,9 +123,17 @@ class TestWeight(unittest.TestCase):
         self.assertGreaterEqual(self.W("\U0001F600"), 2)
 
     def test_fixed_citations(self):
-        # 内訳を手で数えた値。英語：25 + 23 + 2 + 70。日本語：12 + 13 + 2 + 23 + 4 + 16 + 15 + 32。
-        self.assertEqual(self.W(post_text.CITATION_EN), 120)
-        self.assertEqual(self.W(post_text.CITATION_JA), 117)
+        # 内訳を手で数えた値。英語：25 + 29 + 2 + 70。日本語：12 + 13 + 2 + 29 + 4 + 16 + 15 + 32。
+        self.assertEqual(self.W(post_text.CITATION_EN), 126)
+        self.assertEqual(self.W(post_text.CITATION_JA), 123)
+
+    def test_unicode_digits_not_accepted(self):
+        """L-3：数字は [0-9] だけ。"""
+        text = sample_text()
+        self.assertIsNone(post_text.TEMPLATE_RE.match(text.replace("2026", "\u0662026")))
+        self.assertIsNone(post_text.TEMPLATE_RE.match(text.replace("seq 1-4", "seq 1-\u0664")))
+        with self.assertRaises(post_text.PostError):
+            post_text.body(dict(SAMPLE_FACTS, recorded_at="\u0662026-10-07T13:45:22Z"))
 
     def test_over_limit_stops(self):
         facts = dict(SAMPLE_FACTS, seq=10 ** 60)
@@ -223,7 +235,7 @@ class TestPrivacy(unittest.TestCase):
 
     def test_main_prints_nothing_when_stopped(self):
         """build の中で検査に当たれば、標準出力に何も出さず、終了コード 1。"""
-        bad = post_text.body(SAMPLE_FACTS).replace("lines", "/Users/someone lines")
+        bad = post_text.body(SAMPLE_FACTS).replace("seq 1-", "/Users/someone seq 1-")
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(post_text, "head_facts", return_value=SAMPLE_FACTS), \
                 mock.patch.object(post_text, "body", return_value=bad), \
@@ -268,6 +280,21 @@ class TestRealLedger(unittest.TestCase):
         self.assertLessEqual(post_text.weighted_length(text), 280)
         self.assertIn(lang, ("ja", "en"))
         self.assertEqual(post_text.check_publishable(text), post_text.weighted_length(text))
+
+    def test_each_earlier_seq(self):
+        """--seq N：前の seq の文（投稿の決まりはすべての記録の投稿を求める）。"""
+        data = subprocess.run(["git", "-C", PROJECT, "show", "HEAD:sealed/ledger.jsonl"],
+                              check=True, capture_output=True).stdout
+        records = ledger.verify_chain(data)
+        for r in records:
+            text, _l, _c, facts = post_text.build(PROJECT, r["seq"])
+            m = post_text.TEMPLATE_RE.match(text)
+            self.assertEqual(int(m.group("seq")), r["seq"])
+            self.assertEqual(m.group("hash"), ledger.prefix_digest(data, r["seq"]))
+            self.assertEqual(m.group("time"), r["recorded_at"])
+        for bad in (0, len(records) + 1):
+            with self.assertRaises(post_text.PostError):
+                post_text.build(PROJECT, bad)
 
     def test_cli_both_pythons(self):
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
@@ -346,9 +373,149 @@ class TestSyntheticLedger(tl.LedgerCase):
 # ---------------------------------------------------------------- 照らす手順（第三者）
 
 
+# ---------------------------------------------------------------- 投稿の一覧と投稿の決まり（M-2）
+
+
+def post_line(when, seq, h):
+    return "%s %d %s" % (ledger.format_time(when), seq, h)
+
+
+class TestCheckPosts(tl.LedgerCase):
+    """仮の記録 6 件（seq k の recorded_at は T0 + (k−1) 時間）で、投稿の決まりを照らす。"""
+
+    def setUp(self):
+        super().setUp()
+        self.add(n=6)
+        for s in range(1, 7):
+            self.stamp(s)
+        self.d = self.data()
+
+    def rec(self, seq):
+        return tl.T0 + (seq - 1) * tl.H
+
+    def h(self, seq):
+        return ledger.prefix_digest(self.d, seq)
+
+    def check(self, lines, **kw):
+        out = io.StringIO()
+        bad = post_text.check_posts(self.base, post_text.parse_posts("\n".join(lines)), out=out, **kw)
+        return bad, out.getvalue()
+
+    def good(self):
+        return [post_line(self.rec(4) + 100 * tl.H, 4, self.h(4)),
+                post_line(self.rec(5) + 23 * tl.H, 5, self.h(5)),
+                post_line(self.rec(6) + tl.H, 6, self.h(6))]
+
+    def test_rule_constants(self):
+        self.assertEqual(post_text.RULE_MAX_DELAY_HOURS, 24)
+        self.assertEqual(post_text.PRE_RULE_LAST_SEQ, 4)
+
+    def test_rule_followed_passes(self):
+        bad, out = self.check(self.good())
+        self.assertEqual(bad, [])
+        self.assertIn("seq 4: 決まりができる前の記録なので", out)
+        self.assertIn("自分の投稿が無い seq: 1, 2, 3", out)
+
+    def test_seq_1_to_4_late_is_exempt(self):
+        lines = self.good() + [post_line(self.rec(2) + 1000 * tl.H, 2, self.h(2))]
+        self.assertEqual(self.check(lines)[0], [])
+
+    def test_late_seq5_fails(self):
+        lines = self.good()
+        lines[1] = post_line(self.rec(5) + 25 * tl.H, 5, self.h(5))
+        bad, _ = self.check(lines)
+        self.assertEqual(len(bad), 1)
+        self.assertIn("seq 5", bad[0])
+        self.assertIn("24", bad[0])
+
+    def test_exactly_24_hours_passes(self):
+        lines = self.good()
+        lines[1] = post_line(self.rec(5) + 24 * tl.H, 5, self.h(5))
+        self.assertEqual(self.check(lines)[0], [])
+
+    def test_earliest_post_counts(self):
+        lines = self.good() + [post_line(self.rec(5) + 30 * tl.H, 5, self.h(5))]
+        self.assertEqual(self.check(lines)[0], [])
+
+    def test_missing_seq5_fails(self):
+        bad, _ = self.check([self.good()[0], self.good()[2]])
+        self.assertTrue(any("seq 5 に自分の投稿が無い" in b for b in bad), bad)
+
+    def test_missing_seq4_fails(self):
+        bad, _ = self.check(self.good()[1:])
+        self.assertTrue(any("seq 4 に自分の投稿が無い" in b for b in bad), bad)
+
+    def test_wrong_hash_fails_and_is_not_counted(self):
+        lines = self.good()
+        lines[1] = post_line(self.rec(5) + tl.H, 5, self.h(4))
+        bad, _ = self.check(lines)
+        self.assertTrue(any("ハッシュ" in b for b in bad), bad)
+        self.assertTrue(any("seq 5 に自分の投稿が無い" in b for b in bad), bad)
+
+    def test_post_before_recorded_at_fails(self):
+        lines = self.good()
+        lines[2] = post_line(self.rec(6) - tl.H, 6, self.h(6))
+        bad, _ = self.check(lines)
+        self.assertTrue(any("recorded_at より前" in b for b in bad), bad)
+
+    def test_seq_beyond_ledger_fails(self):
+        bad, _ = self.check(self.good() + [post_line(self.rec(6) + tl.H, 7, "b" * 64)])
+        self.assertTrue(any("記録は 6 件しかない" in b for b in bad), bad)
+
+    def test_broken_ledger_fails(self):
+        lines = self.lines()
+        self.write_lines(lines[:5])
+        bad, _ = self.check(self.good())
+        self.assertTrue(bad and "検証に失敗" in bad[0], bad)
+
+    def test_btc_delay_only_when_given(self):
+        # 仮の記録は Bitcoin で未確定なので、確定時刻からの判定は掛からない
+        self.assertEqual(self.check(self.good(), max_delay_after_btc_hours=0)[0], [])
+
+    def test_parse_errors(self):
+        for text in ("", "# だけ", "2026-10-08T00:00:00Z 4", "2026-10-08 00:00:00 4 " + "a" * 64,
+                     "2026-10-08T00:00:00Z ４ " + "a" * 64, "2026-10-08T00:00:00Z 4 " + "A" * 64,
+                     "٢026-10-08T00:00:00Z 4 " + "a" * 64):
+            with self.subTest(text=text):
+                with self.assertRaises(post_text.PostError):
+                    post_text.parse_posts(text)
+
+    def test_cli(self):
+        path = os.path.join(self.base, "posts.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("# 一覧\n" + "\n".join(self.good()[1:]) + "\n")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = post_text.main(["check-posts", path, "--root", self.base])
+        self.assertEqual(code, 1)
+        self.assertIn("合わない: seq 4 に自分の投稿が無い", out.getvalue())
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(self.good()) + "\n")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = post_text.main(["check-posts", path, "--root", self.base])
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertIn("投稿の一覧と記録は合う", out.getvalue())
+
+    def test_cli_cannot_change_exception_or_required_seq(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            post_text.main(["check-posts", "x", "--require-every-seq-from", "9"])
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            post_text.main(["check-posts", "x", "--delay-exempt-through", "9"])
+
+
+# ---------------------------------------------------------------- 照らす手順（第三者）
+
+SHELLS = [sh for sh in ("bash", "zsh") if shutil.which(sh)]
+
+
 @unittest.skipUnless(has_head(), "コミットがまだ無いので、複製して手順を試せない")
 class TestDocProcedure(unittest.TestCase):
+    """手順書の塊をファイルに保存し、-e を付けずに `bash ファイル` と `zsh ファイル` で実行する
+    （文書に書いたとおりの使い方。S-1）。"""
+
     def setUp(self):
+        self.assertIn("bash", SHELLS)
         self.tmp = tempfile.mkdtemp()
         self.clone = os.path.join(self.tmp, "stick-chart-x-post")
         subprocess.run(["git", "clone", "-q", "--no-hardlinks", PROJECT, self.clone],
@@ -360,14 +527,28 @@ class TestDocProcedure(unittest.TestCase):
                                 ignore=shutil.ignore_patterns("__pycache__"))
             self.git("add", "-A", "--", *OVERLAY)
             self.git("commit", "-q", "--allow-empty", "-m", "一時的なコミット（テストの中だけ）")
+        # 塊を、複製の中の文書から取り出して、リポジトリの外のファイルに保存する
+        with open(os.path.join(self.clone, DOC_REL), encoding="utf-8") as f:
+            blocks = BLOCK_RE.findall(f.read())
+        self.assertEqual(len(blocks), 2)
+        self.scripts = []
+        for i, b in enumerate(blocks):
+            path = os.path.join(self.tmp, "x-post-block%d.sh" % i)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(b)
+            self.scripts.append(path)
         # 第三者の立場：複製の中で投稿文を作り直す（運営側と同じ値になる）
-        r = subprocess.run([sys.executable, "-B", "src/sealer/post_text.py"], cwd=self.clone,
-                           capture_output=True, env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
+        self.post = self.make_post()
+
+    def make_post(self, seq=None):
+        cmd = [sys.executable, "-B", "src/sealer/post_text.py"] + ([] if seq is None else ["--seq", str(seq)])
+        r = subprocess.run(cmd, cwd=self.clone, capture_output=True,
+                           env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
         self.assertEqual(r.returncode, 0, r.stderr.decode())
         m = post_text.TEMPLATE_RE.match(r.stdout.decode().rstrip("\n"))
         self.assertIsNotNone(m)
-        self.post = {"SEQ": m.group("seq"), "POSTED": m.group("hash"),
-                     "RECORDED": m.group("time"), "BTC": m.group("btc")}
+        return {"SEQ": m.group("seq"), "POSTED": m.group("hash"),
+                "RECORDED": m.group("time"), "BTC": m.group("btc")}
 
     def tearDown(self):
         shutil.rmtree(self.tmp)
@@ -376,87 +557,175 @@ class TestDocProcedure(unittest.TestCase):
         subprocess.run(["git", "-C", self.clone] + list(tl.AUTHOR) + list(args),
                        check=True, capture_output=True)
 
-    def blocks(self):
-        with open(os.path.join(self.clone, DOC_REL), encoding="utf-8") as f:
-            return BLOCK_RE.findall(f.read())
-
-    def run_blocks(self, **override):
-        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", **self.post)
+    def run_script(self, idx, **override):
+        """[(シェル, 終了コード, 出力)]。-e なし。"""
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("SEQ", "POSTED", "RECORDED", "BTC", "POSTS", "ENV", "BASH_ENV")}
+        env.update(PYTHONDONTWRITEBYTECODE="1", **(self.post if idx == 0 else {}))
         env.update(override)
         out = []
-        for block in self.blocks():
-            r = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", block], cwd=self.clone,
-                               capture_output=True, env=env, timeout=300)
-            out.append((r.returncode, r.stdout.decode("utf-8", "replace")))
+        for sh in SHELLS:
+            r = subprocess.run([sh, self.scripts[idx]], cwd=self.clone, capture_output=True,
+                               env=env, timeout=300)
+            out.append((sh, r.returncode, (r.stdout + r.stderr).decode("utf-8", "replace")))
         return out
 
-    def assertFails(self, **override):
-        codes = [c for c, _o in self.run_blocks(**override)]
-        self.assertTrue(codes and any(c != 0 for c in codes), codes)
+    def assertMatches(self, **override):
+        for sh, code, out in self.run_script(0, **override):
+            self.assertEqual(code, 0, "%s: %s" % (sh, out))
+            self.assertIn("投稿と記録は一致する", out, sh)
+
+    def assertStopsAt(self, check, **override):
+        """終了コード 1 で止まり、どの検査が合わないかを出し、一致したとは出さない。"""
+        for sh, code, out in self.run_script(0, **override):
+            self.assertEqual(code, 1, "%s: %s" % (sh, out))
+            self.assertIn("合わない: (%d)" % check, out, sh)
+            self.assertNotIn("一致する", out, sh)
+
+    def ledger_path(self):
+        return os.path.join(self.clone, "sealed", "ledger.jsonl")
+
+    def append_fake_record(self, when):
+        """仮の seq 5 を足し、許可したカレンダーの Pending の .ots を作ってコミットする（複製の中だけ）。"""
+        data = ledger.read_ledger(self.ledger_path())
+        _r, rec, line = ledger.build_next_record(data, "periods", [tl.target("a/x.md")], "仮", when)
+        with open(self.ledger_path(), "ab") as f:
+            f.write(line)
+        n = rec["seq"]
+        with open(os.path.join(self.clone, "sealed", ledger.ots_name(n)), "xb") as f:
+            f.write(tl.build_ots(ledger.prefix_bytes(ledger.read_ledger(self.ledger_path()), n)))
+        self.git("add", "-A", "sealed")
+        self.git("commit", "-q", "-m", "仮の追記")
+        return n
+
+    # ---- 投稿 1 件（3章）
+
+    def test_shells_available(self):
+        self.assertEqual(SHELLS, ["bash", "zsh"])
 
     def test_same_text_as_project(self):
         if WORKTREE_MODE or not sealed_clean():
             self.skipTest("作業ツリーの記録が HEAD と同じときだけ比べる")
-        text = post_text.build(PROJECT)[0]
-        self.assertIn(self.post["POSTED"], text)
+        self.assertIn(self.post["POSTED"], post_text.build(PROJECT)[0])
 
-    def test_intact_clone_matches_post(self):
-        self.assertEqual(len(self.blocks()), 1)
-        results = self.run_blocks()
-        for code, out in results:
-            self.assertEqual(code, 0, out)
-        self.assertIn("投稿と記録は一致する", results[0][1])
-        self.assertIn(self.post["POSTED"], results[0][1])
+    def test_intact_clone_matches(self):
+        results = self.run_script(0)
+        for sh, _c, out in results:
+            self.assertIn(self.post["POSTED"], out, sh)
+            for k in (2, 3, 4):
+                self.assertIn("(%d) " % k, out, sh)
+            # 変数の直後に日本語の文字が続いても、bash 3.2 で文字が化けないこと（${SEQ} の形で書く）
+            self.assertIn("(3) %s 行目は seq %s、recorded_at %s" % (self.post["SEQ"], self.post["SEQ"],
+                                                                   self.post["RECORDED"]), out, sh)
+            self.assertNotIn("\ufffd", out, sh)
+        self.assertMatches()
 
-    def test_other_posted_hash_fails(self):
+    def test_earlier_post_matches(self):
+        self.post = self.make_post(2)
+        self.assertEqual(self.post["SEQ"], "2")
+        self.assertMatches()
+
+    def test_bad_input_stops_at_0(self):
+        self.assertStopsAt(0, SEQ="abc")
+        self.assertStopsAt(0, POSTED="xyz")
+        self.assertStopsAt(0, BTC="")
+
+    def test_truncated_record_stops_at_1(self):
+        with open(self.ledger_path(), "rb") as f:
+            lines = f.read().split(b"\n")[:-1]
+        with open(self.ledger_path(), "wb") as f:
+            f.write(b"".join(l + b"\n" for l in lines[:-1]))
+        self.git("commit", "-q", "-am", "切り詰め")
+        self.assertStopsAt(1)
+
+    def test_other_posted_hash_stops_at_2(self):
         wrong = ("0" if self.post["POSTED"][0] != "0" else "1") + self.post["POSTED"][1:]
-        self.assertFails(POSTED=wrong)
+        self.assertStopsAt(2, POSTED=wrong)
 
-    def test_other_recorded_at_fails(self):
-        self.assertFails(RECORDED="2000-01-01T00:00:00Z")
-
-    def test_other_height_fails(self):
-        if self.post["BTC"] == "pending":
-            self.skipTest("投稿に高さが無い")
-        self.assertFails(BTC="1")
-
-    def test_rewritten_record_fails(self):
-        path = os.path.join(self.clone, "sealed", "ledger.jsonl")
-        with open(path, "rb") as f:
+    def test_rewritten_record_stops_at_2(self):
+        with open(self.ledger_path(), "rb") as f:
             data = f.read()
         i = data.index(b'"recorded_at":"') + len(b'"recorded_at":"2')
         data = data[:i] + (b"1" if data[i:i + 1] != b"1" else b"2") + data[i + 1:]
-        with open(path, "wb") as f:
+        with open(self.ledger_path(), "wb") as f:
             f.write(data)
         self.git("commit", "-q", "-am", "書き換え")
-        self.assertFails()
+        self.assertStopsAt(2)
 
-    def test_truncated_record_fails(self):
-        path = os.path.join(self.clone, "sealed", "ledger.jsonl")
-        with open(path, "rb") as f:
-            lines = f.read().split(b"\n")[:-1]
-        with open(path, "wb") as f:
-            f.write(b"".join(l + b"\n" for l in lines[:-1]))
-        self.git("commit", "-q", "-am", "切り詰め")
-        self.assertFails()
+    def test_other_recorded_at_stops_at_3(self):
+        self.assertStopsAt(3, RECORDED="2000-01-01T00:00:00Z")
 
-    def test_later_append_still_matches(self):
-        """投稿のあとに記録が増えても、先頭 N 行の値は変わらない（仮の追記。stamp はしないので
-        verify.py は失敗する。(2) までが通ることを確かめる）。"""
-        path = os.path.join(self.clone, "sealed", "ledger.jsonl")
-        data = ledger.read_ledger(path)
-        n = int(self.post["SEQ"])
-        _recs, _rec, line = ledger.build_next_record(
+    def test_verify_failure_stops_at_4(self):
+        """先頭 N 行は同じまま、.ots の無い行を後ろに足す。(1)〜(3) は通り、(4) で止まる。"""
+        data = ledger.read_ledger(self.ledger_path())
+        _r, _rec, line = ledger.build_next_record(
             data, "periods", [tl.target("a/x.md")], "仮", ledger.parse_time("2099-01-01T00:00:00Z"))
-        with open(path, "ab") as f:
+        with open(self.ledger_path(), "ab") as f:
             f.write(line)
-        got = ledger.prefix_digest(ledger.read_ledger(path), n)
-        self.assertEqual(got, self.post["POSTED"])
-        block = self.blocks()[0].split("# (3)")[0]
-        env = dict(os.environ, **self.post)
-        r = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", block], cwd=self.clone,
-                           capture_output=True, env=env)
-        self.assertEqual(r.returncode, 0, r.stdout.decode() + r.stderr.decode())
+        self.git("commit", "-q", "-am", "追記（.ots なし）")
+        self.assertEqual(ledger.prefix_digest(ledger.read_ledger(self.ledger_path()),
+                                              int(self.post["SEQ"])), self.post["POSTED"])
+        self.assertStopsAt(4)
+
+    def test_other_height_stops_at_5(self):
+        if self.post["BTC"] == "pending":
+            self.skipTest("投稿に高さが無い")
+        self.assertStopsAt(5, BTC="1")
+
+    # ---- 投稿の一覧と投稿の決まり（4章）
+
+    def write_posts(self, lines):
+        path = os.path.join(self.tmp, "posts.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("# <投稿の時刻 UTC> <seq> <64 桁>\n" + "\n".join(lines) + "\n")
+        return path
+
+    def run_list(self, lines):
+        return self.run_script(1, POSTS=self.write_posts(lines))
+
+    def assertListOk(self, lines):
+        for sh, code, out in self.run_list(lines):
+            self.assertEqual(code, 0, "%s: %s" % (sh, out))
+            self.assertIn("投稿の決まりを守っている", out, sh)
+
+    def assertListFails(self, lines, text):
+        for sh, code, out in self.run_list(lines):
+            self.assertEqual(code, 1, "%s: %s" % (sh, out))
+            self.assertIn(text, out, sh)
+            self.assertNotIn("守っている", out, sh)
+
+    def seq4_line(self):
+        return "2026-10-09T00:00:00Z 4 " + ledger.prefix_digest(ledger.read_ledger(self.ledger_path()), 4)
+
+    def test_list_first_post_is_exception(self):
+        """seq 4 の投稿は 24 時間を過ぎていても、決まりの前の例外として通る。seq 1〜3 は要らない。"""
+        if int(self.post["SEQ"]) != 4:
+            self.skipTest("記録が 4 件のときの例外を試す")
+        self.assertListOk([self.seq4_line()])
+
+    def test_list_missing_seq4_fails(self):
+        h2 = ledger.prefix_digest(ledger.read_ledger(self.ledger_path()), 2)
+        self.assertListFails(["2026-10-09T00:00:00Z 2 " + h2], "seq 4 に自分の投稿が無い")
+
+    def test_list_wrong_hash_fails(self):
+        self.assertListFails(["2026-10-09T00:00:00Z 4 " + "0" * 64], "ハッシュ")
+
+    def test_list_missing_file_fails(self):
+        for sh, code, out in self.run_script(1, POSTS=os.path.join(self.tmp, "無い.txt")):
+            self.assertEqual(code, 1, sh)
+            self.assertIn("合わない:", out, sh)
+
+    def test_list_seq5_rule(self):
+        if int(self.post["SEQ"]) != 4:
+            self.skipTest("記録が 4 件のときに仮の seq 5 を足して試す")
+        rec5 = ledger.parse_time("2026-10-08T06:00:00Z")
+        n = self.append_fake_record(rec5)
+        h5 = ledger.prefix_digest(ledger.read_ledger(self.ledger_path()), n)
+        ok5 = "%s %d %s" % (ledger.format_time(rec5 + 23 * tl.H), n, h5)
+        late5 = "%s %d %s" % (ledger.format_time(rec5 + 25 * tl.H), n, h5)
+        self.assertListOk([self.seq4_line(), ok5])
+        self.assertListFails([self.seq4_line(), late5], "上限 24")
+        self.assertListFails([self.seq4_line()], "seq 5 に自分の投稿が無い")
 
 
 if __name__ == "__main__":
