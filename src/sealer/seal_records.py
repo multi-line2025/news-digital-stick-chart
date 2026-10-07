@@ -128,6 +128,7 @@ def check_new(project, data_after, records_after, rec, doc):
 
 def write_doc_record(project, kind, doc, data, note, now, ots_cmd, runner=subprocess.run):
     """手順 3〜6。返り値: (記録, 中身のパス, .ots のパス か None)。"""
+    ledger.check_sealed_inside(project)    # T-017：入口を飛ばして直接呼んでも、リンクなら止まる
     _sealed, ledger_path = _paths(project)
     content = ledger.canonical_line(doc) + b"\n"
     sha = ledger.sha256_hex(content)

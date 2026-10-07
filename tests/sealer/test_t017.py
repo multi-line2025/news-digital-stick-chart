@@ -16,7 +16,6 @@
 """
 
 import datetime
-import glob
 import json
 import os
 import re
@@ -36,6 +35,9 @@ from test_ledger import T0, H, run_verify  # noqa: E402
 
 ledger = tl.ledger
 import seal_access  # noqa: E402
+import seal_acquisition  # noqa: E402
+import seal_candidates  # noqa: E402
+import seal_records  # noqa: E402
 import seal_bitcoin  # noqa: E402
 import seal_method  # noqa: E402
 
@@ -174,22 +176,34 @@ class TestVerifyAccessCandidates(t14.Case):
 
 
 class TestHorizonEmbargo(t14.Case):
+    """照合の相手は、その時点（最初の method-access・最初の threshold-access）で採用される
+    periods と periods-triggers である（差し戻し1回目の中2 の (a)・(b)）。"""
+
     def seal_long(self):
         """periods（embargo 90）と、J の最大が 120 の candidates。"""
         self.seal(with_cand=False)
         self.cand_seq = self.add_cand(T0 + datetime.timedelta(minutes=1), output=CAND_LONG)
 
+    def rebuilt_periods(self, now):
+        """J = 120 で作り直した periods（embargo 120）を封印する。"""
+        args = ["--j120", "before_deadline"]
+        sha = ledger.sha256_hex(tl.seal_periods.run_periods(self.root, args))
+        return self.seal(args=args, sha=sha, now=now, with_cand=False)
+
     def test_real_values_within(self):
-        """本物の封印の値：candidates の J の最大 56、periods の embargo_days 90。"""
-        sealed = os.path.join(PROJECT, "sealed")
-        cand = glob.glob(os.path.join(sealed, "candidates-output-*.json"))
-        per = glob.glob(os.path.join(sealed, "periods-output-*.json"))
-        self.assertEqual(len(cand), 1)
-        self.assertEqual(len(per), 1)
-        with open(cand[0], encoding="utf-8") as f:
-            self.assertEqual(ledger.candidates_max_j(json.load(f)), 56)
-        with open(per[0], encoding="utf-8") as f:
-            self.assertEqual(ledger.periods_embargo_days(json.load(f)), 90)
+        """本物の封印の値：candidates の J の最大 56、periods の 1 件目の embargo_days 90。
+        どのファイルを使うかは、本物の記録の順番（periods の 1 件目、すべての candidates）で選ぶ
+        （差し戻し1回目の軽4。sealed/ の中のファイルの数には頼らない）。"""
+        root = PROJECT
+        records = ledger.verify_chain(ledger.read_ledger(
+            os.path.join(root, "sealed", "ledger.jsonl")))
+        first = ledger.records_of_kind(records, ledger.PERIODS_KIND)[0][1]
+        cands = [r for _v, r in ledger.records_of_kind(records, ledger.CANDIDATES_KIND)]
+        self.assertTrue(cands)
+        self.assertEqual(ledger.periods_embargo_days(
+            ledger.read_target_json(root, first, "output")), 90)
+        self.assertEqual(max(ledger.candidates_max_j(ledger.read_target_json(root, c, "output"))
+                             for c in cands), 56)
 
     def test_within_needs_no_triggers(self):
         self.seal()
@@ -197,71 +211,105 @@ class TestHorizonEmbargo(t14.Case):
         self.method(T0 + 3 * H)
         self.access(T0 + 4 * H)
         out = self.verify_ok("candidates")
-        self.assertIn("J（判定が読む最後の日のずれ）の最大 28 は、periods の 1 件目の "
-                      "embargo_days 90 以下", out)
+        self.assertIn("J（判定が読む最後の日のずれ）の最大 28。periods の 1 件目の embargo_days 90 以下",
+                      out)
+        self.assertIn("method-access（seq", out)
         self.verify_ok("all")
         self.method_gate()
         self.threshold_gate()
+
+    def test_within_but_adopted_triggers_j_smaller_fails(self):
+        """作り直しが要らなくても、採用される periods-triggers の J が候補の J より小さければ失敗。"""
+        self.seal()
+        self.seal_triggers(T0 + H / 2, last_read_offset_days=20)
+        self.add_access(T0 + H, 30_000_000)
+        self.verify_fails(("candidates", "all"), "last_read_offset_days 20 が")
 
     def test_exceeding_is_held_until_deadline(self):
         self.seal_long()
         self.step3(T0 + H)
         out = self.verify_ok("candidates")
-        self.assertIn("保留：J の最大 120 が embargo_days 90 を超える", out)
+        self.assertIn("保留：method-access・threshold-access の記録がまだ無い", out)
 
     def test_exceeding_without_triggers_fails_at_threshold_access(self):
         self.seal_long()
         access = self.add_access(T0 + H, 30_000_000)
         self.verify_fails(("candidates", "all"),
-                          "threshold-access の記録（seq %d）より前に、last_read_offset_days が "
-                          "120 以上の periods-triggers の記録が要る" % access)
-        with self.assertRaisesRegex(ledger.ThresholdAccessRequired, "periods-triggers"):
+                          "threshold-access の記録（seq %d）の時点で採用される periods（seq 1）の "
+                          "embargo_days 90 が" % access)
+        with self.assertRaisesRegex(ledger.ThresholdAccessRequired, "embargo_days"):
             self.threshold_gate()
 
     def test_exceeding_without_triggers_fails_at_method_access(self):
         self.seal_long()
         self.step3(T0 + H)
         method = self.add_method(T0 + 3 * H, 30_000_000)
-        self.verify_fails(("candidates", "all"),
-                          "method-access の記録（seq %d）より前に" % method)
-        with self.assertRaisesRegex(ledger.MethodAccessRequired, "periods-triggers"):
+        self.verify_fails(("candidates", "all"), "method-access の記録（seq %d）の時点" % method)
+        with self.assertRaisesRegex(ledger.MethodAccessRequired, "embargo_days"):
             self.method_gate()
 
     def test_writers_refuse_without_triggers(self):
         self.seal_long()
         self.step3(T0 + H)
         before, data = self.snapshot(), self.ledger_bytes()
-        with self.assertRaisesRegex(ledger.LedgerError, "periods-triggers の記録が要る"):
+        with self.assertRaisesRegex(ledger.LedgerError, "embargo_days 90 が"):
             self.method(T0 + 3 * H)
-        with self.assertRaisesRegex(ledger.LedgerError, "periods-triggers の記録が要る"):
+        with self.assertRaisesRegex(ledger.LedgerError, "embargo_days 90 が"):
             seal_access.seal(self.root, T0 + 3 * H, "ots", drand_fetch=tw.FakeDrand(T0 + 3 * H),
                              runner=tw.FakeOts())
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(self.ledger_bytes(), data)
 
-    def test_triggers_too_small_fails(self):
+    def test_b_triggers_without_rebuilt_periods_fails(self):
+        """(b)：triggers が J を覆っていても、採用される periods の embargo_days が J より小さければ
+        失敗。T-017 の初回は periods の 1 件目と比べず triggers だけを見ていたので、これが通った。"""
         self.seal_long()
-        self.seal_triggers(T0 + H, last_read_offset_days=100)
+        self.seal_triggers(T0 + H, last_read_offset_days=120)
         self.add_access(T0 + 2 * H, 30_000_000)
-        self.verify_fails(("candidates", "all"), "120 以上の periods-triggers")
+        self.verify_fails(("candidates", "all"), "embargo_days 90 が、candidates の J の最大 120")
+
+    def test_b_rebuilt_periods_after_deadline_fails(self):
+        """(b)：作り直した periods が threshold-access の後なら採用されないので、失敗。"""
+        self.seal_long()
+        self.seal_triggers(T0 + H, last_read_offset_days=120)
+        self.add_access(T0 + 2 * H, 30_000_000)
+        self.rebuilt_periods(T0 + 3 * H)
+        self.verify_fails(("candidates", "all"), "embargo_days 90 が")
+
+    def test_a_old_triggers_not_adopted_fails(self):
+        """(a)：古い triggers（J 120）があっても、採用される最後の triggers（J 100）が小さければ失敗。
+        T-017 の初回は、期限より前のどれかの triggers で通っていた。"""
+        self.seal_long()
+        self.seal_triggers(T0 + H, last_read_offset_days=120)
+        self.rebuilt_periods(T0 + 2 * H)
+        self.seal_triggers(T0 + 3 * H, last_read_offset_days=100)
+        self.add_access(T0 + 4 * H, 30_000_000)
+        self.verify_fails(("candidates",), "seq 5、100")
+        self.assertEqual(run_verify(self.root, "all").returncode, 1)
 
     def test_triggers_after_deadline_fails(self):
         self.seal_long()
         self.add_access(T0 + H, 30_000_000)
         self.seal_triggers(T0 + 2 * H, last_read_offset_days=120)
-        self.verify_fails(("candidates", "all"), "120 以上の periods-triggers")
+        self.rebuilt_periods(T0 + 3 * H)
+        self.verify_fails(("candidates",), "embargo_days 90 が")
+        self.assertEqual(run_verify(self.root, "all").returncode, 1)
 
-    def test_triggers_before_deadline_passes(self):
+    def test_adopted_triggers_and_periods_pass(self):
         self.seal_long()
         trec = self.seal_triggers(T0 + H, last_read_offset_days=120)
-        self.step3(T0 + 2 * H)
-        rec, _rel, _o = self.method(T0 + 4 * H)
+        prec = self.rebuilt_periods(T0 + 2 * H)
+        self.step3(T0 + 3 * H)
+        rec, _rel, _o = self.method(T0 + 5 * H)
         out = self.verify_ok("candidates")
-        self.assertIn("J の最大 120 が embargo_days 90 を超える。method-access（seq %d）より前の "
-                      "periods-triggers（seq %d）の last_read_offset_days が 120 以上"
-                      % (rec["seq"], trec["seq"]), out)
+        self.assertIn("method-access（seq %d）の時点で採用される periods（seq %d）の embargo_days 120 "
+                      "≥ J の最大。periods-triggers：seq %d、last_read_offset_days 120"
+                      % (rec["seq"], prec["seq"], trec["seq"]), out)
         self.verify_ok("all")
         self.method_gate()
+        arec, _r, _o = self.access(T0 + 6 * H)
+        self.verify_ok("all")
+        self.threshold_gate()
 
     def test_malformed_j_fails(self):
         good = dict(tl.CAND_OUTPUT)
@@ -392,6 +440,191 @@ class TestSymlinkedSealed(t14.Case):
             ledger.check_sealed_inside(self.root)
 
 
+class NoCall:
+    """呼ばれたら記録する runner・drand・ヘッダの取得の代わり（呼ばれないことを確かめる）。"""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, *a, **k):
+        self.calls.append(a)
+        raise AssertionError("書く前に止まるはずなのに、外部の手順が呼ばれた: %r" % (a,))
+
+
+class TestEveryWriterRefusesLinks(t14.Case):
+    """sealed/ に書くすべての仕組みが、sealed/ や ledger.jsonl のリンクで何も書かずに止まる。
+
+    差し戻し1回目の中1（書く仕組みの一部にしか検査が無かった）と軽1（プロジェクトの中の別の
+    場所を指すリンクが通った）。三つの置き方それぞれで、すべての書く仕組みを試し、
+    (1) LedgerError で止まる、(2) プロジェクトの中にも外にも、1 バイトも書かれない、
+    (3) ots・drand・ヘッダの取得が呼ばれない、ことを確かめる。
+    """
+
+    LAYOUTS = ("sealed-outside", "sealed-inside-other", "ledger-outside")
+
+    def setUp(self):
+        super().setUp()
+        self.outside = tempfile.mkdtemp()
+        self.seal()
+        self.step3(T0 + H)
+
+    def tearDown(self):
+        shutil.rmtree(self.outside)
+        super().tearDown()
+
+    def link(self, layout):
+        if layout == "sealed-outside":
+            dst = os.path.join(self.outside, "sealed")
+            shutil.move(self.sealed, dst)
+            os.symlink(dst, self.sealed)
+        elif layout == "sealed-inside-other":
+            dst = os.path.join(self.root, "elsewhere")
+            shutil.move(self.sealed, dst)
+            os.symlink(dst, self.sealed)
+        else:
+            dst = os.path.join(self.outside, "ledger.jsonl")
+            shutil.move(self.ledger, dst)
+            os.symlink(dst, self.ledger)
+
+    def tree(self):
+        out = {}
+        for base in (self.root, self.outside):
+            for dirpath, dirs, files in os.walk(base):
+                for name in dirs + files:
+                    full = os.path.join(dirpath, name)
+                    if os.path.islink(full):
+                        out[full] = ("link", os.readlink(full))
+                    elif os.path.isfile(full):
+                        with open(full, "rb") as f:
+                            out[full] = f.read()
+                    else:
+                        out[full] = "dir"
+        return out
+
+    def writers(self):
+        now = T0 + 5 * H
+        nc = NoCall()
+        data = ledger.read_ledger(self.ledger) if os.path.exists(self.ledger) else b""
+        doc = tl.drand_doc(ledger.THRESHOLD_ACCESS_KIND, 30_000_000)
+        return nc, [
+            ("ledger.append_record", lambda: ledger.append_record(
+                self.ledger, ledger.TRIGGERS_KIND, [tl.target("x")], "", now)),
+            ("ledger.write_once", lambda: ledger.write_once(
+                os.path.join(self.sealed, "x.json"), b"x")),
+            ("stamp.stamp_seq", lambda: tl.stamp.stamp_seq(self.ledger, 1, "ots", runner=nc)),
+            ("stamp.upgrade_seq", lambda: tl.stamp.upgrade_seq(self.ledger, 1, "ots", runner=nc)),
+            ("seal_bitcoin.confirm", lambda: seal_bitcoin.confirm(self.root, 1, "ots", nc,
+                                                                  runner=nc)),
+            ("seal_bitcoin.write_header", lambda: seal_bitcoin.write_header(self.root, 900123, nc)),
+            ("seal_triggers.seal", lambda: tl.seal_triggers.seal(
+                self.root, {"last_read_offset_days": 120}, now, "ots", runner=nc)),
+            ("seal_periods.seal", lambda: tl.seal_periods.seal(self.root, self.out_sha, [], now,
+                                                                "ots", runner=nc)),
+            ("seal_candidates.seal", lambda: seal_candidates.seal(
+                self.root, "0" * 64, now, "ots", runner=nc, require_committed=False)),
+            ("seal_records.write_doc_record", lambda: seal_records.write_doc_record(
+                self.root, ledger.THRESHOLD_ACCESS_KIND, doc, data, "", now, "ots", runner=nc)),
+            ("seal_access.seal", lambda: seal_access.seal(self.root, now, "ots", drand_fetch=nc,
+                                                          runner=nc)),
+            ("seal_acquisition.start", lambda: seal_acquisition.start(
+                self.root, tw.CODE_REL, now, "ots", drand_fetch=nc, runner=nc)),
+            ("seal_acquisition.result", lambda: seal_acquisition.result(
+                self.root, 3, "e" * 64, now, "ots", runner=nc)),
+            ("seal_method.seal", lambda: seal_method.seal(self.root, now, "ots", drand_fetch=nc,
+                                                          runner=nc)),
+        ]
+
+    def test_every_writer_refuses_every_layout(self):
+        for layout in self.LAYOUTS:
+            self.link(layout)
+            nc, writers = self.writers()
+            self.assertEqual(len(writers), 14)
+            for name, fn in writers:
+                with self.subTest(layout=layout, writer=name):
+                    before = self.tree()
+                    with self.assertRaisesRegex(ledger.LedgerError, "実体"):
+                        fn()
+                    self.assertEqual(self.tree(), before)
+            self.assertEqual(nc.calls, [], layout)
+            self.unlink(layout)
+
+    def unlink(self, layout):
+        """リンクを外して元に戻す（同じ仮のプロジェクトで次の置き方を試すため）。"""
+        if layout == "ledger-outside":
+            os.remove(self.ledger)
+            shutil.move(os.path.join(self.outside, "ledger.jsonl"), self.ledger)
+            return
+        target = os.readlink(self.sealed)
+        os.remove(self.sealed)
+        shutil.move(target, self.sealed)
+
+    def test_writers_work_without_links(self):
+        """リンクが無ければ、同じ仕組みで書ける（止まる理由がリンクであることの対照）。"""
+        rec, _rel, _o = self.access(T0 + 5 * H)
+        self.assertEqual(rec["kind"], ledger.THRESHOLD_ACCESS_KIND)
+        self.seal_triggers(T0 + 6 * H, last_read_offset_days=120)
+
+    def test_link_inside_project_refused_by_check(self):
+        """軽1：プロジェクトの中の別のフォルダを指す sealed/ も拒む。"""
+        self.link("sealed-inside-other")
+        with self.assertRaisesRegex(ledger.LedgerError, "sealed/ の実体"):
+            ledger.check_sealed_inside(self.root)
+        with self.assertRaisesRegex(ledger.ThresholdAccessRequired, "sealed/ の実体"):
+            self.threshold_gate()
+        self.verify_fails(("chain", "all"), "sealed/ の実体")
+
+    def test_link_of_a_single_file_refused(self):
+        """sealed/ の中の書く先のファイルが外へのリンクなら、write_once は書かない。"""
+        target = os.path.join(self.outside, "x.json")
+        os.symlink(target, os.path.join(self.sealed, "x.json"))
+        with self.assertRaisesRegex(ledger.LedgerError, "実体"):
+            ledger.write_once(os.path.join(self.sealed, "x.json"), b"x")
+        self.assertFalse(os.path.exists(target))
+        os.remove(os.path.join(self.sealed, "x.json"))
+
+    def test_path_outside_sealed_refused(self):
+        with self.assertRaisesRegex(ledger.LedgerError, "sealed/ の中のファイルではない"):
+            ledger.write_once(os.path.join(self.root, "x.json"), b"x")
+        self.assertFalse(os.path.exists(os.path.join(self.root, "x.json")))
+
+
+class TestHeadersRequired(t14.Case):
+    """差し戻し1回目の軽2：.ots に Bitcoin の証明がある高さのヘッダが無ければ、検証は失敗する。"""
+
+    def confirmed(self):
+        self.seal()
+        up = tw.FakeUpgrade(height=900123)
+        dst = tl.stamp.upgrade_seq(self.ledger, 1, "ots", runner=up)
+        return dst
+
+    def test_missing_header_fails(self):
+        self.confirmed()
+        self.verify_fails(("anchors", "all"), "高さ 900123 の Bitcoin の証明が .ots の中にあるが、"
+                                              "そのヘッダが無い")
+
+    def test_removing_placed_header_fails(self):
+        """置いたヘッダを外すと、確定時刻を黙って変えたり保留にしたりせず、失敗する。"""
+        self.confirmed()
+        data = ledger.read_ledger(self.ledger)
+        hdr = tl.mine_header(tw.tip_for_digest(bytes.fromhex(ledger.prefix_digest(data, 1))),
+                             T0 + H)
+        path = os.path.join(self.sealed, seal_bitcoin.header_name(900123))
+        with open(path, "w") as f:
+            f.write(hdr.hex() + "\n")
+        # テストのヘッダは易しい目標値で掘るので、作業量の下限だけを下げた同じプロセスの検証を使う。
+        code, out, err = tl.run_verify_inproc(self.root, "all")
+        self.assertEqual(code, 0, err)
+        self.assertIn("seq 1: Bitcoin で確定", out)
+        os.rename(path, os.path.join(self.root, "removed.hex"))
+        code, out, err = tl.run_verify_inproc(self.root, "all")
+        self.assertEqual(code, 1)
+        self.assertIn("そのヘッダが無い", err)
+        self.assertNotIn("seq 1: Pending", out)
+        code, out, err = tl.run_verify_inproc(self.root, "all", "--btc-header",
+                                              "900123=" + hdr.hex())
+        self.assertEqual(code, 0, err)
+
+
 # ---------------------------------------------------------------- 3. 手順書（軽3・軽4、T-017）
 
 
@@ -416,6 +649,14 @@ class TestDocT017(unittest.TestCase):
         self.assertNotIn("_test_root", self.text)
         self.assertIn("`ledger.PROJECT_ROOT` を差し替える", self.text)
         self.assertIn("シンボリックリンク", self.text)
+
+    def test_resubmission_statements(self):
+        """差し戻し1回目の中1・中2・軽1・軽2・軽3 の記述。"""
+        for phrase in ("`ledger.check_sealed_path`", "`TestEveryWriterRefusesLinks`",
+                       "プロジェクトの中の別のフォルダを指すリンクも拒む",
+                       "その時点で採用される版", "ヘッダが無い高さがあれば、検証は失敗する",
+                       "drand の署名（BLS）を確かめた場合に限る"):
+            self.assertIn(phrase, self.text)
 
     def test_access_statement(self):
         self.assertIn("最初の `threshold-access` より前に `candidates` の記録があること", self.text)

@@ -150,7 +150,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py all --rev auto
 - `access`：「threshold-access の記録：なし」。
 - `acquisition`：「acquisition-start seq 3 ← acquisition-result seq 4」。seq 3 の drand の回の公開時刻は 2026-10-07T13:45:09+00:00 で、seq 3 自身の確定時刻（ヘッダの時刻 2026-10-07T14:56:14+00:00）に2時間を足した時刻より前である（照合に通る）。
 - `method`：「method-access の記録：なし」。
-- `candidates`：「candidates の 1 件目（seq 2）」。出力の sha256 は `027bde541f834a1a6644fe610323376cd26d1e1cbce99ef8fa7cafdf3da39ee5`。倍率 2, 3, 4, 6, 8, 12, 16、判定期間 14, 28, 56 日、組み合わせ 21。「J（判定が読む最後の日のずれ）の最大 56 は、periods の 1 件目の embargo_days 90 以下」。
+- `candidates`：「candidates の 1 件目（seq 2）」。出力の sha256 は `027bde541f834a1a6644fe610323376cd26d1e1cbce99ef8fa7cafdf3da39ee5`。倍率 2, 3, 4, 6, 8, 12, 16、判定期間 14, 28, 56 日、組み合わせ 21。「J（判定が読む最後の日のずれ）の最大 56。periods の 1 件目の embargo_days 90 以下（区切りの作り直しは要らない）」。
 - `adopted`：「採用は保留（threshold-access の記録が無いため）」。`periods` の仮の候補は seq 1、`candidates` の仮の候補は seq 2。
 - 最後：「この検査で確かめていないこと：(1) … ヘッダが、Bitcoin の本当の鎖にあること … (2) drand の署名（BLS）は、オフラインでは検証していない …」。
 
@@ -226,6 +226,7 @@ git show <そのコミット>:docs/stats/periods.md | shasum -a 256
   2. ヘッダのハッシュが、ヘッダ自身の目標値以下であること（作業量の証明）
   3. その目標値が、下限（2^77 回分のハッシュ）より難しいこと
 - `.ots` の中に無い高さのヘッダを渡すと、エラーで止まる。
+- 逆に、`sealed/` か `--ots-dir` の `.ots` に Bitcoin の証明がある高さは、すべてヘッダが要る。ヘッダが無い高さがあれば、検証は失敗する（T-017 の差し戻し1回目の軽2）。置いたヘッダを外すことで、確定時刻を黙って後にずらしたり、「保留」のまま検証を通したりできないようにするため。自分で upgrade した `.ots` を `--ots-dir` で読ませるときは、新しい高さのヘッダも `--btc-header` などで渡す。
 - ヘッダが本当の鎖の、その高さのブロックかどうかは確かめない。出力されるブロックのハッシュを、自分のノードやエクスプローラーで見比べること。
 - 確定時刻を使うのは、7章の drand の照合（`threshold-access`、`acquisition-start`）と、表示だけである。採用は変わらない。
 
@@ -430,7 +431,13 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_acquisition.py res
 - **関門が読むのは、このリポジトリのルートに固定である（T-014。T-009 の監査 軽2。T-017 で改めた）。** ルートは `ledger.py` の置き場から決まる（`ledger.PROJECT_ROOT`）。関門の関数は引数を一つも取らず、`gate` のコマンドは `--root` を受け付けない（渡すと終了コード 2）。
   - T-014 まであったテスト用のキーワード引数は外した（T-014 の監査 軽1。一時的なディレクトリの下という制限では偽の root を防げず、テストの結果も TMPDIR で変わったため）。テストは、テストの中だけ `ledger.PROJECT_ROOT` を差し替える形で仮のプロジェクトを読ませ、抜けるときに戻す。`src/` の下に、関門に引数を渡すコードと `PROJECT_ROOT` を書き換えるコードが無いことは、テスト（`tests/sealer/test_t017.py`）で確かめる。
   - 限界：同じ Python のプロセスの中で、モジュールの変数を書き換えることは防げない。これは言語の上の限界で、関門を呼ばずにデータに触れられるのと同じ種類のものである（下の「限界」）。
-- **`sealed/` がシンボリックリンクで別の場所を指していたら止める（T-017。T-015 の監査 軽1・軽5 の封印係の側）。** `realpath(<ルート>/sealed)` が `realpath(<ルート>)` の下（それ自身ではない）にあり、`sealed/ledger.jsonl` の実体が `sealed/` の実体の下にあることを確かめる（`ledger.check_sealed_inside`）。関門のほか、書く仕組み（`seal_records`・`seal_bitcoin`）と `verify.py` も、最初に同じ検査をする。別の場所の記録を読ませて関門を通すことと、別の場所の記録に追記させることを止めるためである。検査のあとで置き換えること（検査と使用のあいだの競合）は防げない。
+- **`sealed/` がシンボリックリンクで別の場所を指していたら止める（T-017。T-015 の監査 軽1・軽5 の封印係の側）。** 確かめること（`ledger.check_sealed_inside`）：
+  - `realpath(<ルート>/sealed)` が `join(realpath(<ルート>), "sealed")` と同じであること。プロジェクトの外を指すリンクも、プロジェクトの中の別のフォルダを指すリンクも拒む（T-017 の差し戻し1回目の軽1）。
+  - `sealed/ledger.jsonl` があれば、その実体が `sealed/` の実体の中の `ledger.jsonl` であること。
+  - 書く先のファイルがもうあれば、その実体が `sealed/` の中の同じ名前であること（`ledger.check_sealed_path`）。
+- **この検査は、`sealed/` に書くすべての経路が通る（T-017 の差し戻し1回目の中1）。** 共通の入口 `ledger.append_record`・`ledger.write_once`・`stamp.stamp_seq`・`stamp.upgrade_seq` が、書く前に `check_sealed_path` を呼ぶ。`<プロジェクト>/sealed/` の中でないパスにも書かない。あわせて、各書く仕組み（`seal_periods`・`seal_triggers`・`seal_candidates`・`seal_records`（`seal_access`・`seal_acquisition`・`seal_method` が使う）・`seal_bitcoin`）も、最初に `check_sealed_inside` を呼ぶ。そのため、ots・drand・ヘッダの取得に通信する前に止まる。関門と `verify.py` も同じ検査をする。
+  - テスト（`tests/sealer/test_t017.py` の `TestEveryWriterRefusesLinks`）は、14 の書く経路を、三つの置き方（`sealed/` を外へのリンク、`sealed/` をプロジェクトの中の別のフォルダへのリンク、`ledger.jsonl` を外へのリンク）のそれぞれで試す。どの組でも止まり、プロジェクトの中にも外にも1バイトも書かれず、通信の部分が呼ばれないことを確かめる。
+  - 限界：検査のあとで置き換えること（検査と使用のあいだの競合）は防げない。
 - **J とエンバーゴの照合（T-017）。** 9章の「J とエンバーゴ」の照合に通らなければ止める。
 - 手元で確かめるコマンド（ネットワークを使わない。通れば終了コード 0、止まれば 1）：
   ```sh
@@ -550,16 +557,21 @@ CLAUDE.md の「閾値の決め方」は、閾値と判定期間の候補を「�
   - 区切りは「最初の」`acquisition-start` である。その `acquisition-result` の後や、二つ目の `acquisition-start` の前に足した `candidates` も失敗になる。
 - 採用は1章の規則（`periods` と同じ）。最初の `threshold-access` より前の、`candidates` の最後の記録を採用する。`threshold-access` が無いうちは保留で、仮の候補を示す。
 
-### J とエンバーゴ（T-017。T-014 の監査 軽4）
+### J とエンバーゴ（T-017。T-014 の監査 軽4。差し戻し1回目の中2 で改めた）
 
 J は、予言日 t の判定が読むデータの最後の日を t + J とするときのずれである（docs/stats/periods.md）。J は `candidates` の封印で決まっている。出力の `last_read_offset_days`（判定期間 H ごとの J。今の候補では J = H）の最大は 56 で、`periods` の1件目の出力の `embargo_days`（90）以下である。このとき区切りは作り直さなくてよい。
 
 - `verify.py candidates`（と `all`）は、次を確かめる（`ledger.check_horizon_embargo`）。
-  - 各 `candidates` の出力の `last_read_offset_days` のキーが `horizon_days` とちょうど一致し、各 J が H 以上の整数であること。
-  - すべての `candidates` の J の最大と、`periods` の1件目の出力の `rules.embargo_days` を比べる。J の最大 ≤ `embargo_days` なら、`periods-triggers` は求めない。
-  - 超えたときに限り、`periods-triggers` の記録を求める。期限は、最初の `method-access` と最初の `threshold-access` のうち早い方の記録である（docs/stats/periods.md 8章 (2)：J は手順4の前、かつ期限より前に追記する）。その記録より前に、`last_read_offset_days` が J の最大以上の `periods-triggers` の記録が無ければ失敗する。期限の記録がまだ無いうちは保留と表示する。
+  - 各 `candidates` の出力の `last_read_offset_days` のキーが `horizon_days` とちょうど一致し、各 J が H 以上の整数であること。J の最大は、すべての `candidates` の記録の J の最大である。
+  - **照合する時点** は、最初の `method-access` と最初の `threshold-access`（あるものすべて）。J は手順4の前、かつ期限（`threshold-access`）より前に決める（docs/stats/periods.md 8章 (2)）。
+  - **照合の相手** は、その時点で採用される版である。その時点の記録より前にある `periods` の最後の記録と、`periods-triggers` の最後の記録を使う。時点が `threshold-access` なら、1章の採用の規則で採用される版と同じになる。それより前の古い版は使わない（初回の提出では、期限より前のどれかの `periods-triggers` で通り、`periods` は1件目と比べていた。中2 の (a)・(b)）。
+  - 時点ごとに、次のどれかなら失敗する。
+    1. 採用される `periods` の `rules.embargo_days` が、J の最大より小さい（区切りが J を覆わない）。
+    2. J の最大が `periods` の1件目の `embargo_days` を超えている（作り直しが要る）のに、採用される `periods-triggers` が無いか、その `last_read_offset_days` が J の最大より小さい。`periods-triggers` を求めるのは、超えたときに限り、である。
+    3. 採用される `periods-triggers` の `last_read_offset_days` が値を持ち、J の最大より小さい（宣言した J が候補と食い違う）。
+  - 照合する時点の記録がまだ無いうちは失敗にしない。作り直しが要るなら「保留」と表示する。
 - 関門（`require_threshold_access`・`require_method_access`）と、書く仕組み（`seal_access.py`・`seal_method.py`）も同じ照合をし、通らなければ止まる（何も書かない）。
-- 今の記録では「J（判定が読む最後の日のずれ）の最大 56 は、periods の 1 件目の embargo_days 90 以下」と出る。
+- 今の記録では「J（判定が読む最後の日のずれ）の最大 56。periods の 1 件目の embargo_days 90 以下（区切りの作り直しは要らない）」と出る。照合する時点の記録はまだ無い。
 
 ### 書く仕組み
 
@@ -670,7 +682,7 @@ grep -n '"kind":"candidates"\|"kind":"acquisition-result"' sealed/ledger.jsonl |
 
 - **関門を飛ばしたかどうかは、記録からは検出できない。** `require_method_access()` を呼ばずに手法を作る期間のデータに触れるコードを書くことも、`method-access` を足す前にデータに触れることもできる。記録に残るのは「`method-access` を追記した」ことだけで、「それより前に触れなかった」ことは示せない。関門は、正直な運用で手順を飛ばす誤りを防ぐためのもので、証明ではない。
 - **関門を呼んだコードが、手順4のコードかどうかは確かめない。** `method-access` の中身には、取得のコードのパスや sha256 は入れていない。何を取得したかを時刻証明で示す手段は、今は限られている。マニフェスト（`data/manifest/`）には、OpenTimestamps の時刻証明は付いていない（Git の履歴に入っているだけで、コミットの日時は申告である）。封印の記録の時刻証明に含まれているのは、手順3の `acquisition-result` の中身の `kept_rows_sha256`（取得したファイル一覧の本体の sha256。記録の対象の sha256 を通じて、その seq の `.ots` の対象に入る）だけである。手順4で取得するデータには、まだ何も時刻証明が無い。
-- **手順4のデータの中身は、この記録では示せない。** 生データは Git の外に置く決まりで、記録が示すのは手順4を始めた記録の位置と、drand の回の公開時刻より後に作られたことまでである。手法を作る期間の区画の外（2020-12-15 以降）のデータに触れなかったことも、この記録では示せない。
+- **手順4のデータの中身は、この記録では示せない。** 生データは Git の外に置く決まりで、記録が示すのは手順4を始めた記録の位置と、drand の回の公開時刻より後に作られたこと（drand の署名（BLS）を確かめた場合に限る）までである。手法を作る期間の区画の外（2020-12-15 以降）のデータに触れなかったことも、この記録では示せない。
 - **`method-access` が無くても、それより後の記録は失敗にならない。** 検証が求めるのは「`method-access` があるなら、その前に `candidates` と `acquisition-result` がある」ことだけで、`threshold-access` の前に `method-access` があることは求めない。
 - **`method-access` は二つ以上足せる。** 関門が使うのは最初の記録で、何件あるかは記録の長さから数えられる。
 - **J（判定が読む最後の日のずれ）は、`periods-triggers` の追記を求めない場合がある。** J は `candidates` の封印で決まっている。J の最大は 56 で、`periods` の `embargo_days`（90）以下なので、区切りの作り直しは要らず、`periods-triggers` は求めない。J の最大が `embargo_days` を超えたときに限り、`method-access`（または `threshold-access`）より前に `periods-triggers` の記録を求める（9章の「J とエンバーゴ」。T-017）。

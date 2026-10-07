@@ -40,6 +40,7 @@ PROJECT = os.path.dirname(os.path.dirname(HERE))
 def seal(project, values, now, ots_cmd, runner=subprocess.run):
     doc = {k: values.get(k) for k in ledger.TRIGGER_KEYS}
     ledger.triggers_values(doc)
+    ledger.check_sealed_inside(project)    # T-017：sealed/ が別の場所を指していれば何もしない
     sealed_dir = os.path.join(project, "sealed")
     ledger_path = os.path.join(sealed_dir, "ledger.jsonl")
     data = ledger.read_ledger(ledger_path)

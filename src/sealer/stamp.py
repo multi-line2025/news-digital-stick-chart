@@ -58,6 +58,7 @@ def stamp_seq(ledger_path, seq, ots_cmd=DEFAULT_OTS, runner=subprocess.run):
 
     返り値: (.ots のパス, 応答したカレンダーの一覧, 送ったカレンダーの一覧)
     """
+    ledger.check_sealed_path(ledger_path)   # T-017：外へのリンクなら、ots に送る前に止める
     data = ledger.read_ledger(ledger_path)
     ledger.verify_chain(data)
     prefix = ledger.prefix_bytes(data, seq)
@@ -97,8 +98,10 @@ def upgrade_seq(ledger_path, seq, ots_cmd=DEFAULT_OTS, runner=subprocess.run):
     元の .ots は書き換えない。返り値: 書いたパス（まだ確定していなければ None）。
     runner: subprocess.run の代わり（テストで ots の通信を差し替える）。
     """
+    ledger.check_sealed_path(ledger_path)   # T-017：外へのリンクなら、upgrade の前に止める
     sealed_dir = os.path.dirname(ledger_path)
     src = os.path.join(sealed_dir, ledger.ots_name(seq))
+    ledger.check_sealed_path(src)
     dst = os.path.join(sealed_dir, ledger.ots_name(seq, bitcoin=True))
     if os.path.exists(dst):
         raise ledger.LedgerError("%s は既にある。上書きしない" % dst)

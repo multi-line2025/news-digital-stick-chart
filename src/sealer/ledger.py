@@ -688,52 +688,85 @@ def periods_embargo_days(doc):
     return v
 
 
+def _last_before(records, kind, seq):
+    """seq より前にある kind の最後の記録（無ければ None）。"""
+    found = None
+    for r in records:
+        if r["kind"] == kind and r["seq"] < seq:
+            found = r
+    return found
+
+
 def check_horizon_embargo(records, read_json):
-    """candidates の J の最大 ≤ periods の embargo_days かを確かめる。T-017（T-014 の監査 軽4）。
+    """candidates の J の最大と、採用される periods・periods-triggers を照合する。T-017。
+
+    T-014 の監査 軽4 で加え、T-017 の差し戻し1回目の中2 で、照合の相手を「その時点で採用される
+    版」に改めた（以前は periods の 1 件目の embargo_days と、期限より前のどれかの
+    periods-triggers を見ていたので、採用されない古い triggers の J で通っていた）。
 
     read_json(記録, role) は、記録の対象のファイルを sha256 を照合して JSON で返す関数。
-    - J の最大は、すべての candidates の記録の出力の J の最大（candidates_max_j）。
-    - エンバーゴは、periods の 1 件目（最初に封印した版）の出力の rules.embargo_days。
-    - J の最大 ≤ エンバーゴなら、区切りは作り直さなくてよく、periods-triggers は求めない。
-    - 超えたときに限り、periods-triggers の記録を求める。期限は、最初の method-access と最初の
-      threshold-access のうち早い方（docs/stats/periods.md 8章 (2)：J は手順4の前、かつ期限より
-      前に追記する）。その期限より seq が小さい periods-triggers の記録のどれかの
-      last_read_offset_days が、J の最大以上でなければ LedgerError。期限の記録がまだ無ければ保留。
-    返り値: {"j_max", "embargo", "status", "deadline", "triggers"}。status は
-      "no-candidates"（candidates が無い）、"within"（超えていない）、"ok"（超えていて、
-      periods-triggers がある）、"pending"（超えているが、期限の記録がまだ無い）。
+    - J の最大 = すべての candidates の記録の出力の J の最大（candidates_max_j）。
+    - 照合する時点 P = 最初の method-access と、最初の threshold-access（あるものすべて）。
+      P ごとに、P より前の periods の最後の記録（P が threshold-access なら、採用される periods）と、
+      P より前の periods-triggers の最後の記録（同じく、採用される periods-triggers）を使う。
+      J は手順4の前、かつ期限（threshold-access）より前に決める（docs/stats/periods.md 8章 (2)）。
+    - P ごとに、次のどれかなら LedgerError。
+      (1) その periods の rules.embargo_days が J の最大より小さい（区切りが J を覆わない）。
+      (2) J の最大が periods の 1 件目の embargo_days を超えている（作り直しが要る）のに、
+          その periods-triggers が無いか、その last_read_offset_days が J の最大より小さい。
+      (3) その periods-triggers の last_read_offset_days が値を持ち、J の最大より小さい
+          （宣言した J が候補の J と食い違う）。
+    - P が一つも無いうちは失敗にしない。J の最大が 1 件目の embargo_days 以下なら "within"、
+      超えていれば "pending"。
+    返り値: {"j_max", "embargo_first", "status", "points"}。points は
+      [(P の記録, periods の記録, その embargo_days, periods-triggers の記録か None, その J か None)]。
+      status は "no-candidates"、"within"（作り直しは要らず、すべての P で照合に通る）、
+      "ok"（作り直しが要り、すべての P で照合に通る）、"pending"。
     """
     cands = [r for r in records if r["kind"] == CANDIDATES_KIND]
-    out = {"j_max": None, "embargo": None, "status": "no-candidates", "deadline": None,
-           "triggers": None}
+    out = {"j_max": None, "embargo_first": None, "status": "no-candidates", "points": []}
     if not cands:
         return out
-    out["j_max"] = max(candidates_max_j(read_json(r, "output")) for r in cands)
+    j_max = max(candidates_max_j(read_json(r, "output")) for r in cands)
+    out["j_max"] = j_max
     versions = records_of_kind(records, PERIODS_KIND)
     if not versions:
         raise LedgerError("periods の記録が無い")
-    out["embargo"] = periods_embargo_days(read_json(versions[0][1], "output"))
-    if out["j_max"] <= out["embargo"]:
-        out["status"] = "within"
-        return out
-    marks = [r for r in records if r["kind"] in (METHOD_ACCESS_KIND, THRESHOLD_ACCESS_KIND)]
+    first = periods_embargo_days(read_json(versions[0][1], "output"))
+    out["embargo_first"] = first
+    rebuild = j_max > first
+    marks = []
+    for kind in (METHOD_ACCESS_KIND, THRESHOLD_ACCESS_KIND):
+        m = next((r for r in records if r["kind"] == kind), None)
+        if m is not None:
+            marks.append(m)
     if not marks:
-        out["status"] = "pending"
+        out["status"] = "pending" if rebuild else "within"
         return out
-    deadline = marks[0]
-    out["deadline"] = deadline
-    for r in records:
-        if r["kind"] != TRIGGERS_KIND or r["seq"] >= deadline["seq"]:
-            continue
-        j = triggers_values(read_json(r, "triggers"))["last_read_offset_days"]
-        if j is not None and j >= out["j_max"]:
-            out["status"], out["triggers"] = "ok", r
-            return out
-    raise LedgerError("candidates の J の最大 %d が、periods の 1 件目の embargo_days %d を超えている。"
-                      "%s の記録（seq %d）より前に、last_read_offset_days が %d 以上の "
-                      "periods-triggers の記録が要る" % (out["j_max"], out["embargo"],
-                                                       deadline["kind"], deadline["seq"],
-                                                       out["j_max"]))
+    for p in sorted(marks, key=lambda r: r["seq"]):
+        per = _last_before(records, PERIODS_KIND, p["seq"])
+        if per is None:
+            raise LedgerError("%s の記録（seq %d）より前に periods の記録が無い" % (p["kind"], p["seq"]))
+        emb = periods_embargo_days(read_json(per, "output"))
+        trg = _last_before(records, TRIGGERS_KIND, p["seq"])
+        j = None if trg is None else triggers_values(read_json(trg, "triggers"))["last_read_offset_days"]
+        where = "%s の記録（seq %d）の時点" % (p["kind"], p["seq"])
+        if emb < j_max:
+            raise LedgerError("%sで採用される periods（seq %d）の embargo_days %d が、candidates の J の"
+                              "最大 %d より小さい。J を覆う区切りを、その前に封印する必要がある"
+                              % (where, per["seq"], emb, j_max))
+        if rebuild and (j is None or j < j_max):
+            raise LedgerError("%sで採用される periods-triggers（%s）の last_read_offset_days が、"
+                              "candidates の J の最大 %d 以上でない。J の最大が periods の 1 件目の "
+                              "embargo_days %d を超えるので、その前に %d 以上の periods-triggers の記録が要る"
+                              % (where, "無し" if trg is None else "seq %d、%r" % (trg["seq"], j),
+                                 j_max, first, j_max))
+        if j is not None and j < j_max:
+            raise LedgerError("%sで採用される periods-triggers（seq %d）の last_read_offset_days %d が、"
+                              "candidates の J の最大 %d より小さい" % (where, trg["seq"], j, j_max))
+        out["points"].append((p, per, emb, trg, j))
+    out["status"] = "ok" if rebuild else "within"
+    return out
 
 
 # ---------------------------------------------------------------- 手順4の開始（method-access。T-014）
@@ -1044,6 +1077,7 @@ def append_record(ledger_path, kind, targets, note, now, expected_data=None):
     expected_data: 渡したときは、今の記録のバイト列がこれと同じでなければ追記しない。
       中身（ledger_head など）を作ったあとで、別の記録が先に追記された場合に止めるため。
     """
+    check_sealed_path(ledger_path)          # T-017：外へのリンクなら追記しない
     data = read_ledger(ledger_path)
     if expected_data is not None and data != expected_data:
         raise LedgerError("記録が、中身を作った時点から変わっている。追記しない")
@@ -1059,7 +1093,11 @@ def append_record(ledger_path, kind, targets, note, now, expected_data=None):
 
 
 def write_once(path, content):
-    """新しいファイルを書く。既にあれば、中身が同じときだけ何もしない（上書きしない）。"""
+    """新しいファイルを書く。既にあれば、中身が同じときだけ何もしない（上書きしない）。
+
+    書く場所は sealed/ の中だけ（T-017。check_sealed_path。外へのリンクなら書かない）。
+    """
+    check_sealed_path(path)
     try:
         with open(path, "xb") as f:
             f.write(content)
@@ -1086,27 +1124,51 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 
 
 def check_sealed_inside(project):
-    """project/sealed と project/sealed/ledger.jsonl の実体が、project の実体の下にあるか。
+    """project/sealed と project/sealed/ledger.jsonl が、別の場所を指すリンクでないか。
 
-    T-017（T-015 の監査 軽1・軽5 の sealer の側）。sealed/ やその中の記録をシンボリックリンクに
-    して、別の場所の記録を読ませたり、別の場所に追記させたりすることを止める。
-    確かめること：realpath(project/sealed) が realpath(project) の下（それ自身ではない）にあり、
-    realpath(project/sealed/ledger.jsonl) が realpath(project/sealed) の下にあること。
-    記録のファイルがまだ無いときは、sealed/ の検査だけをする。返り値: realpath(project)。
+    T-017（T-015 の監査 軽1・軽5 の sealer の側。差し戻し1回目の軽1 で厳しくした）。
+    sealed/ やその中の記録をシンボリックリンクにして、別の場所の記録を読ませたり、別の場所に
+    追記させたりすることを止める。確かめること：
+      - realpath(project/sealed) == join(realpath(project), "sealed")
+        （プロジェクトの中の別のフォルダを指すリンクも拒む。project より上の階層のリンク、
+        例えば /tmp → /private/tmp は、両辺が同じだけずれるので通る）
+      - 記録のファイルがあれば、realpath(project/sealed/ledger.jsonl) ==
+        join(realpath(project/sealed), "ledger.jsonl")
+    返り値: realpath(project)。
     限界：検査のあとで置き換えられること（検査と使用のあいだの競合）は防げない。
     """
     root = os.path.realpath(project)
     sealed = os.path.realpath(os.path.join(project, "sealed"))
-    if os.path.commonpath([root, sealed]) != root or sealed == root:
-        raise LedgerError("sealed/ の実体（%s）が、プロジェクトの実体（%s）の下に無い。"
-                          "シンボリックリンクで別の場所を指している" % (sealed, root))
+    if sealed != os.path.join(root, "sealed"):
+        raise LedgerError("sealed/ の実体（%s）が、プロジェクトの実体の sealed/（%s）ではない。"
+                          "シンボリックリンクで別の場所を指している"
+                          % (sealed, os.path.join(root, "sealed")))
     led = os.path.join(project, "sealed", "ledger.jsonl")
     if os.path.lexists(led):
         real = os.path.realpath(led)
-        if os.path.commonpath([sealed, real]) != sealed or real == sealed:
-            raise LedgerError("sealed/ledger.jsonl の実体（%s）が、sealed/ の実体（%s）の下に無い。"
-                              "シンボリックリンクで別の場所を指している" % (real, sealed))
+        if real != os.path.join(sealed, "ledger.jsonl"):
+            raise LedgerError("sealed/ledger.jsonl の実体（%s）が、sealed/ の中の ledger.jsonl ではない。"
+                              "シンボリックリンクで別の場所を指している" % real)
     return root
+
+
+def check_sealed_path(path):
+    """sealed/ に書く・追記するファイルのパスを、書く前に確かめる。T-017（差し戻し1回目の中1）。
+
+    path は <プロジェクト>/sealed/<名前> の形でなければならない。プロジェクトについて
+    check_sealed_inside を行い、path がもう存在するなら、その実体が sealed/ の中の同じ名前で
+    あること（別の場所へのリンクでないこと）も確かめる。書く仕組みの共通の入口
+    （append_record、write_once、stamp.stamp_seq、stamp.upgrade_seq）が呼ぶ。
+    """
+    sealed_dir = os.path.dirname(os.path.abspath(path))
+    if os.path.basename(sealed_dir) != "sealed":
+        raise LedgerError("%s は sealed/ の中のファイルではない。書かない" % path)
+    check_sealed_inside(os.path.dirname(sealed_dir))
+    if os.path.lexists(path):
+        real = os.path.realpath(path)
+        if real != os.path.join(os.path.realpath(sealed_dir), os.path.basename(path)):
+            raise LedgerError("%s の実体（%s）が sealed/ の中に無い。シンボリックリンクで別の場所を"
+                              "指している。書かない" % (path, real))
 
 
 class ThresholdAccessRequired(LedgerError):

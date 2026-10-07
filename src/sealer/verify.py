@@ -144,6 +144,16 @@ class State:
                         headers[int(m.group(1))] = _hex80(f.read().strip())
         for h, hx in header_args or []:
             headers[h] = hx
+        # T-017（差し戻し1回目の軽2）：.ots に Bitcoin の証明がある高さは、すべてヘッダと照合する。
+        # ヘッダが無い高さがあれば失敗にする。置いたヘッダを外して、確定時刻を黙って変えたり、
+        # 「保留」のまま通したりできないようにするため。
+        need = sorted({a["height"] for _s, _p, _d, atts in self.anchors for a in atts
+                       if a["type"] == "bitcoin"})
+        missing = [h for h in need if h not in headers]
+        if missing:
+            raise ledger.LedgerError("高さ %s の Bitcoin の証明が .ots の中にあるが、そのヘッダが無い"
+                                     "（sealed/bitcoin-header-<高さ>.hex、--ots-dir の中の同じ名前の"
+                                     "ファイル、または --btc-header で渡す）" % ", ".join(map(str, missing)))
         self.times, self.detail, unused = ledger.confirmed_times(self.anchors, headers)
         if unused:
             raise ledger.LedgerError("高さ %s のヘッダが渡されたが、その高さの Bitcoin の証明は"
@@ -246,9 +256,10 @@ def adopted_triggers(st):
 def _print_drand(r, t, state, own):
     if state == "ok":
         print("      drand の回の公開時刻 %s は、この記録自身の .ots の確定時刻（ヘッダの時刻）%s に"
-              "幅 %s を足した時刻より前（この記録は、drand の回の公開時刻より後に作られ、ヘッダの"
-              "時刻 + 幅 より前に存在した。確定時刻の側は、ヘッダが本当の鎖にあることを確かめた"
-              "場合に限る）" % (t.isoformat(), own.isoformat(), ledger.DRAND_HEADER_SLACK))
+              "幅 %s を足した時刻より前（この記録は、ヘッダの時刻 + 幅 より前に存在した。確定時刻の"
+              "側は、ヘッダが本当の鎖にあることを確かめた場合に限る。この記録が drand の回の公開"
+              "時刻より後に作られたことは、drand の署名（BLS）を確かめた場合に限る。この検査では"
+              "署名を確かめていない）" % (t.isoformat(), own.isoformat(), ledger.DRAND_HEADER_SLACK))
     else:
         print("      drand の回の公開時刻 %s。この記録自身の .ots が Pending のため、"
               "確定時刻との照合は保留" % t.isoformat())
@@ -399,17 +410,22 @@ def cmd_candidates(st, _a):
             print("      最初の acquisition-start（seq %d）より前" % cut["seq"])
     print("candidates の記録は、すべて最初の acquisition-start の記録より前にある。")
     hz = ledger.check_horizon_embargo(st.records, st.file_json)
-    if hz["status"] == "within":
-        print("J（判定が読む最後の日のずれ）の最大 %d は、periods の 1 件目の embargo_days %d 以下。"
-              "区切りの作り直しは要らず、periods-triggers は求めない。" % (hz["j_max"], hz["embargo"]))
-    elif hz["status"] == "ok":
-        print("J の最大 %d が embargo_days %d を超える。%s（seq %d）より前の periods-triggers"
-              "（seq %d）の last_read_offset_days が %d 以上" % (
-                  hz["j_max"], hz["embargo"], hz["deadline"]["kind"], hz["deadline"]["seq"],
-                  hz["triggers"]["seq"], hz["j_max"]))
-    else:
-        print("保留：J の最大 %d が embargo_days %d を超える。method-access・threshold-access の"
-              "記録がまだ無いので、periods-triggers の照合を保留" % (hz["j_max"], hz["embargo"]))
+    if hz["status"] == "no-candidates":
+        return
+    print("J（判定が読む最後の日のずれ）の最大 %d。periods の 1 件目の embargo_days %d %s。"
+          % (hz["j_max"], hz["embargo_first"],
+             "以下（区切りの作り直しは要らない）" if hz["j_max"] <= hz["embargo_first"]
+             else "を超える（作り直しと、periods-triggers が要る）"))
+    for p, per, emb, trg, j in hz["points"]:
+        print("  %s（seq %d）の時点で採用される periods（seq %d）の embargo_days %d ≥ J の最大。"
+              "periods-triggers：%s" % (p["kind"], p["seq"], per["seq"], emb,
+                                       "無し" if trg is None else "seq %d、last_read_offset_days %r"
+                                       % (trg["seq"], j)))
+    if hz["status"] == "pending":
+        print("保留：method-access・threshold-access の記録がまだ無いので、periods-triggers の照合を保留")
+    elif not hz["points"]:
+        print("  method-access・threshold-access の記録がまだ無い。その記録ができたときに、"
+              "その時点で採用される版と照合する")
 
 
 def cmd_adopted(st, _a):

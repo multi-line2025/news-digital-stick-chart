@@ -73,6 +73,7 @@ def data_started(project):
 
 
 def seal(project, expect_sha, extra_args, now, ots_cmd, runner=subprocess.run):
+    ledger.check_sealed_inside(project)    # T-017：sealed/ が別の場所を指していれば何もしない
     sealed_dir = os.path.join(project, "sealed")
     ledger_path = os.path.join(sealed_dir, "ledger.jsonl")
 

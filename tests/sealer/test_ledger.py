@@ -124,11 +124,15 @@ def target(path, content=b"x"):
 
 class LedgerCase(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        # 書く仕組みの共通の入口は <プロジェクト>/sealed/ の中にだけ書く（T-017）。
+        # self.tmp は仮のプロジェクトの sealed/ にする。
+        self.base = tempfile.mkdtemp()
+        self.tmp = os.path.join(self.base, "sealed")
+        os.mkdir(self.tmp)
         self.path = os.path.join(self.tmp, "ledger.jsonl")
 
     def tearDown(self):
-        shutil.rmtree(self.tmp)
+        shutil.rmtree(self.base)
 
     def add(self, kind="periods", n=1, start=0):
         recs = None
@@ -1384,7 +1388,7 @@ class TestAuditRepro(SealCase):
             self.build(rnd)
             pending = self.verify_all()
             confirmed = self.verify_all(*self.confirm([1, 2, 3, 4, 5, 6]))
-            self.assertIn("この記録は、drand の回の公開時刻より後に作られ", confirmed)
+            self.assertIn("drand の署名（BLS）を確かめた場合に限る", confirmed)
             results.append(self.assertAdoption(pending))
             results.append(self.assertAdoption(confirmed))
         self.assertTrue(all(r == results[0] for r in results), results)

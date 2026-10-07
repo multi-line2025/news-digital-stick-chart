@@ -97,6 +97,7 @@ def check_timing(project, records):
 
 def seal(project, expect_sha, now, ots_cmd, runner=subprocess.run, require_committed=True):
     """返り値: (記録, .ots のパス か None, 送った先の一覧)。"""
+    ledger.check_sealed_inside(project)    # T-017：sealed/ が別の場所を指していれば何もしない
     sealed_dir = os.path.join(project, "sealed")
     ledger_path = os.path.join(sealed_dir, "ledger.jsonl")
 
