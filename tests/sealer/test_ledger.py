@@ -935,6 +935,7 @@ def order_doc_for(data, seq, kind, **over):
                          "owner_decision": {"source": "%s:%s" % (commit, path), "source_line": line,
                                             "decision_line": prefix + "、".join(phrases)}},
             "order1_ref": None,
+            "owner_approval": ledger.expected_owner_approval_1b(),
             "checks": {"gkg_manifests_absent": True, "method_access_absent": True,
                        "not_shallow": True, "worktree_clean": True}})
     common.update(over)

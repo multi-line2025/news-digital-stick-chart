@@ -4,10 +4,11 @@
 kind は二つ（ledger.ORDER1_KIND = "stats-order1"、ledger.ORDER1B_KIND = "stats-order1b"）。
 一つの kind に「順番」の欄を持たせない理由（docs/verify/periods-seal.md 13章）：
   - 収集係の関門（themes.require_exclusion_rules_sealed）と gkg-run-start の exclusion_rule_seq は、
-    「除外の規則の kind の最初の記録」を指す。kind を一つにすると、最初の記録が順番1b のことがあり、
-    その kind の最初の記録が除外の規則であるとは限らなくなる。
-  - 前に要る位置が違う（順番1 は区分表の取得と method-access の前に必須、順番1b は最初の
-    gkg-run-start の前に必須）。中身の形と、封印の前に確かめることも違う。
+    「除外の規則の kind の記録」を指す。stats-order1 は 1 件だけ（ledger.check_stats_order）なので、
+    kind を分ければ、その記録は常に除外の規則である。kind を一つにすると、順番1b と区別できない。
+  - 前に要る位置が違う（順番1 は区分表の取得の前。区分表の取得は ledger に書かれないので、verify が
+    git の履歴で照らす。順番1b は最初の gkg-run-start の前に必須。どちらも method-access より前にだけ
+    置ける）。中身の形と、封印の前に確かめることも違う。
 
 手順は docs/stats/seal-order1.md 2章（順番1）と 3章 (3)（順番1b）。機械で照らせる項目を、書く前に
 すべて確かめ、結果を記録の中身に入れる。一つでも通らなければ何も書かない。
@@ -59,6 +60,10 @@ kind は二つ（ledger.ORDER1_KIND = "stats-order1"、ledger.ORDER1B_KIND = "st
      発言の行がちょうど 1 行、「- 決定：正式に使う数え方は、」で始まる行がちょうど 1 行で、その行に
      二つの語句を含むこと。counting.py の出力の owner_decision が同じ出どころであること
   5  作業ツリーがきれい、HEAD の 40 桁、浅い clone でない
+  順番1b の承認（ledger.OWNER_APPROVAL_1B。a970019 の reviews/T-036.md）：「> 承認します」の行が
+     ちょうど 1 つ、その前で最も近い "## " の見出しが決まった行と一致し、見出しの行もちょうど 1 つ。
+     結果を owner_approval に入れる（呼ぶ側が渡す approvals には頼らない）
+  正式な数え方が ledger.ORDER1B_OFFICIAL_CANDIDATE（C7）と一致すること
   順番1 の記録があれば、その seq と行の sha256 を order1_ref に入れる
   確かめないこと：項目0（試しの run の作りを直すタスクの合格。reviews/ の記録でリードが確かめる）。
 
@@ -225,6 +230,27 @@ def check_owner_choice(project):
     if missing:
         raise ledger.LedgerError("%s:%s の見出しの節に、行 %s が無い" % (commit, path, missing))
     return ledger.expected_owner_choice()
+
+
+def check_owner_approval_1b(project):
+    """順番1b の承認（ledger.OWNER_APPROVAL_1B）を照らす。T-037 再提出1回目 中-B。
+    返り値: 記録に入れる dict（{source, heading, line}）。"""
+    commit, path, heading, line = ledger.OWNER_APPROVAL_1B
+    check_ancestor(project, commit)
+    text = _lines_of(project, commit, path)
+    idx = [i for i, l in enumerate(text) if l == line]
+    if len(idx) != 1:
+        raise ledger.LedgerError("順番1b の承認：%s:%s で、行 %r が %d 行ある（ちょうど 1 行でない）"
+                                 % (commit, path, line, len(idx)))
+    heads = [l for l in text[:idx[0]] if l.startswith("## ")]
+    if not heads or heads[-1] != heading:
+        raise ledger.LedgerError("順番1b の承認：%s:%s で、行 %r の前で最も近い見出しが %r でない（%r）"
+                                 % (commit, path, line, heading, heads[-1] if heads else None))
+    n = sum(1 for l in text if l == heading)
+    if n != 1:
+        raise ledger.LedgerError("順番1b の承認：%s:%s で、見出し %r が %d 行ある（ちょうど 1 行でない）"
+                                 % (commit, path, heading, n))
+    return ledger.expected_owner_approval_1b()
 
 
 def check_owner_decision(project):
@@ -444,6 +470,9 @@ def counting_summary(project, python):
     if status != "decided" or official not in cands:
         raise ledger.LedgerError("%s の出力の正式な数え方が決まっていない（official_status %r、"
                                  "official_candidate %r）。封印しない" % (ledger.COUNTING_SCRIPT, status, official))
+    if official != ledger.ORDER1B_OFFICIAL_CANDIDATE:
+        raise ledger.LedgerError("%s の出力の official_candidate %r が、決まった正式な数え方 %s と違う。封印しない"
+                                 % (ledger.COUNTING_SCRIPT, official, ledger.ORDER1B_OFFICIAL_CANDIDATE))
     commit, path, source_line, prefix, _phrases = ledger.OWNER_DECISION
     if not isinstance(od, dict) or (od.get("source_commit"), od.get("source_path"), od.get("source_line"),
                                     od.get("decision_line_prefix")) != (commit, path, source_line, prefix):
@@ -483,6 +512,7 @@ def seal_order1b(project, files, approvals, now, ots_cmd, runner=subprocess.run)
     given = [(a["item"], a["commit"], a["path"], tuple(a["lines"])) for a in approvals]
     bii = ledger.ORDER1_APPROVALS[2]
     checked = [check_approval(project, *a) for a in given + [bii]]
+    approval = check_owner_approval_1b(project)
     python, py = python_info(project)
     counting = counting_summary(project, python)
     o1 = ledger.first_order1(records)
@@ -492,12 +522,14 @@ def seal_order1b(project, files, approvals, now, ots_cmd, runner=subprocess.run)
     doc = {
         "kind": ledger.ORDER1B_KIND,
         "head": head,
-        "ancestors": sorted({a[1] for a in given + [bii]} | {ledger.OWNER_DECISION[0]}),
+        "ancestors": sorted({a[1] for a in given + [bii]} | {ledger.OWNER_DECISION[0],
+                                                              ledger.OWNER_APPROVAL_1B[0]}),
         "python": py,
         "files": out_files,
         "approvals": checked,
         "counting": counting,
         "order1_ref": ref,
+        "owner_approval": approval,
         "checks": checks,
         "ledger_head": ledger.expected_ledger_head(data, len(records) + 1),
     }

@@ -1189,7 +1189,20 @@ OWNER_DECISION = ("9c85f58f054a679b8e5f40fcd7adbb17536f6366", "reviews/T-028.md"
 ORDER1_DOC_KEYS = ("ancestors", "approvals", "checks", "head", "kind", "ledger_head",
                    "owner_choice", "python", "targets")
 ORDER1B_DOC_KEYS = ("ancestors", "approvals", "checks", "counting", "files", "head", "kind",
-                    "ledger_head", "order1_ref", "python")
+                    "ledger_head", "order1_ref", "owner_approval", "python")
+# 正式な数え方（counting.OFFICIAL_CANDIDATE と同じ。2026-10-08 オーナー決定。seal-order1.md 3章 (3) の4）。
+# 順番1b の counting.official_candidate は、この値と一致しなければならない（T-037 再提出1回目 中-A）
+ORDER1B_OFFICIAL_CANDIDATE = "C7"
+# 順番1b の承認事項へのオーナーの承認（counting.OWNER_APPROVAL_1B と同じ照らし方。T-037 再提出1回目 中-B）：
+# (commit, パス, 見出しの行, 承認の行)。承認の行がちょうど 1 つ、その前で最も近い "## " の見出しが
+# 見出しの行と行の全体で一致し、見出しの行もちょうど 1 つあること
+OWNER_APPROVAL_1B = ("a970019c61808738b02629b14f68b3171c4ddd57", "reviews/T-036.md",
+                     "## 2026-10-08 オーナーの発言（原文のまま記録。順番1b の承認事項）", "> 承認します")
+
+
+def expected_owner_approval_1b():
+    commit, path, heading, line = OWNER_APPROVAL_1B
+    return {"source": "%s:%s" % (commit, path), "heading": heading, "line": line}
 ORDER1_CHECK_KEYS = ("acquisition_starts", "gkg_manifests_absent", "method_access_absent",
                      "not_shallow", "optional_choice_status", "stats_tests", "targets_only_copy",
                      "themes_manifest_absent", "worktree_clean")
@@ -1315,6 +1328,8 @@ def check_order1b_doc(record, doc):
     差し戻し1回目 中2：files に ORDER1B_REQUIRED_FILES があること、counting に候補と基準の案の識別子・
     正式な数え方（official_status が decided で、候補の中にある）・counting.py の出力の sha256・
     OWNER_DECISION の出どころの 2 行があること、approvals に B (ii) があること。
+    再提出1回目：official_candidate が ORDER1B_OFFICIAL_CANDIDATE（C7）と一致すること（中-A）、
+    owner_approval が OWNER_APPROVAL_1B の照らし方と一致すること（中-B）。
     返り値: {パス: sha256}。"""
     what = "seq %d の stats-order1b" % record["seq"]
     _check_doc_kind(record, doc)
@@ -1357,6 +1372,13 @@ def check_order1b_doc(record, doc):
     if c["official_status"] != "decided" or c["official_candidate"] not in c["candidate_ids"]:
         raise LedgerError("%s の counting の正式な数え方が決まっていない（official_status が decided で、"
                           "official_candidate が候補の中にあること）" % what)
+    if c["official_candidate"] != ORDER1B_OFFICIAL_CANDIDATE:
+        raise LedgerError("%s の counting.official_candidate %r が、決まった正式な数え方 %s（ledger."
+                          "ORDER1B_OFFICIAL_CANDIDATE）と違う" % (what, c["official_candidate"],
+                                                               ORDER1B_OFFICIAL_CANDIDATE))
+    if doc["owner_approval"] != expected_owner_approval_1b():
+        raise LedgerError("%s の owner_approval が、決まった照らし方（ledger.OWNER_APPROVAL_1B。%s:%s）と"
+                          "一致しない" % (what, OWNER_APPROVAL_1B[0], OWNER_APPROVAL_1B[1]))
     _check_hex(c["output_sha256"], HEX64, what + " の counting.output_sha256")
     od = c["owner_decision"]
     want_src = "%s:%s" % (OWNER_DECISION[0], OWNER_DECISION[1])
@@ -1449,7 +1471,8 @@ def check_order1_before_themes(records, git):
     for c in sorted(f):
         parents = git("rev-parse", "%s^@" % c).decode().split()
         if not parents:
-            raise LedgerError("区分表のマニフェストに行がある commit %s に親が無い" % c[:12])
+            raise LedgerError("区分表のマニフェストに行がある commit %s に親が無い（浅い clone では親が取れない。"
+                              "この照合には履歴が要るので、--depth を付けない clone で確かめる）" % c[:12])
         ok = False
         for p in parents:
             try:

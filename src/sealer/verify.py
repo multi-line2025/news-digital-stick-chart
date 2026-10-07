@@ -71,8 +71,9 @@ drand の照合の幅（T-008）
     足されたことのあるもの全部。マージコミットで足したものも含む）。外していれば失敗する（T-023）。
     HEAD の履歴に、時刻証明かヘッダを消したコミット（マージを含む）があれば失敗する（T-027）。
 
-終了コード 0: すべての検査に通った（保留の判定があれば、そのことを出力する）
-           1: どこかで失敗した  2: 引数の誤り
+終了コード 0: 照らした検査がすべて通った（保留の判定と、照らさなかったもの（例：git の履歴が無い
+              写しでの区分表との前後）があれば、そのことを出力する。all では最後の行に出す）
+           1: どこかで失敗した（浅い clone で区分表との前後を照らせないときも）  2: 引数の誤り
 """
 
 import argparse
@@ -244,6 +245,7 @@ class State:
             raise ledger.LedgerError("高さ %s のヘッダが渡されたが、その高さの Bitcoin の証明は"
                                      ".ots の中に無い" % ", ".join(map(str, unused)))
         self.cut = ledger.first_threshold_access(self.records)
+        self.unchecked = []      # 照らさなかったもの（all の最後に出す。T-037 再提出1回目 軽2）
 
     def file_json(self, record, role):
         return ledger.read_target_json(self.root, record, role)
@@ -446,6 +448,8 @@ def cmd_stats_order(st, _a):
               % (r["seq"], doc["head"], ",".join(c["candidate_ids"]), ",".join(c["criteria_ids"]),
                  c["official_candidate"], c["official_status"], c["output_sha256"],
                  "無し" if doc["order1_ref"] is None else "seq %d" % doc["order1_ref"]["seq"]))
+        print("      オーナーの承認：%s の「%s」の下の「%s」（ちょうど 1 行）"
+              % (doc["owner_approval"]["source"], doc["owner_approval"]["heading"], doc["owner_approval"]["line"]))
         for path in sorted(files):
             print("      %s  %s" % (files[path], path))
     o1 = ledger.first_order1(st.records)
@@ -456,8 +460,15 @@ def cmd_stats_order(st, _a):
     try:
         repo.git("rev-parse", "--git-dir")
     except ledger.LedgerError:
-        print("git の履歴が無いので、区分表の取得との前後は照合していない（--rev auto には git の履歴が要る）")
+        # 軽2：止めないが、照らさなかったことを all の最後にも出す
+        st.unchecked.append("区分表の取得と順番1 の前後（git の履歴が無いため）")
+        print("照らさなかった：git の履歴が無いので、区分表の取得との前後は照合していない"
+              "（--rev auto には git の履歴が要る）")
         return
+    if repo.git("rev-parse", "--is-shallow-repository").strip() == b"true":
+        # 軽1：浅い clone では親が取れず、照合の理由が分かりにくいので、先に止めて理由を出す
+        raise ledger.LedgerError("浅い clone である。区分表の取得との前後の照合には履歴が要るので、"
+                                 "--depth を付けない clone（git fetch --unshallow でもよい）で確かめる")
     n = ledger.check_order1_before_themes(st.records, repo.git)
     mpath = os.path.join(st.root, ledger.THEMES_MANIFEST)
     body = None
@@ -642,6 +653,9 @@ def cmd_all(st, a):
     cmd_adopted(st, a)
     print("すべての検査に通った。" + ("採用は保留（threshold-access の記録が無いため）。"
                                       if st.cut is None else ""))
+    if st.unchecked:
+        print("ただし、次は照らさなかった（終了コード 0 は、照らした検査がすべて通ったことだけを示す）："
+              + "、".join(st.unchecked))
     print(NOT_CHECKED)
 
 

@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -72,6 +73,8 @@ T020 = ("# T-020\n\n## 2026-10-08 オーナーの発言（原文のまま記録�
         "> 民族、宗教の集団は除外の区分に加える。\n> そのほかこのまま承認の項目は承認します\n\n## 次\n")
 T028 = ("# T-028\n\n" + ledger.OWNER_DECISION[2] + "\n\n" + ledger.OWNER_DECISION[3]
         + "分子は V1 か V2 の少なくとも一方、分母は同じ数え方の全テーマの合計。\n")
+T036 = ("# T-036\n\n## 2026-10-08 再提出1回目\n- 合格\n\n" + ledger.OWNER_APPROVAL_1B[2] + "\n\n"
+        + ledger.OWNER_APPROVAL_1B[3] + "\n")
 ORDER1B_FILES = list(ledger.ORDER1B_REQUIRED_FILES)
 
 
@@ -83,7 +86,8 @@ class StatsCase(t14.Case):
         self.write("src/collector/acquire_filelist.py", "# 一覧の取得（仮）\n")
         self.write(GKG_CODE, "# GKG の取得（仮）\n")
         self.write("src/stats/tagrules.py", TAGRULES_PY % 1)
-        for name, text in (("T-022", T022), ("T-024", T024), ("T-020", T020), ("T-028", T028)):
+        for name, text in (("T-022", T022), ("T-024", T024), ("T-020", T020), ("T-028", T028),
+                           ("T-036", T036)):
             self.write("reviews/%s.md" % name, text)
         self.write(".gitignore", ".venv/\n")
         os.makedirs(os.path.join(self.root, ".venv", "bin"))
@@ -99,7 +103,8 @@ class StatsCase(t14.Case):
                           ("ORDER1_APPROVALS", tuple((a[0], self.hist, a[2], a[3])
                                                      for a in ledger.ORDER1_APPROVALS)),
                           ("OWNER_CHOICE", (self.hist,) + tuple(ledger.OWNER_CHOICE[1:])),
-                          ("OWNER_DECISION", (self.hist,) + tuple(od[1:]))):
+                          ("OWNER_DECISION", (self.hist,) + tuple(od[1:])),
+                          ("OWNER_APPROVAL_1B", (self.hist,) + tuple(ledger.OWNER_APPROVAL_1B[1:]))):
             p = mock.patch.object(ledger, name, val)
             p.start()
             self.addCleanup(p.stop)
@@ -480,6 +485,61 @@ class TestOrder1bRefusals(StatsCase):
             self.commit("出どころを合わせた")
             self.refuses(lambda: self.order1b(), "「決定：」の行に、語句")
 
+    def approval_variant(self, text):
+        """reviews/T-036.md を text にした commit を作り、OWNER_APPROVAL_1B をその commit に向ける。"""
+        self.write("reviews/T-036.md", text)
+        self.commit("承認の記録を変えた")
+        newc = self.git("rev-parse", "HEAD").decode().strip()
+        p = mock.patch.object(ledger, "OWNER_APPROVAL_1B", (newc,) + tuple(ledger.OWNER_APPROVAL_1B[1:]))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_owner_approval_line_missing_refused(self):
+        """中-B：承認の行が無ければ止まる（呼ぶ側の approvals には頼らない）。"""
+        self.base()
+        self.approval_variant(T036.replace(ledger.OWNER_APPROVAL_1B[3] + "\n", ""))
+        self.refuses(lambda: self.order1b(), "が 0 行ある（ちょうど 1 行でない）")
+
+    def test_owner_approval_heading_differs_refused(self):
+        self.base()
+        self.approval_variant(T036.replace(ledger.OWNER_APPROVAL_1B[2],
+                                           "## 2026-10-08 オーナーの発言（別の件）"))
+        self.refuses(lambda: self.order1b(), "の前で最も近い見出しが")
+
+    def test_owner_approval_two_lines_refused(self):
+        self.base()
+        self.approval_variant(T036 + ledger.OWNER_APPROVAL_1B[3] + "\n")
+        self.refuses(lambda: self.order1b(), "が 2 行ある（ちょうど 1 行でない）")
+
+    def test_owner_approval_two_headings_refused(self):
+        self.base()
+        self.approval_variant(ledger.OWNER_APPROVAL_1B[2] + "\n- 前の行\n\n" + T036)
+        self.refuses(lambda: self.order1b(), "見出し")
+
+    def test_owner_approval_recorded_and_required_by_verify(self):
+        self.base()
+        _b, rel = self.order1b()
+        self.assertEqual(self.doc_of(rel)["owner_approval"], ledger.expected_owner_approval_1b())
+        self.assertIn("オーナーの承認：", self.verify_ok("stats-order"))
+
+    def test_owner_approval_bad_raw_fails_verify(self):
+        self.base()
+        b = self.add_order1b(T0 + 4 * H, owner_approval={"source": "x", "heading": "y", "line": "z"})
+        self.verify_fails(("stats-order",), "seq %d の stats-order1b の owner_approval が、決まった照らし方" % b)
+
+    def test_official_candidate_must_be_c7(self):
+        """中-A：正式な数え方が C7 でなければ、書く仕組みも verify も止まる。"""
+        self.base()
+        od = ledger.OWNER_DECISION
+        self.write("src/stats/counting.py",
+                   (COUNTING_PY % (self.hist, od[2], od[3])).replace('"official_candidate": "C7"',
+                                                                      '"official_candidate": "C1"'))
+        self.commit("C1 にした")
+        self.refuses(lambda: self.order1b(), "official_candidate 'C1' が、決まった正式な数え方 C7 と違う")
+        cnt = dict(tl.order_doc_for(b"", 1, ledger.ORDER1B_KIND)["counting"], official_candidate="C1")
+        b = self.add_order1b(T0 + 4 * H, counting=cnt)
+        self.verify_fails(("stats-order",), "seq %d の stats-order1b の counting.official_candidate 'C1'" % b)
+
     def test_owner_decision_source_must_match(self):
         """counting.py の出力の出どころが、ledger の決まった出どころと違えば止まる。"""
         self.base()
@@ -573,6 +633,36 @@ class TestStatsOrderVerify(t14.Case):
 # ---------------------------------------------------------------- 6. 本物の clone の HEAD で
 
 
+class TestVerifyGitNotes(StatsCase):
+    """軽1・軽2：浅い clone と、.git の無い写しの表示。"""
+
+    def tmp_dir(self):
+        td = tempfile.TemporaryDirectory()      # TMPDIR の下。テストが終わると片づく
+        self.addCleanup(td.cleanup)
+        return td.name
+
+    def test_no_git_is_reported_in_all(self):
+        self.base()
+        self.order1()
+        nogit = os.path.join(self.tmp_dir(), "p")
+        shutil.copytree(self.root, nogit, ignore=shutil.ignore_patterns(".git"), symlinks=True)
+        code, out, err = tl.run_verify_inproc(nogit, "all")
+        self.assertEqual(code, 0, err)
+        self.assertIn("照らさなかった：git の履歴が無いので", out)
+        self.assertIn("ただし、次は照らさなかった（終了コード 0 は、照らした検査がすべて通ったことだけを示す）："
+                      "区分表の取得と順番1 の前後", out)
+
+    def test_shallow_clone_explains(self):
+        self.base()
+        self.order1()
+        d = os.path.join(self.tmp_dir(), "shallow")
+        subprocess.run(["git", "clone", "-q", "--depth=1", "file://" + self.root, d], check=True,
+                       capture_output=True)
+        code, _out, err = tl.run_verify_inproc(d, "stats-order")
+        self.assertEqual(code, 1)
+        self.assertIn("浅い clone である。区分表の取得との前後の照合には履歴が要る", err)
+
+
 class TestRealClone(unittest.TestCase):
     """本物のリポジトリの clone の HEAD で、seal_order1 と seal_order1b（今の counting.md・counting.py）が
     通ること。決まった値は差し替えない。clone の sealed/ にだけ書く（本物には書かない）。"""
@@ -596,6 +686,9 @@ class TestRealClone(unittest.TestCase):
             with open(os.path.join(c, rel2), encoding="utf-8") as f:
                 doc2 = json.load(f)
             self.assertEqual(doc2["counting"]["official_candidate"], "C7")
+            # 中-B：承認（a970019 の reviews/T-036.md）を照らした上で通る
+            self.assertEqual(doc2["owner_approval"], ledger.expected_owner_approval_1b())
+            self.assertEqual(doc2["approvals"], [ledger.expected_order1_approvals()[2]])
             self.assertEqual(doc2["counting"]["official_status"], "decided")
             self.assertEqual(doc2["order1_ref"]["seq"], rec["seq"])
             code, out, err = tl.run_verify_inproc(c, "stats-order")
@@ -625,11 +718,15 @@ class TestDocT037(unittest.TestCase):
                        "下の表の10だけ", "threshold-access の後の取得の続き",
                        "区分表の取得は ledger に記録を書かない", "stats-order1 は1件だけ",
                        "待つ記録は kind ではなく status で区別する", "`ledger.ORDER1_TARGET_NAMES`",
-                       "対象だけを置いた写し"):
+                       "対象だけを置いた写し", "この照合の根拠と限界", "暗号的に言える",
+                       "push の前に履歴を書き換えたり", "コミットした位置", "clone から辿れる commit",
+                       "浅い clone では照らせない", "終了コード 0 は、照らした検査がすべて通ったことだけを示す",
+                       "`ledger.OWNER_APPROVAL_1B`", "`ledger.ORDER1B_OFFICIAL_CANDIDATE`"):
             self.assertIn(phrase, self.text)
         for k in ledger.ORDER1_DOC_KEYS + ledger.ORDER1B_DOC_KEYS + ledger.COUNTING_KEYS:
             self.assertIn("`%s`" % k, self.text)
         self.assertNotIn("acquisition-start のうち `fetch.code_path` が `src/collector/themes.py`", self.text)
+        self.assertNotIn("照らす行は、承認を記録したときにリードが決める）と、B (ii)", self.text)
 
 
 if __name__ == "__main__":
