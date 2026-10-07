@@ -347,7 +347,7 @@ class TestCriteria(unittest.TestCase):
                 base = counting.CRITERIA[bid](s)
                 self.assertEqual({k: r[k] for k in base}, base)
                 self.assertEqual(r["official"], bid == counting.OFFICIAL_CRITERION)
-                self.assertEqual(r["decided"], base["candidate"] or counting.fallback_candidate(s))
+                self.assertEqual(r["decided"], base["candidate"] or counting.fallback_candidate(s, bid))
 
     def test_input_must_be_trial_days_in_order(self):
         s = base_summaries()
@@ -389,46 +389,44 @@ def trial_rows(rid, days, complete=True, shas=None):
     return out
 
 
-def official_rows(oid, days, trial_ids, shas=None, extra_days=()):
+def official_rows(oid, days, trial_ids, trial_manifest=b"", shas=None, extra_days=(), failed=None):
+    """正式な run のマニフェストの行。run-start には、gkg._trial_info と同じ形で trial_run_ids と
+    trial_manifest_sha256（空なら None）を書く。"""
     out = [{"kind": "run-start", "run_id": oid, "mode": "official", "trial": False, "official": True,
-            "trial_run_ids": list(trial_ids)}]
+            "trial_run_ids": list(trial_ids),
+            "trial_manifest_sha256": hashlib.sha256(trial_manifest).hexdigest() if trial_manifest else None}]
     for d in list(days) + list(extra_days):
         sha = (shas or {}).get(d, hashlib.sha256(d.encode()).hexdigest())
         out.append({"kind": "day", "run_id": oid, "mode": "official", "day": d,
-                    "file_name": counting.day_file_name("official", oid, d), "sha256": sha})
+                    "file_name": counting.day_file_name("official", oid, d), "sha256": sha,
+                    "failed_files": (failed or {}).get(d, [])})
     return out
 
 
 class TestTrialInputRule(unittest.TestCase):
     def test_normal(self):
         sel = counting.select_trial_input(manifest(trial_rows(RID, counting.TRIAL_DAYS)))
-        self.assertEqual(sel["run_id"], RID)
+        self.assertEqual((sel["status"], sel["run_id"]), ("complete", RID))
         self.assertEqual([d["day"] for d in sel["days"]], list(counting.TRIAL_DAYS))
 
     def test_first_run_start_only(self):
-        # 最初の run が終わっていなければ、あとの完了した run があっても代えない（待つ）
+        # 最初の run が終わっていなければ、あとの完了した run があっても代えない
         m = manifest(trial_rows(RID, counting.TRIAL_DAYS[:1], complete=False)
                      + trial_rows(RID2, counting.TRIAL_DAYS))
-        with self.assertRaises(counting.InputNotReady):
-            counting.select_trial_input(m)
-        # 最初の run が終わっていれば、あとの run は使わない
+        self.assertEqual(counting.select_trial_input(m), {"status": "not_complete", "run_id": RID})
         m = manifest(trial_rows(RID, counting.TRIAL_DAYS) + trial_rows(RID2, counting.TRIAL_DAYS))
         self.assertEqual(counting.select_trial_input(m)["run_id"], RID)
 
     def test_run_complete_required(self):
-        """T-028 差し戻し1回目 軽1：3日の day の行がそろっていても、run-complete が無ければ使わない。"""
+        """3日の day の行がそろっていても、R の run-complete が無ければ終わっていない（差し戻し1回目 軽1）。"""
         m = manifest(trial_rows(RID, counting.TRIAL_DAYS, complete=False))
-        with self.assertRaises(counting.InputNotReady):
-            counting.select_trial_input(m)
-        # run-complete が別の run のものでも同じ
+        self.assertEqual(counting.select_trial_input(m)["status"], "not_complete")
         m = manifest(trial_rows(RID, counting.TRIAL_DAYS, complete=False)
                      + [{"kind": "run-complete", "run_id": RID2, "mode": "trial"}])
-        with self.assertRaises(counting.InputNotReady):
-            counting.select_trial_input(m)
+        self.assertEqual(counting.select_trial_input(m)["status"], "not_complete")
 
-    def test_no_start_is_not_ready(self):
-        with self.assertRaises(counting.InputNotReady):
-            counting.select_trial_input(b"")
+    def test_no_start(self):
+        self.assertEqual(counting.select_trial_input(b""), {"status": "no_trial"})
 
     def test_rejections(self):
         good = trial_rows(RID, counting.TRIAL_DAYS)
@@ -442,6 +440,7 @@ class TestTrialInputRule(unittest.TestCase):
             "start_not_trial": [dict(r, trial=False) if r["kind"] == "run-start" else r for r in good],
             "bad_sha": [dict(r, sha256="0") if r["kind"] == "day" else r for r in good],
             "bad_run_id": [dict(r, run_id="xyz") for r in good],
+            "bad_failed_files": [dict(r, failed_files="x") if r["kind"] == "day" else r for r in good],
         }
         for name, rows in cases.items():
             with self.subTest(name=name):
@@ -486,102 +485,118 @@ def _reader(files):
 
 
 class TestDecide(unittest.TestCase):
-    """counting.md 4章の行き先の表（T-028 差し戻し1回目 中3）。"""
+    """counting.md 4章 (2) の表（T-028 差し戻し1回目 中3、2回目 中-B1・中-B2）。"""
 
     def setUp(self):
-        self.tf, tsha = _files("trial", RID)
-        self.of, osha = _files("official", OID)
-        self.tm = manifest(trial_rows(RID, counting.TRIAL_DAYS, shas=tsha))
-        self.om_none = b""
-        self.om = manifest(official_rows(OID, counting.TRIAL_DAYS, [RID], shas=osha))
+        self.tf, self.tsha = _files("trial", RID)
+        self.of, self.osha = _files("official", OID)
+        self.tm = manifest(trial_rows(RID, counting.TRIAL_DAYS, shas=self.tsha))
         self.files = {**self.tf, **self.of}
 
-    def test_trial_used(self):
-        out = counting.decide(self.tm, self.om_none, _reader(self.files))
-        self.assertEqual(out["status"], "decided")
-        self.assertEqual((out["input_mode"], out["input_run_id"]), ("trial", RID))
+    def om(self, trial_manifest, trial_ids, days=counting.TRIAL_DAYS, **kw):
+        return manifest(official_rows(OID, days, trial_ids, trial_manifest, shas=self.osha, **kw))
+
+    def decide(self, tm, om, files=None):
+        return counting.decide(tm, om, _reader(self.files if files is None else files))
+
+    def test_step1_before_official(self):
+        out = self.decide(self.tm, b"")
+        self.assertEqual((out["status"], out["input_mode"], out["input_run_id"]), ("decided", "trial", RID))
         self.assertEqual(set(out["results"]), set(counting.CRITERIA_IDS))
-        self.assertEqual(out, counting.decide(self.tm, self.om_none, _reader(self.files)))
-        # 正式な run が始まっていても、trial_run_ids の最初が R なら1段目
-        out = counting.decide(self.tm, self.om, _reader(self.files))
-        self.assertEqual(out["input_mode"], "trial")
+        self.assertEqual(out, self.decide(self.tm, b""))
 
-    def test_trial_not_complete_waits_until_official_starts(self):
+    def test_step1_after_official(self):
+        out = self.decide(self.tm, self.om(self.tm, [RID]))
+        self.assertEqual((out["status"], out["input_mode"]), ("decided", "trial"))
+
+    def test_trial_not_complete(self):
         tm = manifest(trial_rows(RID, counting.TRIAL_DAYS, complete=False))
-        self.assertEqual(counting.decide(tm, self.om_none, _reader(self.files))["status"], "pending")
-        out = counting.decide(tm, self.om, _reader(self.files))
+        self.assertEqual(self.decide(tm, b"")["status"], "pending")
+        out = self.decide(tm, self.om(tm, [RID]))
         self.assertEqual((out["status"], out["input_mode"]), ("decided", "official"))
-
-    def test_trial_not_complete_and_official_manifest_failed(self):
-        tm = manifest(trial_rows(RID, counting.TRIAL_DAYS, complete=False))
-        self.assertEqual(counting.decide(tm, None, _reader(self.files))["status"], "pending")
 
     def test_no_trial_run(self):
-        self.assertEqual(counting.decide(b"", b"", _reader(self.files))["status"], "pending")
-        om = manifest(official_rows(OID, counting.TRIAL_DAYS, [],
-                                    shas={d: json_rows(self.om)[i + 1]["sha256"]
-                                          for i, d in enumerate(counting.TRIAL_DAYS)}))
-        out = counting.decide(b"", om, _reader(self.files))
+        self.assertEqual(self.decide(b"", b"")["status"], "pending")
+        out = self.decide(b"", self.om(b"", []))
         self.assertEqual((out["status"], out["input_mode"]), ("decided", "official"))
 
-    def test_sha_mismatch_goes_to_official(self):
-        files = dict(self.files)
-        files[("trial", counting.trial_day_file_name(RID, "2015-03-03"))] = make_day("2015-03-03", BASE_ROWS[:3])
-        # 正式な run がまだなら待つ
-        self.assertEqual(counting.decide(self.tm, self.om_none, _reader(files))["status"], "pending")
-        out = counting.decide(self.tm, self.om, _reader(files))
-        self.assertEqual((out["status"], out["input_mode"]), ("decided", "official"))
-        self.assertIn("sha256", out["tiers"][0]["error"])
+    def test_step2_waits_for_days(self):
+        out = self.decide(b"", self.om(b"", [], days=counting.TRIAL_DAYS[:2]))
+        self.assertEqual(out["status"], "pending")
 
-    def test_wrong_day_in_file(self):
+    def test_run_complete_added_after_official_start_stops(self):
+        """中-B1：正式な run の開始のあとに run-complete を書き足しても、1段目にはならず止まる。"""
+        before = manifest(trial_rows(RID, counting.TRIAL_DAYS, complete=False, shas=self.tsha))
+        om = self.om(before, [RID])
+        after = before + manifest([{"kind": "run-complete", "run_id": RID, "mode": "trial"}])
+        out = self.decide(after, om)
+        self.assertEqual(out["status"], "stopped")
+        self.assertIn("trial_manifest_sha256", out["steps"][-1]["reason"])
+
+    def test_trial_run_ids_mismatch_stops(self):
+        self.assertEqual(self.decide(self.tm, self.om(self.tm, [RID2]))["status"], "stopped")
+        self.assertEqual(self.decide(self.tm, self.om(self.tm, []))["status"], "stopped")
+
+    def test_file_problems_stop_not_step2(self):
+        """中-B2：1段目のファイルの不一致・欠け・頭の行の違いは、2段目に進まず止まる。"""
+        name = counting.trial_day_file_name(RID, "2015-03-03")
+        changed = dict(self.files)
+        changed[("trial", name)] = make_day("2015-03-03", BASE_ROWS[:3])
+        missing = dict(self.files)
+        del missing[("trial", name)]
+        for files in (changed, missing):
+            for om in (b"", self.om(self.tm, [RID])):
+                self.assertEqual(self.decide(self.tm, om, files)["status"], "stopped")
+
+    def test_wrong_day_in_file_stops(self):
         a = counting.trial_day_file_name(RID, "2015-03-02")
         b = counting.trial_day_file_name(RID, "2015-03-03")
         files = dict(self.files)
         files[("trial", b)] = files[("trial", a)]
         rows = [dict(r, sha256=hashlib.sha256(files[("trial", r["file_name"])]).hexdigest())
                 if r["kind"] == "day" else r for r in json_rows(self.tm)]
-        out = counting.decide(manifest(rows), self.om, _reader(files))
-        self.assertEqual(out["input_mode"], "official")
+        self.assertEqual(self.decide(manifest(rows), b"", files)["status"], "stopped")
 
-    def test_trial_run_ids_mismatch(self):
-        om = manifest(official_rows(OID, counting.TRIAL_DAYS, [RID2],
-                                    shas={d: json_rows(self.om)[i + 1]["sha256"]
-                                          for i, d in enumerate(counting.TRIAL_DAYS)}))
-        out = counting.decide(self.tm, om, _reader(self.files))
-        self.assertEqual(out["input_mode"], "official")
-
-    def test_git_check_failed(self):
-        out = counting.decide(None, self.om, _reader(self.files))
-        self.assertEqual(out["input_mode"], "official")
-        out = counting.decide(self.tm, None, _reader(self.files))
-        self.assertEqual(out["input_mode"], "trial")
+    def test_wrong_mode_in_header_stops(self):
+        """頭の行の mode が official の中身を、試しの run の名前で置き、sha256 も合わせたもの（軽4）。"""
         files = dict(self.files)
-        del files[("trial", counting.trial_day_file_name(RID, "2015-03-02"))]
-        self.assertEqual(counting.decide(self.tm, None, _reader(files))["status"], "stopped")
+        for d in counting.TRIAL_DAYS:
+            files[("trial", counting.trial_day_file_name(RID, d))] = make_day(d, BASE_ROWS, mode="official")
+        rows = [dict(r, sha256=hashlib.sha256(files[("trial", r["file_name"])]).hexdigest())
+                if r["kind"] == "day" else r for r in json_rows(self.tm)]
+        out = self.decide(manifest(rows), b"", files)
+        self.assertEqual(out["status"], "stopped")
+        self.assertIn("mode", out["steps"][-1]["reason"])
 
-    def test_both_fail_stops(self):
+    def test_git_check_failed_stops(self):
+        self.assertEqual(self.decide(None, b"")["status"], "stopped")
+        self.assertEqual(self.decide(self.tm, None)["status"], "stopped")
+        tm = manifest(trial_rows(RID, counting.TRIAL_DAYS, complete=False))
+        self.assertEqual(self.decide(tm, None)["status"], "stopped")
+
+    def test_step2_file_problem_stops(self):
         files = dict(self.files)
-        files[("trial", counting.trial_day_file_name(RID, "2015-03-02"))] = b"x"
         files[("official", counting.day_file_name("official", OID, "2015-03-02"))] = b"x"
-        self.assertEqual(counting.decide(self.tm, self.om, _reader(files))["status"], "stopped")
+        self.assertEqual(self.decide(b"", self.om(b"", []), files)["status"], "stopped")
 
-    def test_no_usable_candidate_goes_to_official(self):
-        empty = [("1", "", "", False)]
-        tf, tsha = _files("trial", RID, empty)
+    def test_no_usable_candidate_stops(self):
+        tf, tsha = _files("trial", RID, [("1", "", "", False)])
         files = {**tf, **self.of}
         tm = manifest(trial_rows(RID, counting.TRIAL_DAYS, shas=tsha))
-        out = counting.decide(tm, self.om, _reader(files))
-        self.assertEqual(out["input_mode"], "official")
+        self.assertEqual(self.decide(tm, self.om(tm, [RID]), files)["status"], "stopped")
 
-    def test_fallback_when_criterion_none(self):
-        # V1 がどの記事にも付かない日 → B3（C1 決め打ち）は該当なし → 代わりは C3
-        rows = [("1", "", "ZZA,1", False)] * 3
-        s = base_summaries({d: rows for d in counting.TRIAL_DAYS})
-        out = counting.apply_all(s)
-        self.assertIsNone(out["B3"]["candidate"])
-        self.assertEqual((out["B3"]["decided"], out["B3"]["decided_by"]), ("C3", "fallback"))
-        self.assertEqual(counting.fallback_candidate(s), "C3")
-        self.assertEqual(counting.FALLBACK_ORDER, ("C1", "C3", "C2", "C4", "C5", "C6"))
+    def test_runs_record(self):
+        """中-B2：二つの run_id と、両方の run の3日の failed_files を出力に入れる。"""
+        ff = {"2015-03-03": [{"file_time": "20150303000000", "reason": "http_404", "attempts": 1}]}
+        tm = manifest([dict(r, failed_files=[]) if r["kind"] == "day" else r for r in json_rows(self.tm)])
+        files = dict(self.files)
+        out = counting.decide(tm, self.om(tm, [RID], failed=ff), _reader(files))
+        self.assertEqual(out["runs"]["trial"]["run_id"], RID)
+        self.assertEqual(out["runs"]["official"]["run_id"], OID)
+        self.assertEqual(out["runs"]["official"]["failed_files"]["2015-03-03"], ff["2015-03-03"])
+        self.assertEqual(out["runs"]["trial"]["failed_files"]["2015-03-02"], [])
+        out = counting.decide(b"", b"", _reader(files))
+        self.assertEqual(out["runs"]["official"], {"run_id": None, "failed_files": None})
 
     def test_cli(self):
         base = os.environ.get("STATS_TEST_TMPDIR") or os.environ.get("TMPDIR")
@@ -601,15 +616,39 @@ class TestDecide(unittest.TestCase):
             cmd = [sys.executable, "-B", os.path.join(SRC, "counting.py"), "apply"]
             r = subprocess.run(cmd + [tp, op, ts, os_], capture_output=True, env=env, cwd=PROJECT)
             self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertEqual(json.loads(r.stdout), counting.decide(self.tm, b"", _reader(self.files)))
+            self.assertEqual(json.loads(r.stdout), self.decide(self.tm, b""))
             r = subprocess.run(cmd + ["FAILED", op, ts, os_], capture_output=True, env=env, cwd=PROJECT)
-            self.assertEqual(r.returncode, 3)
-            with open(op, "wb") as f:
-                f.write(self.om)
-            r = subprocess.run(cmd + [tp, op, os.path.join(d, "nowhere"), os.path.join(d, "nowhere")],
-                               capture_output=True, env=env, cwd=PROJECT)
             self.assertEqual(r.returncode, 1)
-            self.assertEqual(json.loads(r.stdout)["status"], "stopped")
+            tm2 = manifest(trial_rows(RID, counting.TRIAL_DAYS, complete=False))
+            with open(tp, "wb") as f:
+                f.write(tm2)
+            r = subprocess.run(cmd + [tp, op, ts, os_], capture_output=True, env=env, cwd=PROJECT)
+            self.assertEqual(r.returncode, 3)
+
+
+class TestFallback(unittest.TestCase):
+    def test_fallback_when_criterion_none(self):
+        # V1 がどの記事にも付かない → B3（C1 決め打ち）は該当なし → 代わりは記事の数で割る V2 の C3
+        rows = [("1", "", "ZZA,1", False)] * 3
+        s = base_summaries({d: rows for d in counting.TRIAL_DAYS})
+        out = counting.apply_all(s)
+        self.assertIsNone(out["B3"]["candidate"])
+        self.assertEqual((out["B3"]["decided"], out["B3"]["decided_by"]), ("C3", "fallback"))
+
+    def test_fallback_follows_criterion_denominator(self):
+        # B1 が使えない（2日目は V1 が空）→ 代わりは「同じ数え方の合計」で割る V2 の C4
+        rows = rows_with(0, 1)
+        rows["2015-03-03"] = [("1", "", "ZZA,1", False)]
+        out = counting.apply_all(base_summaries(rows))
+        self.assertEqual((out["B1"]["candidate"], out["B1"]["decided"]), (None, "C4"))
+        self.assertEqual((out["B2"]["candidate"], out["B2"]["decided"]), (None, "C3"))
+
+    def test_orders(self):
+        self.assertEqual(counting.FALLBACK_ORDER["B1"], ("C2", "C4", "C1", "C3", "C6", "C5"))
+        self.assertEqual(counting.FALLBACK_ORDER["B2"], ("C1", "C3", "C2", "C4", "C5", "C6"))
+        self.assertEqual(set(counting.FALLBACK_ORDER), set(counting.CRITERIA_IDS))
+        for order in counting.FALLBACK_ORDER.values():
+            self.assertEqual(sorted(order), sorted(counting.CANDIDATE_IDS))
 
 
 def json_rows(m):
@@ -659,6 +698,18 @@ class TestRecordAndDoc(unittest.TestCase):
         self.assertEqual([r[0] for r in rows], ["`%s`" % b for b in counting.CRITERIA_IDS])
         rec = [r for r in rows if "おすすめ" in r[1]]
         self.assertEqual([r[0] for r in rec], ["`%s`" % counting.RECOMMENDED_CRITERION])
+
+    def test_doc_fallback_table(self):
+        """代わりの順の文書の写し（T-028 差し戻し2回目 軽3）。文書のほかの場所に順の写しを置かない。"""
+        rows = self._table("fallback")
+        self.assertEqual([r[0] for r in rows], ["`%s`" % b for b in counting.CRITERIA_IDS])
+        for r in rows:
+            bid = r[0].strip("`")
+            self.assertEqual(r[1].split(), ["`%s`" % c for c in counting.FALLBACK_ORDER[bid]], bid)
+        with open(DOC, encoding="utf-8") as f:
+            text = f.read()
+        # 6つの候補を並べた写し（「C1、C3、…」や「C1 → C3 …」の形）が表のほかに無い
+        self.assertEqual(re.findall(r"C\d\s*[、→,]\s*C\d\s*[、→,]\s*C\d", text), [])
 
     def test_doc_constants(self):
         with open(DOC, encoding="utf-8") as f:
