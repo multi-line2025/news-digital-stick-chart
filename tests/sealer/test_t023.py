@@ -102,8 +102,8 @@ class TestAuditP2(JCase):
             "method-access の記録（seq 5）がある")
         # 書く仕組みを飛ばして足した場合
         trg = self.raw_triggers(T0 + 4 * H, last_read_offset_days=200)
-        want = "periods-triggers（seq %d）が J（last_read_offset_days 200）を持つが、最初の " \
-               "method-access（seq 5）より後にある" % trg
+        want = "periods-triggers（seq %d）が J（last_read_offset_days 200）を持ち、最初の " \
+               "method-access（seq 5）より後にあるが、candidates の J の最大 28 と等しくない" % trg
         self.verify_fails(("candidates", "all"), want)
         self.assert_gates_stop("最初の method-access", threshold=False)
         self.assert_writer_refuses(lambda: self.write_access(T0 + 5 * H), "最初の method-access")
@@ -184,7 +184,8 @@ class TestJEquality(JCase):
         self.assertIn("method-access（seq %d）の時点で採用される periods（seq 1）の embargo_days 90 = "
                       "max(1 件目の embargo_days, J の最大)。periods-triggers：seq %d、"
                       "last_read_offset_days 28（= J の最大）" % (rec["seq"], trec["seq"]), out)
-        self.assertIn("J を持つ periods-triggers は、最初の method-access より前にだけある", out)
+        self.assertIn("最初の method-access より後の periods-triggers の J は、null か J の最大と等しい",
+                      out)
         self.method_gate()
         self.write_access(T0 + 5 * H)
         self.verify_ok("all")
@@ -210,21 +211,26 @@ class TestJEquality(JCase):
         self.seal_long()
         self.seal_triggers(T0 + H, last_read_offset_days=120)
         self.rebuilt_periods(T0 + 2 * H)
-        self.seal_triggers(T0 + 3 * H, network_window_days=500)
+        # T-027：書く仕組みはこの追記を拒むので、飛ばして足す
+        self.raw_triggers(T0 + 3 * H, network_window_days=500)
         self.add_access(T0 + 4 * H, ROUND)
         self.verify_fails(("candidates",), "seq 5、None")
 
-    def test_j_trigger_after_method_fails_even_if_equal_and_not_adopted(self):
-        """method-access の後の J を持つ triggers は、値が J の最大と等しくても、threshold-access
-        より後で採用されなくても、失敗（位置の規則）。"""
+    def test_j_trigger_after_method_fails_unless_equal_even_if_not_adopted(self):
+        """method-access の後の J を持つ triggers は、threshold-access より後で採用されなくても、
+        J の最大と等しくなければ失敗。T-027 で、等しい J（28）は通すことにした（T-023 の監査 軽B）。"""
         self.seal()
         self.step3(T0 + H)
         self.method(T0 + 3 * H)
         self.write_access(T0 + 4 * H)
         self.verify_ok("all")
-        trg = self.raw_triggers(T0 + 5 * H, last_read_offset_days=28)
+        self.raw_triggers(T0 + 5 * H, last_read_offset_days=28)
+        self.verify_ok("all")
+        self.method_gate()
+        self.threshold_gate()
+        trg = self.raw_triggers(T0 + 6 * H, last_read_offset_days=29)
         self.verify_fails(("candidates", "all"),
-                          "periods-triggers（seq %d）が J（last_read_offset_days 28）を持つが" % trg)
+                          "periods-triggers（seq %d）が J（last_read_offset_days 29）を持ち" % trg)
         self.assert_gates_stop("最初の method-access")
 
     def test_trigger_writer_allows_j_before_method_and_non_j_after(self):
@@ -233,10 +239,11 @@ class TestJEquality(JCase):
         self.step3(T0 + H)
         self.method(T0 + 3 * H)
         self.seal_triggers(T0 + 4 * H, same_week_years=3)               # J の無いものは通る
+        self.seal_triggers(T0 + 5 * H, last_read_offset_days=28, same_week_years=3)  # T-027：等しい J
         self.assert_writer_refuses(
-            lambda: seal_triggers.seal(self.root, {"last_read_offset_days": 28,
-                                                   "same_week_years": 3}, T0 + 5 * H, None),
-            "J（last_read_offset_days）は試運転の手順4の前に決めて追記する決まり")
+            lambda: seal_triggers.seal(self.root, {"last_read_offset_days": 29,
+                                                   "same_week_years": 3}, T0 + 6 * H, None),
+            "その後に書ける J（last_read_offset_days）は、candidates の J の最大 28 だけ")
 
     def test_real_record_passes_new_rules(self):
         """本物の記録：J の最大 56、1 件目の embargo_days 90、periods-triggers 無し、
@@ -294,14 +301,16 @@ class TestRevAnchorFiles(t17.TestHeadersRequired):
             self.assertEqual(code, 1, rev)
 
     def test_removed_in_a_later_commit_still_fails_with_auto(self):
-        """外したことをコミットしても、--rev auto は履歴の中の追加を見るので失敗する。"""
+        """外したことをコミットしても、--rev auto は失敗する（T-027 からは、消したコミットが履歴に
+        あることで失敗する。--rev HEAD でも同じ）。"""
         self.confirmed_committed()
         os.rename(self.bit_path, os.path.join(self.root, "moved.bitcoin.ots"))
         os.rename(self.hdr_path, os.path.join(self.root, "moved.hex"))
         self.commit("外した")
-        code, _out, err = tl.run_verify_inproc(self.root, "all", "--rev", "auto")
-        self.assertEqual(code, 1)
-        self.assertIn("作業ツリーに無い", err)
+        for rev in ("auto", "HEAD"):
+            code, _out, err = tl.run_verify_inproc(self.root, "all", "--rev", rev)
+            self.assertEqual(code, 1, rev)
+            self.assertIn("sealed/ の時刻証明・ヘッダを消したコミットが履歴にある", err)
 
     def test_changed_content_fails(self):
         """中身を変えたもの（ヘッダの行に空白を足す。ヘッダとしては同じ値に読める）も失敗する。"""
@@ -376,7 +385,7 @@ class TestDocT023(unittest.TestCase):
             self.text = f.read()
 
     def test_j_rules(self):
-        for phrase in ("J を持つ `periods-triggers` は、最初の `method-access` より前にだけ置ける",
+        for phrase in ("`method-access` の後の `periods-triggers` の J は、null か J の最大と等しい値に限る",
                        "E = max(`periods` の1件目の `embargo_days`, J の最大)",
                        "小さすぎる値も、大きすぎる値も拒む", "`TestAuditP2`",
                        "`--last-read-offset-days 56`"):

@@ -1,4 +1,4 @@
-# 期間の区切りと候補の封印を検証する手順（T-005、T-007、T-008、T-009、T-013、T-014、T-017、T-023）
+# 期間の区切りと候補の封印を検証する手順（T-005、T-007、T-008、T-009、T-013、T-014、T-017、T-023、T-027）
 
 この文書は、第三者が次のことを自分で確かめるための手順である。
 
@@ -127,7 +127,14 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py all --rev auto
   - 対象のファイルが後で書き換えられても、封印した時点の中身で確かめられる。
   - 履歴の中で記録そのものが書き換えられていれば失敗する。
   - **時刻証明とヘッダが作業ツリーから外されていないこと（T-023。T-017 の再提出1回目の監査 軽1）。** `anchors` などの検査は作業ツリーの `sealed/` を読む。そのため、コミットにある `.bitcoin.ots` とヘッダを作業ツリーからまとめて外すと、確定した seq が「Pending」と表示されたまま検査が通ってしまう。これを止めるため、`--rev auto` では、HEAD の履歴の中で `sealed/` に足されたことのある時刻証明（`ledger.jsonl.seqNNNNNN.ots`・`ledger.jsonl.seqNNNNNN.bitcoin.ots`）とヘッダ（`bitcoin-header-<高さ>.hex`）が、すべて作業ツリーにあり、足したコミットの中身と同じであることを確かめる。`--rev <コミット>` では、そのコミットの `sealed/` にあるものについて同じことを確かめる。一つでも無いか違えば失敗する。`--rev working`（既定）では確かめない。
-  - 限界：Git の履歴そのものから外したもの（履歴を書き換えて、コミットに一度も入っていない形にしたもの）は、この照合では見つからない。履歴の書き換えは、公開した記録の先頭のハッシュと見比べることでしか分からない（7章の「別の系列」）。
+  - **マージコミットも見る（T-027。T-023 の監査 軽A）。** `git log` は、既定ではマージコミットの差分を出さない。そのため T-023 の版では、マージコミットの中で足した `.bitcoin.ots` とヘッダが照合から漏れた。作業ツリーから外しても `--rev auto` が通り、確定した seq を「Pending」に見せられた（drand の照合も「保留」になる）。今は `git log -m`（マージコミットの差分を、親ごとに出す）で集める。
+  - **消したコミットがあれば失敗する（T-027）。** 時刻証明とヘッダは追記のみである。そのため、`--rev auto` と `--rev <コミット>` のどちらでも、HEAD の履歴に `sealed/` の時刻証明かヘッダを消したコミットが一つでもあれば、失敗にする。マージコミットを含み、名前の変更も「消した」に数える（`git log -m --no-renames --diff-filter=D`）。
+  - 自分で同じことを確かめるコマンド（どちらも何も出なければよい。二つ目は、足したものが作業ツリーにあるかを見る）：
+    ```sh
+    git log -m --no-renames --diff-filter=D --format=%H --name-only HEAD -- sealed/ | grep -E 'seq[0-9]{6}(\.bitcoin)?\.ots$|bitcoin-header-[0-9]+\.hex$'
+    git log -m --no-renames --diff-filter=A --format= --name-only HEAD -- sealed/ | sort -u | grep -E '\.ots$|\.hex$' | while read f; do [ -f "$f" ] || echo "無い: $f"; done
+    ```
+  - 限界：Git の履歴そのものから外したもの（履歴を書き換えて、コミットに一度も入っていない形にしたもの）は、この照合では見つからない。履歴の書き換えは、公開した記録の先頭のハッシュと見比べることでしか分からない（7章の「別の系列」）。`--rev working`（既定）は、この照合をしない。
 - `access`：`threshold-access` の記録ごとに、7章の照合（`ledger_head`、drand の回、`block_start`）をする。あわせて、最初の `threshold-access` より前に `candidates` の記録があること（関門と同じ候補の順序の照合。T-017。T-014 の監査 軽2）を確かめる。記録が無ければ、そう表示する。
 - `acquisition`：`acquisition-start` の記録ごとに 7章の照合（`ledger_head`、drand の回）をし、`acquisition-result` との対応を照合する。最初の `acquisition-start` より前に `candidates` の記録があることも確かめる（T-014）。記録が無ければ、そう表示する。
 - `method`：`method-access` の記録ごとに 10章の照合（`ledger_head`、drand の回、`step`、区画、前に `candidates` と `acquisition-result` があること）をする。記録が無ければ、そう表示する。
@@ -574,7 +581,14 @@ J は、予言日 t の判定が読むデータの最後の日を t + J とす�
 
 - `verify.py candidates`（と `all`）は、次を確かめる（`ledger.check_horizon_embargo`）。
   - 各 `candidates` の出力の `last_read_offset_days` のキーが `horizon_days` とちょうど一致し、各 J が H 以上の整数であること。J の最大は、すべての `candidates` の記録の J の最大である。
-  - **J を持つ `periods-triggers` は、最初の `method-access` より前にだけ置ける（T-023。T-017 の再提出1回目の監査 中1）。** docs/stats/periods.md 8章 (2) の「J は試運転の手順4の前に決めて封印の記録に追記する。J は手法を作る期間のデータを見ずに決まる」による。最初の `method-access` より後に、`last_read_offset_days` が null でない `periods-triggers` が一つでもあれば、採用されるかどうかに関わらず失敗する（`ledger.check_j_triggers_before_method`）。J が null の `periods-triggers`（ほかの三つのきっかけだけのもの）は、手法を作る期間のデータを見て決めてよい値なので、`method-access` の後でも失敗にしない。
+  - **`method-access` の後の `periods-triggers` の J は、null か J の最大と等しい値に限る（T-023 の中1、T-027 で改めた）。** docs/stats/periods.md 8章 (2) の「J は試運転の手順4の前に決めて封印の記録に追記する。J は手法を作る期間のデータを見ずに決まる」による。J は `candidates` の出力で決まり、その値は J の最大である（8章 (2) の案B）。`candidates` は `method-access` より前に要る（10章）。最初の `method-access` より後に、J の最大と違う J を持つ `periods-triggers` が一つでもあれば、採用されるかどうかに関わらず失敗する（`ledger.check_j_triggers_before_method`）。
+  - **T-027 で、J の最大と等しい J を `method-access` の後にも許した理由（T-023 の監査 軽B）。** 監査の案は二つあった。(a) `method-access` の後の J は、J の最大と等しい場合に限り許す。(b) 作り直しが要る場合、`seal_triggers.py` が J が null の追記を拒む。(a) を選んだ。理由は次のとおり。
+    1. 前提：periods.md 8章 (2) は、J 以外の三つのきっかけ（共起の網の日数など）を、手法を作る期間のデータを見て決めてよいとしている。前提：採用されるのは、その時点より前の最後の `periods-triggers` で、その一件が四つの値をすべて持つ。前提：作り直しが要る場合（J の最大 > 1件目の `embargo_days`）、採用される `periods-triggers` の J が null だと照合 (2) に通らない。結論：作り直しが要る場合に `method-access` の後で三つのきっかけを追記するには、同じ記録に J も要る。
+    2. 前提：T-023 の版は、`method-access` の後の J を一律に拒んでいた。結論：作り直しが要る場合、`method-access` の後に三つのきっかけを書く方法が無く、J が null の記録を足すと threshold-access が二度と通らなかった（行き詰まり）。(b) だけでは、行き詰まる記録を書けなくなるだけで、8章 (2) が許す追記の道は閉じたままである。
+    3. 前提：(a) で許す J は、`method-access` より前に封印した `candidates` の J の最大と等しい値だけである。前提：採用される `periods` の `embargo_days` は、max(1件目の `embargo_days`, J の最大) と等しくなければならない（下の照合 1）。結論：手法を作る期間のデータを見たあとでも、J とエンバーゴは一つの値に決まっていて動かせない。8章 (1) の「きっかけの無い変更はしない」と、8章 (2) の「J は試運転の手順4の前に決めて封印の記録に追記する」とも食い違わない（決めた値を書き直せるのではなく、同じ値を繰り返して書けるだけである）。
+    - あわせて、(b) の形の書く前の検査も入れた。作り直しが要る場合、`seal_triggers.py` は J が null の追記を拒み、J の最大も渡すよう求める（`ledger.check_triggers_append`）。この記録は採用されると必ず照合に通らないので、書く理由が無いためである。書く仕組みを飛ばしてその記録を足しても、J の最大を持つ `periods-triggers` を後から足せば、それが採用されて先へ進める（行き詰まらない）。
+    - テスト（`tests/sealer/test_t027.py` の `TestRebuildAfterMethod`）は、監査の再現（作り直しが要る場合に、`method-access` の後で共起の網の日数を足す）が、J の最大を一緒に渡せば threshold-access まで通ることを確かめる。また、`method-access` の後に J やエンバーゴを別の値にすると、書く仕組み・検証・関門が止まることも確かめる。
+    - **未解決（T-027 で報告）：作り直しが二度要る正直な流れで、`verify.py periods` が失敗する。** 作り直しが要る場合は、`method-access` より前に J だけで作り直した `periods`（`rebuild_triggers` は J だけ、`deadline_status` は `before_deadline`）が要る（`method-access` の時点の照合 1 のため）。そのあと、網の日数などを決めて J と一緒に追記し、もう一度作り直すとする。このとき、`deadline_status` の照合（`ledger.judge_deadline_status`）は、すべての版の `rebuild_triggers` を「採用された」`periods-triggers` と比べる。そのため、前の版（J だけ）は「`before_deadline` と申告しているが一致しない」で失敗し、この行は記録から消せない。J とエンバーゴの照合（`candidates`）・関門・書く仕組みは通る。どの `periods-triggers` と比べるべきか（その版より前の最後の記録か、採用された記録か）は、docs/stats/periods.md 8章 (2) の「記録に追記した値」の読み方で決まるので、封印係では決めずにリードに報告した。テストでは `test_known_gap_deadline_status_of_earlier_rebuild`（予期した失敗）として残している。今の本物の記録（J の最大 56 ≤ 90）は、作り直しが要らないので、この流れには入らない。
   - **照合する時点** は、最初の `method-access` と最初の `threshold-access`（あるものすべて）。J は手順4の前、かつ期限（`threshold-access`）より前に決める（docs/stats/periods.md 8章 (2)）。
   - **照合の相手** は、その時点で採用される版である。その時点の記録より前にある `periods` の最後の記録と、`periods-triggers` の最後の記録を使う。時点が `threshold-access` なら、1章の採用の規則で採用される版と同じになる。それより前の古い版は使わない（初回の提出では、期限より前のどれかの `periods-triggers` で通り、`periods` は1件目と比べていた。中2 の (a)・(b)）。
   - **期待するエンバーゴ** E = max(`periods` の1件目の `embargo_days`, J の最大)。docs/stats/periods.md 8章 (1) の表の「EMBARGO_DAYS = max(90, J)」で、1件目の `embargo_days` は 90 である。今の記録では E = max(90, 56) = 90。
@@ -584,12 +598,12 @@ J は、予言日 t の判定が読むデータの最後の日を t + J とす�
     3. 採用される `periods-triggers` の `last_read_offset_days` が null でなく、J の最大と等しくない。小さすぎる値も、大きすぎる値も拒む（T-023。以前は大きい値を通していた）。
   - 照合する時点の記録がまだ無いうちは、J を持つ `periods-triggers` の位置の照合のほかは失敗にしない。作り直しが要るなら「保留」と表示する。
   - これらは docs/stats/periods.md 8章 (2) の「案B なら、候補の中で最大の J を使う」と、8章 (1) の表から機械的に決まる値との一致を求めるもので、値を選ぶ余地を残さない。
-- 関門（`require_threshold_access`・`require_method_access`）と、書く仕組み（`seal_access.py`・`seal_method.py`）も同じ照合をし、通らなければ止まる（何も書かない）。`seal_triggers.py` も、鎖に `method-access` があれば、J（`--last-read-offset-days`）を渡した追記を拒む（追記のみの記録に、検証に通らない行を残さないため。T-023）。
+- 関門（`require_threshold_access`・`require_method_access`）と、書く仕組み（`seal_access.py`・`seal_method.py`）も同じ照合をし、通らなければ止まる（何も書かない）。`seal_triggers.py` も、鎖に `method-access` があれば、J の最大と違う J（`--last-read-offset-days`）を渡した追記を拒む。作り直しが要る場合は、J を渡さない追記も拒む（追記のみの記録に、検証に通らない行を残さないため。T-023、T-027）。
 - 監査の再現（T-017 の再提出1回目の P2・P2b）は、テスト（`tests/sealer/test_t023.py` の `TestAuditP2`）で、検証・両方の関門・書く仕組みが止まることを確かめている。
   - P2：作り直しの要らない候補（J の最大 28、1件目の `embargo_days` 90）のまま、`method-access` の後に J 200 の `periods-triggers` を足す。
   - P2b：同じ候補で、`method-access` の後に J 120 の `periods-triggers` と、エンバーゴを 120 にした `periods` を足す。
 - 今の記録では「J（判定が読む最後の日のずれ）の最大 56。periods の 1 件目の embargo_days 90 以下（区切りの作り直しは要らない）」と出る。照合する時点の記録はまだ無い。`periods-triggers` の記録も無い。
-- 今の記録のまま `method-access` を足すなら、採用される `periods` は1件目（`embargo_days` 90 = E）で照合に通る。その後に J を持つ `periods-triggers` を足すことはできない。J を `periods-triggers` として明示するなら、`method-access` より前に、56 を渡す（`--last-read-offset-days 56`）。それ以外の値は、検証が失敗する。
+- 今の記録のまま `method-access` を足すなら、採用される `periods` は1件目（`embargo_days` 90 = E）で照合に通る。その後に `periods-triggers` を足すなら、J は渡さないか 56 だけである。J を `periods-triggers` として明示するなら 56 を渡す（`--last-read-offset-days 56`）。それ以外の値は、書く仕組みが拒み、検証も失敗する。
 
 ### 書く仕組み
 
@@ -704,7 +718,7 @@ grep -n '"kind":"candidates"\|"kind":"acquisition-result"' sealed/ledger.jsonl |
 - **`method-access` が無くても、それより後の記録は失敗にならない。** 検証が求めるのは「`method-access` があるなら、その前に `candidates` と `acquisition-result` がある」ことだけで、`threshold-access` の前に `method-access` があることは求めない。
 - **`method-access` は二つ以上足せる。** 関門が使うのは最初の記録で、何件あるかは記録の長さから数えられる。
 - **J（判定が読む最後の日のずれ）は、`periods-triggers` の追記を求めない場合がある。** J は `candidates` の封印で決まっている。J の最大は 56 で、`periods` の `embargo_days`（90）以下なので、区切りの作り直しは要らず、`periods-triggers` は求めない。J の最大が `embargo_days` を超えたときに限り、`method-access`（または `threshold-access`）より前に `periods-triggers` の記録を求める（9章の「J とエンバーゴ」。T-017）。
-  - `periods-triggers` に J を書くなら、最初の `method-access` より前に限り、値は J の最大と等しくなければならない。採用される `periods` の `embargo_days` は、max(1件目の `embargo_days`, J の最大) と等しくなければならない（T-023）。そのため、`method-access` の後に J を足してエンバーゴを作り直すことはできない。
+  - `periods-triggers` に J を書くなら、値は J の最大と等しくなければならない（`method-access` の後でも同じ。T-023、T-027）。採用される `periods` の `embargo_days` は、max(1件目の `embargo_days`, J の最大) と等しくなければならない（T-023）。そのため、`method-access` の後に J を変えてエンバーゴを動かすことはできない。
   - J を `periods-triggers` に書かない場合、手順4の前に封印の記録に入っている J は、`candidates` の出力の `last_read_offset_days` である（`candidates` は `method-access` より前に要る。10章の「前提と照合」）。
 - **別の系列が無いことは示せない**（7章。案B）。
 

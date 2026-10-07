@@ -867,6 +867,8 @@ if "--j120" in sys.argv:
     status = sys.argv[-1]
 if "--e120" in sys.argv:        # T-023：きっかけの無いエンバーゴの延長（照合で拒まれる形）
     embargo = 120
+if "--nw500" in sys.argv:       # T-027：共起の網の日数（J と一緒に渡す。--j120 と組にする）
+    trig["network_window_days"] = 500
 print(json.dumps({"deadline_status": status, "rebuild_triggers": trig,
     "rules": {"embargo_days": embargo},
     "periods": [{"name": n, "block_start": s, "block_end": e} for n, s, e in blocks]}))

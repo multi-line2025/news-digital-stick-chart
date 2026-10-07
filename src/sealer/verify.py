@@ -60,7 +60,8 @@ drand の照合の幅（T-008）
     <コミット>       そのコミットの中のファイルと照合する。
     auto か <コミット> のときは、そのコミットの sealed/ の時刻証明（.ots・.bitcoin.ots）と
     ヘッダが、作業ツリーにも同じ中身であることも確かめる（auto なら HEAD の履歴で sealed/ に
-    足されたことのあるもの全部）。外していれば失敗する（T-023）。
+    足されたことのあるもの全部。マージコミットで足したものも含む）。外していれば失敗する（T-023）。
+    HEAD の履歴に、時刻証明かヘッダを消したコミット（マージを含む）があれば失敗する（T-027）。
 
 終了コード 0: すべての検査に通った（保留の判定があれば、そのことを出力する）
            1: どこかで失敗した  2: 引数の誤り
@@ -129,26 +130,37 @@ class Repo:
             raise ledger.LedgerError("seq %s の記録を含むコミットが無い" % missing)
         return found
 
+    def _anchor_log(self, diff_filter):
+        """[(パス, コミット)]。HEAD の履歴で、sealed/ の時刻証明・ヘッダに diff_filter（A か D）の
+        変更をしたコミット。T-027（T-023 の監査 軽A）：-m でマージコミットの差分も、親ごとに出す
+        （git log は既定ではマージの差分を出さないので、マージで足したものや消したものが漏れていた）。
+        --no-renames で、名前の変更も「消した」と「足した」に分けて出す。"""
+        text = self.git("log", "-m", "--no-renames", "--diff-filter=" + diff_filter,
+                        "--format=@%H", "--name-only", "HEAD", "--", "sealed/").decode("utf-8")
+        out, commit = [], None
+        for line in text.splitlines():
+            if line.startswith("@"):
+                commit = line[1:]
+            elif line and REV_ANCHOR_RE.match(line):
+                out.append((line, commit))
+        return sorted(set(out))
+
     def anchor_files(self, rev):
-        """[(パス, コミット)]。rev のコミットの sealed/ にある時刻証明とヘッダ。T-023。
+        """[(パス, コミット)]。rev のコミットの sealed/ にある時刻証明とヘッダ。T-023、T-027。
 
         rev が auto なら、HEAD の履歴の中で sealed/ に足されたことのある、すべての時刻証明と
-        ヘッダ（足したコミットの中身と比べる）。それ以外なら、そのコミットの sealed/ にあるもの。
+        ヘッダ（足したコミットの中身と比べる）。マージコミットで足したものも含む（T-027）。
+        それ以外なら、そのコミットの sealed/ にあるもの。
         """
-        out = []
         if rev == "auto":
-            text = self.git("log", "--no-renames", "--diff-filter=A", "--format=@%H",
-                            "--name-only", "HEAD", "--", "sealed/").decode("utf-8")
-            commit = None
-            for line in text.splitlines():
-                if line.startswith("@"):
-                    commit = line[1:]
-                elif line and REV_ANCHOR_RE.match(line):
-                    out.append((line, commit))
-        else:
-            text = self.git("ls-tree", "-r", "--name-only", rev, "--", "sealed/").decode("utf-8")
-            out = [(p, rev) for p in text.splitlines() if REV_ANCHOR_RE.match(p)]
-        return sorted(set(out))
+            return self._anchor_log("A")
+        text = self.git("ls-tree", "-r", "--name-only", rev, "--", "sealed/").decode("utf-8")
+        return sorted({(p, rev) for p in text.splitlines() if REV_ANCHOR_RE.match(p)})
+
+    def removed_anchor_files(self):
+        """[(パス, コミット)]。HEAD の履歴で、sealed/ の時刻証明かヘッダを消したコミット（マージを
+        含む。名前の変更も含む）。T-027。時刻証明とヘッダは追記のみなので、一つでもあれば失敗にする。"""
+        return self._anchor_log("D")
 
 
 def check_rev_anchor_files(repo, rev):
@@ -157,10 +169,17 @@ def check_rev_anchor_files(repo, rev):
 
     検証の残りは作業ツリーの sealed/ を読むので、コミットにある .bitcoin.ots とヘッダを
     作業ツリーからまとめて外すと、確定した seq が「Pending」のまま検証が通ってしまう。それを止める。
-    作業ツリーのファイルがシンボリックリンクなら、それも失敗にする。返り値: 照合した件数。
+    作業ツリーのファイルがシンボリックリンクなら、それも失敗にする。
+    T-027：HEAD の履歴に、時刻証明かヘッダを消したコミット（マージを含む）が一つでもあれば失敗。
+    返り値: 照合した件数。
     """
     if rev == "working":
         return 0
+    removed = repo.removed_anchor_files()
+    if removed:
+        raise ledger.LedgerError("sealed/ の時刻証明・ヘッダを消したコミットが履歴にある（追記のみの"
+                                 "決まりに反する）: %s" % "; ".join(
+                                     "%s（コミット %s）" % (rel, c[:12]) for rel, c in removed))
     files = repo.anchor_files(rev)
     bad = []
     for rel, commit in files:
@@ -484,8 +503,8 @@ def cmd_candidates(st, _a):
               % (p["kind"], p["seq"], per["seq"], emb,
                  "無し" if trg is None else "seq %d、last_read_offset_days %r%s"
                  % (trg["seq"], j, "（null）" if j is None else "（= J の最大）")))
-    print("J を持つ periods-triggers は、最初の method-access より前にだけある"
-          "（method-access の記録が無ければ、すべて前）。")
+    print("最初の method-access より後の periods-triggers の J は、null か J の最大と等しい"
+          "（method-access の記録が無ければ、照合するものは無い）。")
     if hz["status"] == "pending":
         print("保留：method-access・threshold-access の記録がまだ無いので、periods-triggers の照合を保留")
     elif not hz["points"]:

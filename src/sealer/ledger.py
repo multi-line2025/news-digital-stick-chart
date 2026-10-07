@@ -702,15 +702,31 @@ def triggers_j(record, read_json):
     return triggers_values(read_json(record, "triggers"))["last_read_offset_days"]
 
 
-def check_j_triggers_before_method(records, read_json):
-    """J（last_read_offset_days）を持つ periods-triggers の記録が、最初の method-access より
-    前にだけあることを確かめる。T-023（T-017 の再提出1回目の監査 中1）。
+def candidates_j_max(records, read_json):
+    """すべての candidates の記録の出力の J の最大。candidates の記録が無ければ None。"""
+    cands = [r for r in records if r["kind"] == CANDIDATES_KIND]
+    if not cands:
+        return None
+    return max(candidates_max_j(read_json(r, "output")) for r in cands)
+
+
+def check_j_triggers_before_method(records, read_json, j_max):
+    """最初の method-access より後の periods-triggers の J（last_read_offset_days）を確かめる。
+    T-023（T-017 の再提出1回目の監査 中1）、T-027（T-023 の監査 軽B）。
 
     docs/stats/periods.md 8章 (2)：「J は試運転の手順4の前に決めて封印の記録に追記する。
-    J は手法を作る期間のデータを見ずに決まる」。手順4の開始は method-access の記録なので、
-    その後に J を持つ periods-triggers があれば LedgerError（採用されるかどうかに関わらない）。
-    J が null の periods-triggers（ほかの三つのきっかけだけのもの）は、手法を作る期間のデータを
-    見て決めてよい値なので、method-access の後でも拒まない。
+    J は手法を作る期間のデータを見ずに決まる」。J は candidates の出力（method-access より前に
+    封印する決まり）で決まっていて、その値は J の最大 j_max である（8章 (2) の案B）。
+    - method-access の後の periods-triggers の J が null でなく、j_max と等しくなければ
+      LedgerError（採用されるかどうかに関わらない）。j_max が None（candidates が無い）なら、
+      method-access の後の J はすべて LedgerError。
+    - T-027 で、j_max と等しい J は method-access の後でも許すことにした（T-023 では一律に拒んで
+      いた）。手法を作る期間のデータを見て決めてよいほかの三つのきっかけ（periods.md 8章 (2)）を
+      method-access の後に追記するとき、作り直しが要る場合は、その記録にも J が要るため
+      （採用されるのは最後の periods-triggers で、その J が null なら照合 (2) に通らない）。
+      等しい値に限るので、J とエンバーゴ（max(1 件目, j_max)）は、データを見たあとでも動かない。
+    - J が null の periods-triggers は、ここでは拒まない（作り直しが要る場合に採用されれば、
+      check_horizon_embargo の (2) で失敗する。書く仕組み seal_triggers は、その追記を拒む）。
     method-access が無ければ何もしない。返り値: 最初の method-access の記録か None。
     """
     m = next((r for r in records if r["kind"] == METHOD_ACCESS_KIND), None)
@@ -719,12 +735,40 @@ def check_j_triggers_before_method(records, read_json):
     for r in records:
         if r["kind"] == TRIGGERS_KIND and r["seq"] > m["seq"]:
             j = triggers_j(r, read_json)
-            if j is not None:
-                raise LedgerError("periods-triggers（seq %d）が J（last_read_offset_days %d）を持つが、"
-                                  "最初の method-access（seq %d）より後にある。J は試運転の手順4の前に"
-                                  "決めて追記する決まり（docs/stats/periods.md 8章 (2)）"
-                                  % (r["seq"], j, m["seq"]))
+            if j is not None and j != j_max:
+                raise LedgerError("periods-triggers（seq %d）が J（last_read_offset_days %d）を持ち、"
+                                  "最初の method-access（seq %d）より後にあるが、candidates の J の最大 %s "
+                                  "と等しくない。J は試運転の手順4の前に決まっている"
+                                  "（docs/stats/periods.md 8章 (2)）。手順4の後に書けるのは、その値だけ"
+                                  % (r["seq"], j, m["seq"], j_max))
     return m
+
+
+def check_triggers_append(records, read_json, values):
+    """periods-triggers を 1 件追記してよいかを、書く前に確かめる（seal_triggers が使う）。T-027。
+
+    values はきっかけの値（4 つのキー）。次のどれかなら LedgerError。
+    - 鎖に method-access があり、J が null でなく、candidates の J の最大と等しくない
+      （check_j_triggers_before_method と同じ規則）。
+    - J の最大が periods の 1 件目の embargo_days を超える（作り直しが要る）のに、J が null
+      （T-023 の監査 軽B：この記録が採用されると threshold-access が二度と通らなくなるため。
+      作り直しが要る場合は、ほかのきっかけと一緒に J の最大を渡す）。
+    """
+    j_max = candidates_j_max(records, read_json)
+    j = values.get("last_read_offset_days")
+    m = next((r for r in records if r["kind"] == METHOD_ACCESS_KIND), None)
+    if m is not None and j is not None and j != j_max:
+        raise LedgerError("method-access の記録（seq %d）がある。その後に書ける J（last_read_offset_days）は"
+                          "、candidates の J の最大 %s だけ（docs/stats/periods.md 8章 (2)）。%d は追記しない"
+                          % (m["seq"], j_max, j))
+    versions = records_of_kind(records, PERIODS_KIND)
+    if j_max is not None and versions and j is None:
+        first = periods_embargo_days(read_json(versions[0][1], "output"))
+        if j_max > first:
+            raise LedgerError("candidates の J の最大 %d が periods の 1 件目の embargo_days %d を超える"
+                              "（作り直しが要る）ので、J が null の periods-triggers は追記しない。"
+                              "採用されると照合に通らなくなるため。--last-read-offset-days %d も渡す"
+                              % (j_max, first, j_max))
 
 
 def check_horizon_embargo(records, read_json):
@@ -743,8 +787,9 @@ def check_horizon_embargo(records, read_json):
       P ごとに、P より前の periods の最後の記録（P が threshold-access なら、採用される periods）と、
       P より前の periods-triggers の最後の記録（同じく、採用される periods-triggers）を使う。
     - 次のどれかなら LedgerError。
-      (0) J を持つ periods-triggers が、最初の method-access より後にある
-          （check_j_triggers_before_method。採用されるかどうかに関わらない）。
+      (0) 最初の method-access より後の periods-triggers が、J の最大と等しくない J を持つ
+          （check_j_triggers_before_method。採用されるかどうかに関わらない。T-027 で、等しい J は
+          許すことにした）。
       (1) P で採用される periods の rules.embargo_days が E と等しくない
           （J を覆わない区切りも、きっかけの無い延長も拒む。periods.md 8章 (1)）。
       (2) J の最大が periods の 1 件目の embargo_days を超えている（作り直しが要る）のに、
@@ -758,13 +803,12 @@ def check_horizon_embargo(records, read_json):
       status は "no-candidates"、"within"（作り直しは要らず、すべての P で照合に通る）、
       "ok"（作り直しが要り、すべての P で照合に通る）、"pending"。
     """
-    check_j_triggers_before_method(records, read_json)
-    cands = [r for r in records if r["kind"] == CANDIDATES_KIND]
+    j_max = candidates_j_max(records, read_json)
+    check_j_triggers_before_method(records, read_json, j_max)
     out = {"j_max": None, "embargo_first": None, "embargo_expected": None,
            "status": "no-candidates", "points": []}
-    if not cands:
+    if j_max is None:
         return out
-    j_max = max(candidates_max_j(read_json(r, "output")) for r in cands)
     out["j_max"] = j_max
     versions = records_of_kind(records, PERIODS_KIND)
     if not versions:
@@ -1276,8 +1320,8 @@ def require_threshold_access():
       - 中身の block_start が、periods の 1 件目の出力の閾値の期間の始まりと一致すること
       - 候補の順序（T-014）：最初の threshold-access より前に candidates の記録が 1 件以上
         あり、すべての candidates が最初の acquisition-start より前にあり、形の照合に通ること
-      - J とエンバーゴ（T-017、T-023）：check_horizon_embargo。J を持つ periods-triggers が
-        最初の method-access より前にだけあること。採用される periods の embargo_days が
+      - J とエンバーゴ（T-017、T-023、T-027）：check_horizon_embargo。最初の method-access より
+        後の periods-triggers の J が null か J の最大と等しいこと。採用される periods の embargo_days が
         max(periods の 1 件目の embargo_days, candidates の J の最大) と等しいこと。採用される
         periods-triggers の J が null でなければ J の最大と等しいこと。J の最大が 1 件目の
         embargo_days を超えるときは、その periods-triggers が要ること

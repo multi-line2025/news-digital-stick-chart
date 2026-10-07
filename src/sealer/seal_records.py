@@ -93,9 +93,9 @@ def result_refs(project, records, extra=None):
 
 
 def _check_j(project, records_after):
-    """J とエンバーゴの照合（T-017、T-023）。追記した後の記録に対して ledger.check_horizon_embargo。
+    """J とエンバーゴの照合（T-017、T-023、T-027）。追記した後の記録に対して ledger.check_horizon_embargo。
 
-    J を持つ periods-triggers が最初の method-access より前にだけあること、採用される periods の
+    最初の method-access より後の periods-triggers の J が null か J の最大と等しいこと、採用される periods の
     embargo_days が max(1 件目の embargo_days, J の最大) と等しいこと、採用される periods-triggers
     の J が null でなければ J の最大と等しいこと。
     """

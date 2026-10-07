@@ -20,11 +20,13 @@ docs/stats/periods.md 8章 (2) の「きっかけの値は期限より前に決�
 時刻証明の時刻は、採用の判定には使わない。
 threshold-access の記録の後でも、追記は拒まない（関門は設けない。T-008）。その場合、
 検証が「採用しない」と表示する。
-ただし、J（--last-read-offset-days）を渡したときは、鎖に method-access（試運転の手順4の開始）の
-記録が 1 件でもあれば、追記しない（T-023）。J は手順4の前に決めて追記する決まり
-（docs/stats/periods.md 8章 (2)）で、検証（ledger.check_j_triggers_before_method）も、
-最初の method-access より後の J を持つ periods-triggers を失敗にする。追記のみの記録に
-検証に通らない行を残さないため、書く前に止める。
+ただし、次の場合は追記しない（ledger.check_triggers_append。追記のみの記録に、検証に通らない
+行や、採用されると先へ進めなくなる行を残さないため、書く前に止める）。
+  - 鎖に method-access（試運転の手順4の開始）の記録があり、J（--last-read-offset-days）が
+    candidates の J の最大と等しくない（T-023、T-027）。J は手順4の前に決まっている
+    （docs/stats/periods.md 8章 (2)）ので、手順4の後に書けるのは、その値だけである。
+  - J の最大が periods の 1 件目の embargo_days を超える（作り直しが要る）のに、J を渡さない
+    （T-027。T-023 の監査 軽B）。
 """
 
 import argparse
@@ -54,12 +56,8 @@ def seal(project, values, now, ots_cmd, runner=subprocess.run):
         ledger.check_anchors(data, sealed_dir)
     if not ledger.records_of_kind(records, "periods"):
         raise ledger.LedgerError("periods の記録が無い。きっかけの値は封印しない")
-    if doc["last_read_offset_days"] is not None:
-        m = next((r for r in records if r["kind"] == ledger.METHOD_ACCESS_KIND), None)
-        if m is not None:
-            raise ledger.LedgerError("method-access の記録（seq %d）がある。J（last_read_offset_days）は"
-                                     "試運転の手順4の前に決めて追記する決まり"
-                                     "（docs/stats/periods.md 8章 (2)）。追記しない" % m["seq"])
+    ledger.check_triggers_append(records, lambda r, role: ledger.read_target_json(project, r, role),
+                                 doc)
     if ots_cmd is not None:
         stamp.check_ots(ots_cmd)
     content = ledger.canonical_line(doc) + b"\n"
