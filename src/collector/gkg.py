@@ -52,8 +52,9 @@
       MAX_CONSECUTIVE_TRANSIENT_FAILURES  5    一時的な失敗（通信の失敗・時間切れ・429・5xx）で
                                            終わったファイルが続けてこの本数になったら、取得の
                                            全体を止める（相手か手元の通信が止まっている）
-      MAX_INTERRUPTS_PER_FILE         2    同じファイルを interrupted（取り直す印）にする回数の
-                                           上限（5章）
+      MAX_INTERRUPTED_RETRIES_PER_RUN 1    連続した失敗で止まったとき、その失敗のファイルを
+                                           interrupted（再開で取り直す印）にするのは、1つの run
+                                           の中で1回だけ（5章）
       MAX_CONSECUTIVE_FORMAT_FAILURES    10    形式の失敗（md5 は合うのに zip や行の形が想定と
                                            違う）が続けてこの本数になったら、全体を止める
                                            （コードとデータの形が合っていない）
@@ -109,16 +110,29 @@
     文書の「組」（以下 g）：V2SOURCECOLLECTIONIDENTIFIER の値に、翻訳の印があれば T を付けた
     もの（例 "1"、"1T"、"2"）。分母と数え方は試運転のあとで決めるので、どの集計も g ごとに
     分けて持ち、あとで組を選んで足せるようにする。
-    行の時刻：GKGRECORDID の時刻がファイルの時刻と違う行は件数を数える。その時刻が手法を
-    作る期間の外（ファイルの日の規則で DATA_START より前か METHOD_BLOCK_END より後）なら、
-    その行は集計に入れずに捨てる。行はファイルの日に入れる（行の時刻では日を決めない）。
+    行の時刻：GKGRECORDID の時刻が 2020-12-14 23:45:00 より後（ファイルの日の規則で
+    METHOD_BLOCK_END より後。区画の後ろの期間）の行は、どの件数にも入れずに捨てる（rows にも
+    数えない。後ろの期間の量を扱わないため）。それ以外で、行の時刻がファイルの時刻と違う行は
+    件数（rows_id_time_differs）を数え、DATA_START より前なら（rows_id_time_before_block）集計に
+    入れずに捨てる。行はファイルの日に入れる（行の時刻では日を決めない）。
+    欄の数や ID の形が違う行（時刻が分からない行）は、ファイルの日（区画の中）の行として
+    件数だけ数える。
 
 ------------------------------------------------------------------------
 5. 取得の記録、取り直し、途中で止まったとき
 ------------------------------------------------------------------------
     run_id：入口のスクリプトの sha256 の先頭16桁。コードが同じなら同じ run_id になり、
-    途中で止まった取得を続きから再開する。コードを変えると別の run_id になり、最初から
-    取り直すことになる（前の run のファイルと記録は消さずに残り、マニフェストにも残る）。
+    途中で止まった取得を続きから再開する。
+    正式な run（T-018 の差し戻し1回目のリードの指示）
+      - 正式な run は、マニフェストの「最初の run-start」の run である。run-start の行には
+        official: true を書く。
+      - マニフェストに別の run_id の run-start が既にあれば、新しい run は始めずに止まる
+        （GkgError）。コードを変えると run_id が変わるので、run-start のあとでコードを変えた
+        場合は、取得を続けられない。続けるかどうか、規則を変えるかはオーナーが決める（別の
+        タスク。前の run のファイルと記録は消さずに残る）。こうするのは、コードを少し変えて
+        新しい run を作り、欠けたファイルを取り直す（結果の良い run を選ぶ）余地を無くすため。
+      - 手法を作る期間の欠けた日の一覧は、正式な run の記録（マニフェストの day の行と、日の
+        集計の F の行）だけから作る（official_day_records）。
     取得の記録（保存先の gkg-<run_id>-fetch-log.jsonl。Git の外。追記のみ）
       15分ファイル1本につき、結果が決まるたびに1行を追記する。項目：file_time、listed_md5、
       listed_size（一覧の値）、sha256（受け取った zip のバイト列。成功したときだけ）、result
@@ -130,9 +144,12 @@
       - 取り直すのは次の二つだけで、どちらも人が個々のファイルを選ぶものではない。
         (a) 2章の「続けて失敗したら全体を止める」で止まったとき、その連続した失敗の
             ファイルを interrupted として記録する。再開すると、interrupted のファイルは
-            取り直す。同じファイルが interrupted になるのは MAX_INTERRUPTS_PER_FILE（2）回
-            まで。上限に達したファイルの一時的な失敗は、連続の数に入れず、failed のまま
-            確定する（同じファイルで止まり続けないため）。
+            取り直す。ただし、interrupted にするのは1つの run の中で1回だけ
+            （MAX_INTERRUPTED_RETRIES_PER_RUN）。2回目以降に連続した失敗で止まったときは、
+            その失敗のファイルを failed のまま確定させて止まる（再開しても取り直さない）。
+            通信を止めるなどして連続した失敗を起こさせ、選んだファイルを何度も取り直させる
+            余地を、run の中で1回に限るため。代償：2回目の通信の不調で失敗したファイルは
+            欠けたまま残る。
             一時的な失敗が続いている途中で日が変わった場合、前の日の集計はまだ書かない
             （続きで止まる条件に達したら、日をまたいだ失敗も interrupted にして取り直せる
             ようにするため）。連続が途切れた時点（成功か、一時的でない結果）で、待たせた日を
@@ -187,6 +204,8 @@
         超えうる。そのため 5章のとおり、ディスクの空きが 10 GiB を下回ったら止まる。
       - メモリ：組1種類あたり約 110 バイト（Counter の項目と tuple）。1日 1,000万種類で
         約 1.1 GB（P1・P2 で約 2.2 GB）。上限 MAX_PAIR_KEYS（4千万、約 4.4 GB）で止まる。
+        日の集計を書くときは、並べ替えた一覧と書き出しの文字列を一時的に作るので、組の部分が
+        最大で約2倍になる（上限の近くで 9〜10 GB）。運用の手順は src/collector/README.md 6.1。
     本番の取得の最初の数日で実際の大きさを測り、見込みを超える場合は、止まったところで
     リードに報告する（組を週ごとにまとめる、P2 をやめるなど、形の見直しは別のタスク）。
 
@@ -249,6 +268,9 @@ privacy_scan = filelist.privacy_scan
 
 DATA_START = datetime.date(2015, 3, 2)
 METHOD_BLOCK_END = datetime.date(2020, 12, 14)
+# 行の時刻（14桁）がこれより後なら、ファイルの日の規則で METHOD_BLOCK_END より後になる
+# （filelist.LAST_KEPT_TIME と同じ時刻。テストで照合する）。14桁の数字どうしは文字列で比べられる。
+LAST_KEPT_TS = b"20201214234500"
 METHOD_BLOCK = (DATA_START.isoformat(), METHOD_BLOCK_END.isoformat())
 
 ALLOWED_HOST = "data.gdeltproject.org"
@@ -270,7 +292,7 @@ RETRY_WAIT_SECONDS = (30, 120)
 MAX_RETRY_AFTER_SECONDS = 900
 MAX_CONSECUTIVE_TRANSIENT_FAILURES = 5
 MAX_CONSECUTIVE_FORMAT_FAILURES = 10
-MAX_INTERRUPTS_PER_FILE = 2
+MAX_INTERRUPTED_RETRIES_PER_RUN = 1
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 FINAL_STATUSES = frozenset({403, 404, 410})
 READ_ERRORS = (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError,
@@ -520,16 +542,17 @@ def _ts_inside_block(ts):
 def add_line(agg, line, file_time_b, vocab):
     """1行を読み、4章の許可リストの値だけを集計に加える。一覧にない欄はここで捨てる。"""
     st = agg.stats
-    st["rows"] += 1
     if line.endswith(b"\n"):
         line = line[:-1]
     if line.endswith(b"\r"):
         line = line[:-1]
     if not line:
+        st["rows"] += 1
         st["rows_empty"] += 1
         return
     f = line.split(b"\t")
     if len(f) != N_COLUMNS:
+        st["rows"] += 1
         st["rows_bad_columns"] += 1
         return
     rid, d21, coll = f[I_ID], f[I_D21], f[I_COLL]
@@ -537,14 +560,20 @@ def add_line(agg, line, file_time_b, vocab):
     del f, line                                    # 残りの20欄は、ここで手放す
     m = _ID_RE.fullmatch(rid)
     if m is None:
+        st["rows"] += 1
         st["rows_bad_id"] += 1
         return
     ts, tmark = m.group(1), m.group(2)
     if ts != file_time_b:
+        if ts > LAST_KEPT_TS:
+            return          # 区画の後ろの時刻の行：数えずに捨てる（どの件数にも入れない）
+        st["rows"] += 1
         st["rows_id_time_differs"] += 1
         if not _ts_inside_block(ts):
-            st["rows_id_time_outside_block"] += 1
+            st["rows_id_time_before_block"] += 1
             return
+    else:
+        st["rows"] += 1
     if d21 == file_time_b:
         st["d21_same_as_file"] += 1
     elif d21 == b"0":
@@ -973,6 +1002,34 @@ def _disk_free(path):
     return shutil.disk_usage(path).free
 
 
+def official_run_id(manifest):
+    """正式な run の run_id（マニフェストの最初の run-start）。run-start が無ければ None。"""
+    for e in manifest:
+        if e.get("kind") == "run-start":
+            return e.get("run_id")
+    return None
+
+
+def official_day_records(manifest):
+    """正式な run の day の行（日付の順）。欠けた日の一覧は、これと日の集計の F の行から作る。
+
+    正式な run が run-complete まで終わっていなければ GkgError。
+    """
+    rid = official_run_id(manifest)
+    if rid is None:
+        raise GkgError("run-start が無い")
+    mine = [e for e in manifest if e.get("run_id") == rid]
+    if not any(e.get("kind") == "run-complete" for e in mine):
+        raise GkgError("正式な run が終わっていない")
+    days = {}
+    for e in mine:
+        if e.get("kind") == "day":
+            if e["day"] in days:
+                raise GkgError("正式な run に同じ日の day の行が二つある")
+            days[e["day"]] = e
+    return [days[d] for d in sorted(days)]
+
+
 def run_gkg(*, root, home, filelist_rows, filelist_sha256, method_access_seq, code_sha256,
             transport=urllib_transport, sleep=time.sleep, clock=time.monotonic,
             now=lambda: datetime.datetime.now(datetime.timezone.utc), log=_stderr_log,
@@ -986,6 +1043,10 @@ def run_gkg(*, root, home, filelist_rows, filelist_sha256, method_access_seq, co
     if not plan:
         raise GkgError("対象のファイルが1本も無い")
     manifest = read_jsonl(paths["manifest"])
+    official = official_run_id(manifest)
+    if official is not None and official != run_id:
+        raise GkgError("マニフェストに別の run（%s）の run-start がある。正式な run は最初の "
+                       "run-start の run なので、新しい run は始めない" % official)
     mine = [e for e in manifest if e.get("run_id") == run_id]
     if any(e.get("kind") == "run-complete" for e in mine):
         raise GkgError("この run_id の取得は完了している（取り直さない）")
@@ -1006,6 +1067,7 @@ def run_gkg(*, root, home, filelist_rows, filelist_sha256, method_access_seq, co
         if disk_free(paths["store"]) < MIN_FREE_DISK_BYTES:
             raise RunInterrupted("保存先のディスクの空きが足りない")
         append_jsonl(paths["manifest"], dict(base, kind="run-start", started_at=_iso(now()),
+                                             official=True,
                                              files_selected=n_files, days=len(plan),
                                              block_start=METHOD_BLOCK[0],
                                              block_end=METHOD_BLOCK[1],
@@ -1017,12 +1079,9 @@ def run_gkg(*, root, home, filelist_rows, filelist_sha256, method_access_seq, co
     for e in read_jsonl(log_path):
         if e.get("run_id") == run_id and "file_time" in e:
             latest[e["file_time"]] = e
-    interrupts = Counter()
-    for e in read_jsonl(log_path):
-        if e.get("run_id") == run_id and "file_time" in e:
-            if e.get("result") == "interrupted":
-                interrupts[e["file_time"]] += 1
-    state = {"transient": [], "format": 0, "interrupts": interrupts}
+    retries_used = len({e.get("trip") for e in read_jsonl(log_path)
+                        if e.get("run_id") == run_id and e.get("result") == "interrupted"})
+    state = {"transient": [], "format": 0, "retries_used": retries_used}
     pacer = Pacer(clock, sleep)
     vocab = {}
     totals = Counter()
@@ -1073,12 +1132,14 @@ def run_gkg(*, root, home, filelist_rows, filelist_sha256, method_access_seq, co
 
 
 def _log_file(log_path, run_id, entry, result, reason, transient, attempts, sha, docs, stats,
-              now):
+              now, trip=None):
     rec = {"run_id": run_id, "file_time": entry["file_time"], "listed_md5": entry["md5"],
            "listed_size": entry["size"], "result": result, "reason": reason,
            "transient": transient, "attempts": attempts, "sha256": sha,
            "docs": {g.decode() if isinstance(g, bytes) else g: n for g, n in sorted(docs.items())},
            "stats": dict(sorted(stats.items())), "finished_at": _iso(now())}
+    if trip is not None:
+        rec["trip"] = trip
     append_jsonl(log_path, rec, "取得の記録の行")
     return rec
 
@@ -1133,7 +1194,7 @@ def _run_day(day, entries, latest, state, pacer, vocab, log_path, run_id, transp
             files.append({"file_time": entry["file_time"], "result": "failed", "reason": reason,
                           "md5": entry["md5"], "size": entry["size"], "sha256": sha,
                           "attempts": fr.attempts, "docs": {}})
-            if transient and state["interrupts"][entry["file_time"]] < MAX_INTERRUPTS_PER_FILE:
+            if transient:
                 state["transient"].append(entry)
                 state["format"] = 0
             elif reason.startswith("format_"):
@@ -1143,12 +1204,19 @@ def _run_day(day, entries, latest, state, pacer, vocab, log_path, run_id, transp
                 state["transient"] = []
                 state["format"] = 0
             if len(state["transient"]) >= MAX_CONSECUTIVE_TRANSIENT_FAILURES:
-                for e in state["transient"]:
-                    state["interrupts"][e["file_time"]] += 1
-                    latest[e["file_time"]] = _log_file(log_path, run_id, e, "interrupted",
-                                                       "consecutive_transient_failures", True,
-                                                       0, None, {}, {}, now)
-                raise RunInterrupted("一時的な失敗が %d 本続いたので止めた（再開できる）"
+                if state["retries_used"] < MAX_INTERRUPTED_RETRIES_PER_RUN:
+                    trip = state["retries_used"] + 1
+                    for e in state["transient"]:
+                        latest[e["file_time"]] = _log_file(
+                            log_path, run_id, e, "interrupted", "consecutive_transient_failures",
+                            True, 0, None, {}, {}, now, trip=trip)
+                    raise RunInterrupted("一時的な失敗が %d 本続いたので止めた（再開すると、続いた"
+                                         "失敗のファイルを1回だけ取り直す）"
+                                         % MAX_CONSECUTIVE_TRANSIENT_FAILURES)
+                state["transient"] = []
+                latest[entry["file_time"]] = rec
+                raise RunInterrupted("一時的な失敗が %d 本続いたので止めた。この run の取り直しは"
+                                     "使い切ったので、続いた失敗のファイルは failed のまま確定した"
                                      % MAX_CONSECUTIVE_TRANSIENT_FAILURES)
             if state["format"] >= MAX_CONSECUTIVE_FORMAT_FAILURES:
                 raise RunInterrupted("形式の失敗が %d 本続いたので止めた。コードとデータの形が"

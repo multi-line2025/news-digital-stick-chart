@@ -69,9 +69,9 @@ def tsv(header, rows):
 
 
 GOOD = tsv(["THEME", "DESCRIPTION", "COUNT"],
-           [["ENV_CLIMATECHANGE", "Climate change", COUNT_MARKS[0]],
-            ["TAX_FNCACT_FARMER", "Farmers", COUNT_MARKS[1]],
-            ["WB_2433_CONFLICT", "World Bank conflict", COUNT_MARKS[2]]])
+           [["QQ_ALPHA", "Alpha desc", COUNT_MARKS[0]],
+            ["QQ_BETA_TWO", "Beta desc", COUNT_MARKS[1]],
+            ["QQ_7_GAMMA", "Gamma desc", COUNT_MARKS[2]]])
 
 
 class FakeResponse:
@@ -154,20 +154,63 @@ class TestUrl(unittest.TestCase):
 class TestClassify(unittest.TestCase):
     def test_count_and_unknown_columns_dropped(self):
         header = ["THEME", "Description", "Count", "Frequency", "Mystery", "Type"]
-        rows = [["ENV_X", "d", "5", "6", "abc", "THEME"], ["TAX_Y", "e", "7", "8", "def", "THEME"]]
+        rows = [["QQ_X", "d", "5", "6", "abc", "THEME"], ["QQ_Z", "e", "7", "8", "def", "THEME"]]
         keep, drop = themes.classify_columns(header, rows)
         self.assertEqual([header[i] for i in keep], ["THEME", "Description", "Type"])
         self.assertEqual(drop, ["Count", "Frequency", "Mystery"])
 
+    def test_counts_hidden_in_kept_columns(self):
+        """監査の5つの形：説明・種類・注記・kind の中の数、名前の欄の中の数。"""
+        base = [["QQ_A", "plain", "x", "y", "k"], ["QQ_B", "plain", "x", "y", "k"]]
+        header = ["Theme", "Description", "Type", "Notes", "kind"]
+        cases = {
+            "Description": "Seen in 1,234,567 articles",
+            "Type": "1234",
+            "Notes": "12.3k",
+            "kind": "1 234",
+        }
+        for col, val in cases.items():
+            with self.subTest(col=col):
+                rows = [list(r) for r in base]
+                rows[0][header.index(col)] = val
+                if col == "Type":
+                    rows[1][header.index(col)] = "N/A"
+                keep, drop = themes.classify_columns(header, rows)
+                self.assertIn(col, drop)
+                self.assertNotIn(header.index(col), keep)
+        rows = [list(r) for r in base]
+        rows[0][0] = "QQ_A (1234)"
+        with self.assertRaisesRegex(themes.ThemesError, "名前の形に合わない"):
+            themes.classify_columns(header, rows)
+
+    def test_hidden_counts_never_written(self):
+        tmp = tempfile.mkdtemp(prefix="themes-hidden-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root, home = os.path.join(tmp, "p"), os.path.join(tmp, "h")
+        os.makedirs(os.path.join(root, "data", "manifest"))
+        os.makedirs(os.path.join(home, *themes.STORE_PARTS))
+        body = tsv(["Theme", "Description", "Type", "Notes", "kind"],
+                   [["QQ_A", "Seen in 7,123,457 articles", "8123459", "12.3k", "9 123461"],
+                    ["QQ_B", "plain", "N/A", "none", "k"]])
+        e = themes.run(root=root, home=home, url=URL, transport=FakeTransport(body),
+                       clock=lambda: 0.0, now=lambda: NOW)
+        self.assertEqual(e["kept_columns"], ["Theme"])
+        for top in (os.path.join(home, *themes.STORE_PARTS), os.path.join(root, "data", "manifest")):
+            for n in os.listdir(top):
+                with open(os.path.join(top, n), "rb") as f:
+                    data = f.read()
+                for m in (b"7,123,457", b"8123459", b"12.3k", b"123461", b"Seen in"):
+                    self.assertNotIn(m, data)
+
     def test_numeric_values_dropped_even_with_keep_header(self):
-        keep, drop = themes.classify_columns(["NAME", "TYPE"], [["ENV_X", "12"], ["ENV_Y", "3"]])
+        keep, drop = themes.classify_columns(["NAME", "TYPE"], [["QQ_X", "12"], ["QQ_Y", "3"]])
         self.assertEqual((keep, drop), ([0], ["TYPE"]))
 
     def test_headerless_or_bad_shapes_stop(self):
         for header, rows in (
-                (["ENV_X", "123"], [["ENV_Y", "4"]]),          # 見出しの無い形（件数が見出しに）
-                (["", "NAME"], [["a", "ENV_X"]]),
-                (["NAME", "name"], [["ENV_X", "ENV_Y"]]),
+                (["QQ_X", "123"], [["QQ_Y", "4"]]),          # 見出しの無い形（件数が見出しに）
+                (["", "NAME"], [["a", "QQ_X"]]),
+                (["NAME", "name"], [["QQ_X", "QQ_Y"]]),
                 (["COUNT"], [["5"]]),                           # 残す欄が無い
                 (["DESCRIPTION"], [["some text"]])):           # テーマの名前の欄が無い
             with self.subTest(header=header):
@@ -214,7 +257,7 @@ class TestRun(RunCase):
             self.assertEqual(themes.privacy_scan.find_in_bytes(data), {}, name)
         body = files[e["file_name"]].decode()
         self.assertEqual(body.splitlines()[0], "THEME\tDESCRIPTION")
-        self.assertIn("ENV_CLIMATECHANGE\tClimate change", body)
+        self.assertIn("QQ_ALPHA\tAlpha desc", body)
         line = json.loads(files[themes.MANIFEST_NAME])
         self.assertEqual(line["sha256"], e["sha256"])
         self.assertEqual(line["source_url"], URL)
@@ -222,8 +265,8 @@ class TestRun(RunCase):
 
     def test_xlsx(self):
         data = xlsx([["NAME", "DESCRIPTION", "NUMARTS"],
-                     ["ENV_CLIMATECHANGE", "Climate", COUNT_MARKS[0]],
-                     ["TAX_FNCACT_FARMER", "Farm", COUNT_MARKS[1]]])
+                     ["QQ_ALPHA", "Alpha", COUNT_MARKS[0]],
+                     ["QQ_BETA_TWO", "Beta", COUNT_MARKS[1]]])
         e = self.run_themes(data, url=URL.replace(".TXT", ".xlsx"))
         self.assertEqual(e["dropped_columns"], ["NUMARTS"])
         for data in self.written().values():
@@ -231,8 +274,8 @@ class TestRun(RunCase):
                 self.assertNotIn(m.encode(), data)
 
     def test_stops_without_writing(self):
-        cases = [tsv(["ENV_X", "5"], [["ENV_Y", "6"]]),             # 見出しが無い
-                 GOOD.replace(b"ENV_CLIMATECHANGE", b"see " + b"a" + b"@" + b"b.org" * 1),
+        cases = [tsv(["QQ_X", "5"], [["QQ_Y", "6"]]),             # 見出しが無い
+                 GOOD.replace(b"QQ_ALPHA", b"see " + b"a" + b"@" + b"b.org" * 1),
                  b"\xff\xfe broken"]
         for body in cases:
             with self.subTest(body=body[:20]):

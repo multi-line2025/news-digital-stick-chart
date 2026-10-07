@@ -156,7 +156,7 @@ CODEGATE_REL = "src/collector/codegate.py"
 PINNED_SHA256 = (
     (FILELIST_REL, "afd7a9dd47bc052a691e1a4cd558b211f4d72cf1ce1f451fa9f3016540cd04a7"),
     (PRIVACY_SCAN_REL, "68d8836d56489ca5df9f2f55e24a2642ebf3aa14afdc2e0120577c7b6c6cb887"),
-    (CODEGATE_REL, "945adb339c6c38585d331546d61c940a1862d53f7f94e3db8aec63da4ce107c4"),
+    (CODEGATE_REL, "d422be41dc59c4be50689a2426453db965be506a9981770ab3eb7557ed078769"),
 )
 
 # 関門 (4)：未コミットの変更が無いことを確かめるフォルダ。

@@ -12,6 +12,7 @@
 このファイルには、メールアドレスの形の文字列をそのまま書かない（実行中に組み立てる）。
 """
 
+import base64
 import datetime
 import gzip
 import hashlib
@@ -21,6 +22,7 @@ import json
 import os
 import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -111,8 +113,8 @@ def all_markers():
     return [m.encode() for m in out]
 
 
-def gkg_row(ts, n, themes1=("ENV_CLIMATECHANGE", "TAX_FNCACT_FARMER"),
-            themes2=(("ENV_CLIMATECHANGE", 10), ("ENV_CLIMATECHANGE", 90), ("TAX_FNCACT_FARMER", 40)),
+def gkg_row(ts, n, themes1=("QQ_ALPHA", "QQ_BETA_TWO"),
+            themes2=(("QQ_ALPHA", 10), ("QQ_ALPHA", 90), ("QQ_BETA_TWO", 40)),
             countries=("JA", "US"), coll="1", translated=False, srclc=None, eng=None, d21=None,
             rid_ts=None):
     cols = dict(MARKERS)
@@ -141,7 +143,7 @@ def make_zip(ts, rows, name=None):
 
 def standard_rows(ts):
     return [gkg_row(ts, 1),
-            gkg_row(ts, 2, themes1=("ENV_CLIMATECHANGE",), themes2=(("ENV_CLIMATECHANGE", 5),),
+            gkg_row(ts, 2, themes1=("QQ_ALPHA",), themes2=(("QQ_ALPHA", 5),),
                     countries=("JA",), translated=True, srclc="jpn",
                     eng="GT-JPN 1.0 / MARKERENGINE x"),
             gkg_row(ts, 3, themes1=(), themes2=(), countries=(), coll="2")]
@@ -312,16 +314,16 @@ class TestAggregate(unittest.TestCase):
         a = self.agg(standard_rows(self.TS))
         T = a.tables
         self.assertEqual(a.docs, {b"1": 1, b"1T": 1, b"2": 1})
-        self.assertEqual(T["t1"][b"1"], {b"ENV_CLIMATECHANGE": 1, b"TAX_FNCACT_FARMER": 1})
-        self.assertEqual(T["t2m"][b"1"], {b"ENV_CLIMATECHANGE": 2, b"TAX_FNCACT_FARMER": 1})
-        self.assertEqual(T["t2"][b"1"], {b"ENV_CLIMATECHANGE": 1, b"TAX_FNCACT_FARMER": 1})
-        self.assertEqual(T["c1"][b"1"][(b"ENV_CLIMATECHANGE", b"JA")], 1)
-        self.assertEqual(T["c2m"][b"1"][(b"ENV_CLIMATECHANGE", b"US")], 2)
-        self.assertEqual(T["l1"][b"1T"], {(b"ENV_CLIMATECHANGE", b"jpn"): 1})
-        self.assertEqual(T["l1"][b"1"], {(b"ENV_CLIMATECHANGE", b"-"): 1,
-                                         (b"TAX_FNCACT_FARMER", b"-"): 1})
-        self.assertEqual(T["p1"][b"1"], {(b"ENV_CLIMATECHANGE", b"TAX_FNCACT_FARMER"): 1})
-        self.assertEqual(T["p2"][b"1"], {(b"ENV_CLIMATECHANGE", b"TAX_FNCACT_FARMER"): 1})
+        self.assertEqual(T["t1"][b"1"], {b"QQ_ALPHA": 1, b"QQ_BETA_TWO": 1})
+        self.assertEqual(T["t2m"][b"1"], {b"QQ_ALPHA": 2, b"QQ_BETA_TWO": 1})
+        self.assertEqual(T["t2"][b"1"], {b"QQ_ALPHA": 1, b"QQ_BETA_TWO": 1})
+        self.assertEqual(T["c1"][b"1"][(b"QQ_ALPHA", b"JA")], 1)
+        self.assertEqual(T["c2m"][b"1"][(b"QQ_ALPHA", b"US")], 2)
+        self.assertEqual(T["l1"][b"1T"], {(b"QQ_ALPHA", b"jpn"): 1})
+        self.assertEqual(T["l1"][b"1"], {(b"QQ_ALPHA", b"-"): 1,
+                                         (b"QQ_BETA_TWO", b"-"): 1})
+        self.assertEqual(T["p1"][b"1"], {(b"QQ_ALPHA", b"QQ_BETA_TWO"): 1})
+        self.assertEqual(T["p2"][b"1"], {(b"QQ_ALPHA", b"QQ_BETA_TWO"): 1})
         self.assertEqual(T["eng"][b"1T"], {b"GT-JPN 1.0": 1})
         self.assertEqual(a.stats["eng_other_tokens"], 1)          # 知らない部分は件数だけ
         self.assertEqual(T["nc"][b"1"], {b"JA": 1, b"US": 1})
@@ -334,23 +336,43 @@ class TestAggregate(unittest.TestCase):
         rows = standard_rows(ts) + [
             b"too\tfew\tcolumns",
             gkg_row(ts, 9).replace(b"%s-9" % ts.encode(), b"NOTANID"),
-            gkg_row(ts, 10, themes1=("ENV_CLIMATECHANGE", "lower case theme", "X@Y"),
+            gkg_row(ts, 10, themes1=("QQ_ALPHA", "lower case theme", "X@Y"),
                     countries=("JA", "J1"), srclc="Japanese", coll="abc", d21="0"),
-            gkg_row(ts, 11, rid_ts="20201215000000"),          # 行の時刻が区画の後：捨てる
             gkg_row(ts, 12, rid_ts="20150302001500"),          # ずれるが区画の中：残す
+            gkg_row(ts, 13, rid_ts="20150301000000"),          # 区画の前：数えて捨てる
         ]
         a = self.agg(rows)
         st = a.stats
         self.assertEqual(st["rows_bad_columns"], 1)
         self.assertEqual(st["rows_bad_id"], 1)
         self.assertEqual(st["rows_id_time_differs"], 2)
-        self.assertEqual(st["rows_id_time_outside_block"], 1)
+        self.assertEqual(st["rows_id_time_before_block"], 1)
+        self.assertEqual(st["rows"], len(rows))
         self.assertEqual(st["theme_tokens_invalid_v1"], 2)
         self.assertEqual(st["country_codes_invalid"], 1)
         self.assertEqual(st["srclc_other"], 1)
         self.assertEqual(st["d21_zero"], 1)
         self.assertEqual(a.docs[b"X"], 1)
         self.assertEqual(sum(a.docs.values()), 5)
+
+    def test_post_block_rows_are_dropped_without_counting(self):
+        """区画の後ろの時刻の行は、どの件数にも入らない（行の数が変わっても出力は同じ）。"""
+        ts = self.TS
+        base = standard_rows(ts)
+        files = [{"file_time": ts, "result": "ok", "reason": "", "md5": "a" * 32, "size": 9,
+                  "sha256": "b" * 64, "attempts": 1, "docs": {"1": 1}}]
+        outs = []
+        for n in (0, 1, 5):
+            post = [gkg_row(ts, 100 + i, rid_ts=t, themes1=("QQ_POSTMARK",))
+                    for i, t in enumerate(["20201214234501", "20201215000000", "99991231235959",
+                                           "20231107000000", "20201299999999"][:n])]
+            a = gkg.aggregate_zip(make_zip(ts, base + post), ts, {})
+            outs.append(gkg.serialize_day("2015-03-02", a, files))
+        self.assertEqual(outs[0], outs[1])
+        self.assertEqual(outs[0], outs[2])
+        self.assertNotIn(b"QQ_POSTMARK", outs[2])
+        self.assertEqual(gkg.LAST_KEPT_TS.decode(),
+                         gkg.filelist.LAST_KEPT_TIME.strftime("%Y%m%d%H%M%S"))
 
     def test_zip_checks(self):
         ts = self.TS
@@ -388,7 +410,7 @@ class TestAggregate(unittest.TestCase):
         self.assertTrue({"F", "FD", "V", "D", "T", "C", "L", "P1", "P2", "NC", "NL", "E", "S"}
                         <= tags)
         v = {l.split("\t")[2]: l.split("\t")[1] for l in lines if l.startswith("V\t")}
-        self.assertIn("\t".join(["P1", "1", v["ENV_CLIMATECHANGE"], v["TAX_FNCACT_FARMER"], "2"]),
+        self.assertIn("\t".join(["P1", "1", v["QQ_ALPHA"], v["QQ_BETA_TWO"], "2"]),
                       lines)
         self.assertEqual(gzip.decompress(gkg.gzip_bytes(data)), data)
         self.assertEqual(gkg.gzip_bytes(data), gkg.gzip_bytes(data))
@@ -633,17 +655,46 @@ class TestRun(RunCase):
         inter = [e["file_time"] for e in self.fetch_log() if e["result"] == "interrupted"]
         self.assertEqual(inter, streak)
 
-    def test_interrupt_cap_prevents_endless_loop(self):
-        """同じファイルが interrupted になるのは MAX_INTERRUPTS_PER_FILE 回まで。"""
+    def test_interrupted_retry_only_once_per_run(self):
+        """interrupted で取り直すのは run の中で1回だけ。2回目の連続した失敗は failed で確定する。"""
+        self.assertEqual(gkg.MAX_INTERRUPTED_RETRIES_PER_RUN, 1)
         times = sorted(self.zips)
+        streak = times[:gkg.MAX_CONSECUTIVE_TRANSIENT_FAILURES]
         for ts in times:
             self.responses[ts] = [FakeResponse(status=503)]
-        for _ in range(gkg.MAX_INTERRUPTS_PER_FILE):
-            with self.assertRaises(gkg.RunInterrupted):
-                self.run_gkg()
-        done = self.run_gkg()          # 上限に達したファイルは failed のまま進む
-        self.assertEqual(done["files_ok"], 0)
-        self.assertEqual(done["files_failed"], len(times))
+        with self.assertRaisesRegex(gkg.RunInterrupted, "1回だけ取り直す"):
+            self.run_gkg()
+        with self.assertRaisesRegex(gkg.RunInterrupted, "使い切った"):
+            self.run_gkg()                       # 1回目の取り直し。また続けて失敗する
+        self.assertEqual(sorted(set(self.transport.calls)), streak)
+        for ts in times:                         # 相手が直っても
+            self.responses[ts] = [ok_response(self.zips[ts])]
+        done = self.run_gkg()
+        for ts in streak:
+            self.assertNotIn(ts, self.transport.calls)   # 2回目は取り直さない
+        self.assertEqual(done["files_failed"], len(streak))
+        trips = {e.get("trip") for e in self.fetch_log() if e["result"] == "interrupted"}
+        self.assertEqual(trips, {1})
+
+    def test_official_run_is_first_run_start(self):
+        self.run_gkg()
+        with self.assertRaisesRegex(gkg.GkgError, "別の run"):
+            self.run_gkg(code_sha256="cd" * 32)
+        m = self.manifest()
+        self.assertEqual(gkg.official_run_id(m), RUN_ID)
+        self.assertTrue(m[0]["official"])
+        days = gkg.official_day_records(m)
+        self.assertEqual([d["day"] for d in days], ["2015-03-02", "2015-03-03"])
+
+    def test_new_run_refused_even_if_first_did_not_finish(self):
+        self.low_after = 1
+        with self.assertRaises(gkg.RunInterrupted):
+            self.run_gkg()
+        self.low_after = None
+        with self.assertRaisesRegex(gkg.GkgError, "別の run"):
+            self.run_gkg(code_sha256="cd" * 32)
+        with self.assertRaisesRegex(gkg.GkgError, "終わっていない"):
+            gkg.official_day_records(self.manifest())
 
     def test_format_breaker(self):
         for ts in self.zips:
@@ -691,6 +742,160 @@ class TestRun(RunCase):
             self.run_gkg()
         with open(os.path.join(SRC, "gkg.py"), encoding="utf-8") as f:
             self.assertNotIn("import tempfile", f.read())
+
+
+CHILD_SCRIPT = os.path.join(HERE, "gkg_child.py")
+
+
+class ChildRun:
+    """GKG の取得（または集計だけ）を子プロセス（gkg_child.py）で、audit hook の見張りの下で動かす。
+
+    返り値："report"（子の結果と、止めた記録 violations）、"files"（root・store・outside の下の
+    全ファイル。.gz は展開した中身）、"outside"（outside の下の名前の一覧）、stdout・stderr。
+    source_mutation を与えると、gkg.py の写しを置き換えて子に読み込ませる。
+    """
+
+    DAYS = ("20150302", "20150303")
+
+    def __init__(self, tc):
+        self.tc = tc
+
+    def __call__(self, mode="run", mutation=None, source_mutation=None):
+        tops = {k: tempfile.mkdtemp(prefix="gkg-child-%s-" % k)
+                for k in ("root", "home", "outside", "code")}
+        try:
+            mdir = os.path.join(tops["root"], "data", "manifest")
+            os.makedirs(mdir)
+            store = os.path.join(tops["home"], *gkg.STORE_PARTS)
+            os.makedirs(store)
+            zips = {}
+            for d in self.DAYS:
+                for i in range(2):
+                    ts = ts_of(d, i)
+                    zips[ts] = make_zip(ts, standard_rows(ts))
+            rows = [listing(ts, z) for ts, z in sorted(zips.items())]
+            gkg_path = os.path.join(SRC, "gkg.py")
+            if source_mutation:
+                with open(gkg_path, encoding="utf-8") as f:
+                    src = f.read()
+                for a, b in source_mutation:
+                    self.tc.assertEqual(src.count(a), 1, a)
+                    src = src.replace(a, b.replace("OUTSIDE", tops["outside"]))
+                gkg_path = os.path.join(tops["code"], "gkg.py")
+                with open(gkg_path, "w", encoding="utf-8") as f:
+                    f.write(src)
+                for name in ("filelist.py", "privacy_scan.py"):
+                    shutil.copyfile(os.path.join(SRC, name), os.path.join(tops["code"], name))
+            real_store = os.path.realpath(store)
+            allowed = []
+            if mode == "run":
+                allowed = [os.path.join(os.path.realpath(mdir), gkg.MANIFEST_NAME),
+                           os.path.join(real_store, gkg.fetch_log_name(RUN_ID))]
+                allowed += [os.path.join(real_store, gkg.day_file_name(
+                    RUN_ID, "%s-%s-%s" % (d[:4], d[4:6], d[6:]))) for d in self.DAYS]
+            report = tempfile.TemporaryFile()
+            vio = tempfile.TemporaryFile()
+            try:
+                cfg = {"report_fd": report.fileno(), "violation_fd": vio.fileno(),
+                       "gkg_path": gkg_path, "root": tops["root"], "home": tops["home"],
+                       "outside": tops["outside"], "mode": mode, "mutation": mutation,
+                       "allowed": allowed, "code_sha": CODE_SHA, "now": NOW.isoformat(),
+                       "rows": rows,
+                       "zips": {k: base64.b64encode(v).decode() for k, v in zips.items()}}
+                env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+                proc = subprocess.run([sys.executable, "-B", CHILD_SCRIPT],
+                                      input=json.dumps(cfg).encode(), capture_output=True,
+                                      pass_fds=(report.fileno(), vio.fileno()), env=env,
+                                      timeout=120)
+                report.seek(0)
+                raw = report.read()
+                vio.seek(0)
+                vraw = vio.read()
+            finally:
+                report.close()
+                vio.close()
+            self.tc.assertEqual(proc.returncode, 0, proc.stderr.decode(errors="replace"))
+            rep = json.loads(raw)
+            rep["violations"] = [json.loads(l) for l in vraw.decode("ascii").splitlines()]
+            files = {}
+            for k in ("root", "home", "outside"):
+                for d, _ds, fs in os.walk(tops[k]):
+                    for n in fs:
+                        with open(os.path.join(d, n), "rb") as f:
+                            b = f.read()
+                        files[os.path.join(k, os.path.relpath(os.path.join(d, n), tops[k]))] = (
+                            gzip.decompress(b) if n.endswith(".gz") else b)
+            outside = sorted(os.listdir(tops["outside"]))
+            return {"report": rep, "files": files, "outside": outside, "stdout": proc.stdout,
+                    "stderr": proc.stderr}
+        finally:
+            for t in tops.values():
+                shutil.rmtree(t, ignore_errors=True)
+
+
+class TestChildGuard(unittest.TestCase):
+    """保存先の外への書き込み（監査 中2）を、子プロセスの見張りで捕まえる。"""
+
+    def setUp(self):
+        self.child = ChildRun(self)
+
+    def check_clean_outputs(self, r):
+        for name, data in r["files"].items():
+            for mk in all_markers():
+                self.assertNotIn(mk, data, (name, mk))
+            self.assertEqual(privacy_scan.find_in_bytes(data), {}, name)
+        for stream in (r["stdout"], r["stderr"]):
+            for mk in all_markers():
+                self.assertNotIn(mk, stream)
+
+    def test_normal_run_under_guard(self):
+        r = self.child("run")
+        rep = r["report"]
+        self.assertIsNone(rep["error"], rep)
+        self.assertEqual(rep["violations"], [])
+        self.assertEqual(rep["out"]["files_ok"], 4)
+        self.assertEqual(r["outside"], [])
+        self.assertEqual(sorted(n.split(os.sep)[0] for n in r["files"]),
+                         ["home"] * 3 + ["root"])
+        self.check_clean_outputs(r)
+
+    def test_aggregate_under_guard_writes_nothing(self):
+        r = self.child("aggregate")
+        self.assertIsNone(r["report"]["error"], r["report"])
+        self.assertEqual(r["report"]["violations"], [])
+        self.assertEqual(r["report"]["out"]["docs"], 3)
+        self.assertEqual(r["files"], {})
+
+    def test_raw_zip_leak_mutation_is_caught(self):
+        """監査の変異：fr.data を手放す直前に、生の zip を保存先の外へ書く。"""
+        leak = ('            fr.data = None',
+                '            open("OUTSIDE/raw.zip", "wb").write(fr.data)\n'
+                '            fr.data = None')
+        r = self.child("run", source_mutation=[leak])
+        self.assertTrue(r["report"]["violations"], r["report"])
+        self.assertEqual(r["report"]["violations"][0][0], "open")
+        self.assertEqual(r["report"]["error"][0], "Blocked")
+        self.assertEqual(r["outside"], [])
+        self.check_clean_outputs(r)
+
+    def test_leak_into_store_dir_with_other_name_is_caught(self):
+        """保存先のフォルダの中でも、決まった名前以外のファイルには書けない。"""
+        leak = ('            fr.data = None',
+                '            open(os.path.join(os.path.dirname(log_path), "raw.zip"), "wb")'
+                '.write(fr.data)\n            fr.data = None')
+        r = self.child("run", source_mutation=[leak])
+        self.assertTrue(r["report"]["violations"])
+        self.assertEqual(r["report"]["violations"][0][0], "open")
+        self.assertFalse(any(n.endswith("raw.zip") for n in r["files"]))
+        self.check_clean_outputs(r)
+
+    def test_runtime_mutations_are_caught(self):
+        for name in ("fileio", "makedirs", "symlink", "subprocess", "system", "sqlite3",
+                     "os_open", "open_append", "fork_exec", "getframe", "tb_frame"):
+            with self.subTest(mutation=name):
+                r = self.child("aggregate", mutation=name)
+                self.assertTrue(r["report"]["violations"], name)
+                self.assertEqual(r["outside"], [], name)
 
 
 class TestNoNetworkGuard(unittest.TestCase):

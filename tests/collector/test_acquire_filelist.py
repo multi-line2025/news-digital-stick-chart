@@ -803,6 +803,35 @@ class TestGateHardening(CopyCase):
                 git(self.project, "update-index", flag.replace("--", "--no-"), rel)
         acq.check_gate(self.seams())
 
+    def test_git_replace_refused(self):
+        """T-018 の監査 軽1：git replace で HEAD の中身を偽れないこと。"""
+        rel = "src/collector/filelist.py"
+        p = os.path.join(self.project, rel)
+        with open(p, "rb") as f:
+            orig = f.read()
+        with open(p, "ab") as f:
+            f.write(b"# replaced\n")
+        fake = git(self.project, "hash-object", "-w", rel).strip().decode()
+        real = git(self.project, "rev-parse", "HEAD:" + rel).strip().decode()
+        git(self.project, "replace", real, fake)
+        # 置き換えがあると、普通の git の HEAD の中身は書き換えた中身に見える
+        self.assertEqual(git(self.project, "show", "HEAD:" + rel), orig + b"# replaced\n")
+        self.refuse("git replace|未コミット")
+        git(self.project, "replace", "-d", real)
+        with open(p, "wb") as f:
+            f.write(orig)
+        acq.check_gate(self.seams())
+        self.assertEqual(acq._load_codegate(self.project)[0].GIT_ENV["GIT_NO_REPLACE_OBJECTS"], "1")
+
+    def test_replace_ref_alone_refused(self):
+        """作業ツリーを変えずに、関係の無いオブジェクトの置き換えだけがあっても止まる。"""
+        a = git(self.project, "rev-parse", "HEAD:README.md").strip().decode() \
+            if os.path.exists(os.path.join(self.project, "README.md")) else \
+            git(self.project, "rev-parse", "HEAD:CLAUDE.md").strip().decode()
+        b = git(self.project, "rev-parse", "HEAD:src/collector/README.md").strip().decode()
+        git(self.project, "replace", a, b)
+        self.refuse("git replace")
+
     def test_ignored_files_refused(self):
         d = os.path.join(self.project, "src", "sealer", "__pycache__")
         os.makedirs(d)

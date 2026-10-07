@@ -21,6 +21,8 @@
         シンボリックリンクでない既にあるフォルダでなければならない（.git がファイルの形の
         「gitdir:」で別の場所を指す場合も止まる）。
       - core.fsmonitor を切る（リポジトリの設定から外部のコマンドを動かさないため）。
+      - GIT_NO_REPLACE_OBJECTS=1 を渡し、`git replace` の置き換えを使わせない（T-018 の監査
+        軽1）。さらに check_clean で、置き換えの参照（refs/replace/）が1つも無いことを確かめる。
     確かめないこと：git の実行ファイル（/usr/bin/git など、PATH の固定の値で見つかるもの）が
     本物であること。リポジトリの .git/config のうち、上で切った以外の設定。
 
@@ -34,6 +36,8 @@
           取得のコードを差し替える経路になる
       (c) skip-worktree か assume-unchanged の印が付いたファイル（git ls-files -v の頭の字が
           "H" でないもの）。この印があると、作業ツリーの変更が git status に出ない
+      (d) git replace の置き換えの参照（refs/replace/ の下）。置き換えがあると、HEAD の中身と
+          して別のオブジェクトを見せられる
     そのうえで、files に挙げたファイルの作業ツリーの中身が、HEAD のコミットの中身と
     バイト単位で同じであることを確かめ、その中身を返す（committed_bytes）。
 
@@ -63,6 +67,7 @@ GIT_ENV = {
     "GIT_CONFIG_GLOBAL": os.devnull,
     "GIT_TERMINAL_PROMPT": "0",
     "GIT_OPTIONAL_LOCKS": "0",
+    "GIT_NO_REPLACE_OBJECTS": "1",
 }
 PROJECT_DIRS = (("sealed",), ("data",), ("data", "manifest"))
 
@@ -133,6 +138,11 @@ def check_clean(project, paths, files):
     if ignored:
         raise CodeGateError("取得のコードのフォルダに、無視されるファイルがある（.pyc など）: %s"
                             % ", ".join(_names(b"\0".join(ignored))))
+    code, out = run_git(project, "for-each-ref", "--format=%(refname)", "refs/replace/")
+    if code != 0:
+        raise CodeGateError("git for-each-ref が失敗した")
+    if out.strip():
+        raise CodeGateError("git replace の置き換え（refs/replace/）がある")
     code, out = run_git(project, "ls-files", "-v", "-z", "--", *paths)
     if code != 0:
         raise CodeGateError("git ls-files が失敗した")

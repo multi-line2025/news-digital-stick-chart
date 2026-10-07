@@ -31,11 +31,18 @@
     前に捨てる。規則（見出しの名前と値だけで機械的に決まる）：
       - 見出しの行が無い形（1行目の値に数字だけの欄がある、など）は、どれが件数の欄かを見出しで
         確かめられないので、何も書かずに止まる（ThemesError）。
-      - 見出しが KEEP_HEADER_RE（名前・説明・種類など）に当たり、かつ値が数字だけの欄でない
-        ものだけを残す。それ以外の欄（DROP_HEADER_RE に当たる件数・頻度の欄、知らない見出しの欄、
-        値が数字だけの欄）は、すべて捨てる。知らない欄は捨てる側に倒す。
-      - 残す欄が無い、またはテーマの名前の欄（値の大半が英大文字・数字・下線の形）が無い場合は
-        止まる。
+      - 見出しが KEEP_HEADER_RE（名前・説明・種類など）に当たらない欄、DROP_HEADER_RE（件数・
+        頻度など）に当たる欄は、すべて捨てる。知らない欄は捨てる側に倒す。
+      - テーマの名前の欄（見出しが NAME_HEADER_RE に当たる欄）は、すべての値が THEME_NAME_RE
+        （英大文字で始まり、英大文字・数字・下線だけ）に完全に合わなければならない。合わない値が
+        1つでもあれば、何も書かずに止まる（「QQ_A (1234)」のように名前に件数を足した形を
+        書かないため）。名前の欄が1つも無い場合も止まる。
+      - 名前以外の残す欄（説明・種類など）は、数字（半角・全角）を含む値が1つでもあれば、
+        欄ごと捨てる（「Seen in 1,234,567 articles」「12.3k」「1 234」のような件数を書かない
+        ため）。止まらずに欄ごと捨てる理由：取得は1回だけなので、止めると名前の欄まで失う。
+        名前の欄が残れば区分表の目的（除外の規則をテーマの名前に当てる）は果たせ、捨てた欄の
+        見出しはマニフェストの dropped_columns に残る。
+      - 限界：数字を使わずに書いた量（「one million」など）は見分けられない。
     保存するのは、残した欄の見出しと値だけ。捨てた欄は、見出しの名前だけを報告とマニフェストに
     出す（値は出さない）。
 
@@ -95,6 +102,9 @@ KEEP_HEADER_RE = re.compile(
 DROP_HEADER_RE = re.compile(
     r"count|freq|volume|number|\bnum\b|total|articles|\bdocs?\b|documents|occurr|mentions|"
     r"hits|popular|\bn\b|cnt|rank|percent|share|ratio", re.I)
+NAME_HEADER_RE = re.compile(
+    r"\A(?:theme|themes|name|names|theme ?name|category ?name|tag)\Z", re.I)
+DIGIT_RE = re.compile(r"[0-9\uff10-\uff19]")
 NUMERIC_RE = re.compile(r"\A[-+]?[0-9][0-9,]*(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?\Z")
 THEME_NAME_RE = re.compile(r"\A[A-Z][A-Z0-9_]{0,159}\Z")
 
@@ -283,22 +293,24 @@ def classify_columns(header, rows):
                           "確かめられない）")
     if any(NUMERIC_RE.match(h) for h in header):
         raise ThemesError("1行目に数字だけの値がある（見出しの行が無い形とみなして止まる）")
-    keep, drop = [], []
+    keep, drop, names = [], [], []
     for i, h in enumerate(header):
-        col = [r[i] if i < len(r) else "" for r in rows]
-        if KEEP_HEADER_RE.match(h) and not DROP_HEADER_RE.search(h) and not _is_numeric_column(col):
+        col = [(r[i] if i < len(r) else "").strip() for r in rows]
+        if not KEEP_HEADER_RE.match(h) or DROP_HEADER_RE.search(h):
+            drop.append(h)                          # 件数・頻度の欄と、知らない欄
+        elif NAME_HEADER_RE.match(h):
+            bad = sum(1 for v in col if not THEME_NAME_RE.match(v))
+            if bad:
+                raise ThemesError("テーマの名前の欄「%s」に、名前の形に合わない値が %d 件ある"
+                                  "（件数が紛れている可能性があるので止まる）" % (h, bad))
             keep.append(i)
+            names.append(i)
+        elif any(DIGIT_RE.search(v) for v in col):
+            drop.append(h)                          # 数字の入った値がある欄は欄ごと捨てる
         else:
-            drop.append(h)
-    if not keep:
-        raise ThemesError("残す欄が無い")
-    has_name = False
-    for i in keep:
-        vals = [r[i].strip() for r in rows if i < len(r) and r[i].strip()]
-        if vals and sum(1 for v in vals if THEME_NAME_RE.match(v)) * 2 > len(vals):
-            has_name = True
-    if not has_name:
-        raise ThemesError("テーマの名前の形の欄が無い")
+            keep.append(i)
+    if not names:
+        raise ThemesError("テーマの名前の欄が無い")
     return keep, drop
 
 
