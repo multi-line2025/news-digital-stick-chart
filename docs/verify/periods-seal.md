@@ -1,4 +1,4 @@
-# 期間の区切りと候補の封印を検証する手順（T-005、T-007、T-008、T-009、T-013、T-014、T-017、T-023、T-027、T-031、T-037、T-041）
+# 期間の区切りと候補の封印を検証する手順（T-005、T-007、T-008、T-009、T-013、T-014、T-017、T-023、T-027、T-031、T-037、T-041、T-043）
 
 この文書は、第三者が次のことを自分で確かめるための手順である。
 
@@ -804,6 +804,10 @@ rec, rel, ots_path = seal_gkg_run.start(
 
 - 形は `seal_acquisition.start` と同じで、返り値は（記録、中身のパス、その seq 自身の `.ots` のパス）。drand と ots の通信を使う。
 - `method-access` の記録が無い、`threshold-access` の記録がある、`official` が既にある（`trial` も `official` も書けない）、同じ run_id の `trial` が既にある、`trial_days` が1〜3日でない、のどれかなら、drand を取りにいく前に止まる。取得のコードがコミットされていないときと、run_id がその sha256 の先頭16桁でないときも、drand の前に止まる。そのほかの中身の照合（一覧、除外の規則の記録、ほかの run と同じ入力など）は、drand を取ったあと、書く前に行い、通らなければ何も書かない（T-031 の差し戻し1回目の軽5）。
+- **使い回し（T-043。T-041 の監査 中-1）**：同じ mode・run_id の `gkg-run-start` が既にあり、入力（`code_sha256`・`filelist_sha256`・`method_access_seq`・`exclusion_rule_seq`・`exclusion_rule_record_sha256`・`trial_days`）がすべて同じで、マニフェスト（作業ツリーと HEAD の版）にまだその run-start の行が無ければ、`seal_gkg_run.start` は新しく書かずにその記録を返す（drand は呼ばない）。ots の stamp が失敗したあと（記録は ledger に残る）や、記録を書いたあと run-start の行を書く前に止まったあとの、正直なやり直しで、記録が先へ進めなくならないようにするため。
+  - stamp が失敗したときは、記録に `.ots` が無いので、鎖の検証（`anchors` と `all`）と、次の書く仕組みが止まる。`PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/stamp.py stamp --seq N` で `.ots` を作ってから、同じコマンドでやり直す。
+  - 入力が一つでも違えば、使い回さずに止まる。run-start の行が既にある記録（run が始まっている）も使い回さない。official の記録があれば、trial の記録は使い回さない。そのため、結果を見てから run や入力を選び直す道にはならない。
+  - 収集係の `make_start_hook`（`src/collector/acquire_gkg.py`）は、同じ mode・run_id の記録が既にあれば、`seal_gkg_run.start` を呼ばずにその記録を使う（入力と run-start の行は照らさない）。その場合でも、run-start の行を書いたあとの`verify.py gkg-runs` が、行の指す記録の mode・run_id を照らす。入力の一致は、`seal_gkg_run.start` を呼ぶ形にすれば、封印係の側でも照らせる（収集係への申し送り）。
 
 ### 確かめるコマンド
 
@@ -823,7 +827,9 @@ grep -n '"kind":"gkg-run-start"' sealed/ledger.jsonl | cut -d: -f1 || true
 - 各 run-start の行の `gkg_run_seq` の記録があり、kind が `gkg-run-start`、行の正規の形の sha256 が `gkg_run_record_sha256` と同じ、中身の `mode`（そのマニフェストの mode）と `run_id` が行と同じであること（収集係の `gkg.check_sealed_run` と同じ照らし方）。
 - 試しの run の数え方は「**異なる run_id の数**」である。マニフェストの run-start の行の異なる run_id の数が、その mode の `gkg-run-start` の記録の件数と同じであること。同じ run_id の run-start の行が2行以上あるのは、正直なやり直しとして通す（同じ run の記録を指す）。
 - 記録を書かずに行った試しの run は、run-start の行が記録を指せないか、数が合わないので見つかる。
-- マニフェストが無い mode は照らさず、「照らさなかった」と表示し、`all` の最後の行にも出す（13章の区分表と同じ形。終了コードは 0 のまま）。
+- マニフェストが無い mode で、その mode の `gkg-run-start` の記録が1件以上あれば失敗にする（記録だけあって run-start の行が無い。T-043。T-041 の監査 軽-1）。記録が0件でマニフェストも無い mode は照らさず、「照らさなかった」と表示し、`all` の最後の行にも出す（13章の区分表と同じ形。終了コードは 0 のまま）。マニフェストが通常のファイルでない（symlink やディレクトリ）ときは失敗にする。
+- 正式な run の run-start の行の `trial_run_ids` が、`official` の記録より前の `trial` の記録の run_id の一覧（seq の順）と同じであること（T-043。T-041 の監査 軽-2。src/collector/README.md 6.5.5 の第三者の照らし方3）。`trial_manifest_sha256` は、この照合では照らさない（収集係の関門が正式な run の開始と再開のたびに照らす）。
+- **照らす時機（T-043。T-041 の監査 軽-3）**：試しの run のマニフェストは、run が終わってからコミットされる（src/collector/README.md 6.4）。封印の記録（`gkg-run-start`）は run の前に書かれ、ハッシュは24時間以内に投稿されるので、記録だけ先に公開された間は、マニフェストの行が無いか件数が合わず、この照合は失敗することがある。第三者は、マニフェストのコミットのあとで照らす。
 - 限界：コミットと、記録のハッシュの公開（X への投稿）の前に、記録の末尾の行と中身のファイルとマニフェストの行をまとめて戻すことは見つけられない。戻したあとの記録とマニフェストは、互いにつじつまが合うからである。7章の「別の系列が無かったこと」と同じ限界で、記録の先頭のハッシュを公開した時点より前の部分だけが固まる。末尾の行と中身とマニフェストの行をまとめて戻すことを見つけるには、投稿したハッシュと照らす（docs/verify/x-post.md）。
 
 ### 示せないこと
@@ -900,6 +906,7 @@ rec, rel, ots_path = seal_stats.seal_order1b(project, files, approvals, now, ots
     - 限界(3)：照らせるのは、clone から辿れる commit（`git log --all` に出るもの）だけである。clone に含まれないブランチや、公開していない commit は照らせない。
     - したがって、この照合が示すのは「公開された履歴の中で、マニフェストの行は順番1 の記録を含む commit の後に入り、その行の中身は順番1 の記録を前提に作られた」ことまでで、「区分表の取得そのものが順番1 より後だった」ことの証明ではない。
 - **最初の method-access の前に `stats-order1` の記録が要る**（T-041。T-037 で保留していたもの。収集係のテストが、method-access の前に `stats-order1` と `stats-order1b` の記録を置く形になった（T-032）ので入れた）。`seal_method.py` は、`stats-order1` が無ければ drand を取りにいく前に止まる。書く仕組みを飛ばして足した `method-access` は、`method-access` の関門（`require_method_access`）、ほかの書く仕組み、`verify.py stats-order` と `all` が止める（`ledger.check_stats_order`）。テストは `tests/sealer/test_t037.py` の `TestWithoutOrder1.test_method_and_gkg_refused_without_order1`。
+- **最初の method-access の前に `stats-order1b` の記録も要る**（T-043。T-041 の監査 軽-4）。順番1b が無いまま `method-access` を書くと、そのあと順番1b も `gkg-run-start` も書けず、記録が先へ進めなくなるため。`seal_method.py` は、`stats-order1b` が無ければ drand を取りにいく前に止まり、ほかの書く仕組みと `verify.py stats-order`・`all` も止める。`method-access` の関門（`require_method_access`）では、まだ照らさない。収集係のテスト （`tests/collector/test_acquire_gkg.py` の `test_sealer_gate_stops_without_order1b`）が、順番1b の無い記録で関門を通ったあと `gkg-run-start` の書く仕組みで止まることを確かめているためで、収集係のテストを直すタスクのあとで関門にも入れる。関門で照らさなくても、GKG の取得には `gkg-run-start` が要り、それは順番1b が無ければ drand の前に止まるので、要求は送られない。正規の流れは 順番1 → 順番1b → `method-access` である。
 
 ### 確かめるコマンド
 

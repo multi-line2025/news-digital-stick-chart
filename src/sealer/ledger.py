@@ -1088,6 +1088,8 @@ def check_gkg_manifests(records, read_json, manifests):
     """gkg-run-start の記録と、収集係のマニフェストの run-start の行を照らす（T-041。T-031 の監査 中1 の残り）。
 
     manifests：{"trial": バイト列か None, "official": バイト列か None}（None はマニフェストが無い）。
+    マニフェストが無い mode：その mode の gkg-run-start の記録が 1 件以上あれば LedgerError（記録だけあって
+    行が無い。T-043。T-041 の監査 軽-1）。0 件なら照らさない（返り値の値が None）。
     マニフェストのある mode について、次のどれかなら LedgerError：
       - run-start の行に gkg_run_seq（正の整数）と gkg_run_record_sha256（64 桁）が無い。
       - その seq の記録が無いか、kind が gkg-run-start でない、行の正規の形の sha256 が違う、
@@ -1095,6 +1097,8 @@ def check_gkg_manifests(records, read_json, manifests):
       - run-start の行の異なる run_id の数が、その mode の gkg-run-start の記録の件数と違う
         （試しの run の回数は「異なる run_id の数」。同じ run_id の行が 2 行以上あるのは正直な
         やり直しとして通す）。
+      - official の run-start の行の trial_run_ids が、official の記録より前の trial の記録の run_id の一覧
+        （seq の順）と違う（T-043。T-041 の監査 軽-2。src/collector/README.md 6.5.5 の第三者の照らし方3）。
     返り値: {mode: (異なる run_id の数, 行の数) か None（マニフェストが無い）}。
     """
     by_seq = {r["seq"]: r for r in records}
@@ -1102,6 +1106,12 @@ def check_gkg_manifests(records, read_json, manifests):
     for mode in ("trial", "official"):
         body = manifests.get(mode)
         if body is None:
+            have = [r["seq"] for r in records if r["kind"] == GKG_RUN_KIND
+                    and read_json(r, GKG_RUN_KIND).get("mode") == mode]
+            if have:
+                raise LedgerError("%s が無いのに、mode %s の gkg-run-start の記録がある（seq %s）。記録だけあって"
+                                  "run-start の行が無い（マニフェストをコミットしたあとで照らす）"
+                                  % (GKG_MANIFESTS[mode], mode, ", ".join(map(str, have))))
             out[mode] = None
             continue
         path = GKG_MANIFESTS[mode]
@@ -1134,6 +1144,13 @@ def check_gkg_manifests(records, read_json, manifests):
                                   "合わない" % (path, i, row.get("mode"), row.get("run_id"), seq,
                                                 doc.get("mode"), doc.get("run_id")))
             ids.add(row["run_id"])
+            if mode == "official":
+                want = [read_json(r, GKG_RUN_KIND).get("run_id") for r in records
+                        if r["kind"] == GKG_RUN_KIND and r["seq"] < seq
+                        and read_json(r, GKG_RUN_KIND).get("mode") == "trial"]
+                if row.get("trial_run_ids") != want:
+                    raise LedgerError("%s の %d 行目の trial_run_ids %r が、official の記録（seq %d）より前の trial の"
+                                      "記録の run_id の一覧 %r と違う" % (path, i, row.get("trial_run_ids"), seq, want))
         recs = [r for r in records if r["kind"] == GKG_RUN_KIND
                 and read_json(r, GKG_RUN_KIND).get("mode") == mode]
         if len(ids) != len(recs):
@@ -1469,14 +1486,20 @@ def first_order1(records):
     return _first_of_kind(records, ORDER1_KIND)
 
 
-def check_stats_order(records, read_json):
+def check_stats_order(records, read_json, order1b_before_method=True):
     """順番1・順番1b の記録の数・中身・位置の照合。T-037（差し戻し1回目で改めた）。
     （docs/stats/seal-order1.md 2章の項目2、3章 (3)。docs/verify/periods-seal.md 13章）
       - stats-order1 の記録は 1 件だけ（差し戻し1回目 中5。2 件目は書く仕組みも止める。
         新しい版の扱いは別に決める）。
       - 各記録の中身が check_order1_doc・check_order1b_doc に通る。
       - stats-order1・stats-order1b の記録は、最初の method-access より前にある。
-      - 最初の method-access の前に、stats-order1 の記録がある（T-041）。
+      - 最初の method-access の前に、stats-order1 の記録がある（T-041）と、stats-order1b の記録がある（T-043）。
+        order1b_before_method が偽なら、後者は照らさない。method-access の関門（require_method_access）
+        だけが偽で呼ぶ：収集係のテスト（tests/collector/test_acquire_gkg.py の
+        test_sealer_gate_stops_without_order1b）が、順番1b の無い記録で関門を通ったあと gkg-run-start の
+        書く仕組みで止まることを確かめているため（収集係のテストを直したあとで、関門でも照らす。
+        GKG の取得は gkg-run-start が要り、それは順番1b が無ければ drand の前に止まるので、関門で
+        照らさなくても要求は送られない）。書く仕組み（seal_method は drand の前）と verify は照らす。
       - 最初の gkg-run-start の前に、stats-order1b の記録がある。
     区分表の取得は ledger に記録を書かない（収集係はマニフェスト data/manifest/gdelt-themes.jsonl に
     書く）ので、区分表の取得との前後は git の履歴で照らす（check_order1_before_themes。verify と
@@ -1502,6 +1525,11 @@ def check_stats_order(records, read_json):
         # T-041：収集係のテストが method-access の前に順番1・1b を置く形になったので、T-037 で保留した
         # 「順番1 が無ければ method-access も止まる」を入れた
         raise LedgerError("最初の method-access の記録（seq %d）より前に、stats-order1（順番1）の記録が無い"
+                          % m["seq"])
+    if order1b_before_method and m is not None and not any(r["seq"] < m["seq"] for r in o1b):
+        # T-043（T-041 の監査 軽-4）：順番1b が無いまま method-access を書くと、そのあと順番1b も
+        # gkg-run-start も書けず、記録が先へ進めなくなるので止める
+        raise LedgerError("最初の method-access の記録（seq %d）より前に、stats-order1b（順番1b）の記録が無い"
                           % m["seq"])
     if g is not None and not any(r["seq"] < g["seq"] for r in o1b):
         raise LedgerError("最初の gkg-run-start の記録（seq %d）より前に、stats-order1b（順番1b）の記録が無い"
@@ -2223,8 +2251,10 @@ def require_method_access():
         check_acquisition_pairs(records, refs)
         check_candidates_ready(root, records, rec["seq"])
         check_horizon_embargo(records, lambda r, role: read_target_json(root, r, role))
-        # T-037：順番1・1b の位置（method-access より前にだけある、など）
-        check_stats_order(records, lambda r, role: read_target_json(root, r, role))
+        # T-037：順番1・1b の位置（method-access より前にだけある、など）。順番1b が method-access の前に
+        # あることは、関門では照らさない（T-043。check_stats_order の注記）
+        check_stats_order(records, lambda r, role: read_target_json(root, r, role),
+                          order1b_before_method=False)
         # T-031（T-027 の監査 中1）：仮の採用（periods-triggers の最後の記録）での deadline_status
         check_deadline_statuses(records, lambda r, role: read_target_json(root, r, role),
                                 provisional=True)

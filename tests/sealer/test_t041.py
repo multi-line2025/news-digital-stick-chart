@@ -18,8 +18,10 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
+import subprocess  # noqa: E402
 import test_ledger as tl  # noqa: E402
 import test_t031 as t31  # noqa: E402
+import seal_gkg_run  # noqa: E402
 from test_ledger import T0, H  # noqa: E402
 
 ledger = tl.ledger
@@ -28,17 +30,21 @@ TRIAL = ledger.GKG_MANIFESTS["trial"]
 OFFICIAL = ledger.GKG_MANIFESTS["official"]
 
 
+class FailStamp(t31.tw.FakeOts):
+    """ots stamp だけが失敗する runner（監査のプローブ scratchpad/a41probe と同じ）。"""
+
+    def __call__(self, cmd, input=None, capture_output=True, timeout=None):
+        if "stamp" in cmd:
+            return subprocess.CompletedProcess(cmd, 1, stdout=b"", stderr=b"calendar down")
+        return super().__call__(cmd, input=input, capture_output=capture_output, timeout=timeout)
+
+
 class TestGkgManifests(t31.GkgCase):
     change_code = t31.TestGkgRunStart.change_code     # 取得のコードを直してコミットする（run_id が変わる）
 
     def row(self, rec, **over):
-        """run-start の行（収集係の gkg.py の形のうち、照らす欄だけ）。"""
-        doc = self.doc_of([t for t in rec["targets"]][0]["path"])
-        r = {"kind": "run-start", "mode": doc["mode"], "run_id": doc["run_id"],
-             "gkg_run_seq": rec["seq"],
-             "gkg_run_record_sha256": hashlib.sha256(ledger.canonical_line(rec)).hexdigest()}
-        r.update(over)
-        return r
+        """run-start の行（収集係の gkg.py の形のうち、照らす欄だけ。正式な run は trial_run_ids も）。"""
+        return self.manifest_row(rec, **over)
 
     def write_manifest(self, rel, rows):
         full = os.path.join(self.root, rel)
@@ -63,13 +69,99 @@ class TestGkgManifests(t31.GkgCase):
         out = self.verify_ok("all")
         self.assertNotIn("ただし、次は照らさなかった", out)
 
-    def test_missing_manifest_is_reported(self):
+    def test_missing_manifest_without_records_is_reported(self):
+        """記録が 0 件でマニフェストも無いときは、今のまま「照らさなかった」（終了コード 0）。"""
         self.ready()
-        self.start_run(T0 + 4 * H)
         out = self.verify_ok("all")
         self.assertIn("照らさなかった：%s が無いので" % TRIAL, out)
         self.assertIn("ただし、次は照らさなかった（終了コード 0 は、照らした検査がすべて通ったことだけを示す）：", out)
         self.assertIn("%s の run-start の行と gkg-run-start の記録の照合（マニフェストが無い）" % OFFICIAL, out)
+
+    def test_missing_manifest_with_records_fails(self):
+        """軽-1：その mode の記録が 1 件以上あるのにマニフェストが無ければ失敗。"""
+        self.ready()
+        t1, _r, _o = self.start_run(T0 + 4 * H, manifest=False)
+        self.verify_fails(("gkg-runs", "all"), "%s が無いのに、mode trial の gkg-run-start の記録がある（seq %d）"
+                          % (TRIAL, t1["seq"]))
+
+    def test_manifest_not_regular_file_fails(self):
+        """軽-1：マニフェストが symlink やディレクトリなら失敗。"""
+        self.ready()
+        os.makedirs(os.path.join(self.root, TRIAL))
+        self.verify_fails(("gkg-runs",), "%s が通常のファイルでない" % TRIAL)
+        self.tearDown()
+        self.setUp()
+        self.ready()
+        other = os.path.join(self.root, "elsewhere.jsonl")
+        open(other, "w").close()
+        os.symlink(other, os.path.join(self.root, TRIAL))
+        self.verify_fails(("gkg-runs",), "%s が通常のファイルでない" % TRIAL)
+
+    def test_official_trial_run_ids_checked(self):
+        """軽-2：正式な run の run-start の行の trial_run_ids が、official より前の trial の記録の run_id の一覧
+        と同じでなければ失敗。"""
+        self.ready()
+        t1, _r, _o = self.start_run(T0 + 4 * H)
+        off, _r, _o = self.start_run(T0 + 5 * H, mode="official", manifest=False)
+        self.write_manifest(OFFICIAL, [self.row(off)])
+        self.verify_ok("gkg-runs")
+        for bad in ([], ["0" * 16], None):
+            with self.subTest(bad=bad):
+                self.write_manifest(OFFICIAL, [self.row(off, trial_run_ids=bad)])
+                self.verify_fails(("gkg-runs",), "1 行目の trial_run_ids %r が、official の記録（seq %d）より前の"
+                                  % (bad, off["seq"]))
+
+    def test_probe_a41_stamp_failure_then_retry(self):
+        """中-1：監査のプローブの流れ（stamp の失敗 → .ots を stamp.py で作り直す → 同じ run_id でやり直す →
+        別の run）で、記録が先へ進めなくならず、verify が通る。"""
+        self.ready()
+        with self.assertRaises(ledger.LedgerError):
+            seal_gkg_run.start(self.root, "trial", t31.tw.CODE_REL, self.code_sha()[:16], t31.KEPT,
+                               self.method_rec["seq"], t31.TRIAL_DAYS, self.excl()[0], self.excl()[1],
+                               T0 + 4 * H, "ots", drand_fetch=t31.tw.FakeDrand(T0 + 4 * H),
+                               runner=FailStamp())
+        recs = [r for r in self.records() if r["kind"] == ledger.GKG_RUN_KIND]
+        self.assertEqual(len(recs), 1)
+        # .ots が無いうちは、鎖の検証が止まる（書く仕組みも）
+        self.verify_fails(("anchors",), "時刻証明")
+        tl.stamp.stamp_seq(self.ledger, recs[0]["seq"], "ots", runner=t31.tw.FakeOts())
+        # 同じ run_id でやり直す：新しく書かずに、同じ記録を返す（drand は呼ばない）
+        before = self.ledger_bytes()
+        again, _rel, _o = seal_gkg_run.start(
+            self.root, "trial", t31.tw.CODE_REL, self.code_sha()[:16], t31.KEPT, self.method_rec["seq"],
+            t31.TRIAL_DAYS, self.excl()[0], self.excl()[1], T0 + 5 * H, "ots",
+            drand_fetch=t31.t23.t17.NoCall(), runner=t31.tw.FakeOts())
+        self.assertEqual(again, recs[0])
+        self.assertEqual(self.ledger_bytes(), before)
+        self.append_manifest(again)
+        # 別の run（コードを直したもの）
+        self.change_code()
+        self.start_run(T0 + 6 * H)
+        out = self.verify_ok("all")
+        self.assertIn("異なる run_id 2 個", out)
+
+    def test_reuse_refused_when_input_differs(self):
+        """中-1：使い回せるのは、入力がすべて同じで、まだ run-start の行が無い記録だけ。"""
+        self.ready()
+        t1, _r, _o = self.start_run(T0 + 4 * H, manifest=False)
+        self.assert_writer_refuses(lambda: self.start_run(T0 + 5 * H, filelist_sha256="d" * 64),
+                                   "filelist_sha256")
+        self.assert_writer_refuses(lambda: self.start_run(T0 + 5 * H, days=["2015-03-02"]),
+                                   "trial_days が違う")
+        self.append_manifest(t1)
+        self.assert_writer_refuses(lambda: self.start_run(T0 + 5 * H, manifest=False),
+                                   "run-start の行が既にある")
+
+    def test_reuse_refused_when_row_only_in_head(self):
+        """run-start の行が HEAD の版のマニフェストにだけあっても、使い回さない。"""
+        self.ready()
+        t1, _r, _o = self.start_run(T0 + 4 * H)
+        self.commit("マニフェスト")
+        with open(os.path.join(self.root, TRIAL), "w"):
+            pass
+        self.assert_writer_refuses(lambda: self.start_run(T0 + 5 * H, manifest=False),
+                                   "run-start の行が既にある")
+        self.assertTrue(t1)
 
     def test_trial_run_without_record_fails(self):
         """記録を書かずに行った試しの run（マニフェストに run-start がある）は、数が合わないので止まる。"""
@@ -132,6 +224,22 @@ class TestDocT041(unittest.TestCase):
                        "最初の method-access の前に `stats-order1` の記録が要る"):
             self.assertIn(phrase, self.text)
         self.assertNotIn("`method-access` の前に `stats-order1` を求めることは、まだしていない", self.text)
+
+
+class TestDocT043(unittest.TestCase):
+    def setUp(self):
+        with open(DOC, encoding="utf-8") as f:
+            self.text = f.read()
+
+    def test_statements(self):
+        for phrase in ("使い回し（T-043。T-041 の監査 中-1）", "stamp.py stamp --seq N",
+                       "結果を見てから run や入力を選び直す道にはならない", "`make_start_hook`",
+                       "記録が0件でマニフェストも無い mode は照らさず", "通常のファイルでない",
+                       "`trial_run_ids` が、`official` の記録より前の `trial` の記録の run_id の一覧",
+                       "第三者は、マニフェストのコミットのあとで照らす",
+                       "最初の method-access の前に `stats-order1b` の記録も要る"):
+            self.assertIn(phrase, self.text)
+        self.assertNotIn("- マニフェストが無い mode は照らさず、", self.text)
 
 
 if __name__ == "__main__":

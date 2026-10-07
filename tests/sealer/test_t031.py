@@ -14,6 +14,7 @@
 """
 
 import hashlib
+import json
 import os
 import re
 import sys
@@ -49,8 +50,7 @@ class GkgCase(t23.JCase):
         self.seal()
         self.step3(T0 + H)
         # T-037：gkg-run-start の前に順番1・順番1b が要り、どちらも method-access より前に置く
-        # （順番1 は step3 が足す）
-        self.add_order1b(T0 + 2 * H)
+        # （どちらも step3 が足す。T-043）
         self.method_rec, _r, _o = self.method(T0 + 3 * H)
         self.commit("手順4まで")
 
@@ -61,15 +61,44 @@ class GkgCase(t23.JCase):
         rec = [r for r in self.records() if r["seq"] == seq][0]
         return seq, hashlib.sha256(ledger.canonical_line(rec)).hexdigest()
 
-    def start_run(self, now, mode="trial", days=TRIAL_DAYS, **over):
+    def start_run(self, now, mode="trial", days=TRIAL_DAYS, manifest=True, **over):
         ex_seq, ex_sha = self.excl()
         args = dict(mode=mode, code_rel=tw.CODE_REL, run_id=self.code_sha()[:16],
                     filelist_sha256=KEPT, method_access_seq=self.method_rec["seq"],
                     trial_days=days if mode == "trial" else None, exclusion_rule_seq=ex_seq,
                     exclusion_rule_record_sha256=ex_sha)
         args.update(over)
-        return seal_gkg_run.start(self.root, now=now, ots_cmd="ots", drand_fetch=tw.FakeDrand(now),
-                                  runner=tw.FakeOts(), **args)
+        got = seal_gkg_run.start(self.root, now=now, ots_cmd="ots", drand_fetch=tw.FakeDrand(now),
+                                 runner=tw.FakeOts(), **args)
+        if manifest:
+            self.append_manifest(got[0])
+        return got
+
+    # ---- 収集係のマニフェストの run-start の行（T-043：記録があるのに行が無ければ verify が止まるので、
+    # 収集係と同じく、記録を書いたら行を足す）
+    def manifest_row(self, rec, **over):
+        doc = ledger.read_target_json(self.root, rec, ledger.GKG_RUN_KIND)
+        row = {"kind": "run-start", "mode": doc["mode"], "run_id": doc["run_id"],
+               "gkg_run_seq": rec["seq"],
+               "gkg_run_record_sha256": hashlib.sha256(ledger.canonical_line(rec)).hexdigest()}
+        if doc["mode"] == "official":
+            row["trial_run_ids"] = [ledger.read_target_json(self.root, r, ledger.GKG_RUN_KIND)["run_id"]
+                                    for r in self.records() if r["kind"] == ledger.GKG_RUN_KIND
+                                    and r["seq"] < rec["seq"]
+                                    and ledger.read_target_json(self.root, r, ledger.GKG_RUN_KIND)["mode"]
+                                    == "trial"]
+        row.update(over)
+        return row
+
+    def append_manifest(self, rec, **over):
+        doc = ledger.read_target_json(self.root, rec, ledger.GKG_RUN_KIND)
+        rel = ledger.GKG_MANIFESTS[doc["mode"]]
+        full = os.path.join(self.root, rel)
+        with open(full, "a", encoding="utf-8") as f:
+            f.write(json.dumps(self.manifest_row(rec, **over), sort_keys=True) + "\n")
+        for other in ledger.GKG_MANIFESTS.values():      # もう一方の mode は空のマニフェストを置く
+            if not os.path.exists(os.path.join(self.root, other)):
+                open(os.path.join(self.root, other), "a").close()
 
     def raw_run(self, now, doc_over=None, mode="trial"):
         """gkg-run-start を、書く仕組みを通さずに足す（書く仕組みを飛ばした場合の再現）。"""
@@ -132,6 +161,11 @@ class TestGkgRunStart(GkgCase):
         self.start_run(T0 + 4 * H)
         off, _rel, _o = self.start_run(T0 + 5 * H, mode="official")
         self.verify_ok("gkg-runs")
+        # 同じ run_id の trial（使い回しの候補）は、official があるので使い回さない（T-043）
+        self.assert_writer_refuses(lambda: self.start_run(T0 + 6 * H),
+                                   "official の記録があるので、試しの run の記録")
+        # 別の run_id の trial は、official より後には書けない
+        self.change_code()
         self.assert_writer_refuses(lambda: self.start_run(T0 + 6 * H),
                                    "official の記録（seq %d）より後に" % off["seq"])
         self.assert_writer_refuses(lambda: self.start_run(T0 + 6 * H, mode="official"),
@@ -280,7 +314,8 @@ class TestGkgRunStart(GkgCase):
             lambda: seal_gkg_run.start(self.root, "trial", tw.CODE_REL, self.code_sha()[:16], KEPT,
                                        self.method_rec["seq"], TRIAL_DAYS, self.excl()[0], self.excl()[1],
                                        T0 + 5 * H, "ots", runner=tw.FakeOts(), **nocall),
-            "同じ run_id %s の trial の記録（seq %d）が既にある" % (self.code_sha()[:16], tr["seq"]))
+            # T-043：同じ run_id の trial は使い回しを試み、run-start の行が既にあるので止まる
+            "gkg-run-start（seq %d）には run-start の行が既にある" % tr["seq"])
         self.change_code()
         import datetime as _dt
         d0 = _dt.date(2015, 3, 2)
@@ -332,7 +367,8 @@ class TestGkgRunStart(GkgCase):
                                            TRIAL_DAYS if mode == "trial" else None,
                                            self.excl()[0], self.excl()[1], T0 + 5 * H, "ots",
                                            drand_fetch=t23.t17.NoCall(), runner=tw.FakeOts()),
-                "official")
+                # T-043：同じ run_id の official は使い回しを試み、run-start の行があるので止まる
+                "official" if mode == "trial" else "run-start の行が既にある")
 
     def test_honest_flow_passes(self):
         """正直な流れ：試しの run 2 回（コードを直して）、正式な run 1 回、そのあと threshold-access。"""

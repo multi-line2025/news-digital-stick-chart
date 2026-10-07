@@ -1026,10 +1026,14 @@ class SealCase(unittest.TestCase):
         return self._append_doc(ledger.ORDER1B_KIND, self.order_doc(ledger.ORDER1B_KIND, **over), now)
 
     def ensure_order1(self, now):
+        """method-access の前に要る順番1（T-037・T-041）と順番1b（T-043）を、無ければ足す。"""
         recs = ledger.verify_chain(ledger.read_ledger(self.ledger))
+        got = None
         if not any(r["kind"] == ledger.ORDER1_KIND for r in recs):
-            return self.add_order1(now)
-        return None
+            got = self.add_order1(now)
+        if not any(r["kind"] == ledger.ORDER1B_KIND for r in recs):
+            self.add_order1b(now)
+        return got
 
     def add_cand(self, now, output=None):
         """candidates の記録を、書く仕組みを通さずに足す（T-014。acquisition-start の前提）。

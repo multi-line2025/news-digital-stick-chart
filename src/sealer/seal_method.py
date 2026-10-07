@@ -9,7 +9,7 @@ method-access は、手法を作る期間の区画（periods の 1 件目の出�
     PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_method.py seal
         1. 記録の鎖と .ots を検証する。periods の記録が無ければ止める。
         2. candidates の記録と acquisition-result の記録が、それぞれ 1 件以上なければ止める。
-           stats-order1（順番1）の記録が無ければ止める（T-041）。どれも drand を取りにいく前に止める。
+           stats-order1（順番1。T-041）か stats-order1b（順番1b。T-043）の記録が無ければ止める。どれも drand を取りにいく前に止める。
         3. drand（quicknet）の最新の回を取る。
         4. 中身 {"kind", "step": 4, "block_start", "block_end", "drand", "ledger_head"} を作る。
            block_start・block_end は periods の 1 件目の出力の method の区画で、引数では渡せない。
@@ -52,6 +52,10 @@ def seal(project, now, ots_cmd, drand_fetch=None, runner=subprocess.run):
     if ledger.first_order1(records) is None:
         # T-041：method-access の前に順番1（stats-order1）が要る。drand を取りにいく前に止める
         raise ledger.LedgerError("stats-order1（順番1）の記録が無い。手順4は、順番1 の封印の後に行う決まり。"
+                                 "追記しない")
+    if not any(r["kind"] == ledger.ORDER1B_KIND for r in records):
+        # T-043（T-041 の監査 軽-4）：順番1b も method-access の前に要る。drand を取りにいく前に止める
+        raise ledger.LedgerError("stats-order1b（順番1b）の記録が無い。手順4は、順番1b の封印の後に行う決まり。"
                                  "追記しない")
     block_start, block_end = ledger.method_block_of(project, records)
     doc = {

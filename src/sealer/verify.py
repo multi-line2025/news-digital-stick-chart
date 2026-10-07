@@ -506,7 +506,10 @@ def gkg_manifests_check(st):
     for mode, rel in ledger.GKG_MANIFESTS.items():
         path = os.path.join(st.root, rel)
         manifests[mode] = None
-        if os.path.isfile(path) and not os.path.islink(path):
+        if os.path.lexists(path):
+            # T-043（T-041 の監査 軽-1）：通常のファイルでない（symlink・ディレクトリなど）なら失敗
+            if os.path.islink(path) or not os.path.isfile(path):
+                raise ledger.LedgerError("%s が通常のファイルでない（symlink かディレクトリなど）" % rel)
             with open(path, "rb") as f:
                 manifests[mode] = f.read()
     got = ledger.check_gkg_manifests(st.records, st.file_json, manifests)

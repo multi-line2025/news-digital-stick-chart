@@ -301,6 +301,10 @@ class TestDocProcedure(unittest.TestCase):
             # T-037：method-access の前には順番1（stats-order1）が要る（仮の記録を足す）
             self._append_doc(ledger.ORDER1_KIND,
                              lambda d, s: tl.order_doc_for(d, s, ledger.ORDER1_KIND))
+        if ledger.ORDER1B_KIND not in self._kinds():
+            # T-043：method-access の前には順番1b（stats-order1b）も要る（仮の記録を足す）
+            self._append_doc(ledger.ORDER1B_KIND,
+                             lambda d, s: tl.order_doc_for(d, s, ledger.ORDER1B_KIND))
         m = self._append_doc("method-access", self._drand("method-access"))
         self.git("add", "-A")
         self.git("commit", "-q", "-m", "step 3 and method")

@@ -28,6 +28,14 @@ docs/verify/periods-seal.md 12章。
                                    （テストだけ）
     drand_fetch・runner            通信の差し替え（テストだけ）
 
+使い回し（T-043。T-041 の監査 中-1）
+  同じ mode・run_id の gkg-run-start が既にあり、入力（上の 7 つ）がすべて同じで、マニフェスト（作業
+  ツリーと HEAD の版）にまだその run-start の行が無ければ、新しく書かずに、その記録（と中身のパス・
+  .ots のパス）を返す。ots の stamp が失敗したあと（記録は残り、.ots は
+  `stamp.py stamp --seq N` で後から作る。作るまでは鎖の検証が止まる）や、記録を書いたあと run-start の
+  行を書く前に止まったあとの、正直なやり直しで、記録が先へ進めなくならないようにするため。入力が
+  一つでも違えば止まるので、結果を見てから入力を選び直す道にはならない。
+
 いつ呼ぶか（T-031 の差し戻し1回目の中3）
   gkg-run-start は、収集係のマニフェストの run-start の行 1 件につき 1 件だけ書く。run の最初の実行
   （run-start の行を書く実行）で、要求を送る前に 1 回だけ呼び、同じ run の再開では呼ばない。
@@ -44,8 +52,11 @@ docs/verify/periods-seal.md 12章。
     （T-037。T-031 の監査 中2）。
   - threshold-access の記録がある（閾値を決める期間に触れたあとで、手法を作る期間の GKG の
     取得を始めない。T-031 の中2）。
-  - official の記録が既にある（正式な run は 1 件だけ。trial は official より前だけ）。
-  - trial で、同じ run_id の trial の記録が既にある。trial_days が 1〜3 日でない（T-031 の中3）。
+  - official の記録が既にある（正式な run は 1 件だけ。trial は official より前だけ）。ただし下の
+    「使い回し」に当たるときは、新しく書かずに既にある記録を返す。
+  - 同じ mode・run_id の記録が既にあるのに、入力（code_sha256・filelist_sha256・method_access_seq・
+    exclusion_rule_seq・その sha256・trial_days）が違うか、その記録に run-start の行が既にある。
+    trial_days が 1〜3 日でない（T-031 の中3）。
   - 取得のコードが、HEAD のコミットの中身と同じでない。run_id がその sha256 の先頭 16 桁でない。
   drand を取ったあと、書く前に止まるもの（seal_records.check_new）：
   - 中身の照合（ledger.check_gkg_run_doc・check_gkg_runs）に通らない。例えば、一覧の sha256 が
@@ -65,6 +76,7 @@ CLI（プロジェクトのルートで。ots と drand の通信を使うので
 
 import argparse
 import datetime
+import json
 import os
 import subprocess
 import sys
@@ -101,34 +113,92 @@ def _precheck(project, records, mode):
     if cut is not None:
         raise ledger.LedgerError("threshold-access の記録（seq %d）がある。閾値を決める期間に触れたあとで、"
                                  "手法を作る期間の GKG の取得を始めない。追記しない" % cut["seq"])
-    runs = ledger.check_gkg_runs(records, lambda r, role: ledger.read_target_json(project, r, role))
-    modes = [(r["seq"], d["mode"]) for r, d in runs] + [(len(records) + 1, mode)]
-    ledger.check_gkg_run_modes(modes)
-    return runs
+    return ledger.check_gkg_runs(records, lambda r, role: ledger.read_target_json(project, r, role))
+
+
+def _manifest_run_start_rows(project, mode):
+    """作業ツリーと HEAD の版のマニフェスト（その mode）の run-start の行。無ければ空。"""
+    rel = ledger.GKG_MANIFESTS[mode]
+    bodies = []
+    full = os.path.join(project, rel)
+    if os.path.isfile(full) and not os.path.islink(full):
+        with open(full, "rb") as f:
+            bodies.append(f.read())
+    r = subprocess.run(["git", "-C", project, "show", "HEAD:%s" % rel], capture_output=True)
+    if r.returncode == 0:
+        bodies.append(r.stdout)
+    rows = []
+    for body in bodies:
+        for raw in body.split(b"\n"):
+            try:
+                row = json.loads(raw.decode("utf-8")) if raw.strip() else None
+            except (UnicodeDecodeError, ValueError):
+                raise ledger.LedgerError("%s に JSON として読めない行がある。使い回さない" % rel) from None
+            if isinstance(row, dict) and row.get("kind") == "run-start":
+                rows.append(row)
+    return rows
+
+
+def _reuse(project, records, runs, mode, run_id, code_sha, filelist_sha256, method_access_seq,
+           trial_days, exclusion_rule_seq, exclusion_rule_record_sha256, ots_cmd, runner):
+    """同じ mode・run_id の gkg-run-start が既にあれば、それを使い回す（T-043。T-041 の監査 中-1）。
+
+    stamp が失敗したあと（記録は ledger に残り、.ots は stamp.py stamp --seq N で後から作る）や、
+    記録を書いたあと run-start の行を書く前に止まったあとの、正直なやり直しのため。使い回すのは、
+    次のすべてが同じで、まだ run-start の行が無い記録だけ（結果を見てから run を選び直す道は作らない）：
+    mode・run_id・code_sha256・filelist_sha256・method_access_seq・exclusion_rule_seq・
+    exclusion_rule_record_sha256・trial_days。run-start の行は、作業ツリーと HEAD の版のマニフェストで探す。
+    trial は、official の記録が既にあれば使い回さない（試しの run は正式な run の前だけ）。
+    返り値: (記録, 中身のパス, .ots のパス) か None（使い回す記録が無い）。
+    """
+    same = [(r, d) for r, d in runs if d["mode"] == mode and d["run_id"] == run_id]
+    if not same:
+        return None
+    rec, d = same[0]
+    want = {"code_sha256": code_sha, "filelist_sha256": filelist_sha256,
+            "method_access_seq": method_access_seq, "exclusion_rule_seq": exclusion_rule_seq,
+            "exclusion_rule_record_sha256": exclusion_rule_record_sha256,
+            "trial_days": None if trial_days is None else list(trial_days)}
+    diff = sorted(k for k, v in want.items() if d.get(k) != v)
+    if diff:
+        raise ledger.LedgerError("同じ mode・run_id %s の gkg-run-start（seq %d）が既にあるが、%s が違う。"
+                                 "使い回さず、追記もしない" % (run_id, rec["seq"], "・".join(diff)))
+    if mode == "trial" and any(x["mode"] == "official" for _r, x in runs):
+        raise ledger.LedgerError("official の記録があるので、試しの run の記録（seq %d）は使い回さない。追記しない"
+                                 % rec["seq"])
+    for row in _manifest_run_start_rows(project, mode):
+        if row.get("gkg_run_seq") == rec["seq"] or row.get("run_id") == run_id:
+            raise ledger.LedgerError("gkg-run-start（seq %d）には run-start の行が既にある（run は始まっている）。"
+                                     "再開では書かない。使い回さない" % rec["seq"])
+    rel = ledger.output_target(rec, ledger.GKG_RUN_KIND)["path"]
+    ots_path = os.path.join(project, "sealed", ledger.ots_name(rec["seq"]))
+    return rec, rel, ots_path
 
 
 def start(project, mode, code_rel, run_id, filelist_sha256, method_access_seq, trial_days,
           exclusion_rule_seq, exclusion_rule_record_sha256, now, ots_cmd, drand_fetch=None,
           runner=subprocess.run):
-    """gkg-run-start を 1 件追記する。返り値: (記録, 中身のパス, .ots のパス か None)。"""
+    """gkg-run-start を 1 件追記する（または、同じ run の記録を使い回す。_reuse）。
+    返り値: (記録, 中身のパス, .ots のパス か None)。"""
+    project = os.path.abspath(project)
     data, records = seal_records.load_checked(project, ots_cmd, runner=runner)
     runs = _precheck(project, records, mode)
     o1 = ledger.first_order1(records)
     if exclusion_rule_seq != o1["seq"]:
         raise ledger.LedgerError("exclusion_rule_seq %r が、除外の規則の kind（%s）の最初の記録の seq %d でない。"
                                  "追記しない" % (exclusion_rule_seq, ledger.ORDER1_KIND, o1["seq"]))
-    if mode == "trial":
-        same = [r["seq"] for r, d in runs if d["mode"] == "trial" and d["run_id"] == run_id]
-        if same:
-            raise ledger.LedgerError("同じ run_id %s の trial の記録（seq %d）が既にある。gkg-run-start は run の"
-                                     "最初の実行で 1 件だけ書き、再開では書かない。追記しない"
-                                     % (run_id, same[0]))
-        if not isinstance(trial_days, (list, tuple)) or not 0 < len(trial_days) <= ledger.TRIAL_DAYS_MAX:
-            raise ledger.LedgerError("trial_days は 1〜%d 日の一覧。追記しない" % ledger.TRIAL_DAYS_MAX)
+    if mode == "trial" and (not isinstance(trial_days, (list, tuple))
+                            or not 0 < len(trial_days) <= ledger.TRIAL_DAYS_MAX):
+        raise ledger.LedgerError("trial_days は 1〜%d 日の一覧。追記しない" % ledger.TRIAL_DAYS_MAX)
     code_path, code_sha = seal_acquisition.committed_code_sha256(project, code_rel)
     if run_id != code_sha[:16]:
         raise ledger.LedgerError("run_id %r が、取得のコードの sha256 の先頭 16 桁 %s と違う。追記しない"
                                  % (run_id, code_sha[:16]))
+    reused = _reuse(project, records, runs, mode, run_id, code_sha, filelist_sha256, method_access_seq,
+                    trial_days, exclusion_rule_seq, exclusion_rule_record_sha256, ots_cmd, runner)
+    if reused is not None:
+        return reused
+    ledger.check_gkg_run_modes([(r["seq"], d["mode"]) for r, d in runs] + [(len(records) + 1, mode)])
     doc = {
         "kind": ledger.GKG_RUN_KIND,
         "step": STEP,

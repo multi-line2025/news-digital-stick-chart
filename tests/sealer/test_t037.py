@@ -231,7 +231,15 @@ class TestOrder1Flow(StatsCase):
         self.assertEqual(bdoc["order1_ref"]["seq"], o1["seq"])
         m, _r, _o = self.method(T0 + 6 * H)
         self.commit("手順4")
-        self.gkg_run(T0 + 7 * H, m["seq"])
+        g, _r, _o = self.gkg_run(T0 + 7 * H, m["seq"])
+        # T-043：記録があるのにマニフェストが無ければ verify が止まるので、収集係と同じく行を書く
+        os.makedirs(os.path.join(self.root, "data", "manifest"), exist_ok=True)
+        with open(os.path.join(self.root, ledger.GKG_MANIFESTS["trial"]), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"kind": "run-start", "mode": "trial", "run_id": self.gkg_sha()[:16],
+                                "gkg_run_seq": g["seq"],
+                                "gkg_run_record_sha256": hashlib.sha256(ledger.canonical_line(g)).hexdigest()})
+                    + "\n")
+        open(os.path.join(self.root, ledger.GKG_MANIFESTS["official"]), "w").close()
         self.commit("試しの run")
         out = self.verify_ok("all", "--rev", "auto")
         self.assertIn("stats-order1 seq %d（順番1）: HEAD %s" % (o1["seq"], doc["head"]), out)
@@ -334,13 +342,31 @@ class TestWithoutOrder1(StatsCase):
                      "除外の規則の kind（stats-order1）の記録が無い")
         self.refuses(lambda: self.order1(T0 + 4 * H), "method-access の記録がある")
 
-    def test_gkg_refused_without_order1b(self):
+    def test_method_and_gkg_refused_without_order1b(self):
+        """T-043（T-041 の監査 軽-4）：順番1b が無ければ、method-access の書く仕組み（drand の前）と verify が
+        止まる（関門はまだ照らさない）。書く仕組みを飛ばして method-access を足しても、gkg-run-start は止まる。"""
         self.base()
         self.order1()
-        m, _r, _o = self.method(T0 + 4 * H)
-        self.commit("手順4")
-        self.refuses(lambda: self.gkg_run(T0 + 5 * H, m["seq"], nocall=True),
-                     "順番1b（stats-order1b）の記録が無い")
+        self.refuses(lambda: seal_method.seal(self.root, T0 + 4 * H, "ots", drand_fetch=t17.NoCall(),
+                                              runner=tw.FakeOts()),
+                     "stats-order1b（順番1b）の記録が無い。手順4は、順番1b の封印の後")
+        m = self._append_doc(ledger.METHOD_ACCESS_KIND,
+                             self._drand_doc(ledger.METHOD_ACCESS_KIND, ROUND, None), T0 + 4 * H)
+        self.commit("手順4（書く仕組みを飛ばした）")
+        msg = "最初の method-access の記録（seq %d）より前に、stats-order1b（順番1b）の記録が無い" % m
+        # 関門では、まだ照らさない（収集係のテストとの兼ね合い。ledger.check_stats_order の注記）
+        self.method_gate()
+        self.verify_fails(("stats-order", "all"), msg)
+        self.refuses(lambda: self.gkg_run(T0 + 5 * H, m, nocall=True), "順番1b（stats-order1b）の記録が無い")
+
+    def test_order1_order1b_method_flow_passes(self):
+        """順番1 → 順番1b → method-access の正規の流れは通る。"""
+        self.base()
+        self.order1()
+        self.order1b()
+        self.method(T0 + 5 * H)
+        self.method_gate()
+        self.verify_ok("stats-order")
 
 
 # ---------------------------------------------------------------- 4. 順番1 の書く前の照合
@@ -409,6 +435,7 @@ class TestOrder1Refusals(StatsCase):
     def test_method_access_refused(self):
         self.base()
         self.add_order1(T0 + 3 * H)
+        self.add_order1b(T0 + 3 * H)
         self.method(T0 + 4 * H)
         self.commit("手順4")
         self.refuses(lambda: self.order1(), "stats-order1 の記録が既にある")
@@ -557,11 +584,13 @@ class TestOrder1bRefusals(StatsCase):
         self.refuses(lambda: self.order1b(), "owner_decision の出どころが、決まった出どころ")
 
     def test_after_method_access_refused(self):
+        """method-access のあとでは、順番1b の 2 件目も書けない。"""
         self.base()
         self.order1()
-        self.method(T0 + 4 * H)
+        self.order1b()
+        self.method(T0 + 5 * H)
         self.commit("手順4")
-        self.refuses(lambda: self.order1b(T0 + 5 * H), "method-access の記録がある")
+        self.refuses(lambda: self.order1b(T0 + 6 * H), "method-access の記録がある")
 
     def test_file_outside_head_refused(self):
         self.base()

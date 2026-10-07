@@ -86,11 +86,11 @@ class TestAuditP2(JCase):
         # 書く仕組みは J を拒む（何も書かない）
         self.assert_writer_refuses(
             lambda: seal_triggers.seal(self.root, {"last_read_offset_days": 200}, T0 + 4 * H, None),
-            "method-access の記録（seq 6）がある")
+            "method-access の記録（seq 7）がある")
         # 書く仕組みを飛ばして足した場合
         trg = self.raw_triggers(T0 + 4 * H, last_read_offset_days=200)
         want = "periods-triggers（seq %d）が J（last_read_offset_days 200）を持ち、最初の " \
-               "method-access（seq 6）より後にあるが、candidates の J の最大 28 と等しくない" % trg
+               "method-access（seq 7）より後にあるが、candidates の J の最大 28 と等しくない" % trg
         self.verify_fails(("candidates", "all"), want)
         self.assert_gates_stop("最初の method-access", threshold=False)
         self.assert_writer_refuses(lambda: self.write_access(T0 + 5 * H), "最初の method-access")
@@ -108,16 +108,16 @@ class TestAuditP2(JCase):
         self.method(T0 + 3 * H)
         self.assert_writer_refuses(
             lambda: seal_triggers.seal(self.root, {"last_read_offset_days": 120}, T0 + 4 * H, None),
-            "method-access の記録（seq 6）がある")
+            "method-access の記録（seq 7）がある")
         self.raw_triggers(T0 + 4 * H, last_read_offset_days=120)
         # T-031：seal_periods も、候補の J の最大（28）と違う J の版を拒むので、飛ばして足す
         self.assert_periods_writer_refuses(["--j120", "before_deadline"], T0 + 5 * H, "candidates の J の最大 28 と違う")
         self.raw_periods(["--j120", "before_deadline"], T0 + 5 * H)
-        self.verify_fails(("candidates", "all"), "最初の method-access（seq 6）より後にある")
+        self.verify_fails(("candidates", "all"), "最初の method-access（seq 7）より後にある")
         self.assert_gates_stop("最初の method-access", threshold=False)
         self.assert_writer_refuses(lambda: self.write_access(T0 + 6 * H), "最初の method-access")
         self.add_access(T0 + 6 * H, ROUND)
-        self.verify_fails(("candidates", "all"), "最初の method-access（seq 6）より後にある")
+        self.verify_fails(("candidates", "all"), "最初の method-access（seq 7）より後にある")
         self.assert_gates_stop("最初の method-access")
 
     def test_p2b_values_alone_also_fail(self):

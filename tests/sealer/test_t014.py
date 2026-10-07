@@ -146,8 +146,8 @@ class TestMethodAccessWriter(Case):
     def test_written_and_verified(self):
         self.seal()
         _s, rseq = self.step3(T0 + H, order1=False)
-        oseq = self.add_order1(T0 + 2 * H)        # T-037：method-access の前の順番1
-        rseq = oseq
+        self.add_order1(T0 + 2 * H)               # T-037：method-access の前の順番1
+        rseq = self.add_order1b(T0 + 2 * H)       # T-043：method-access の前の順番1b
         rec, rel, ots_path = self.method(T0 + 3 * H)
         self.assertEqual(rec["seq"], rseq + 1)
         self.assertEqual(rec["kind"], "method-access")
