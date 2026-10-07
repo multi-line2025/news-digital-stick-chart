@@ -18,6 +18,8 @@
   - periods の記録が無い。記録の鎖か .ots の検証に通らない。
   - start：candidates の記録が 1 件も無い（T-014。T-013 の監査 B-1。候補は、手法を作る期間の
     データに触れる前に封印する決まり。drand を取りにいく前に止める）。
+  - start：取得のコードが区分表の取得（src/collector/themes.py）で、順番1（stats-order1）の記録が
+    無い（T-037。drand を取りにいく前に止める）。
   - start：取得のコードが、このリポジトリの HEAD のコミットの中身と同じでない（コミットして
     いない、または作業ツリーで変えている）。第三者が、記録の sha256 をコミットの中の
     コードと照らせるようにするため。
@@ -70,6 +72,10 @@ def start(project, code_rel, now, ots_cmd, drand_fetch=None, runner=subprocess.r
         raise ledger.LedgerError("candidates の記録が無い。候補は、手法を作る期間のデータに触れる"
                                  "前に封印する決まり。追記しない")
     code_path, code_sha = committed_code_sha256(project, code_rel)
+    if code_path == ledger.THEMES_CODE_PATH and ledger.first_order1(records) is None:
+        # T-037：区分表の取得は、順番1（除外の規則と入れる規則）の封印の後
+        raise ledger.LedgerError("区分表の取得（%s）は、順番1（%s）の記録の後に行う決まり。追記しない"
+                                 % (ledger.THEMES_CODE_PATH, ledger.ORDER1_KIND))
     doc = {
         "kind": ledger.ACQ_START_KIND,
         "step": STEP,

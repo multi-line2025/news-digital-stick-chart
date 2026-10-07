@@ -15,7 +15,7 @@ T-008：区切りは最初の threshold-access の記録。acquisition-start の
 acquisition-result の対応、drand の照合の幅（幅の中は通り、外は失敗）、許可リストに無い kind を
 拒むことを確かめる。
 T-014：acquisition-start の前に candidates が要ること（SealCase.add_cand で足す）、kind の許可リストが
-method-access・gkg-run-start（T-031）を含む 8 つであること。
+method-access・gkg-run-start（T-031）・stats-order1・stats-order1b（T-037）を含む 10 であること。
 """
 
 import contextlib
@@ -290,11 +290,12 @@ class TestChain(LedgerCase):
             ledger.append_record(self.path, "acquisition", [target("b")], "", T0 + H)
         self.assertEqual(len(self.lines()), 1)
 
-    def test_allowed_kinds_are_the_eight(self):
+    def test_allowed_kinds_are_the_ten(self):
         self.assertEqual(set(ledger.ALLOWED_KINDS),
                          {"periods", "periods-triggers", "threshold-access",
                           "acquisition-start", "acquisition-result", "candidates",
-                          "method-access", "gkg-run-start"})     # T-031：gkg-run-start を加えた
+                          "method-access", "gkg-run-start",     # T-031：gkg-run-start を加えた
+                          "stats-order1", "stats-order1b"})      # T-037：順番1・順番1b
         self.assertNotIn("acquisition", ledger.ALLOWED_KINDS)
         self.add(n=1)
         for i, k in enumerate(ledger.ALLOWED_KINDS):
@@ -903,6 +904,32 @@ def run_verify(root, *args):
                           capture_output=True)
 
 
+def order_doc_for(data, seq, kind, **over):
+    """順番1・1b の中身（形の照合に通る仮のもの。T-037）。data は今の記録のバイト列、seq は足す行の seq。
+    書く仕組み（seal_stats）を通さない。"""
+    common = {"kind": kind, "head": "a" * 40, "ancestors": ["b" * 40],
+              "python": {"path": ".venv/bin/python", "version": "Python 3.14.2"},
+              "approvals": [{"item": "A", "source": "c" * 40 + ":reviews/T-022.md",
+                             "lines": ["> Kはいま封印していいよ"]}],
+              "ledger_head": ledger.expected_ledger_head(data, seq)}
+    if kind == ledger.ORDER1_KIND:
+        common.update({
+            "targets": [{"name": n, "sha256": "d" * 64} for n in ledger.ORDER1_REQUIRED_NAMES],
+            "owner_choice": {"source": "e" * 40 + ":reviews/T-020.md", "heading": "## h",
+                             "lines": ["> x"]},
+            "checks": {"acquisition_starts": [], "gkg_manifests_absent": True,
+                       "method_access_absent": True, "not_shallow": True,
+                       "optional_choice_status": "decided", "stats_tests": "OK (1 tests)",
+                       "themes_manifest_absent": True, "worktree_clean": True}})
+    else:
+        common.update({"files": [{"path": "docs/stats/counting.md", "sha256": "f" * 64}],
+                       "order1_ref": None,
+                       "checks": {"gkg_manifests_absent": True, "method_access_absent": True,
+                                  "not_shallow": True, "worktree_clean": True}})
+    common.update(over)
+    return common
+
+
 class SealCase(unittest.TestCase):
     """仮のプロジェクトで封印の仕組みを動かす（本物の sealed/ には書かない）。"""
 
@@ -969,9 +996,28 @@ class SealCase(unittest.TestCase):
                                  "kept_rows_sha256": "e" * 64}, now)
 
     def add_method(self, now, round_no, head=None, **kw):
+        # T-037：method-access の前には順番1（stats-order1）が要る。無ければ先に足す
+        self.ensure_order1(now)
         return self._append_doc(ledger.METHOD_ACCESS_KIND,
                                 self._drand_doc(ledger.METHOD_ACCESS_KIND, round_no, head, **kw),
                                 now)
+
+    def order_doc(self, kind, **over):
+        """順番1・1b の中身（形の照合に通る仮のもの）。T-037。書く仕組み（seal_stats）を通さない。"""
+        data = ledger.read_ledger(self.ledger)
+        return order_doc_for(data, len(ledger.verify_chain(data)) + 1, kind, **over)
+
+    def add_order1(self, now, **over):
+        return self._append_doc(ledger.ORDER1_KIND, self.order_doc(ledger.ORDER1_KIND, **over), now)
+
+    def add_order1b(self, now, **over):
+        return self._append_doc(ledger.ORDER1B_KIND, self.order_doc(ledger.ORDER1B_KIND, **over), now)
+
+    def ensure_order1(self, now):
+        recs = ledger.verify_chain(ledger.read_ledger(self.ledger))
+        if not any(r["kind"] == ledger.ORDER1_KIND for r in recs):
+            return self.add_order1(now)
+        return None
 
     def add_cand(self, now, output=None):
         """candidates の記録を、書く仕組みを通さずに足す（T-014。acquisition-start の前提）。
@@ -1293,22 +1339,27 @@ def run_verify_inproc(root, *args, ots_dirs=()):
 
 
 def adoption_lines(text):
+    """採用の表示の行（periods・periods-triggers・candidates）。T-037（T-031 の監査 軽2）：
+    TestAuditRepro の seq 2 が candidates になったので、upgrade を出さなかった記録（seq 2）の採用も
+    比べられるよう、candidates の行も含める。"""
     return [l for l in text.splitlines()
-            if l.startswith("  periods: ") or l.startswith("  periods-triggers: ")]
+            if l.startswith("  periods: ") or l.startswith("  periods-triggers: ")
+            or l.startswith("  candidates: ")]
 
 
 class TestAuditRepro(SealCase):
-    """seq 1 periods、seq 2 candidates、seq 3 periods-triggers、seq 4 periods、
-    seq 5 threshold-access、seq 6 periods。
-    どの操作でも、採用は periods = seq 4、periods-triggers = seq 3 のまま。
-    T-031 の差し戻し1回目（軽4）：J を持つ版は candidates の後に書く決まりになったので、
-    candidates を seq 2 にした。
-    T-031：作り直した版は、先に periods-triggers を追記してから書く決まり（seal_periods の書く前の
-    照合）になったので、seq 2 と seq 3 の順を入れ替えた。
-    T-017：threshold-access の前に candidates が要る（verify access の照合）ので seq 4 に足した。
-    T-023：J とエンバーゴの照合（採用される triggers の J = candidates の J の最大、採用される
-    periods の embargo_days = max(90, J の最大)）に通るよう、candidates の J の最大を seq 3 の
-    J（120）にそろえ（CAND_J120）、seq 2 を J 120 で作り直した periods（embargo 120）にした。"""
+    """今の並び（T-031 の差し戻し1回目から）：
+      seq 1 periods（1 件目。embargo 90）、seq 2 candidates（J の最大 120）、
+      seq 3 periods-triggers（J 120）、seq 4 periods（J 120 で作り直した版。embargo 120）、
+      seq 5 threshold-access、seq 6 periods（threshold-access の後なので採用されない）。
+    どの操作でも、採用は periods = seq 4、periods-triggers = seq 3、candidates = seq 2 のまま
+    （adoption_lines は三つの行を比べる。T-037）。
+    並びがこうなった理由（古い説明は残さず、要点だけ書く。T-037 の T-031 監査 軽3）：
+      - threshold-access の前に candidates が要る（T-017）。
+      - 採用される triggers の J は candidates の J の最大と等しく、採用される periods の embargo_days は
+        max(90, J の最大) と等しい（T-023）。そのため candidates の J の最大を 120 にした。
+      - 作り直した版は、先に periods-triggers を追記してから書き（T-031）、J を持つ版は candidates の
+        後に書く（T-031 の差し戻し1回目の軽4）。"""
 
     ACQ_ROUND = 30_000_000   # 公開時刻は 2026 年の夏。下の確定時刻（T0 以後）より前。
 
@@ -1346,9 +1397,10 @@ class TestAuditRepro(SealCase):
 
     def assertAdoption(self, out):
         lines = adoption_lines(out)
-        self.assertEqual(len(lines), 2, out)
+        self.assertEqual(len(lines), 3, out)
         self.assertTrue(lines[0].startswith("  periods: 採用 = seq 4（2 件目"), lines)
         self.assertTrue(lines[1].startswith("  periods-triggers: 採用 = seq 3（1 件目"), lines)
+        self.assertTrue(lines[2].startswith("  candidates: 採用 = seq 2（1 件目"), lines)  # T-037
         return lines
 
     def test_baseline_all_pending(self):

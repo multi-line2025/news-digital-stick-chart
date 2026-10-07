@@ -297,6 +297,10 @@ class TestDocProcedure(unittest.TestCase):
         # 作り直す：正しい method-access → 通る
         shutil.rmtree(self.clone)
         shutil.copytree(base, self.clone)
+        if ledger.ORDER1_KIND not in self._kinds():
+            # T-037：method-access の前には順番1（stats-order1）が要る（仮の記録を足す）
+            self._append_doc(ledger.ORDER1_KIND,
+                             lambda d, s: tl.order_doc_for(d, s, ledger.ORDER1_KIND))
         m = self._append_doc("method-access", self._drand("method-access"))
         self.git("add", "-A")
         self.git("commit", "-q", "-m", "step 3 and method")

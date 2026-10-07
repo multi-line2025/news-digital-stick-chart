@@ -39,6 +39,8 @@ docs/verify/periods-seal.md 12章。
   drand を取りにいく前に止まるもの：
   - periods の記録が無い。記録の鎖か .ots の検証に通らない。
   - method-access の記録が無い（gkg-run-start は手順4の記録の後）。
+  - 除外の規則の kind（stats-order1）の記録が無い。exclusion_rule_seq がその最初の記録の seq でない。
+    順番1b（stats-order1b）の記録が無い（T-037。T-031 の監査 中2）。
   - threshold-access の記録がある（閾値を決める期間に触れたあとで、手法を作る期間の GKG の
     取得を始めない。T-031 の中2）。
   - official の記録が既にある（正式な run は 1 件だけ。trial は official より前だけ）。
@@ -85,6 +87,13 @@ def _precheck(project, records, mode):
     if ledger.check_method_access_order(records) == []:
         raise ledger.LedgerError("method-access の記録が無い。gkg-run-start は手順4の記録の後に書く。"
                                  "追記しない")
+    # T-037（T-031 の監査 中2）：除外の規則の kind（stats-order1）の記録と、順番1b の記録が要る
+    if ledger.first_order1(records) is None:
+        raise ledger.LedgerError("除外の規則の kind（%s）の記録が無い。gkg-run-start は順番1の封印の後に書く。"
+                                 "追記しない" % ledger.ORDER1_KIND)
+    if not any(r["kind"] == ledger.ORDER1B_KIND for r in records):
+        raise ledger.LedgerError("順番1b（%s）の記録が無い。gkg-run-start は順番1b の封印の後に書く"
+                                 "（docs/stats/seal-order1.md 3章 (3)）。追記しない" % ledger.ORDER1B_KIND)
     cut = ledger.first_threshold_access(records)
     if cut is not None:
         raise ledger.LedgerError("threshold-access の記録（seq %d）がある。閾値を決める期間に触れたあとで、"
@@ -101,6 +110,10 @@ def start(project, mode, code_rel, run_id, filelist_sha256, method_access_seq, t
     """gkg-run-start を 1 件追記する。返り値: (記録, 中身のパス, .ots のパス か None)。"""
     data, records = seal_records.load_checked(project, ots_cmd, runner=runner)
     runs = _precheck(project, records, mode)
+    o1 = ledger.first_order1(records)
+    if exclusion_rule_seq != o1["seq"]:
+        raise ledger.LedgerError("exclusion_rule_seq %r が、除外の規則の kind（%s）の最初の記録の seq %d でない。"
+                                 "追記しない" % (exclusion_rule_seq, ledger.ORDER1_KIND, o1["seq"]))
     if mode == "trial":
         same = [r["seq"] for r, d in runs if d["mode"] == "trial" and d["run_id"] == run_id]
         if same:

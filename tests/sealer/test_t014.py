@@ -52,9 +52,13 @@ class Case(tw.WriterCase):
         return seal_method.seal(self.root, now, "ots", drand_fetch=fetch or tw.FakeDrand(now),
                                 runner=tw.FakeOts())
 
-    def step3(self, now):
+    def step3(self, now, order1=True):
+        """手順3（acquisition-start と result）。T-037：method-access の前には順番1（stats-order1）が
+        要るので、order1 が真なら、まだ無ければ result のあとに仮の順番1の記録を足す。"""
         s, _r, _o = self.start(now)
         r, _r2, _o2 = self.result(now + H, s["seq"])
+        if order1:
+            self.ensure_order1(now + H)
         return s["seq"], r["seq"]
 
     def ledger_bytes(self):
@@ -141,7 +145,9 @@ class TestMethodAccessWriter(Case):
 
     def test_written_and_verified(self):
         self.seal()
-        _s, rseq = self.step3(T0 + H)
+        _s, rseq = self.step3(T0 + H, order1=False)
+        oseq = self.add_order1(T0 + 2 * H)        # T-037：method-access の前の順番1
+        rseq = oseq
         rec, rel, ots_path = self.method(T0 + 3 * H)
         self.assertEqual(rec["seq"], rseq + 1)
         self.assertEqual(rec["kind"], "method-access")
@@ -547,7 +553,7 @@ class TestDocStatements(unittest.TestCase):
             self.assertIn(phrase, self.text)
 
     def test_kind_count_is_seven(self):
-        self.assertIn("下の表の8つだけ", self.text)   # T-031：gkg-run-start を加えた
+        self.assertIn("下の表の10だけ", self.text)   # T-031・T-037 で kind を加えた
         self.assertIn("| `method-access` |", self.text)
 
 

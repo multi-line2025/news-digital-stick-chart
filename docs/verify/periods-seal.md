@@ -1,4 +1,4 @@
-# 期間の区切りと候補の封印を検証する手順（T-005、T-007、T-008、T-009、T-013、T-014、T-017、T-023、T-027、T-031）
+# 期間の区切りと候補の封印を検証する手順（T-005、T-007、T-008、T-009、T-013、T-014、T-017、T-023、T-027、T-031、T-037）
 
 この文書は、第三者が次のことを自分で確かめるための手順である。
 
@@ -10,6 +10,7 @@
 6. 閾値と判定期間の候補（`candidates`）の記録の形と、最初の `acquisition-start` より前に封印されたこと（9章。T-013）
 7. 試運転の手順4（手法を作る期間のデータそのものの取得）の開始の記録（`method-access`）と、その関門（10章。T-014）
 8. GKG の取得の run（試しの run・正式な run）の開始の記録（`gkg-run-start`）と、試しの run の回数（12章。T-031）
+9. 統計係の順番1・順番1b の事前の封印（`stats-order1`・`stats-order1b`）と、その位置（13章。T-037）
 
 封印したことは、現時点では公開していない（オーナーの決定）。公開するかどうかは、試運転のあとでオーナーが判断する。オーナーは、封印のハッシュを公開する前に手順3（ファイル一覧の取得）へ進むと決めた（案B。reviews/T-013.md の末尾）。そのため、別の系列が無いことは示せない（7章の「示せないこと」）。
 
@@ -33,7 +34,7 @@
 |---|---|
 | `seq` | 通し番号。1 から始まり、行の順に 1 ずつ増える |
 | `prev_hash` | 直前の行のバイト列（末尾の改行を含めない）の sha256。1 行目は 0 が 64 個 |
-| `kind` | 種類。下の表の8つだけ（許可リスト）。それ以外の `kind` があれば、鎖の検証（`chain`）で失敗になる |
+| `kind` | 種類。下の表の10だけ（許可リスト）。それ以外の `kind` があれば、鎖の検証（`chain`）で失敗になる |
 | `targets` | 対象のファイル。各要素は `path`（ルートからの相対パス）、`role`、`sha256` |
 | `recorded_at` | 記録した日時（UTC）。記録した機械の時計による申告で、証明ではない |
 | `note` | 注記 |
@@ -48,6 +49,8 @@
 | `candidates` | 閾値と判定期間の候補（docs/stats/candidates.md。形式は 9章。T-013） | doc / code / test / import / output | `src/sealer/seal_candidates.py` |
 | `method-access` | 試運転の手順4（手法を作る期間の区画のデータそのもの）に初めて触れる直前の記録。前に `candidates` と `acquisition-result` が要る（形式は 10章。T-014） | method-access | `src/sealer/seal_method.py` |
 | `gkg-run-start` | GKG の取得の run（試しの run・正式な run）の開始の記録。最初の `method-access` より後（形式は 12章。T-031） | gkg-run-start | `src/sealer/seal_gkg_run.py` の `start` |
+| `stats-order1` | 統計係の順番1（除外の規則と入れる規則）の封印。除外の規則の kind（形式は 13章。T-037） | stats-order1 | `src/sealer/seal_stats.py` の `seal_order1` |
+| `stats-order1b` | 統計係の順番1b（数え方の候補と基準の案）の封印（形式は 13章。T-037） | stats-order1b | `src/sealer/seal_stats.py` の `seal_order1b` |
 
 - T-007 の案にあった `acquisition` は、二つ（`acquisition-start` と `acquisition-result`）に分けたので、許可リストに無い。今の記録にも無い。
 - 許可リストに限る理由：決めていない名前の `kind` を受け付けると、正式な取得や閾値の期間への接触を別の名前で記録して、規則の区切りから外せてしまうため。
@@ -67,6 +70,7 @@
   - `threshold-access` は、閾値を決める期間の区画（2020-12-15 以降）の情報を初めて「扱う」直前に、鎖へ追記する記録である。「扱う」の定義は docs/stats/periods.md 8章 (2) に従う。ディスクに書く（プロジェクトと Git の外の一時的な置き場を含む）、画面に表示する、集計する、ログに出すことを指す。メモリの上で受け取り、ディスクに書く前に捨てることは含めない。
   - `method-access`（試運転の手順4の開始。10章）も、区切りに使わない。区切りは `threshold-access` のまま（T-014 のリードの指示）。
   - `gkg-run-start`（GKG の取得の run の開始。12章。T-031）も、区切りに使わない。
+  - `stats-order1`・`stats-order1b`（統計係の順番1・1b。13章。T-037）も、区切りに使わない。
   - `acquisition-start`・`acquisition-result`（試運転の手順3の取得）は、区切りに使わない。8章 (2) は、手順3でファイル一覧の 2020-12-15 以降の行をメモリの上で捨てるなら、手順3は期限に当たらないとしている。また、きっかけの値の一部（共起の網の期間など）は、手順3の後に手法を作る期間のデータを見て決めてよいとしている。そのため、手順3の後に追記したきっかけの値も、最初の `threshold-access` より前なら採用される。
   - `threshold-access` の記録がまだ無いうちは、「採用は保留」とする。仮の候補として、今ある最後の記録を示す。
   - 区切りの後に `periods`・`periods-triggers` を追記することは、封印の仕組みでは拒まない（関門は設けない。監査の所見による）。期限の後の作り直しは、追記したうえで、検証が「採用しない」と表示するだけである。
@@ -141,6 +145,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py all --rev auto
 - `access`：`threshold-access` の記録ごとに、7章の照合（`ledger_head`、drand の回、`block_start`）をする。あわせて、最初の `threshold-access` より前に `candidates` の記録があること（関門と同じ候補の順序の照合。T-017。T-014 の監査 軽2）を確かめる。記録が無ければ、そう表示する。
 - `acquisition`：`acquisition-start` の記録ごとに 7章の照合（`ledger_head`、drand の回）をし、`acquisition-result` との対応を照合する。最初の `acquisition-start` より前に `candidates` の記録があることも確かめる（T-014）。記録が無ければ、そう表示する。
 - `method`：`method-access` の記録ごとに 10章の照合（`ledger_head`、drand の回、`step`、区画、前に `candidates` と `acquisition-result` があること）をする。記録が無ければ、そう表示する。
+- `stats-order`：`stats-order1`・`stats-order1b` の記録ごとに 13章の照合（中身の形、`ledger_head`、位置）をし、対象の名前と sha256 を並べる（T-037）。記録が無ければ、そう表示する。
 - `gkg-runs`：`gkg-run-start` の記録ごとに 12章の照合（`ledger_head`、drand の回、中身、順序）をし、試しの run の回数と、各 run の `run_id`・`code_sha256`・日を並べる（T-031）。記録が無ければ、そう表示する。
 - `periods`：
   - すべての版の区画の境目が、1件目と一致することを確かめる。
@@ -164,11 +169,12 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py all --rev auto
 - `acquisition`：「acquisition-start seq 3 ← acquisition-result seq 4」。seq 3 の drand の回の公開時刻は 2026-10-07T13:45:09+00:00 で、seq 3 自身の確定時刻（ヘッダの時刻 2026-10-07T14:56:14+00:00）に2時間を足した時刻より前である（照合に通る）。
 - `method`：「method-access の記録：なし」。
 - `gkg-runs`：「gkg-run-start の記録：なし」。
+- `stats-order`：「stats-order1・stats-order1b の記録：なし」。
 - `candidates`：「candidates の 1 件目（seq 2）」。出力の sha256 は `027bde541f834a1a6644fe610323376cd26d1e1cbce99ef8fa7cafdf3da39ee5`。倍率 2, 3, 4, 6, 8, 12, 16、判定期間 14, 28, 56 日、組み合わせ 21。「J（判定が読む最後の日のずれ）の最大 56。periods の 1 件目の embargo_days 90 以下（区切りの作り直しは要らない）」。
 - `adopted`：「採用は保留（threshold-access の記録が無いため）」。`periods` の仮の候補は seq 1、`candidates` の仮の候補は seq 2。
 - 最後：「この検査で確かめていないこと：(1) … ヘッダが、Bitcoin の本当の鎖にあること … (2) drand の署名（BLS）は、オフラインでは検証していない …」。
 
-`all` の代わりに `chain`、`anchors`、`targets`、`access`、`acquisition`、`method`、`gkg-runs`、`periods`、`candidates`、`adopted` を一つずつ実行してもよい。
+`all` の代わりに `chain`、`anchors`、`targets`、`access`、`acquisition`、`stats-order`、`method`、`gkg-runs`、`periods`、`candidates`、`adopted` を一つずつ実行してもよい。
 
 ## 4. 検証のコードを使わずに確かめる
 
@@ -190,14 +196,14 @@ head -n 1 sealed/ledger.jsonl | shasum -a 256
 
 - N 行目の `prev_hash` が、N−1 行目の末尾の改行を除いたバイト列の sha256 と一致すること。
 - 先頭 N 行の sha256 が、`sealed/ledger.jsonl.seq00000N.ots` の対象と一致すること。
-- 各行の `kind` が1章の8つのどれかであること。
+- 各行の `kind` が1章の10のどれかであること。
 - 採用：`kind` が `threshold-access` の最初の行を探し、それより上の行のうち、種類ごとに一番下の行が採用である。
 
 ```sh
 sed -n 1p sealed/ledger.jsonl | tr -d '\n' | shasum -a 256           # 2 行目の prev_hash と比べる
 head -n 2 sealed/ledger.jsonl | shasum -a 256                         # seq000002.ots の対象と比べる
 grep -n '"kind":"threshold-access"' sealed/ledger.jsonl | head -n 1   # 最初の threshold-access の行（区切り）
-grep -o '"kind":"[^"]*"' sealed/ledger.jsonl | sort | uniq -c         # kind の一覧（8つの外があれば失敗）
+grep -o '"kind":"[^"]*"' sealed/ledger.jsonl | sort | uniq -c         # kind の一覧（10の外があれば失敗）
 ```
 
 対象のファイルが後で書き換えられている場合は、その記録を含んだ最初のコミットに戻してから確かめる。
@@ -781,7 +787,7 @@ Data: The GDELT Project (https://www.gdeltproject.org/). This project is not aff
 - `filelist_sha256` は、最初の `method-access` より前の、ただ1件の `acquisition-result` の `kept_rows_sha256` と同じ（`ledger.gkg_filelist_sha256`。2件以上あれば、どの一覧かを決められないので書けない）。手順3で封印した一覧だけを使い、試しの run のあとで手順3をやり直した一覧に替えることはできない（T-031 の差し戻し1回目の中1）。
 - `method_access_seq` は、最初の `method-access` の記録の seq。
 - `trial_days`：`trial` なら、日付（YYYY-MM-DD）の狭義に増える1〜3日の一覧（`ledger.TRIAL_DAYS_MAX`。収集係の `TRIAL_DAYS` の3日と揃える。T-031 の差し戻し1回目の中3）で、すべて `periods` の1件目の `method` の区画の中。`official` なら null。
-- `exclusion_rule_seq` は、最初の `gkg-run-start` より前の記録の seq（`gkg-run-start` 自身や、試しの run のあとの記録は指せない。T-031 の差し戻し1回目の中1）。`exclusion_rule_record_sha256` は、その記録の行の正規の形（`ledger.canonical_line`。末尾の改行を含めない）の sha256。除外の規則の kind が決まったら、その kind の最初の記録であることも照合する（下の「示せないこと」。別のタスク）。
+- `exclusion_rule_seq` は、除外の規則の kind（`stats-order1`。13章）の最初の記録の seq（T-037。T-031 の監査 中2）。`exclusion_rule_record_sha256` は、その記録の行の正規の形（`ledger.canonical_line`。末尾の改行を含めない）の sha256。その記録は `method-access` より前にあるので、最初の `gkg-run-start` より前でもある（T-031 の差し戻し1回目の中1 の照合も続けて行う）。`stats-order1` の記録が無いうちは、書く仕組みは drand の前に止まる。
 - **どの run も同じ入力**：すべての `gkg-run-start` で、`filelist_sha256`・`exclusion_rule_seq`・`exclusion_rule_record_sha256`・`method_access_seq` が同じ（`ledger.check_gkg_run_common`）。試しの run を見たあとで、正式な run の入力を選び直せない。
 - **順序**：どの `gkg-run-start` も、最初の `method-access` より後で、最初の `threshold-access` より前にある（閾値を決める期間に触れたあとで、手法を作る期間の GKG の取得を始めない。T-031 の差し戻し1回目の中2。CLAUDE.md の試運転の手順4）。`official` の記録は1件だけ（0件は可）。`trial` の記録は、`official` の記録より前にだけある。`trial` の記録どうしで `run_id` は重ならない（下の「run の単位」）。
 - **run の単位（T-031 の差し戻し1回目の中3）**：`gkg-run-start` は、収集係のマニフェストの run-start の行1件につき1件だけ書く。run の最初の実行（run-start の行を書く実行）で、GKG への要求を送る前に1回だけ書き、同じ run の再開では書かない。正式な run の2回目の実行（1回目は run-start を書いて止まる。src/collector/gkg.py 5章）でも書かない。そのため、試しの run の回数は `trial` の記録の件数と同じになる。同じ run_id の `trial` を2件書こうとすると、書く仕組みも verify も止まる。
@@ -812,6 +818,71 @@ grep -n '"kind":"gkg-run-start"' sealed/ledger.jsonl | cut -d: -f1 || true
 
 ### 示せないこと
 
-- **除外の規則の記録の種類。** `exclusion_rule_seq` が指す記録の `kind` が「除外の規則」の kind であることは、まだ照合しない。除外の規則の kind が決まっていないため（src/collector/themes.py の `EXCLUSION_RULE_KIND`）。決まったら、その kind の最初の記録であること（収集係の README 6.5.3 と同じ）を照合する（別のタスク）。それまでは、最初の `gkg-run-start` より前のどの記録でも指せる。
+- **除外の規則の記録の中身。** `exclusion_rule_seq` が `stats-order1` の最初の記録であることは照合する（T-037）。その記録の10件の sha256 が、統計係の表と同じであることは、`stats-order1` を書く仕組みが書く前に確かめる（13章）。gkg-run-start の照合は、その中身を作業ツリーと照らし直さない（3章 (1) の手順で別に照らす。docs/stats/seal-order1.md 3章 (1)）。
 - **記録に無い run。** `gkg-run-start` を書かずに GKG に要求を送ることは、記録からは検出できない（10章の関門の限界と同じ）。数えられるのは、記録に残した run だけである。
+- **threshold-access の後の取得の続き（T-037。T-031 の監査 軽4）。** `gkg-run-start` は run の最初の実行で書き、再開では書かない。そのため、`threshold-access` より前に始めた run を、`threshold-access` の後に再開して続けること（正式な run の2回目の実行を含む）は、この記録からは検出できない。照らせるのは、収集係のマニフェスト（run-resume・day の行の時刻と commit）だけである。
+- **試しの run の日。** `trial_days` は、収集係の `TRIAL_DAYS`（2015-03-02・03・04 の3日）とちょうど同じでなければならない（`ledger.TRIAL_DAYS`。T-037。T-031 の監査 軽1）。値は `ledger.py` に写してあり、テスト（`tests/sealer/test_t037.py` の `TestTrialDaysMatchCollector`）が `src/collector/gkg.py` と同じことを確かめる。
 - **run を始めたあとの経過。** 記録が示すのは、run の開始が drand の回の公開時刻より後（drand の署名を確かめた場合に限る）で、その seq の `.ots` の確定時刻＋2時間より前（ヘッダが本当の鎖にある場合に限る）だったことまでである。run の結果は、収集係のマニフェスト（src/collector/README.md）で扱う。
+
+## 13. 統計係の順番1・順番1b の封印（stats-order1・stats-order1b。T-037）
+
+統計係の順番1（除外の規則と入れる規則。封印の対象10件）と順番1b（数え方の候補と基準の案）を、データに触れる前に封印する記録である（docs/stats/seal-order1.md）。採用の区切りには使わない。
+
+### 二つの kind にした理由
+
+一つの kind に「順番」の欄を持たせず、`stats-order1` と `stats-order1b` の二つにした。理由（前提 → 結論）：
+- 前提：収集係の関門（`themes.require_exclusion_rules_sealed`）と `gkg-run-start` の `exclusion_rule_seq` は、「除外の規則の kind の最初の記録」を指す（src/collector/README.md 6.5.3）。前提：順番1b は順番1 と前後を問わず封印できる（seal-order1.md 3章 (3)）。結論：kind を一つにすると、その kind の最初の記録が順番1b になりうるので、「最初の記録」が除外の規則を指すとは限らなくなる。二つに分ければ、`stats-order1` の最初の記録が、常に最初に封印した除外の規則である。
+- 前提：前に要る位置が違う（順番1 は区分表の取得と `method-access` の前に必須、順番1b は最初の `gkg-run-start` の前に必須）。前提：封印の前に確かめることと中身の形も違う。結論：kind で分けると、位置の照合と中身の照合を kind ごとに一つの規則で書ける。
+
+### 記録の形
+
+`stats-order1` の中身（`sealed/stats-order1-<sha256>.json`。キーはこの9個だけ：`ancestors`・`approvals`・`checks`・`head`・`kind`・`ledger_head`・`owner_choice`・`python`・`targets`）：
+- `head`：封印した時点の HEAD の40桁。`ancestors`：祖先であることを確かめた commit の40桁（1cb463a・2d23cdf・8f0f4ec・0f98e62）。
+- `python`：`{"path": ".venv/bin/python", "version": "Python 3.14.2"}` の形。
+- `targets`：対象の名前と sha256（`[{"name", "sha256"}]`。10件。少なくとも `src/stats/exclusion.py`・`src/stats/tagrules.py` とそれぞれの出力が入っていること）。
+- `approvals`：承認の照らし方（`[{"item", "source", "lines"}]`。A・B・B (ii)。`source` は `<40桁>:<パス>`、`lines` は照らした行をそのまま）。
+- `owner_choice`：2d23cdf の版の reviews/T-020.md の見出しと三行（`{"source", "heading", "lines"}`）。
+- `checks`：`worktree_clean`・`not_shallow`・`method_access_absent`・`themes_manifest_absent`・`gkg_manifests_absent`（どれも true）、`optional_choice_status`（"decided"）、`acquisition_starts`（照らした acquisition-start の一覧）、`stats_tests`（"OK (N tests)"）。
+- `ledger_head`：この行を足す前の記録の先頭 seq 行の sha256。
+
+`stats-order1b` の中身（キーはこの9個だけ：`ancestors`・`approvals`・`checks`・`files`・`head`・`kind`・`ledger_head`・`order1_ref`・`python`）：
+- `files`：封印の対象のファイルのパスと sha256（`[{"path", "sha256"}]`）。順番1b の中身の細部は統計係が作り直している最中（T-036 予定）なので、一般的な形にした。
+- `approvals`：呼ぶ側が渡す承認の照らし方と、B (ii) の照らし方（必ず入れる）。
+- `order1_ref`：順番1 の記録があれば、その最後の記録の `{"seq", "record_sha256"}`。無ければ null。
+- `checks`：`worktree_clean`・`not_shallow`・`method_access_absent`・`gkg_manifests_absent`（どれも true）。
+
+### 書く仕組みが、書く前に確かめること（`src/sealer/seal_stats.py`）
+
+```python
+import seal_stats   # src/sealer/seal_stats.py
+rec, rel, ots_path = seal_stats.seal_order1(project, now, ots_cmd)
+rec, rel, ots_path = seal_stats.seal_order1b(project, files, approvals, now, ots_cmd)
+```
+
+- `seal_stats.seal_order1` は、seal-order1.md 2章の項目1〜9 を確かめる。作業ツリーがきれい（追跡していないファイルも無い）、浅い clone でない、祖先、承認の行、出どころの見出しと三行、10件の sha256 を自分で計算し直して表（HEAD の版の seal-order1.md）と照らす、"undecided" を拒む、区分表と GKG のマニフェストが作業ツリーにも履歴にも無い、`method-access` が無い、すべての `acquisition-start` のコードが `src/collector/acquire_filelist.py`、`tests/stats` が通る。一つでも通らなければ何も書かない。
+- 項目10（対象だけを置いた写しで流すこと）は、この仕組みでは行わない。プロジェクトと Git の外にフォルダを作り、あとで消すことになる（CLAUDE.md の削除の規則）ため。封印の前に手で行い、結果をリードに報告する。
+- `seal_stats.seal_order1b` は、3章 (3) の項目1・2・3・5・6 を確かめる（`method-access` と GKG の跡が無い、ファイルが HEAD に含まれ作業ツリーと同じ、承認の行、作業ツリーがきれい、浅い clone でない）。項目0（試しの run の作りを直すタスクの合格）と、候補の数や正式な基準の指定などの細部は、この仕組みでは確かめない。
+
+### 位置の照合（`ledger.check_stats_order`。書く仕組み・`method-access` の関門・`verify.py stats-order` と `all`）
+
+- `stats-order1`・`stats-order1b` の記録は、最初の `method-access` と、最初の区分表の取得（`acquisition-start` のうち `fetch.code_path` が `src/collector/themes.py` のもの）より前にある。
+- 最初の区分表の取得の前に、`stats-order1` の記録がある。`seal_acquisition.py start --code src/collector/themes.py` は、無ければ drand の前に止まる。
+- **限界（T-037 でリードに報告）：`method-access` の前に `stats-order1` を求めることはしていない。** 求めると、収集係のテスト（`tests/collector/test_acquire_gkg.py` の `E2ECase`）が、順番1 の無い写しに `seal_method.seal` で `method-access` を書くので、通らなくなるため（収集係のフォルダは封印係の範囲の外）。そのため、順番1 より前に `method-access` を書くことは止まらない。その場合、順番1 は `method-access` の後に書けず（seal-order1.md 2章の項目2。書く仕組みも verify も止まる）、`gkg-run-start` も書けないので、手法を作る期間の GKG の取得には進めない（追記のみの記録が先へ進めなくなる）。収集係のテストを直したあとで、`ledger.check_stats_order` の照合に `method-access` を足すことを提案した。
+- 最初の `gkg-run-start` の前に、`stats-order1b` の記録がある。`seal_gkg_run.start` は、`stats-order1` か `stats-order1b` が無ければ drand の前に止まる。
+
+### 確かめるコマンド
+
+<!-- test:offline -->
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py stats-order
+grep -n '"kind":"stats-order1' sealed/ledger.jsonl | cut -d: -f1 || true
+```
+
+- 記録の10件の sha256 を作業ツリーで計算し直して照らす手順は、docs/stats/seal-order1.md 3章 (1) のとおり（`shasum -a 256 <ファイル>`、`git show <commit>:<path> | shasum -a 256`、`PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/stats/exclusion.py | shasum -a 256` など）。
+
+### 収集係への申し送り（src/collector は封印係の範囲の外）
+
+- `themes.EXCLUSION_RULE_KIND` に入れる値は `"stats-order1"`（`ledger.ORDER1_KIND`）。
+- 関門が照らす記録は、その kind の最初の記録（`ledger.first_order1(records)`。README 6.5.3 と同じ）。
+- 記録の中身は `ledger.read_target_json(root, rec, "stats-order1")` で読める（sha256 を照らしたうえで JSON を返す）。`ledger.check_order1_doc(rec, doc)` が形を照らし、`{対象の名前: sha256}` を返す。名前は docs/stats/seal-order1.md 1章の表の「対象」の列と同じ文字列である。
+- この dict を、収集係が持つ10件の名前と sha256 と比べれば、記録の中身（どの規則を封印したか）を照らせる。

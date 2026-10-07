@@ -18,6 +18,9 @@
     python3 -B src/sealer/verify.py method             method-access（手順4の開始）の ledger_head・
                                                        drand の回・区画、その前に candidates と
                                                        acquisition-result があること（T-014）
+    python3 -B src/sealer/verify.py stats-order        統計係の順番1・順番1b（stats-order1・stats-order1b。T-037）の
+                                                       中身の形・ledger_head と位置（method-access と区分表の取得
+                                                       より前、それらの前に順番1、gkg-run-start の前に順番1b）
     python3 -B src/sealer/verify.py gkg-runs           GKG の取得の run の開始（gkg-run-start。T-031）の
                                                        ledger_head・drand・中身・順序。試しの run の回数と、
                                                        各 run の run_id・code_sha256・日を並べる
@@ -35,7 +38,8 @@
 採用の規則（T-007、T-008）
     最初の kind=threshold-access の記録より seq が小さい記録のうち、その種類（periods、
     periods-triggers、candidates）の最後のものを採用する。threshold-access の記録が無いうちは保留。
-    acquisition-start・acquisition-result・method-access・gkg-run-start は区切りに使わない。
+    acquisition-start・acquisition-result・method-access・gkg-run-start・stats-order1・stats-order1b は
+    区切りに使わない。
     時刻（Bitcoin の確定時刻、drand の回の公開時刻）と、Pending かどうかは使わない。
 
 drand の照合の幅（T-008）
@@ -415,6 +419,35 @@ def cmd_acquisition(st, _a):
         print(ledger.DRAND_NOT_VERIFIED)
 
 
+def cmd_stats_order(st, _a):
+    """統計係の順番1・順番1b の記録の照合と一覧。T-037。"""
+    got = ledger.check_stats_order(st.records, st.file_json)
+    if not got["order1"] and not got["order1b"]:
+        print("stats-order1・stats-order1b の記録：なし（照合するものが無い）")
+    for r in got["order1"]:
+        doc = st.file_json(r, ledger.ORDER1_KIND)
+        ledger.check_ledger_head(st.data, r, doc)
+        targets = ledger.check_order1_doc(r, doc)
+        print("  stats-order1 seq %d（順番1）: HEAD %s、%s、対象 %d 件、承認 %s、tests/stats %s"
+              % (r["seq"], doc["head"], doc["python"]["version"], len(targets),
+                 "・".join(a["item"] for a in doc["approvals"]), doc["checks"]["stats_tests"]))
+        for name in sorted(targets):
+            print("      %s  %s" % (targets[name], name))
+    for r in got["order1b"]:
+        doc = st.file_json(r, ledger.ORDER1B_KIND)
+        ledger.check_ledger_head(st.data, r, doc)
+        files = ledger.check_order1b_doc(r, doc)
+        print("  stats-order1b seq %d（順番1b）: HEAD %s、ファイル %d 件、承認 %s、順番1 の参照 %s"
+              % (r["seq"], doc["head"], len(files), "・".join(a["item"] for a in doc["approvals"]),
+                 "無し" if doc["order1_ref"] is None else "seq %d" % doc["order1_ref"]["seq"]))
+        for path in sorted(files):
+            print("      %s  %s" % (files[path], path))
+    o1 = ledger.first_order1(st.records)
+    print("除外の規則の kind（%s）の最初の記録：%s。順番1・1b は最初の method-access と区分表の取得より前、"
+          "それらの前に順番1、最初の gkg-run-start の前に順番1b（あるものすべて照合した）。"
+          % (ledger.ORDER1_KIND, "無し" if o1 is None else "seq %d" % o1["seq"]))
+
+
 def cmd_method(st, _a):
     """手順4の開始（kind が method-access）の照合。T-014。"""
     recs = ledger.check_method_access_order(st.records)
@@ -543,7 +576,8 @@ def cmd_candidates(st, _a):
 
 def cmd_adopted(st, _a):
     print("採用の規則：最初の threshold-access の記録より seq が小さい記録のうち、その種類の最後の"
-          "もの。acquisition-start・acquisition-result・method-access・gkg-run-start は区切りに使わない。時刻（Bitcoin の確定"
+          "もの。acquisition-start・acquisition-result・method-access・gkg-run-start・stats-order1・"
+          "stats-order1b は区切りに使わない。時刻（Bitcoin の確定"
           "時刻、drand の回の公開時刻）と Pending かどうかは使わない。")
     print("candidates は、これに加えて、すべての記録が最初の acquisition-start より前に"
           "なければならない（candidates の検査。後ろにあれば検証は失敗する）。")
@@ -578,6 +612,7 @@ def cmd_all(st, a):
     cmd_targets(st, a)
     cmd_access(st, a)
     cmd_acquisition(st, a)
+    cmd_stats_order(st, a)
     cmd_method(st, a)
     cmd_gkg_runs(st, a)
     cmd_periods(st, a)
@@ -593,7 +628,8 @@ def main(argv=None):
     p.add_argument("--root", default=os.getcwd())
     sub = p.add_subparsers(dest="cmd", required=True)
     parsers = {}
-    for name in ("chain", "anchors", "targets", "access", "acquisition", "method", "gkg-runs",
+    for name in ("chain", "anchors", "targets", "access", "acquisition", "stats-order", "method",
+                 "gkg-runs",
                  "periods", "candidates", "adopted", "all"):
         s = sub.add_parser(name, allow_abbrev=False)
         s.add_argument("--btc-header", type=_parse_header_arg, action="append",
@@ -606,7 +642,7 @@ def main(argv=None):
     a = p.parse_args(argv)
     fn = {"chain": cmd_chain, "anchors": cmd_anchors, "targets": cmd_targets,
           "access": cmd_access, "acquisition": cmd_acquisition, "method": cmd_method,
-          "gkg-runs": cmd_gkg_runs,
+          "gkg-runs": cmd_gkg_runs, "stats-order": cmd_stats_order,
           "periods": cmd_periods,
           "candidates": cmd_candidates, "adopted": cmd_adopted,
           "all": cmd_all}[a.cmd]

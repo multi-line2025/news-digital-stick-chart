@@ -48,10 +48,16 @@ class GkgCase(t23.JCase):
     def ready(self):
         self.seal()
         self.step3(T0 + H)
+        # T-037：gkg-run-start の前に順番1・順番1b が要り、どちらも method-access より前に置く
+        # （順番1 は step3 が足す）
+        self.add_order1b(T0 + 2 * H)
         self.method_rec, _r, _o = self.method(T0 + 3 * H)
         self.commit("手順4まで")
 
-    def excl(self, seq=1):
+    def excl(self, seq=None):
+        """除外の規則の記録の seq と行の sha256。既定は stats-order1 の最初の記録（T-037）。"""
+        if seq is None:
+            seq = ledger.first_order1(self.records())["seq"]
         rec = [r for r in self.records() if r["seq"] == seq][0]
         return seq, hashlib.sha256(ledger.canonical_line(rec)).hexdigest()
 
@@ -106,7 +112,7 @@ class TestGkgRunStart(GkgCase):
         r1, rel1, _o = self.start_run(T0 + 4 * H)
         self.change_code()
         sha2 = self.code_sha()
-        r2, _rel2, _o = self.start_run(T0 + 5 * H, days=["2015-03-02"])
+        r2, _rel2, _o = self.start_run(T0 + 5 * H)
         self.assertEqual(self.doc_of(rel1)["trial_days"], TRIAL_DAYS)
         self.commit("試しの run")
         for args in (("gkg-runs",), ("all", "--rev", "auto")):
@@ -116,7 +122,7 @@ class TestGkgRunStart(GkgCase):
                           % (r1["seq"], sha1[:16], sha1, tw.CODE_REL, "、".join(TRIAL_DAYS)), out)
             self.assertIn("  seq %d  試しの run（trial）  run_id %s  code_sha256 %s"
                           % (r2["seq"], sha2[:16], sha2), out)
-            self.assertIn("日 2015-03-02  一覧", out)
+            self.assertIn("日 2015-03-02、2015-03-03、2015-03-04  一覧", out)
             self.assertLess(out.index("seq %d  試しの run" % r1["seq"]),
                             out.index("seq %d  試しの run" % r2["seq"]))
 
@@ -138,6 +144,7 @@ class TestGkgRunStart(GkgCase):
         """完了条件：method-access より前に書こうとすると止まる。"""
         self.seal()
         self.step3(T0 + H)
+        self.add_order1b(T0 + 2 * H)       # T-037：順番1（step3 が足す）と順番1b はある
         self.commit("手順3まで")
         self.assert_writer_refuses(
             lambda: seal_gkg_run.start(self.root, "trial", tw.CODE_REL, self.code_sha()[:16], KEPT,
@@ -194,7 +201,8 @@ class TestGkgRunStart(GkgCase):
         self.start_run(T0 + 5 * H, mode="official")
         out = self.verify_ok("adopted")
         self.assertIn("採用は保留（threshold-access の記録が無いため）", out)
-        self.assertIn("acquisition-result・method-access・gkg-run-start は区切りに使わない", out)
+        self.assertIn("acquisition-result・method-access・gkg-run-start・stats-order1・stats-order1b は"
+                      "区切りに使わない", out)
         access, _r, _o = self.write_access(T0 + 6 * H)
         out = self.verify_ok("all")
         self.assertIn("区切り：最初の threshold-access の記録 = seq %d" % access["seq"], out)
@@ -208,8 +216,8 @@ class TestGkgRunStart(GkgCase):
             self.assert_writer_refuses(
                 lambda: seal_gkg_run.start(self.root, mode, tw.CODE_REL, self.code_sha()[:16], KEPT,
                                            self.method_rec["seq"],
-                                           TRIAL_DAYS if mode == "trial" else None, 1,
-                                           self.excl()[1], T0 + 5 * H, "ots",
+                                           TRIAL_DAYS if mode == "trial" else None,
+                                           self.excl()[0], self.excl()[1], T0 + 5 * H, "ots",
                                            drand_fetch=t23.t17.NoCall(), runner=tw.FakeOts()),
                 "threshold-access の記録（seq %d）がある" % access["seq"])
         g = self.raw_run(T0 + 5 * H)
@@ -225,21 +233,31 @@ class TestGkgRunStart(GkgCase):
         self.result(T0 + 6 * H, s["seq"], kept="d" * 64)
         trec = [x for x in self.records() if x["seq"] == tr["seq"]][0]
         tr_sha = hashlib.sha256(ledger.canonical_line(trec)).hexdigest()
+        o1 = self.excl()[0]
         self.assert_writer_refuses(
             lambda: self.start_run(T0 + 7 * H, mode="official", filelist_sha256="d" * 64,
                                    exclusion_rule_seq=tr["seq"], exclusion_rule_record_sha256=tr_sha),
-            "filelist_sha256")
+            "exclusion_rule_seq %d が、除外の規則の kind（stats-order1）の最初の記録の seq %d でない"
+            % (tr["seq"], o1))
         self.assert_writer_refuses(
-            lambda: self.start_run(T0 + 7 * H, mode="official", exclusion_rule_seq=tr["seq"],
-                                   exclusion_rule_record_sha256=tr_sha),
-            "最初の gkg-run-start（seq %d）より前の記録の seq でない" % tr["seq"])
+            lambda: self.start_run(T0 + 7 * H, mode="official", filelist_sha256="d" * 64),
+            "filelist_sha256")
         seq2 = self.excl(2)
         self.assert_writer_refuses(
             lambda: self.start_run(T0 + 7 * H, mode="official", exclusion_rule_seq=seq2[0],
                                    exclusion_rule_record_sha256=seq2[1]),
-            "exclusion_rule_seq 2 が、最初の gkg-run-start（seq %d）の 1 と違う" % tr["seq"])
-        # 正直な流れ（同じ一覧・同じ除外の規則の記録）は止まらない
-        self.start_run(T0 + 7 * H, mode="official")
+            "exclusion_rule_seq 2 が、除外の規則の kind（stats-order1）の最初の記録の seq %d でない" % o1)
+        # 書く仕組みを飛ばして、試しの run の記録を除外の規則として指すと、verify で止まる
+        g = self.raw_run(T0 + 7 * H, {"exclusion_rule_seq": tr["seq"],
+                                     "exclusion_rule_record_sha256": tr_sha}, mode="official")
+        self.verify_fails(("gkg-runs",), "seq %d の gkg-run-start の exclusion_rule_seq %d が、除外の規則の "
+                                         "kind（stats-order1）の最初の記録の seq（%d）でない" % (g, tr["seq"], o1))
+
+    def test_probe_a_honest_official_passes(self):
+        """正直な流れ（同じ一覧・同じ除外の規則の記録）は止まらない。"""
+        self.ready()
+        self.start_run(T0 + 4 * H)
+        self.start_run(T0 + 5 * H, mode="official")
         self.verify_ok("gkg-runs")
 
     def test_filelist_needs_single_result_before_method(self):
@@ -247,6 +265,7 @@ class TestGkgRunStart(GkgCase):
         self.seal()
         self.step3(T0 + H)
         self.step3(T0 + 2 * H)
+        self.add_order1b(T0 + 3 * H)
         self.method_rec, _r, _o = self.method(T0 + 4 * H)
         self.commit("手順4まで")
         self.assert_writer_refuses(lambda: self.start_run(T0 + 5 * H), "ちょうど 1 件でない")
@@ -259,7 +278,7 @@ class TestGkgRunStart(GkgCase):
         nocall = dict(drand_fetch=t23.t17.NoCall())
         self.assert_writer_refuses(
             lambda: seal_gkg_run.start(self.root, "trial", tw.CODE_REL, self.code_sha()[:16], KEPT,
-                                       self.method_rec["seq"], TRIAL_DAYS, 1, self.excl()[1],
+                                       self.method_rec["seq"], TRIAL_DAYS, self.excl()[0], self.excl()[1],
                                        T0 + 5 * H, "ots", runner=tw.FakeOts(), **nocall),
             "同じ run_id %s の trial の記録（seq %d）が既にある" % (self.code_sha()[:16], tr["seq"]))
         self.change_code()
@@ -269,7 +288,7 @@ class TestGkgRunStart(GkgCase):
             days = [(d0 + _dt.timedelta(days=k)).isoformat() for k in range(n)]
             self.assert_writer_refuses(
                 lambda: seal_gkg_run.start(self.root, "trial", tw.CODE_REL, self.code_sha()[:16], KEPT,
-                                           self.method_rec["seq"], days, 1, self.excl()[1],
+                                           self.method_rec["seq"], days, self.excl()[0], self.excl()[1],
                                            T0 + 5 * H, "ots", runner=tw.FakeOts(), **nocall),
                 "trial_days は 1〜3 日の一覧")
         # 書く仕組みを飛ばした場合：同じ run_id の trial と、4 日の trial は verify で止まる
@@ -299,8 +318,8 @@ class TestGkgRunStart(GkgCase):
         self.assertEqual(g, seq)
         self.assertTrue(data)
         self.verify_fails(("gkg-runs", "all"),
-                          "seq %d の gkg-run-start の exclusion_rule_seq %d が、最初の gkg-run-start（seq %d）"
-                          "より前の記録の seq でない" % (g, g, g))
+                          "seq %d の gkg-run-start の exclusion_rule_seq %d が、除外の規則の kind（stats-order1）の"
+                          "最初の記録の seq（%d）でない" % (g, g, self.excl()[0]))
 
     def test_precheck_stops_before_drand(self):
         """軽1：official が既にあるときと、method-access が無いときは、drand を呼ぶ前に止まる。"""
@@ -310,8 +329,8 @@ class TestGkgRunStart(GkgCase):
             self.assert_writer_refuses(
                 lambda: seal_gkg_run.start(self.root, mode, tw.CODE_REL, self.code_sha()[:16], KEPT,
                                            self.method_rec["seq"],
-                                           TRIAL_DAYS if mode == "trial" else None, 1,
-                                           self.excl()[1], T0 + 5 * H, "ots",
+                                           TRIAL_DAYS if mode == "trial" else None,
+                                           self.excl()[0], self.excl()[1], T0 + 5 * H, "ots",
                                            drand_fetch=t23.t17.NoCall(), runner=tw.FakeOts()),
                 "official")
 
@@ -357,8 +376,9 @@ class TestSealPeriodsPrecheck(t23.JCase):
     def test_s1_second_rebuild_without_triggers(self):
         """S1：triggers を足さずに 3 件目の版（網の日数と同じ週の年数）を書く。"""
         prec = self.nw_rebuilt()
+        last_t = [r for r in self.records() if r["kind"] == ledger.TRIGGERS_KIND][-1]
         self.assert_periods_writer_refuses(["--nwonly", "--sw3", "before_deadline"], T0 + 6 * H,
-                                           "periods-triggers の最後の記録（seq 6、")
+                                           "periods-triggers の最後の記録（seq %d、" % last_t["seq"])
         # 先に triggers を足そうとしても、既にある before_deadline の版と違うので止まる（T-027）
         self.assert_writer_refuses(
             lambda: seal_triggers.seal(self.root, {"network_window_days": 500, "same_week_years": 3},
@@ -489,8 +509,9 @@ class TestSealPeriodsPrecheck(t23.JCase):
         self.nw_rebuilt()
         self.method_gate()
         self.raw_triggers(T0 + 6 * H, network_window_days=600)
+        prec = [r for r in self.records() if r["kind"] == ledger.PERIODS_KIND][1]
         with self.assertRaisesRegex(ledger.MethodAccessRequired,
-                                    "仮の採用として比べた）: 2 件目（seq 7）: before_deadline と申告"):
+                                    "仮の採用として比べた）: 2 件目（seq %d）: before_deadline と申告" % prec["seq"]):
             self.method_gate()
 
 
@@ -524,7 +545,7 @@ class TestDocT031(unittest.TestCase):
             self.text = f.read()
 
     def test_kind_table_and_chapter(self):
-        self.assertIn("下の表の8つだけ", self.text)
+        self.assertIn("下の表の10だけ", self.text)   # T-037
         self.assertIn("| `gkg-run-start` |", self.text)
         self.assertIn("## 12. GKG の取得の run の開始（gkg-run-start。T-031）", self.text)
         for k in ledger.GKG_RUN_DOC_KEYS:
@@ -534,7 +555,7 @@ class TestDocT031(unittest.TestCase):
         """差し戻し1回目の中1〜中4・軽2・軽4・軽5 の記述。"""
         for phrase in ("run の単位（T-031 の差し戻し1回目の中3）", "同じ run の再開では書かない",
                        "最初の `threshold-access` より前にある", "ただ1件の `acquisition-result`",
-                       "どの run も同じ入力", "その kind の最初の記録であること",
+                       "どの run も同じ入力", "除外の規則の kind（`stats-order1`。13章）の最初の記録の seq",   # T-037
                        "期限の前の `after_deadline` の版を書かない", "`candidates` の記録がまだ無いうちは",
                        "書く仕組み（`seal_method.py`。T-031 の差し戻し1回目の軽2）",
                        "drand を取ったあと、書く前に行い", "`gkg-run-start`（GKG の取得の run の開始。12章。T-031）も、区切りに使わない"):

@@ -7,8 +7,9 @@
 1 行の形（キーはこの 6 つだけ。ほかのキーがあれば検証で失敗にする）
     seq          通し番号。1 から始まり、行の順に 1 ずつ増える。
     prev_hash    直前の行のバイト列（末尾の改行を含めない）の sha256。1 行目は 0 が 64 個。
-    kind         種類。許可リスト（ALLOWED_KINDS）の 8 つだけ。それ以外は検証で失敗にする。
-                 gkg-run-start（GKG の取得の run の開始。T-031）を加えた。
+    kind         種類。許可リスト（ALLOWED_KINDS）の 10 だけ。それ以外は検証で失敗にする。
+                 gkg-run-start（GKG の取得の run の開始。T-031）、stats-order1・stats-order1b
+                 （統計係の順番1・順番1b の事前の封印。T-037）を加えた。
                  periods / periods-triggers / threshold-access / acquisition-start /
                  acquisition-result / candidates（T-013）/ method-access（T-014）
     targets      対象のファイルの一覧。各要素は {"path", "role", "sha256"}。
@@ -144,8 +145,11 @@ ACQ_RESULT_KIND = "acquisition-result"
 CANDIDATES_KIND = "candidates"
 METHOD_ACCESS_KIND = "method-access"
 GKG_RUN_KIND = "gkg-run-start"      # T-031：GKG の取得の run（試し・正式）の開始
+ORDER1_KIND = "stats-order1"        # T-037：統計係の順番1（除外の規則と入れる規則）。除外の規則の kind
+ORDER1B_KIND = "stats-order1b"      # T-037：統計係の順番1b（数え方の候補と基準の案）
 ALLOWED_KINDS = (PERIODS_KIND, TRIGGERS_KIND, THRESHOLD_ACCESS_KIND, ACQ_START_KIND,
-                 ACQ_RESULT_KIND, CANDIDATES_KIND, METHOD_ACCESS_KIND, GKG_RUN_KIND)
+                 ACQ_RESULT_KIND, CANDIDATES_KIND, METHOD_ACCESS_KIND, GKG_RUN_KIND,
+                 ORDER1_KIND, ORDER1B_KIND)
 
 # stamp で使う公開カレンダー（ots の既定と同じ 4 つ）と、その集約先が返す Pending の宛先
 # （実体のカレンダー）。stamp.py はこの左側に送る。.ots の Pending の宛先は右側に限る。
@@ -929,6 +933,9 @@ GKG_RUN_DOC_KEYS = ("code_path", "code_sha256", "drand", "exclusion_rule_record_
 GKG_RUN_MODES = ("trial", "official")
 # 試しの run の日数の上限。収集係の src/collector/gkg.py の TRIAL_DAYS（3 日）と揃える（T-031 の中3）。
 TRIAL_DAYS_MAX = 3
+# 試しの run の日。収集係の src/collector/gkg.py の TRIAL_DAYS と同じ 3 日ちょうど（T-037。T-031 の
+# 監査 軽1）。手法を作る期間の最初の 3 日。値はここに写し、テストで gkg.py と同じことを確かめる。
+TRIAL_DAYS = ("2015-03-02", "2015-03-03", "2015-03-04")
 RUN_ID_RE = re.compile(r"\A[0-9a-f]{16}\Z")
 DAY_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}\Z")
 
@@ -951,13 +958,13 @@ def check_gkg_run_doc(records, record, doc, read_json):
         kept_rows_sha256 と違う（gkg_filelist_sha256。手順3で封印した一覧だけを使う。T-031 の中1）。
       - method_access_seq が、最初の method-access の記録の seq でない。
       - trial_days：mode が trial なら、日付（YYYY-MM-DD）の、狭義に増える 1〜TRIAL_DAYS_MAX（3）日の
-        一覧で、すべて periods の 1 件目の method の区画の中。mode が official なら null。
+        一覧で、すべて periods の 1 件目の method の区画の中で、TRIAL_DAYS（収集係の 3 日）と
+        ちょうど同じ（T-037）。mode が official なら null。
       - exclusion_rule_seq が、最初の gkg-run-start より前の記録の seq でない（gkg-run-start 自身や、
         試しの run のあとの記録は指せない。T-031 の中1）。exclusion_rule_record_sha256 が、
         その記録の行の正規の形（canonical_line）の sha256 と違う。
-        kind が決まったら、その kind の最初の記録であることを照合する（手順書 12章）。
-        限界：その記録の kind が「除外の規則」の kind であることは照合しない（除外の規則の kind は
-        まだ決まっていない。src/collector/themes.py の EXCLUSION_RULE_KIND）。
+        除外の規則の kind（stats-order1）の最初の記録であることも照合する（T-037）。
+        その記録が、除外の規則の kind（ORDER1_KIND = stats-order1）の最初の記録であること（T-037）。
     返り値: 中身の dict（そのまま）。
     """
     seq = record["seq"]
@@ -1011,7 +1018,15 @@ def check_gkg_run_doc(records, record, doc, read_json):
         if outside:
             raise LedgerError("seq %d の gkg-run-start（trial）の trial_days %s が、手法を作る期間の"
                               "区画 %s〜%s の外" % (seq, ", ".join(outside), start, end))
+        if tuple(days) != TRIAL_DAYS:
+            raise LedgerError("seq %d の gkg-run-start（trial）の trial_days %s が、収集係の TRIAL_DAYS（%s）と"
+                              "同じでない（T-037）" % (seq, ", ".join(days), ", ".join(TRIAL_DAYS)))
     ex = doc["exclusion_rule_seq"]
+    o1 = _first_of_kind(records, ORDER1_KIND)
+    if o1 is None or ex != o1["seq"]:
+        raise LedgerError("seq %d の gkg-run-start の exclusion_rule_seq %r が、除外の規則の kind（%s）の最初の"
+                          "記録の seq（%s）でない（T-037。T-031 の監査 中2）"
+                          % (seq, ex, ORDER1_KIND, "無し" if o1 is None else o1["seq"]))
     first_run = _first_of_kind(records, GKG_RUN_KIND)
     limit = seq if first_run is None else min(seq, first_run["seq"])
     target = next((r for r in records if r["seq"] == ex), None) if type(ex) is int else None
@@ -1117,6 +1132,186 @@ def check_gkg_run_common(runs):
                               "gkg-run-start は run の最初の実行で 1 件だけ書き、再開では書かない"
                               % (r["seq"], d["run_id"], seen[d["run_id"]]))
         seen[d["run_id"]] = r["seq"]
+
+
+# ---------------------------------------------------------------- 統計係の順番1・順番1b（T-037）
+
+ORDER_KINDS = (ORDER1_KIND, ORDER1B_KIND)
+HEX40 = re.compile(r"\A[0-9a-f]{40}\Z")
+THEMES_CODE_PATH = "src/collector/themes.py"          # 区分表の取得のコード
+FILELIST_CODE_PATH = "src/collector/acquire_filelist.py"
+# 順番1の記録に、少なくとも入っていなければならない対象（docs/stats/seal-order1.md 2章の申し送り）
+ORDER1_REQUIRED_NAMES = ("src/stats/exclusion.py", "src/stats/exclusion.py の出力",
+                         "src/stats/tagrules.py", "src/stats/tagrules.py の出力")
+ORDER1_DOC_KEYS = ("ancestors", "approvals", "checks", "head", "kind", "ledger_head",
+                   "owner_choice", "python", "targets")
+ORDER1B_DOC_KEYS = ("ancestors", "approvals", "checks", "files", "head", "kind", "ledger_head",
+                    "order1_ref", "python")
+ORDER1_CHECK_KEYS = ("acquisition_starts", "gkg_manifests_absent", "method_access_absent",
+                     "not_shallow", "optional_choice_status", "stats_tests", "themes_manifest_absent",
+                     "worktree_clean")
+ORDER1B_CHECK_KEYS = ("gkg_manifests_absent", "method_access_absent", "not_shallow", "worktree_clean")
+
+
+def check_ledger_head(data, record, doc):
+    """中身の ledger_head が、記録の先頭 seq−1 行のハッシュと一致するか（drand を持たない種類）。"""
+    head = doc.get("ledger_head") if isinstance(doc, dict) else None
+    if head != expected_ledger_head(data, record["seq"]):
+        raise LedgerError("seq %d の %s の中身の ledger_head が、直前の記録のハッシュと一致しない"
+                          % (record["seq"], record["kind"]))
+
+
+def _check_hex(value, pattern, what):
+    if not isinstance(value, str) or not pattern.match(value):
+        raise LedgerError("%s の形が違う" % what)
+
+
+def _check_approvals(approvals, what):
+    if not isinstance(approvals, list) or not approvals:
+        raise LedgerError("%s の approvals が空でない一覧でない" % what)
+    for a in approvals:
+        if not isinstance(a, dict) or sorted(a) != ["item", "lines", "source"]:
+            raise LedgerError("%s の approvals の要素のキーが item・lines・source でない" % what)
+        src = a["source"]
+        if not isinstance(src, str) or ":" not in src or not HEX40.match(src.split(":", 1)[0]):
+            raise LedgerError("%s の approvals の source が「40 桁の commit:パス」でない" % what)
+        if not isinstance(a["lines"], list) or not a["lines"] \
+                or not all(isinstance(x, str) and x for x in a["lines"]):
+            raise LedgerError("%s の approvals の lines が空でない文字列の一覧でない" % what)
+
+
+def check_order1_doc(record, doc):
+    """stats-order1 の中身の形を照合する（ledger_head は check_ledger_head）。T-037。
+    返り値: {対象の名前: sha256}。"""
+    what = "seq %d の stats-order1" % record["seq"]
+    _check_doc_kind(record, doc)
+    if not isinstance(doc, dict) or tuple(sorted(doc)) != ORDER1_DOC_KEYS:
+        raise LedgerError("%s の中身のキーが、決まった %d 個（%s）と一致しない"
+                          % (what, len(ORDER1_DOC_KEYS), "、".join(ORDER1_DOC_KEYS)))
+    _check_hex(doc["head"], HEX40, what + " の head")
+    if not isinstance(doc["ancestors"], list) or not doc["ancestors"]:
+        raise LedgerError("%s の ancestors が空でない一覧でない" % what)
+    for c in doc["ancestors"]:
+        _check_hex(c, HEX40, what + " の ancestors")
+    py = doc["python"]
+    if not isinstance(py, dict) or sorted(py) != ["path", "version"] \
+            or not all(isinstance(v, str) and v for v in py.values()):
+        raise LedgerError("%s の python のキーが path・version でない" % what)
+    targets = doc["targets"]
+    if not isinstance(targets, list) or not targets:
+        raise LedgerError("%s の targets が空でない一覧でない" % what)
+    out = {}
+    for t in targets:
+        if not isinstance(t, dict) or sorted(t) != ["name", "sha256"] or not isinstance(t["name"], str):
+            raise LedgerError("%s の targets の要素のキーが name・sha256 でない" % what)
+        _check_hex(t["sha256"], HEX64, what + " の targets の sha256")
+        if t["name"] in out:
+            raise LedgerError("%s の targets の名前 %s が重なる" % (what, t["name"]))
+        out[t["name"]] = t["sha256"]
+    missing = [n for n in ORDER1_REQUIRED_NAMES if n not in out]
+    if missing:
+        raise LedgerError("%s の targets に %s が無い" % (what, "、".join(missing)))
+    _check_approvals(doc["approvals"], what)
+    oc = doc["owner_choice"]
+    if not isinstance(oc, dict) or sorted(oc) != ["heading", "lines", "source"]:
+        raise LedgerError("%s の owner_choice のキーが heading・lines・source でない" % what)
+    checks = doc["checks"]
+    if not isinstance(checks, dict) or tuple(sorted(checks)) != ORDER1_CHECK_KEYS:
+        raise LedgerError("%s の checks のキーが、決まった %d 個と一致しない" % (what, len(ORDER1_CHECK_KEYS)))
+    for k in ("gkg_manifests_absent", "method_access_absent", "not_shallow",
+              "themes_manifest_absent", "worktree_clean"):
+        if checks[k] is not True:
+            raise LedgerError("%s の checks.%s が true でない" % (what, k))
+    if checks["optional_choice_status"] != "decided":
+        raise LedgerError("%s の checks.optional_choice_status が decided でない" % what)
+    return out
+
+
+def check_order1b_doc(record, doc):
+    """stats-order1b の中身の形を照合する（ledger_head は check_ledger_head）。T-037。
+    返り値: {パス: sha256}。順番1b の細部（候補の数や基準の識別子）は統計係が作り直している最中
+    （T-036 予定）なので、ここではパスと sha256 の一覧と、承認の照らし方の形だけを照合する。"""
+    what = "seq %d の stats-order1b" % record["seq"]
+    _check_doc_kind(record, doc)
+    if not isinstance(doc, dict) or tuple(sorted(doc)) != ORDER1B_DOC_KEYS:
+        raise LedgerError("%s の中身のキーが、決まった %d 個（%s）と一致しない"
+                          % (what, len(ORDER1B_DOC_KEYS), "、".join(ORDER1B_DOC_KEYS)))
+    _check_hex(doc["head"], HEX40, what + " の head")
+    for c in doc["ancestors"] if isinstance(doc["ancestors"], list) else [None]:
+        _check_hex(c, HEX40, what + " の ancestors")
+    py = doc["python"]
+    if not isinstance(py, dict) or sorted(py) != ["path", "version"]:
+        raise LedgerError("%s の python のキーが path・version でない" % what)
+    files = doc["files"]
+    if not isinstance(files, list) or not files:
+        raise LedgerError("%s の files が空でない一覧でない" % what)
+    out = {}
+    for f in files:
+        if not isinstance(f, dict) or sorted(f) != ["path", "sha256"]:
+            raise LedgerError("%s の files の要素のキーが path・sha256 でない" % what)
+        acquisition_start_fields({"fetch": {"code_path": f["path"], "code_sha256": f["sha256"]}})
+        if f["path"] in out:
+            raise LedgerError("%s の files のパス %s が重なる" % (what, f["path"]))
+        out[f["path"]] = f["sha256"]
+    _check_approvals(doc["approvals"], what)
+    ref = doc["order1_ref"]
+    if ref is not None and (not isinstance(ref, dict) or sorted(ref) != ["record_sha256", "seq"]):
+        raise LedgerError("%s の order1_ref が null か {seq, record_sha256} でない" % what)
+    checks = doc["checks"]
+    if not isinstance(checks, dict) or tuple(sorted(checks)) != ORDER1B_CHECK_KEYS \
+            or not all(v is True for v in checks.values()):
+        raise LedgerError("%s の checks のキーが決まった %d 個でないか、true でないものがある"
+                          % (what, len(ORDER1B_CHECK_KEYS)))
+    return out
+
+
+def themes_acquisition_starts(records, read_json):
+    """acquisition-start のうち、区分表の取得のもの（fetch.code_path が THEMES_CODE_PATH）。"""
+    out = []
+    for r in records:
+        if r["kind"] == ACQ_START_KIND:
+            path, _sha = acquisition_start_fields(read_json(r, ACQ_START_KIND))
+            if path == THEMES_CODE_PATH:
+                out.append(r)
+    return out
+
+
+def first_order1(records):
+    """除外の規則の kind（stats-order1）の最初の記録（無ければ None）。収集係の関門が使う。"""
+    return _first_of_kind(records, ORDER1_KIND)
+
+
+def check_stats_order(records, read_json):
+    """順番1・順番1b の記録の位置と、その記録が前に要る記録の照合。T-037。
+    （docs/stats/seal-order1.md 2章の項目2、3章 (3)。docs/verify/periods-seal.md 13章）
+      - stats-order1・stats-order1b の記録は、最初の method-access と、最初の区分表の取得
+        （acquisition-start のうち fetch.code_path が src/collector/themes.py のもの）より前にある。
+      - 最初の区分表の取得の前に、stats-order1 の記録がある（method-access の前には求めない。下の注記）。
+      - 最初の gkg-run-start の前に、stats-order1b の記録がある。
+    返り値: {"order1": [記録], "order1b": [記録]}。
+    """
+    o1 = [r for r in records if r["kind"] == ORDER1_KIND]
+    o1b = [r for r in records if r["kind"] == ORDER1B_KIND]
+    m = _first_of_kind(records, METHOD_ACCESS_KIND)
+    th = themes_acquisition_starts(records, read_json)
+    t = th[0] if th else None
+    g = _first_of_kind(records, GKG_RUN_KIND)
+    for r in o1 + o1b:
+        for mark, name in ((m, "method-access"), (t, "区分表の取得（acquisition-start）")):
+            if mark is not None and r["seq"] > mark["seq"]:
+                raise LedgerError("%s の記録（seq %d）が、最初の %s の記録（seq %d）より後にある。順番1・1b は"
+                                  "データに触れる前に封印する決まり" % (r["kind"], r["seq"], name, mark["seq"]))
+    # method-access の前に順番1 を求めることはしない（T-037 のリードの指示の項目2 は区分表の取得だけ。
+    # 収集係のテスト tests/collector/test_acquire_gkg.py が、順番1 の無い写しに method-access を書くため。
+    # 求める場合は、ここに (m, "method-access") を足す。docs/verify/periods-seal.md 13章の限界）
+    for mark, name in ((t, "区分表の取得（acquisition-start）"),):
+        if mark is not None and not any(r["seq"] < mark["seq"] for r in o1):
+            raise LedgerError("最初の %s の記録（seq %d）より前に、stats-order1（順番1）の記録が無い"
+                              % (name, mark["seq"]))
+    if g is not None and not any(r["seq"] < g["seq"] for r in o1b):
+        raise LedgerError("最初の gkg-run-start の記録（seq %d）より前に、stats-order1b（順番1b）の記録が無い"
+                          % g["seq"])
+    return {"order1": o1, "order1b": o1b}
 
 
 # ---------------------------------------------------------------- periods の検査
@@ -1722,6 +1917,7 @@ def require_method_access():
         （check_method_access_order）。acquisition-start と result の対応が正しいこと
       - 候補の順序：candidates が最初の acquisition-start より前にあり、形の照合に通ること
       - J とエンバーゴ（T-017、T-023）：check_horizon_embargo（require_threshold_access と同じ）
+      - 順番1・1b（T-037）：check_stats_order。順番1・1b の記録が method-access より後に無いこと
       - periods の deadline_status（T-031）：check_deadline_statuses(provisional=True)。
         threshold-access がまだ無ければ、periods-triggers の最後の記録を仮の採用として比べる
       - sealed/ と記録のファイルの実体が、プロジェクトの下にあること（check_sealed_inside）
@@ -1756,6 +1952,8 @@ def require_method_access():
         check_acquisition_pairs(records, refs)
         check_candidates_ready(root, records, rec["seq"])
         check_horizon_embargo(records, lambda r, role: read_target_json(root, r, role))
+        # T-037：順番1・1b の位置（method-access より前にだけある、など）
+        check_stats_order(records, lambda r, role: read_target_json(root, r, role))
         # T-031（T-027 の監査 中1）：仮の採用（periods-triggers の最後の記録）での deadline_status
         check_deadline_statuses(records, lambda r, role: read_target_json(root, r, role),
                                 provisional=True)
