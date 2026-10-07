@@ -424,7 +424,8 @@ class TestExclusionOutput(unittest.TestCase):
         self.assertEqual(rec["terms"], {k: list(v) for k, v in exclusion.EXCLUSION_TERMS.items()})
 
     def test_no_k_in_output(self):
-        # この出力は K と別に封印するので、K の値を含まない。
+        # 除外の規則の出力は、入れる規則（tagrules.py）と分けたファイルの出力で、K の値を含まない。
+        # 二つは同じ順番1で封印する（docs/stats/tags-naive.md 5章）。分けたままにするのは、この性質を確かめるため。
         rec = json.loads(exclusion.canonical_json())
         self.assertNotIn("k_articles_per_day", json.dumps(rec))
         self.assertNotIn("inclusion", rec)

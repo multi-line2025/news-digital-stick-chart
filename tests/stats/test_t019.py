@@ -1,6 +1,8 @@
-"""タグを入れる規則・素朴な予測・採点計画の一部のテスト（T-019〜T-022）。
+"""素朴な予測・採点計画の一部と、順番1の封印の対象のテスト（T-019〜T-022）。
 
-除外の規則のテストは test_exclusion.py に分けた（T-022。除外の規則を K と別に封印するため）。
+除外の規則のテストは test_exclusion.py に、入れる規則のテストは test_tagrules.py に分けた（T-022）。
+この二つは順番1で封印する。このファイルは封印しない（naive.py・scoring.py の改訂や、封印の対象の
+sha256 の表 docs/stats/seal-order1.md と一緒に直すため）。
 
 実行（プロジェクトのルートで）:
     PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/stats -v
@@ -488,17 +490,6 @@ class TestSealTargets(unittest.TestCase):
         want = {k: _sha256(v) for k, v in seal_target_bytes().items()}
         self.assertEqual(got, want)
 
-    def test_seal_targets_read_only_seal_targets(self):
-        # M-2：順番1で封印するテストは、封印しないファイル（作業中の reviews/、申し送りの文書、
-        # naive.py・scoring.py・periods.py・candidates.py）を読まない。
-        b = seal_target_bytes()
-        for k in ("tests/stats/test_exclusion.py", "tests/stats/test_tagrules.py"):
-            for word in (b'"reviews"', b"seal-order1", b"import naive", b"import scoring",
-                         b"import periods", b"import candidates"):
-                self.assertNotIn(word, b[k], (k, word))
-            self.assertNotIn(b'os.path.join(PROJECT, path)', b[k], k)
-        self.assertIn(b'_git_show(spec)', b["tests/stats/test_exclusion.py"])
-
     def test_inclusion_rule_in_order1(self):
         # M-1：K と入れる規則の定数と式は、順番1の対象（tagrules.py とその出力）に入っている。
         b = seal_target_bytes()
@@ -508,8 +499,14 @@ class TestSealTargets(unittest.TestCase):
         self.assertEqual(rec["inclusion"]["k_articles_per_day"], 10)
         self.assertEqual(rec["inclusion"]["min_count_per_quarter"], 1)
         self.assertIn("A = K / N_med", rec["inclusion"]["a_rule"])
-        # 除外の規則の出力には K が入らない（分けたファイルのまま）。
-        self.assertNotIn(b"k_articles_per_day", b["src/stats/exclusion.py の出力"])
+        # 除外の規則のコードと出力には、K の定数も K の値の欄も無い（分けたファイルのまま）。
+        for k in ("src/stats/exclusion.py", "src/stats/exclusion.py の出力"):
+            self.assertNotIn(b"K_ARTICLES_PER_DAY", b[k], k)
+            self.assertNotIn(b"k_articles_per_day", b[k], k)
+        # 除外の規則のテストは K の定数を使わず、tagrules を読み込まない（出力に K の欄が無いことを
+        # 確かめるために、欄の名前だけを書いている）。
+        self.assertNotIn(b"K_ARTICLES_PER_DAY", b["tests/stats/test_exclusion.py"])
+        self.assertNotIn(b"import tagrules", b["tests/stats/test_exclusion.py"])
 
     def test_old_version_output_is_the_first_submission(self):
         # 1cb463a の出力は、初回の提出で報告した sha256（98926edb…）と同じ。
@@ -521,6 +518,178 @@ class TestSealTargets(unittest.TestCase):
         self.assertEqual(rec["optional_choice_status"], "decided")
         self.assertEqual(rec["enabled_optional_categories"], ["ethnic_religious_group"])
         self.assertTrue(rec["owner_choice_source"].startswith("2d23cdf:reviews/T-020.md "))
+
+
+# ---------------------------------------------------------------------------
+# 順番1で封印するテストが、封印の対象の外を読まないこと（T-022 差し戻し2回目 M-1）
+# ---------------------------------------------------------------------------
+
+# 子プロセス（と、その子の Python）に audit hook を入れる sitecustomize。
+# 開いたファイル（open の事象）と、起動したプロセス・通信の事象を、ログに1行ずつ書く。
+# フックの中では import をしない（import 自身が open の事象を起こすため）。
+_SITECUSTOMIZE = """
+import os, sys, json
+_log = os.environ.get("STATS_AUDIT_LOG")
+if _log:
+    _fd = os.open(_log, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    _dumps = json.dumps
+    _getcwd = os.getcwd
+    _fspath = os.fspath
+    _PROC = ("subprocess.Popen", "os.system", "os.exec", "os.posix_spawn", "os.spawn", "os.fork",
+             "os.forkpty", "pty.spawn")
+    _NET = ("socket.connect", "socket.getaddrinfo", "socket.bind", "urllib.Request", "http.client.connect")
+
+    def _s(x):
+        if isinstance(x, bytes):
+            return x.decode("utf-8", "replace")
+        if isinstance(x, (str, int)) or x is None:
+            return x
+        try:
+            return _fspath(x)
+        except TypeError:
+            return repr(x)
+
+    def _hook(event, args):
+        try:
+            if event == "open":
+                rec = ["open", _s(args[0]), _s(args[1]) if len(args) > 1 else None,
+                       args[2] if len(args) > 2 and isinstance(args[2], int) else None, _getcwd()]
+            elif event == "subprocess.Popen":
+                argv = args[1]
+                if isinstance(argv, (str, bytes)) or not hasattr(argv, "__iter__"):
+                    argv = [argv]
+                rec = ["proc", [_s(a) for a in argv], _s(args[2]) if args[2] is not None else None]
+            elif event in _PROC or event in _NET:
+                rec = ["other", event, repr(args)]
+            else:
+                return
+            os.write(_fd, (_dumps(rec) + "\\n").encode("utf-8"))
+        except Exception as e:
+            os.write(_fd, (_dumps(["hook-error", event, repr(e)]) + "\\n").encode("utf-8"))
+
+    sys.addaudithook(_hook)
+"""
+
+SEALED_TEST_FILES = ("tests/stats/test_exclusion.py", "tests/stats/test_tagrules.py")
+
+# 許可リスト。ファイルは順番1の封印の対象（作業ツリーにあるもの）だけ。読むだけで、書かない。
+ALLOWED_OPENS = frozenset({
+    "src/stats/exclusion.py", "src/stats/tagrules.py", "docs/stats/tags-naive.md",
+    "tests/stats/test_exclusion.py", "tests/stats/test_tagrules.py",
+})
+# プロセスは、封印の対象の二つのコードを引数なしで動かすもの（と、拒むことを確かめる --x）と、
+# 決まった git show（2d23cdf の版の reviews/T-020.md）だけ。
+ALLOWED_PROCS = frozenset({
+    ("PYTHON", "-B", "src/stats/exclusion.py"), ("PYTHON", "-B", "src/stats/exclusion.py", "--x"),
+    ("PYTHON", "-B", "src/stats/tagrules.py"), ("PYTHON", "-B", "src/stats/tagrules.py", "--x"),
+    ("git", "show", "2d23cdf:reviews/T-020.md"),
+})
+_WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_TRUNC
+
+
+def _under(path, roots):
+    return any(path == r or path.startswith(r + os.sep) for r in roots)
+
+
+def audit_sealed_tests(project, test_files=SEALED_TEST_FILES):
+    """test_files を子プロセスの unittest で流し、開いたファイルと起動したプロセスを集める。
+
+    戻り値: (opens, procs, others, returncode)。
+      opens:  プロジェクトの中で開いたファイルの (相対パス, 書き込みか) の集合。
+              Python の本体と標準ライブラリ（sys.prefix・sys.base_prefix の下）と、このテストの
+              一時のディレクトリは数えない。プロジェクトの外のそれ以外のファイルは、絶対パスのまま入れる。
+      procs:  起動したプロセスの引数の組。Python の実行ファイルは "PYTHON"、プロジェクトの中の
+              パスは相対パスにする。
+      others: 通信など、ほかの事象。
+    """
+    import tempfile
+    project = os.path.realpath(project)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = os.path.realpath(tmp)
+        with open(os.path.join(tmp, "sitecustomize.py"), "w", encoding="utf-8") as f:
+            f.write(_SITECUSTOMIZE)
+        log = os.path.join(tmp, "audit.log")
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHONPATH=tmp, STATS_AUDIT_LOG=log,
+                   PYTHONPYCACHEPREFIX=os.path.join(tmp, "pyc"))
+        r = subprocess.run([sys.executable, "-B", "-m", "unittest", *test_files],
+                           capture_output=True, env=env, cwd=project)
+        with open(log, encoding="utf-8") as f:
+            lines = [json.loads(x) for x in f]
+    ignore = {os.path.realpath(p) for p in (sys.prefix, sys.base_prefix, sys.exec_prefix,
+                                            sys.base_exec_prefix)} | {tmp}
+    exe = {sys.executable, os.path.realpath(sys.executable)}
+    opens, procs, others = set(), set(), []
+    for rec in lines:
+        if rec[0] == "open":
+            path, mode, flags, cwd = rec[1:]
+            if isinstance(path, int):
+                continue  # 既に開いたファイル記述子（os.fdopen など）。新しいファイルではない。
+            full = os.path.realpath(os.path.join(cwd, path))
+            if _under(full, ignore):
+                continue
+            write = (isinstance(mode, str) and any(c in mode for c in "wax+")) or \
+                    (isinstance(flags, int) and bool(flags & _WRITE_FLAGS))
+            rel = os.path.relpath(full, project) if _under(full, [project]) else full
+            opens.add((rel, write))
+        elif rec[0] == "proc":
+            argv, cwd = rec[1], rec[2] or project
+            out = []
+            for k, a in enumerate(argv):
+                if k == 0 and (a in exe or os.path.realpath(a) in exe):
+                    out.append("PYTHON")
+                elif isinstance(a, str) and os.path.isabs(a) and _under(os.path.realpath(a), [project]):
+                    out.append(os.path.relpath(os.path.realpath(a), project))
+                else:
+                    out.append(a)
+            procs.add(tuple(out))
+        else:
+            others.append(rec)
+    return opens, procs, others, r.returncode
+
+
+class TestSealedTestsReadOnlyTargets(unittest.TestCase):
+    def test_sealed_tests_read_only_targets(self):
+        opens, procs, others, rc = audit_sealed_tests(PROJECT)
+        self.assertEqual(rc, 0, "封印するテストが通らない")
+        self.assertEqual(others, [])
+        self.assertEqual({p for p, w in opens if w}, set(), "書き込みがある")
+        self.assertEqual({p for p, w in opens}, set(ALLOWED_OPENS))
+        self.assertEqual(procs, set(ALLOWED_PROCS))
+
+    def test_allowlist_is_seal_targets(self):
+        # 許可リストのファイルは、すべて順番1の封印の対象（seal-order1.md の表）に入っている。
+        head, rows = read_handoff_table("seal-targets")
+        targets = {r[0].strip("`") for r in rows}
+        self.assertLessEqual(set(ALLOWED_OPENS), targets)
+        self.assertIn("2d23cdf:reviews/T-020.md", targets)
+
+    def test_detects_reads_outside_targets(self):
+        # 封印の対象の写しに、対象の外を読む行を足すと、集めた中に現れること（検出の確かめ）。
+        import shutil
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            for rel in ALLOWED_OPENS | {"reviews/T-020.md"}:
+                os.makedirs(os.path.join(d, os.path.dirname(rel)), exist_ok=True)
+                shutil.copyfile(os.path.join(PROJECT, rel), os.path.join(d, rel))
+            path = os.path.join(d, "tests", "stats", "test_exclusion.py")
+            with open(path, encoding="utf-8") as f:
+                src = f.read()
+            extra = (
+                "\n\nclass TestInjected(unittest.TestCase):\n"
+                "    def test_a(self):\n"
+                "        open(\"reviews/T-020.md\").close()\n"
+                "    def test_b(self):\n"
+                "        open(os.path.join(PROJECT, \"rev\" + \"iews\", \"T-\" + \"020.md\")).close()\n"
+                "    def test_c(self):\n"
+                "        subprocess.run([\"git\", \"show\", \"HEAD:\" + \"reviews/T-020.md\"], capture_output=True)\n"
+            )
+            src = src.replace("\n\nif __name__ == \"__main__\":", extra + "\n\nif __name__ == \"__main__\":")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(src)
+            opens, procs, others, rc = audit_sealed_tests(d)
+        self.assertIn(("reviews/T-020.md", False), opens)
+        self.assertIn(("git", "show", "HEAD:reviews/T-020.md"), procs)
+        self.assertNotEqual({p for p, w in opens}, set(ALLOWED_OPENS))
 
 
 class TestNoDataNoNetwork(unittest.TestCase):
