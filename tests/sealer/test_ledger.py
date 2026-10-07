@@ -869,6 +869,12 @@ if "--e120" in sys.argv:        # T-023：きっかけの無いエンバーゴ�
     embargo = 120
 if "--nw500" in sys.argv:       # T-027：共起の網の日数（J と一緒に渡す。--j120 と組にする）
     trig["network_window_days"] = 500
+if "--nwonly" in sys.argv:      # T-027 の差し戻し1回目（監査の probe_within.py と同じ）
+    trig["network_window_days"] = 500
+    status = sys.argv[-1]
+if "--sw3" in sys.argv:
+    trig["same_week_years"] = 3
+    status = sys.argv[-1]
 print(json.dumps({"deadline_status": status, "rebuild_triggers": trig,
     "rules": {"embargo_days": embargo},
     "periods": [{"name": n, "block_start": s, "block_end": e} for n, s, e in blocks]}))

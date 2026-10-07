@@ -34,6 +34,8 @@ import seal_triggers  # noqa: E402
 DOC = os.path.join(tl.PROJECT, "docs", "verify", "periods-seal.md")
 ROUND = 30_000_000
 REMOVED = "sealed/ の時刻証明・ヘッダを消したコミットが履歴にある"
+# 手順書のコマンドの範囲（verify.py の REV_ANCHOR_RE と同じ。差し戻し1回目の軽2）
+ANCHOR_GREP = "'^sealed/(ledger\\.jsonl\\.seq[0-9]{6}(\\.bitcoin)?\\.ots|bitcoin-header-[0-9]+\\.hex)$'"
 
 
 # ---------------------------------------------------------------- 1. 軽A：マージと削除
@@ -162,13 +164,25 @@ class TestMergeAndRemoval(t23.TestRevAnchorFiles):
         self.assertEqual(code, 0, err)
         self.assertIn("seq 1: Bitcoin で確定", out)
 
+    def test_doc_grep_matches_verify_pattern(self):
+        """差し戻し1回目の軽2：手順書のコマンドの範囲が、検証のコードの範囲（REV_ANCHOR_RE）と同じ。"""
+        import verify
+        pat = re.compile(ANCHOR_GREP.strip("'"))
+        names = ["sealed/ledger.jsonl.seq000001.ots", "sealed/ledger.jsonl.seq000001.bitcoin.ots",
+                 "sealed/bitcoin-header-970086.hex", "sealed/other.ots", "sealed/x.hex",
+                 "sealed/sub/ledger.jsonl.seq000001.ots", "sealed/ledger.jsonl.seq1.ots",
+                 "sealed/periods-output-ab.json", "sealed/ledger.jsonl.seq000001.ots.bak"]
+        for n in names:
+            self.assertEqual(bool(pat.search(n)), bool(verify.REV_ANCHOR_RE.match(n)), n)
+        self.assertEqual(_doc_text().count("grep -E " + ANCHOR_GREP), 2)
+
     def test_doc_commands_agree(self):
         """手順書の、検証のコードを使わないコマンドが、同じ結論を出す（消したコミットを見つける）。"""
         self.evil_merge()
         self.move_out()
         self.commit("remove")
         cmd = ("git log -m --no-renames --diff-filter=D --format=%H --name-only HEAD -- sealed/ "
-               "| grep -E 'seq[0-9]{6}(\\.bitcoin)?\\.ots$|bitcoin-header-[0-9]+\\.hex$'")
+               "| grep -E " + ANCHOR_GREP)
         self.assertIn(cmd, _doc_text())
         out = subprocess.run(["sh", "-c", cmd], cwd=self.root, capture_output=True).stdout.decode()
         self.assertIn("sealed/ledger.jsonl.seq000001.bitcoin.ots", out)
@@ -199,49 +213,51 @@ class TestRebuildAfterMethod(t23.JCase):
 
     def test_probe_rebuild_other_trigger_after_method(self):
         """probe23.py の Rebuild.test_rebuild_other_trigger_after_method。T-023 の版では、
-        J と網の日数を一緒に渡すと拒まれ、網の日数だけを渡すと受け付けられ、そのあと
-        threshold-access が二度と通らなかった。今は逆になり、threshold-access まで進める。"""
+        網の日数だけを渡すと受け付けられ、そのあと threshold-access が二度と通らなかった。
+        T-027 の初回では J と一緒なら受け付けたが、前の版（J だけで作り直した before_deadline）が
+        verify periods で失敗し続けた（差し戻し1回目の中1）。今は、どちらの追記も書く仕組みが拒む。
+        前の版と同じ値のままなら、threshold-access まで進め、verify all も通る。"""
         self.to_method()
-        # 網の日数だけ（J が null）は、書く仕組みが拒む
         self.assert_writer_refuses(
             lambda: seal_triggers.seal(self.root, {"network_window_days": 500}, T0 + 6 * H, None),
             "J が null の periods-triggers は追記しない")
-        # J の最大と一緒なら受け付ける
-        trec = self.seal_triggers(T0 + 6 * H, last_read_offset_days=120, network_window_days=500)
-        prec = self.rebuilt_with_network(T0 + 7 * H)
-        arec, _r, _o = self.write_access(T0 + 8 * H)
-        out = self.verify_ok("candidates")
-        self.assertIn("threshold-access（seq %d）の時点で採用される periods（seq %d）の embargo_days 120"
-                      % (arec["seq"], prec["seq"]), out)
-        self.assertIn("periods-triggers：seq %d、last_read_offset_days 120（= J の最大）" % trec["seq"],
-                      out)
-        out = self.verify_ok("adopted")
-        self.assertIn("periods-triggers: 採用 = seq %d" % trec["seq"], out)
+        self.assert_writer_refuses(
+            lambda: seal_triggers.seal(self.root, {"last_read_offset_days": 120,
+                                                   "network_window_days": 500}, T0 + 6 * H, None),
+            "periods の 2 件目（seq 4）が before_deadline で、その rebuild_triggers")
+        # 前の版と同じ値（J 120 だけ）を言い直すことは拒まない
+        self.seal_triggers(T0 + 6 * H, last_read_offset_days=120)
+        arec, _r, _o = self.write_access(T0 + 7 * H)
+        out = self.verify_ok("all")
+        self.assertIn("threshold-access（seq %d）の時点で採用される periods（seq 4）の embargo_days 120"
+                      % arec["seq"], out)
         self.method_gate()
         self.threshold_gate()
 
-    @unittest.expectedFailure
-    def test_known_gap_deadline_status_of_earlier_rebuild(self):
-        """リードに報告した未解決の点（T-027 の範囲の外）。上と同じ正直な流れで、verify periods は
-        失敗する。method-access の前に作り直した periods（rebuild_triggers は J だけ、
-        deadline_status は before_deadline）を、judge_deadline_status が「採用された」
-        periods-triggers（J と網の日数）と比べるため。直ったら、このテストは予期しない成功になる。"""
+    def test_gap_is_stopped_by_writers_and_gate(self):
+        """T-027 の初回で開示した形（J だけの版のあとに J と網の日数を足し、作り直す）を、書く仕組みを
+        飛ばして作る。verify periods・all は前の版の申告で失敗し、seal_access と threshold-access の
+        関門も、verify periods と同じ照合で止まる（差し戻し1回目の中1 (ii)・軽1）。"""
         self.to_method()
-        self.seal_triggers(T0 + 6 * H, last_read_offset_days=120, network_window_days=500)
+        self.raw_triggers(T0 + 6 * H, last_read_offset_days=120, network_window_days=500)
         self.rebuilt_with_network(T0 + 7 * H)
-        self.write_access(T0 + 8 * H)
-        self.assertEqual(run_verify(self.root, "periods").returncode, 0)
+        msg = "2 件目（seq 4）: before_deadline と申告しているが"
+        self.assert_writer_refuses(lambda: self.write_access(T0 + 8 * H), msg)
+        self.add_access(T0 + 8 * H, ROUND)
+        self.verify_fails(("periods", "all"), "2 件目: before_deadline と申告しているが")
+        with self.assertRaisesRegex(ledger.ThresholdAccessRequired, re.escape(msg)):
+            self.threshold_gate()
+        self.verify_ok("candidates")        # J とエンバーゴの照合は通る（食い違いは deadline_status だけ）
 
     def test_bypassed_null_j_trigger_does_not_dead_end(self):
-        """書く仕組みを飛ばして J が null の triggers を足しても、J の最大を持つ triggers を後から
-        足せば、それが採用されて先へ進める（T-023 の監査 軽B の行き詰まりが無い）。"""
+        """書く仕組みを飛ばして J が null の triggers を足しても、前の版と同じ値（J の最大）の
+        triggers を後から足せば、それが採用されて先へ進める（T-023 の監査 軽B の行き詰まりが無い）。"""
         self.to_method()
         self.raw_triggers(T0 + 6 * H, network_window_days=500)
         self.assert_writer_refuses(lambda: self.write_access(T0 + 7 * H), "None")
-        self.seal_triggers(T0 + 7 * H, last_read_offset_days=120, network_window_days=500)
-        self.rebuilt_with_network(T0 + 8 * H)
-        self.write_access(T0 + 9 * H)
-        self.verify_ok("candidates")
+        self.seal_triggers(T0 + 7 * H, last_read_offset_days=120)
+        self.write_access(T0 + 8 * H)
+        self.verify_ok("all")
         self.threshold_gate()
 
     def test_j_cannot_move_after_method(self):
@@ -260,17 +276,17 @@ class TestRebuildAfterMethod(t23.JCase):
         self.assert_writer_refuses(lambda: self.write_access(T0 + 7 * H), "150")
 
     def test_embargo_cannot_move_after_method(self):
-        """method-access の後に、エンバーゴを別の値にした periods を足しても、採用されれば失敗する。
-        （ここでは --e120 を使えないので、J を持たない v1 の形（embargo 90）に戻す形で試す。）"""
+        """method-access の後に、エンバーゴを別の値にした periods（v1 の形、embargo 90 に戻す）を
+        足しても、採用されれば失敗する。"""
         self.to_method()
-        self.seal_triggers(T0 + 6 * H, last_read_offset_days=120, network_window_days=500)
         self.seal(now=T0 + 7 * H, with_cand=False)       # embargo 90 の periods（戻す）
-        self.assert_writer_refuses(lambda: self.write_access(T0 + 8 * H), "embargo_days 90 が")
+        msg = "embargo_days 90 が、candidates の J の最大 120 より小さい"
+        self.assert_writer_refuses(lambda: self.write_access(T0 + 8 * H), msg)
         self.add_access(T0 + 8 * H, ROUND)
-        # all は、先に periods の照合（未解決の点。上の予期した失敗）で止まるので candidates で見る
-        self.verify_fails(("candidates",), "embargo_days 90 が")
-        self.assertEqual(run_verify(self.root, "all").returncode, 1)
-        self.assert_gates_stop("embargo_days 90 が", method=False)
+        # 差し戻し1回目の軽1：all の失敗も、文言まで確かめる（ほかの理由の失敗で通らないように）
+        self.verify_fails(("candidates", "all"), msg)
+        self.verify_ok("periods")
+        self.assert_gates_stop(msg, method=False)
 
     def test_embargo_cannot_be_extended_after_method_in_within_case(self):
         """作り直しの要らない候補（J の最大 28）で、method-access の後に J 28 と一緒にエンバーゴを
@@ -301,6 +317,75 @@ class TestRebuildAfterMethod(t23.JCase):
         self.verify_ok("candidates")
 
 
+# ---------------------------------------------------------------- 2b. 差し戻し1回目の中1 の再現（作り直しの要らない場合）
+
+
+class TestDeadlineRepro(t23.JCase):
+    """監査の再現（scratchpad/au27probe_x/probe_within.py）。J の最大 28（≤ 90。今の本物の記録と
+    同じく作り直しは要らない）でも、作り直した版（before_deadline）のあとに、それと違う
+    periods-triggers を足すと、前の版が verify periods で失敗し続けた。今は書く仕組みが止める。"""
+
+    def rebuilt(self, args, now):
+        sha = ledger.sha256_hex(tl.seal_periods.run_periods(self.root, args))
+        return self.seal(args=args, sha=sha, now=now, with_cand=False)
+
+    def first_rebuild(self):
+        self.seal()
+        self.step3(T0 + H)
+        self.method(T0 + 3 * H)
+        self.seal_triggers(T0 + 4 * H, network_window_days=500)
+        return self.rebuilt(["--nwonly", "before_deadline"], T0 + 5 * H)
+
+    def test_repro1_second_rebuild_refused(self):
+        """再現1：網の日数で作り直したあと、同じ週の年数も決めて二度目の作り直しをする。"""
+        prec = self.first_rebuild()
+        self.assert_writer_refuses(
+            lambda: seal_triggers.seal(self.root, {"network_window_days": 500, "same_week_years": 3},
+                                       T0 + 6 * H, None),
+            "periods の 2 件目（seq %d）が before_deadline で、その rebuild_triggers" % prec["seq"])
+        # 飛ばして作った場合：seal_access・関門・verify が止まる
+        self.raw_triggers(T0 + 6 * H, network_window_days=500, same_week_years=3)
+        self.rebuilt(["--nwonly", "--sw3", "before_deadline"], T0 + 7 * H)
+        msg = "2 件目（seq %d）: before_deadline と申告しているが" % prec["seq"]
+        self.assert_writer_refuses(lambda: self.write_access(T0 + 8 * H), msg)
+        self.add_access(T0 + 8 * H, ROUND)
+        self.verify_fails(("periods", "all"), "2 件目: before_deadline と申告しているが")
+        with self.assertRaisesRegex(ledger.ThresholdAccessRequired, re.escape(msg)):
+            self.threshold_gate()
+
+    def test_repro2_restated_j_refused(self):
+        """再現2：作り直しのあとに、手順書の案内どおり J（28）を言い直す。"""
+        prec = self.first_rebuild()
+        self.assert_writer_refuses(
+            lambda: seal_triggers.seal(self.root, {"last_read_offset_days": 28,
+                                                   "network_window_days": 500}, T0 + 6 * H, None),
+            "periods の 2 件目（seq %d）が before_deadline で、その rebuild_triggers" % prec["seq"])
+        self.raw_triggers(T0 + 6 * H, last_read_offset_days=28, network_window_days=500)
+        msg = "2 件目（seq %d）: before_deadline と申告しているが" % prec["seq"]
+        self.assert_writer_refuses(lambda: self.write_access(T0 + 8 * H), msg)
+        self.add_access(T0 + 8 * H, ROUND)
+        self.verify_fails(("periods", "all"), "2 件目: before_deadline と申告しているが")
+        with self.assertRaisesRegex(ledger.ThresholdAccessRequired, re.escape(msg)):
+            self.threshold_gate()
+
+    def test_one_rebuild_passes_and_same_values_allowed(self):
+        """作り直し一回なら通る。同じ値の言い直しも拒まない。threshold-access の後の追記は、
+        採用されないので拒まない（今までどおり）。"""
+        self.first_rebuild()
+        self.seal_triggers(T0 + 6 * H, network_window_days=500)
+        self.write_access(T0 + 7 * H)
+        self.verify_ok("all")
+        self.threshold_gate()
+        self.seal_triggers(T0 + 8 * H, network_window_days=600)
+        self.verify_ok("all")
+
+    def test_before_any_rebuild_any_values_allowed(self):
+        """before_deadline の版がまだ無ければ、値の食い違いの検査はしない。"""
+        self.seal()
+        self.seal_triggers(T0 + H, network_window_days=500)
+        self.seal_triggers(T0 + 2 * H, network_window_days=600, same_week_years=3)
+
+
 # ---------------------------------------------------------------- 3. 手順書
 
 
@@ -328,6 +413,9 @@ class TestDocT027(unittest.TestCase):
 
     def test_known_gap_statement(self):
         self.assertIn("未解決（T-027 で報告）", self.text)
+        self.assertIn("決まるまでの扱い（T-027 の差し戻し1回目の中1 (ii)）", self.text)
+        self.assertIn("今の本物の記録（J の最大 56）でも、正直な流れで入りうる", self.text)
+        self.assertIn("T-027 の初回のコミット（58df044）の説明の訂正", self.text)
 
 
 if __name__ == "__main__":

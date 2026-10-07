@@ -27,6 +27,9 @@ threshold-access の記録の後でも、追記は拒まない（関門は設け
     （docs/stats/periods.md 8章 (2)）ので、手順4の後に書けるのは、その値だけである。
   - J の最大が periods の 1 件目の embargo_days を超える（作り直しが要る）のに、J を渡さない
     （T-027。T-023 の監査 軽B）。
+  - threshold-access の記録がまだ無く、before_deadline の periods の版があり、その rebuild_triggers
+    と渡した値が違う（T-027 の差し戻し1回目の中1 (ii)。ledger.check_triggers_against_rebuilds）。
+    採用されると、その版が verify.py periods で失敗し続けるため。
 """
 
 import argparse
@@ -56,8 +59,9 @@ def seal(project, values, now, ots_cmd, runner=subprocess.run):
         ledger.check_anchors(data, sealed_dir)
     if not ledger.records_of_kind(records, "periods"):
         raise ledger.LedgerError("periods の記録が無い。きっかけの値は封印しない")
-    ledger.check_triggers_append(records, lambda r, role: ledger.read_target_json(project, r, role),
-                                 doc)
+    read = lambda r, role: ledger.read_target_json(project, r, role)  # noqa: E731
+    ledger.check_triggers_append(records, read, doc)
+    ledger.check_triggers_against_rebuilds(records, read, doc)
     if ots_cmd is not None:
         stamp.check_ots(ots_cmd)
     content = ledger.canonical_line(doc) + b"\n"

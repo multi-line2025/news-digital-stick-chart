@@ -17,6 +17,7 @@ check_acquisition_pairs と同じ。
        - threshold-access：ledger_head、drand、block_start（periods の 1 件目の閾値の期間の始まり）、
          その前に candidates の記録があり、候補の順序の照合に通ること（T-014）、
          J とエンバーゴの照合（T-017、T-023。ledger.check_horizon_embargo）
+         periods の deadline_status の照合（T-027。ledger.check_deadline_statuses。verify periods と同じ規則）
        - acquisition-start：ledger_head、drand、step = 3、fetch（取得のコードのパスと sha256）、
          その前に candidates の記録があること（T-014。check_candidates_order）
        - method-access：ledger_head、drand、step = 4、区画（periods の 1 件目の method の区画）、
@@ -118,6 +119,9 @@ def check_new(project, data_after, records_after, rec, doc):
             raise ledger.LedgerError("block_start が periods の 1 件目の閾値の期間の始まりと一致しない")
         ledger.check_candidates_ready(project, records_after, rec["seq"])
         _check_j(project, records_after)
+        # T-027 の差し戻し1回目の中1 (ii)：verify periods と同じ deadline_status の照合
+        ledger.check_deadline_statuses(records_after,
+                                       lambda r, role: ledger.read_target_json(project, r, role))
     elif kind == ledger.ACQ_START_KIND:
         ledger.acquisition_start_fields(doc)
         ledger.check_candidates_order(records_after)

@@ -1001,6 +1001,63 @@ def judge_deadline_status(output, decided, adopted_triggers):
                       "periods-triggers の記録と一致する"]
 
 
+def check_deadline_statuses(records, read_json):
+    """threshold-access の記録があるとき、すべての periods の版の deadline_status を、
+    verify.py periods と同じ規則（judge_deadline_status。採用された periods-triggers と比べる）で
+    照合する。T-027 の差し戻し1回目の中1 (ii)。食い違いがあれば LedgerError。
+
+    書く仕組み（seal_access）と threshold-access の関門が使う。verify periods に通らない記録の
+    まま、閾値を決める期間に進まないため。periods の 1 件目の deadline_status が null でない
+    ことも失敗にする（verify periods と同じ）。threshold-access が無ければ何もしない。
+    どの periods-triggers と比べるべきか（docs/stats/periods.md 8章 (2) の「記録に追記した値」）は、
+    統計係の判断を待っている。決まるまでは verify periods と同じ規則を使う。
+    """
+    rec, _cand, cut = adoption(records, TRIGGERS_KIND)
+    if cut is None:
+        return
+    values = None if rec is None else triggers_values(read_json(rec, "triggers"))
+    versions = records_of_kind(records, PERIODS_KIND)
+    problems = []
+    for v, r in versions:
+        out = read_json(r, "output")
+        if v == 1 and out.get("deadline_status") is not None:
+            problems.append("1 件目: deadline_status が null でない")
+        _expected, probs = judge_deadline_status(out, True, values)
+        problems += ["%d 件目（seq %d）: %s" % (v, r["seq"], p) for p in probs]
+    if problems:
+        raise LedgerError("periods の deadline_status の照合に通らない（verify.py periods と同じ規則）: %s"
+                          % "; ".join(problems))
+
+
+def check_triggers_against_rebuilds(records, read_json, values):
+    """periods-triggers を 1 件追記する前に、既にある before_deadline の periods の版の
+    rebuild_triggers と食い違わないかを確かめる。T-027 の差し戻し1回目の中1 (ii)。
+
+    verify periods は、すべての版の rebuild_triggers を「採用された」periods-triggers と比べる
+    （judge_deadline_status）。before_deadline の版があるところに、それと違う値の
+    periods-triggers を足すと、それが採用されたとき前の版が「申告と一致しない」になり、
+    verify periods と all が失敗し続ける（追記のみの記録から消せない）。そのため書く前に拒む。
+    - threshold-access の記録が既にあれば何もしない（その後の periods-triggers は採用されない）。
+    - before_deadline の版が二つ以上あり、互いに rebuild_triggers が違えば、どの値でも拒む。
+    どの periods-triggers と比べるべきかは統計係の判断を待っている。決まるまでの扱いである。
+    """
+    if first_threshold_access(records) is not None:
+        return
+    for v, r in records_of_kind(records, PERIODS_KIND):
+        out = read_json(r, "output")
+        trig = out.get("rebuild_triggers")
+        if out.get("deadline_status") != "before_deadline" or not isinstance(trig, dict):
+            continue
+        if dict(trig) != dict(values):
+            raise LedgerError("periods の %d 件目（seq %d）が before_deadline で、その rebuild_triggers %s "
+                              "と、追記するきっかけの値 %s が違う。この値が採用されると、その版は "
+                              "verify.py periods で「申告と一致しない」になり、記録から消せないので追記しない"
+                              "（docs/verify/periods-seal.md 9章。どの periods-triggers と比べるかは"
+                              "統計係の判断待ち）"
+                              % (v, r["seq"], json.dumps(trig, sort_keys=True),
+                                 json.dumps(values, sort_keys=True)))
+
+
 def read_target_json(root, record, role):
     """記録の対象（role のもの）のファイルを読み、sha256 を照合して JSON として返す。"""
     t = output_target(record, role)
@@ -1325,6 +1382,7 @@ def require_threshold_access():
         max(periods の 1 件目の embargo_days, candidates の J の最大) と等しいこと。採用される
         periods-triggers の J が null でなければ J の最大と等しいこと。J の最大が 1 件目の
         embargo_days を超えるときは、その periods-triggers が要ること
+      - periods の deadline_status（T-027）：check_deadline_statuses。verify.py periods と同じ規則
       - sealed/ と記録のファイルの実体が、プロジェクトの下にあること（check_sealed_inside）
     記録が無ければ、先に src/sealer/seal_access.py で threshold-access を追記する。
 
@@ -1351,6 +1409,7 @@ def require_threshold_access():
                               "閾値の期間の始まり %s と一致しない" % (rec["seq"], got, want))
         check_candidates_ready(root, records, rec["seq"])
         check_horizon_embargo(records, lambda r, role: read_target_json(root, r, role))
+        check_deadline_statuses(records, lambda r, role: read_target_json(root, r, role))
     except ThresholdAccessRequired:
         raise
     except LedgerError as e:

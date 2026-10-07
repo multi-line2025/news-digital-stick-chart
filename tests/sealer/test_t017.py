@@ -190,6 +190,20 @@ class TestHorizonEmbargo(t14.Case):
         sha = ledger.sha256_hex(tl.seal_periods.run_periods(self.root, args))
         return self.seal(args=args, sha=sha, now=now, with_cand=False)
 
+    def raw_triggers(self, now, **values):
+        """periods-triggers を、書く仕組みを通さずに足す（書く仕組みを飛ばした場合の再現）。
+        T-027 の差し戻し1回目で test_t023.py の JCase から移した。"""
+        doc = {k: values.get(k) for k in ledger.TRIGGER_KEYS}
+        content = ledger.canonical_line(doc) + b"\n"
+        sha = ledger.sha256_hex(content)
+        rel = "sealed/periods-triggers-%s.json" % sha
+        ledger.write_once(os.path.join(self.root, rel), content)
+        ledger.append_record(self.ledger, ledger.TRIGGERS_KIND,
+                             [{"path": rel, "role": "triggers", "sha256": sha}], "", now)
+        seq = len(self.records())
+        tl.stamp.stamp_seq(self.ledger, seq, "ots", runner=tl.FakeRun())
+        return seq
+
     def test_real_values_within(self):
         """本物の封印の値：candidates の J の最大 56、periods の 1 件目の embargo_days 90。
         どのファイルを使うかは、本物の記録の順番（periods の 1 件目、すべての candidates）で選ぶ
@@ -282,7 +296,10 @@ class TestHorizonEmbargo(t14.Case):
         self.seal_long()
         self.seal_triggers(T0 + H, last_read_offset_days=120)
         self.rebuilt_periods(T0 + 2 * H)
-        self.seal_triggers(T0 + 3 * H, last_read_offset_days=100)
+        # T-027 の差し戻し1回目：書く仕組みは、before_deadline の版と食い違う値を拒むので、飛ばして足す
+        with self.assertRaisesRegex(ledger.LedgerError, "before_deadline で、その rebuild_triggers"):
+            tl.seal_triggers.seal(self.root, {"last_read_offset_days": 100}, T0 + 3 * H, None)
+        self.raw_triggers(T0 + 3 * H, last_read_offset_days=100)
         self.add_access(T0 + 4 * H, 30_000_000)
         self.verify_fails(("candidates",), "seq 5、100")
         self.assertEqual(run_verify(self.root, "all").returncode, 1)

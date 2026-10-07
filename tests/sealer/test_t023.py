@@ -50,19 +50,6 @@ class JCase(t17.TestHorizonEmbargo):
     """TestHorizonEmbargo の道具（seal・step3・method・seal_long・rebuilt_periods など）を使う。
     親のテストを二重に走らせないよう、下の各クラスは test_ で始まる親のメソッドを持たない形にする。"""
 
-    def raw_triggers(self, now, **values):
-        """periods-triggers を、書く仕組みを通さずに足す（書く仕組みを飛ばした場合の再現）。"""
-        doc = {k: values.get(k) for k in ledger.TRIGGER_KEYS}
-        content = ledger.canonical_line(doc) + b"\n"
-        sha = ledger.sha256_hex(content)
-        rel = "sealed/periods-triggers-%s.json" % sha
-        ledger.write_once(os.path.join(self.root, rel), content)
-        ledger.append_record(self.ledger, ledger.TRIGGERS_KIND,
-                             [{"path": rel, "role": "triggers", "sha256": sha}], "", now)
-        seq = len(self.records())
-        tl.stamp.stamp_seq(self.ledger, seq, "ots", runner=tl.FakeRun())
-        return seq
-
     def write_access(self, now):
         return seal_access.seal(self.root, now, "ots", drand_fetch=tw.FakeDrand(now),
                                 runner=tw.FakeOts())
