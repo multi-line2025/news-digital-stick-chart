@@ -500,10 +500,12 @@ class TestSealTargets(unittest.TestCase):
 
     def test_frozen_doc_hash_in_sealed_test(self):
         # M-3：封印するテスト test_tagrules.py の中の定数が、今の tags-naive.md の sha256 と同じ。
-        import test_tagrules
+        # test_tagrules.py は import せず、封印の対象のバイト列から定数を読む（どの起動のしかたでも同じに動くため）。
         b = seal_target_bytes()
-        self.assertEqual(test_tagrules.TAGS_NAIVE_SHA256, _sha256(b["docs/stats/tags-naive.md"]))
-        self.assertIn(test_tagrules.TAGS_NAIVE_SHA256.encode(), b["tests/stats/test_tagrules.py"])
+        tree = ast.parse(b["tests/stats/test_tagrules.py"].decode("utf-8"))
+        values = [n.value.value for n in tree.body if isinstance(n, ast.Assign)
+                  and [t.id for t in n.targets if isinstance(t, ast.Name)] == ["TAGS_NAIVE_SHA256"]]
+        self.assertEqual(values, [_sha256(b["docs/stats/tags-naive.md"])])
 
     def test_seal_targets(self):
         head, rows = read_handoff_table("seal-targets")
