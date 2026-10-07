@@ -30,7 +30,6 @@ import naive  # noqa: E402
 import periods  # noqa: E402
 import scoring  # noqa: E402
 import exclusion  # noqa: E402
-import tagrules  # noqa: E402
 
 D = datetime.date
 DAY = datetime.timedelta(days=1)
@@ -73,202 +72,15 @@ class Guarded:
 
 
 # ---------------------------------------------------------------------------
-# 入れる規則
+# 入れる規則のテストは test_tagrules.py に分けた（T-022 差し戻し1回目。順番1で封印するため）。
+# ここでは、区画の日付が periods.py と一致することだけを確かめる。
 # ---------------------------------------------------------------------------
 
-class TestQuarters(unittest.TestCase):
-    def test_method_block(self):
-        qs = tagrules.quarters(METHOD_START, METHOD_END)
-        self.assertEqual(len(qs), 24)
-        self.assertEqual(qs[0], (D(2015, 3, 2), D(2015, 3, 31)))
-        self.assertEqual(qs[1], (D(2015, 4, 1), D(2015, 6, 30)))
-        self.assertEqual(qs[-1], (D(2020, 10, 1), D(2020, 12, 14)))
-        for (a, b), (c, d) in zip(qs, qs[1:]):
-            self.assertEqual(b + DAY, c)
-        self.assertEqual(sum((b - a).days + 1 for a, b in qs), (METHOD_END - METHOD_START).days + 1)
-
+class TestMethodBlockMatchesPeriods(unittest.TestCase):
     def test_matches_periods_block(self):
         ps = periods.rebuild_periods()
         self.assertEqual((ps[0]["block_start"], ps[0]["block_end"]), (METHOD_START, METHOD_END))
 
-    def test_doc_constants(self):
-        head, rows = read_table("tag-constants")
-        got = {r[0]: r[1] for r in rows}
-        self.assertEqual(got["K_ARTICLES_PER_DAY"], str(tagrules.K_ARTICLES_PER_DAY))
-        self.assertEqual(got["MIN_COUNT_PER_QUARTER"], str(tagrules.MIN_COUNT_PER_QUARTER))
-        self.assertEqual(got["四半期の数"], str(len(tagrules.quarters(METHOD_START, METHOD_END))))
-
-
-class TestBuildTagList(unittest.TestCase):
-    # 小さな区画（2つの四半期にまたがる）で試す。
-    S, E = D(2019, 3, 1), D(2019, 6, 30)
-
-    def days(self):
-        d, out = self.S, []
-        while d <= self.E:
-            out.append(d)
-            d += DAY
-        return out
-
-    def base(self, total=1000):
-        totals = {d: total for d in self.days()}
-        return totals
-
-    def test_a_is_k_over_median(self):
-        totals = self.base()
-        for i, d in enumerate(self.days()[:10]):
-            totals[d] = 3000  # 中央値は 1000 のまま
-        r = tagrules.build_tag_list({}, {}, totals, set(), self.S, self.E)
-        self.assertEqual(r["a"], "1/100")
-        self.assertEqual(r["n_med"], "1000/1")
-        a, n = tagrules.threshold_a({1: 1, 2: 3, 3: 10, 4: 20}, set())
-        self.assertEqual(n, F(13, 2))
-        self.assertEqual(a, F(10) / F(13, 2))
-
-    def test_rules(self):
-        totals = self.base(1000)  # A = 10/1000
-        ds = self.days()
-        counts = {
-            "QQ_A": {d: 10 for d in ds},                 # 平均 = A ちょうど → 入る
-            "QQ_B": {d: 9 for d in ds},                  # A 未満
-            "QQ_C": {d: 50 for d in ds if d.month >= 4},  # 最初の四半期に無い
-            "MILITARY_X": {d: 100 for d in ds},            # 除外の語
-            "QQ_D": {d: 100 for d in ds},                # 説明で除外
-        }
-        themes = {"QQ_A": None, "QQ_B": "", "QQ_C": "x", "MILITARY_X": "", "QQ_D": "flood relief",
-                  "QQ_E": "never appears"}
-        r = tagrules.build_tag_list(themes, counts, totals, set(), self.S, self.E)
-        self.assertEqual(r["tag_list"], ["QQ_A"])
-        rows = {x["name"]: x for x in r["themes"]}
-        self.assertTrue(rows["QQ_A"]["mean_ratio_at_least_a"])
-        self.assertFalse(rows["QQ_B"]["mean_ratio_at_least_a"])
-        self.assertFalse(rows["QQ_C"]["present_throughout"])
-        self.assertEqual(rows["QQ_C"]["quarter_counts"][0], 0)
-        self.assertEqual(rows["MILITARY_X"]["exclusion_matches"], [["conflict_violence", "MILITARY", "name", "exact"]])
-        self.assertEqual(rows["QQ_D"]["exclusion_matches"], [["disaster", "FLOOD", "description", "exact"]])
-        self.assertFalse(rows["QQ_E"]["present_throughout"])
-        self.assertTrue(rows["QQ_A"]["in_category_table"])
-        self.assertEqual([x["name"] for x in r["themes"]], sorted(rows))
-        self.assertTrue(r["v_equals_a"])
-
-    def test_theme_only_in_data_is_considered(self):
-        ds = self.days()
-        r = tagrules.build_tag_list({}, {"QQ_Z": {d: 20 for d in ds}}, self.base(), set(), self.S, self.E)
-        self.assertEqual(r["tag_list"], ["QQ_Z"])
-        self.assertFalse(r["themes"][0]["in_category_table"])
-
-    def test_missing_days_not_counted(self):
-        ds = self.days()
-        march = [d for d in ds if d.month == 3]
-        missing = set(march)  # 最初の四半期の使える日が無い → その四半期は条件から外す
-        totals = self.base()
-        counts = {"QQ_C": {d: 50 for d in ds if d.month >= 4}}
-        r = tagrules.build_tag_list({}, counts, totals, missing, self.S, self.E)
-        self.assertEqual(r["quarters_without_usable_days"], [0])
-        self.assertEqual(r["tag_list"], ["QQ_C"])
-        self.assertIsNone(r["themes"][0]["quarter_counts"][0])
-        # 欠けた日の件数は存在の条件にも平均にも入らない
-        missing2 = {march[0]}
-        counts2 = {"QQ_Q": {march[0]: 10 ** 6}}
-        r2 = tagrules.build_tag_list({}, counts2, totals, missing2, self.S, self.E)
-        self.assertEqual(r2["themes"][0]["mean_ratio"], 0.0)
-        self.assertEqual(r2["themes"][0]["quarter_counts"], [0, 0])
-
-    def test_rejects_dates_outside_block(self):
-        totals = self.base()
-        later = {self.E + DAY: 5}
-        with self.assertRaises(ValueError):
-            tagrules.build_tag_list({}, {"QQ_A": later}, totals, set(), self.S, self.E)
-        t2 = dict(totals)
-        t2[self.E + DAY] = 1000
-        with self.assertRaises(ValueError):
-            tagrules.build_tag_list({}, {}, t2, set(), self.S, self.E)
-        with self.assertRaises(ValueError):
-            tagrules.build_tag_list({}, {}, totals, {self.S - DAY}, self.S, self.E)
-        # 閾値を決める期間の始まりの日も拒む
-        with self.assertRaises(ValueError):
-            tagrules.build_tag_list({}, {"A": {D(2020, 12, 15): 1}}, {}, set(), METHOD_START, METHOD_END)
-
-    def test_rejects_bad_totals_and_counts(self):
-        totals = self.base()
-        totals[self.S] = 0
-        with self.assertRaises(ValueError):
-            tagrules.build_tag_list({}, {}, totals, set(), self.S, self.E)
-        totals = self.base()
-        del totals[self.S]
-        with self.assertRaises(ValueError):
-            tagrules.build_tag_list({}, {}, totals, set(), self.S, self.E)
-        with self.assertRaises(ValueError):
-            tagrules.build_tag_list({}, {"A": {self.S: -1}}, self.base(), set(), self.S, self.E)
-        with self.assertRaises(ValueError):
-            tagrules.build_tag_list({}, {"A": {self.S: 1.5}}, self.base(), set(), self.S, self.E)
-
-    def test_two_settings_distinguishable(self):
-        ds = self.days()
-        counts = {"QQ_A": {d: 20 for d in ds}, "QQ_EBOLA": {d: 20 for d in ds}}
-        allset = tagrules.build_tag_list({}, counts, self.base(), set(), self.S, self.E,
-                                         optional=tagrules.OPTIONAL_CATEGORIES)
-        planb = tagrules.build_tag_list({}, counts, self.base(), set(), self.S, self.E,
-                                        optional=("ethnic_religious_group",))
-        default = tagrules.build_tag_list({}, counts, self.base(), set(), self.S, self.E)
-        self.assertEqual(allset["enabled_optional_categories"], ["disease_named", "ethnic_religious_group"])
-        self.assertEqual(planb["enabled_optional_categories"], ["ethnic_religious_group"])
-        self.assertEqual(default["enabled_optional_categories"], list(tagrules.ENABLED_OPTIONAL_CATEGORIES))
-        self.assertNotEqual(allset["enabled_optional_categories"], planb["enabled_optional_categories"])
-        self.assertEqual(allset["tag_list"], ["QQ_A"])
-        self.assertEqual(planb["tag_list"], ["QQ_A", "QQ_EBOLA"])
-        self.assertEqual(tagrules.compare_lists(allset, planb),
-                         {"only_in_old": [], "only_in_new": ["QQ_EBOLA"], "in_both": 1,
-                          "enabled_optional_categories": {
-                              "old": ["disease_named", "ethnic_religious_group"],
-                              "new": ["ethnic_religious_group"]}})
-        with self.assertRaises(ValueError):
-            tagrules.build_tag_list({}, counts, self.base(), set(), self.S, self.E, optional=("crime",))
-
-    def result(self, names, tag_list, block=("2019-03-01", "2019-06-30"), a="1/100", n_med="1000/1",
-               enabled=None):
-        r = {"block_start": block[0], "block_end": block[1], "a": a, "n_med": n_med,
-             "themes": [{"name": n} for n in names], "tag_list": tag_list}
-        if enabled is not None:
-            r["enabled_optional_categories"] = enabled
-        return r
-
-    def test_compare_lists(self):
-        names = ["A", "B", "C", "D", "E"]
-        old = self.result(names, ["A", "B", "C"])  # 1cb463a の版のように設定を持たない結果
-        new = self.result(names, ["B", "C", "D", "E"], enabled=["ethnic_religious_group"])
-        self.assertEqual(tagrules.compare_lists(old, new),
-                         {"only_in_old": ["A"], "only_in_new": ["D", "E"], "in_both": 2,
-                          "enabled_optional_categories": {"old": None, "new": ["ethnic_religious_group"]}})
-
-    def test_compare_lists_requires_same_input(self):
-        names = ["A", "B"]
-        base = self.result(names, ["A"])
-        for other in (self.result(names, ["A"], block=("2019-03-02", "2019-06-30")),
-                      self.result(names, ["A"], block=("2019-03-01", "2019-06-29")),
-                      self.result(names, ["A"], a="1/99"),
-                      self.result(names, ["A"], n_med="999/1"),
-                      self.result(["A", "B", "C"], ["A"])):
-            with self.assertRaises(ValueError):
-                tagrules.compare_lists(base, other)
-        # 同じ入力から作った二つの実の結果は比べられる
-        ds = self.days()
-        counts = {"QQ_A": {d: 20 for d in ds}}
-        r1 = tagrules.build_tag_list({}, counts, self.base(), set(), self.S, self.E)
-        r2 = tagrules.build_tag_list({}, counts, self.base(), set(), self.S, self.E,
-                                     optional=tagrules.OPTIONAL_CATEGORIES)
-        tagrules.compare_lists(r1, r2)
-        r3 = tagrules.build_tag_list({}, counts, self.base(2000), set(), self.S, self.E)
-        with self.assertRaises(ValueError):
-            tagrules.compare_lists(r1, r3)
-
-    def test_deterministic(self):
-        ds = self.days()
-        rng = random.Random(7)
-        counts = {"T%02d" % i: {d: rng.randrange(0, 30) for d in ds} for i in range(20)}
-        a = tagrules.build_tag_list({}, counts, self.base(), set(), self.S, self.E)
-        b = tagrules.build_tag_list({}, dict(reversed(list(counts.items()))), self.base(), set(), self.S, self.E)
-        self.assertEqual(json.dumps(a, sort_keys=True), json.dumps(b, sort_keys=True))
 
 
 # ---------------------------------------------------------------------------
@@ -568,7 +380,7 @@ class TestLogistic(unittest.TestCase):
 # 出力・データとネットワークを使わないこと
 # ---------------------------------------------------------------------------
 
-MODULES = ("tagrules", "naive", "scoring")
+MODULES = ("naive", "scoring")  # tagrules は test_tagrules.py で確かめる
 
 
 class TestOutput(unittest.TestCase):
@@ -598,14 +410,6 @@ class TestOutput(unittest.TestCase):
         rec = json.loads(scoring.canonical_json())
         self.assertIn("before the first threshold-access", rec["revision"])
 
-    def test_tagrules_output(self):
-        rec = json.loads(tagrules.canonical_json())
-        self.assertEqual(rec["inclusion"]["k_articles_per_day"], 10)
-        self.assertEqual(rec["exclusion"]["per_theme_exceptions"], "none")
-        self.assertEqual(rec["exclusion"], json.loads(exclusion.canonical_json()))
-        self.assertIn("counting method", rec["counting"])
-        self.assertEqual(rec["exclusion"]["terms"], {k: list(v) for k, v in tagrules.EXCLUSION_TERMS.items()})
-
 
 def _sha256(data):
     import hashlib
@@ -632,19 +436,44 @@ def _run_script_bytes(code_bytes):
     return r.stdout
 
 
+HANDOFF = os.path.join(PROJECT, "docs", "stats", "seal-order1.md")
+
+
+def read_handoff_table(name):
+    with open(HANDOFF, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    i = lines.index("<!-- table:%s -->" % name)
+    rows = []
+    for line in lines[i + 1:]:
+        if not line.startswith("|"):
+            break
+        rows.append([c.strip() for c in line.strip().strip("|").split("|")])
+    return rows[0], rows[2:]
+
+
+def _run_cli_bytes(rel):
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    r = subprocess.run([sys.executable, "-B", os.path.join(PROJECT, rel)], capture_output=True, env=env,
+                       cwd=PROJECT)
+    if r.returncode != 0:
+        raise AssertionError(r.stderr.decode())
+    return r.stdout
+
+
 def seal_target_bytes():
-    """順番1の封印の対象（文書 5章の表 seal-targets）のバイト列。"""
+    """順番1の封印の対象（docs/stats/seal-order1.md の表 seal-targets）のバイト列。"""
     def read(rel):
         with open(os.path.join(PROJECT, rel), "rb") as f:
             return f.read()
-    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
-    out = subprocess.run([sys.executable, "-B", os.path.join(SRC, "exclusion.py")],
-                         capture_output=True, env=env, cwd=PROJECT).stdout
     old = _git_show("1cb463a:src/stats/tagrules.py")
     return {
         "src/stats/exclusion.py": read("src/stats/exclusion.py"),
+        "src/stats/exclusion.py の出力": _run_cli_bytes("src/stats/exclusion.py"),
         "tests/stats/test_exclusion.py": read("tests/stats/test_exclusion.py"),
-        "src/stats/exclusion.py の出力": out,
+        "src/stats/tagrules.py": read("src/stats/tagrules.py"),
+        "src/stats/tagrules.py の出力": _run_cli_bytes("src/stats/tagrules.py"),
+        "tests/stats/test_tagrules.py": read("tests/stats/test_tagrules.py"),
+        "docs/stats/tags-naive.md": read("docs/stats/tags-naive.md"),
         "1cb463a:src/stats/tagrules.py": old,
         "1cb463a:src/stats/tagrules.py の出力": _run_script_bytes(old),
         "2d23cdf:reviews/T-020.md": _git_show("2d23cdf:reviews/T-020.md"),
@@ -653,21 +482,34 @@ def seal_target_bytes():
 
 class TestSealTargets(unittest.TestCase):
     def test_seal_targets(self):
-        head, rows = read_table("seal-targets")
+        head, rows = read_handoff_table("seal-targets")
         self.assertEqual(head, ["対象", "sha256"])
         got = {r[0].strip("`"): r[1].strip("`") for r in rows}
         want = {k: _sha256(v) for k, v in seal_target_bytes().items()}
         self.assertEqual(got, want)
 
-    def test_seal_targets_have_no_k(self):
+    def test_seal_targets_read_only_seal_targets(self):
+        # M-2：順番1で封印するテストは、封印しないファイル（作業中の reviews/、申し送りの文書、
+        # naive.py・scoring.py・periods.py・candidates.py）を読まない。
         b = seal_target_bytes()
-        # 除外の規則のコードと出力には、K の定数も K の値の欄も無い。
-        for k in ("src/stats/exclusion.py", "src/stats/exclusion.py の出力"):
-            self.assertNotIn(b"K_ARTICLES_PER_DAY", b[k], k)
-            self.assertNotIn(b"k_articles_per_day", b[k], k)
-        # テストのファイルは、出力に K の欄が無いことを確かめるために欄の名前だけを書いている。K の定数は使わない。
-        self.assertNotIn(b"K_ARTICLES_PER_DAY", b["tests/stats/test_exclusion.py"])
-        self.assertNotIn(b"import tagrules", b["tests/stats/test_exclusion.py"])
+        for k in ("tests/stats/test_exclusion.py", "tests/stats/test_tagrules.py"):
+            for word in (b'"reviews"', b"seal-order1", b"import naive", b"import scoring",
+                         b"import periods", b"import candidates"):
+                self.assertNotIn(word, b[k], (k, word))
+            self.assertNotIn(b'os.path.join(PROJECT, path)', b[k], k)
+        self.assertIn(b'_git_show(spec)', b["tests/stats/test_exclusion.py"])
+
+    def test_inclusion_rule_in_order1(self):
+        # M-1：K と入れる規則の定数と式は、順番1の対象（tagrules.py とその出力）に入っている。
+        b = seal_target_bytes()
+        self.assertIn(b"K_ARTICLES_PER_DAY = 10", b["src/stats/tagrules.py"])
+        self.assertIn(b"MIN_COUNT_PER_QUARTER = 1", b["src/stats/tagrules.py"])
+        rec = json.loads(b["src/stats/tagrules.py の出力"])
+        self.assertEqual(rec["inclusion"]["k_articles_per_day"], 10)
+        self.assertEqual(rec["inclusion"]["min_count_per_quarter"], 1)
+        self.assertIn("A = K / N_med", rec["inclusion"]["a_rule"])
+        # 除外の規則の出力には K が入らない（分けたファイルのまま）。
+        self.assertNotIn(b"k_articles_per_day", b["src/stats/exclusion.py の出力"])
 
     def test_old_version_output_is_the_first_submission(self):
         # 1cb463a の出力は、初回の提出で報告した sha256（98926edb…）と同じ。
@@ -678,11 +520,11 @@ class TestSealTargets(unittest.TestCase):
         rec = json.loads(seal_target_bytes()["src/stats/exclusion.py の出力"])
         self.assertEqual(rec["optional_choice_status"], "decided")
         self.assertEqual(rec["enabled_optional_categories"], ["ethnic_religious_group"])
+        self.assertTrue(rec["owner_choice_source"].startswith("2d23cdf:reviews/T-020.md "))
 
 
 class TestNoDataNoNetwork(unittest.TestCase):
     ALLOWED = {
-        "tagrules": {"datetime", "fractions", "json", "math", "sys", "exclusion"},
         "naive": {"datetime", "json", "math", "sys", "candidates", "periods", "scoring"},
         "scoring": {"datetime", "json", "sys", "candidates"},
     }

@@ -7,6 +7,11 @@
 - 一覧を作る関数 build_tag_list() は、手法を作る期間の区画のデータを「メモリの上の引数」として
   受け取る。ファイルは開かない。区画の外の日付が一つでも入っていれば止まる。
 - この版は「提案」で、オーナーの承認のあと封印係が封印する。統計係は封印しない。
+- 封印の時機（T-022 差し戻し1回目で変更）：入れる規則の定数と式（K、MIN_COUNT_PER_QUARTER、四半期の
+  規則、A の式、存在の条件）は、除外の規則と同じ順番1で、区分表の取得と method-access より前に封印する。
+  報道量の数え方（r(d) の分子と分母の単位）は未決のままでよい。この規則は、数え方がどれに決まっても
+  同じ式で計算できる（K の単位は「r(d) の分子の単位で1日あたり」）。数え方が決まったあとの順番3では、
+  この記録への参照と数え方とのつながりだけを足し、ここの定数と式は変えない（文書 5章）。
 
 入れる規則（CLAUDE.md「タグの一覧」1）
   (1) 全体にわたって存在する：手法を作る期間の区画を暦の四半期に分け、欠けた日でない日の
@@ -203,19 +208,31 @@ def build_tag_list(themes, counts, totals, missing_days, block_start, block_end,
 
 
 def _input_signature(result):
-    return (result["block_start"], result["block_end"], result["a"], result["n_med"],
-            frozenset(r["name"] for r in result["themes"]))
+    """入力だけで決まり、版（除外の規則）と設定に依らない値の組。
+
+    区画・欠けた日でない日の数・四半期・使える日の無い四半期・a・n_med と、テーマごとの
+    （名前、区分表にあるか、四半期ごとの件数、平均の比率）。1cb463a の版の結果も同じ欄を持つ。
+    """
+    themes = tuple(sorted(
+        (r["name"], r["in_category_table"], tuple(r["quarter_counts"]), r["mean_ratio"])
+        for r in result["themes"]))
+    return (result["block_start"], result["block_end"], result["usable_day_count"],
+            tuple(tuple(q) for q in result["quarters"]),
+            tuple(result["quarters_without_usable_days"]),
+            result["a"], result["n_med"], themes)
 
 
 def compare_lists(old_result, new_result):
     """二つの build_tag_list() の結果を比べ、出入りしたテーマを返す（名前の順）。
 
-    二つが同じ入力から作られたことを、区画（block_start, block_end）・a・n_med・テーマの集合で
-    確かめ、違えば止まる。戻り値には、両方の enabled_optional_categories を入れる
+    二つが同じ入力から作られたことを、_input_signature() の値（区画、欠けた日でない日の数
+    usable_day_count、四半期、a、n_med、テーマごとの四半期の件数 quarter_counts と平均など）で
+    確かめ、一つでも違えば止まる。戻り値には、両方の enabled_optional_categories を入れる
     （1cb463a の版の結果のように、その値を持たない結果は None）。
     """
     if _input_signature(old_result) != _input_signature(new_result):
-        raise ValueError("二つの結果の入力が違う（区画・a・n_med・テーマの集合のどれか）")
+        raise ValueError("二つの結果の入力が違う（区画・欠けた日でない日の数・四半期・a・n_med・"
+                         "テーマの集合・テーマごとの件数と平均のどれか）")
     old, new = set(old_result["tag_list"]), set(new_result["tag_list"])
     return {"only_in_old": sorted(old - new), "only_in_new": sorted(new - old),
             "in_both": len(old & new),
@@ -241,8 +258,13 @@ def as_record():
             "data_scope": "method block only; any date outside the block in the inputs stops the build",
         },
         "exclusion": exclusion.as_record(),
-        "counting": "numerator and denominator of r(d) follow the counting method sealed by the collector "
-                    "(T-018); this record is sealed only after, or together with, that counting method",
+        "counting": "numerator and denominator of r(d) follow the counting method decided after the trial "
+                    "run and sealed later (order 3) with a reference to this record; K is read in the "
+                    "numerator unit of r(d) per day at the median total; counts must be non-negative "
+                    "integers; deciding the counting method does not change K, the presence rule or the "
+                    "A formula",
+        "seal_order": "order 1, together with the exclusion rule, before the category table acquisition "
+                      "and before method-access (docs/stats/tags-naive.md 5)",
         "changes_after_seeing_table": "only fixes of defects reproducible by a test (exception, crash on "
                                       "empty input, etc.); no words, no numbers, no new kinds of match. "
                                       "New version, owner approval, before method-access; lists computed "

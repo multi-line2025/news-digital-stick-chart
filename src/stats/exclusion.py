@@ -2,10 +2,11 @@
 """除外の規則（T-019・T-020・T-022。未決事項5）。
 
 タグの一覧の除外する規則（CLAUDE.md「タグの一覧」2）を、入れる規則（tagrules.py の K など）から
-分けたもの。分けた理由：除外の規則は区分表の取得より前に今すぐ封印するが、K は報道量の数え方が
-封印されるまで封印しない（docs/stats/tags-naive.md 5章）。この二つを別々の記録で封印できるように、
-ファイルと出力を分けた。規則の中身は T-020 の合格の版（2f4b3ce の tagrules.py）と同じで、変えたのは
-オーナーの決定（選べる区分と、その出どころ）の反映だけである。
+分けたもの（T-022）。今の封印の手順（docs/stats/tags-naive.md 5章）では、除外の規則と入れる規則は
+どちらも順番1で、区分表の取得より前に封印する。ファイルと出力を分けたままにしているのは、除外の
+規則の出力に K の値が入らないことを、テストで確かめられるようにするため（test_no_k_in_output）。
+規則の中身は T-020 の合格の版（2f4b3ce の tagrules.py）と同じで、変えたのはオーナーの決定（選べる
+区分と、その出どころ）の反映だけである。
 
 - データは読まない。ネットワークは使わない。現在の日時を読まない。ファイルを開かない。
 - 区分表（GDELT のテーマの区分表）も読まない。この規則を決めた時点で、区分表は取得されていない。
@@ -121,11 +122,12 @@ CLAUDE_CATEGORIES = ("政治・選挙", "紛争・暴力", "犯罪", "特定の�
 # オーナーが選ぶ区分（文書 0章の7・8）。2026-10-08 にオーナーが決めた。
 #   0章7 病名の扱い：案B（disease_named を使わない）
 #   0章8 民族・宗教の集団：除外の区分に加える（ethnic_religious_group を使う）
-# 決定の出どころは OWNER_CHOICE_SOURCE（reviews/ の記録のファイルと見出し）。
+# 決定の出どころは OWNER_CHOICE_SOURCE（「commit:ファイル 見出し」の形。見出しは "## " を除いた行の全体）。
+# 作業中の reviews/ ではなく、その commit の版を出どころとする（追記で見出しが増えても変わらないため）。
 # 出どころが None なら「未決」で、封印係は封印を拒む（optional_choice_status）。
 OPTIONAL_CATEGORIES = ("disease_named", "ethnic_religious_group")
 ENABLED_OPTIONAL_CATEGORIES = ("ethnic_religious_group",)
-OWNER_CHOICE_SOURCE = "reviews/T-020.md 2026-10-08 オーナーの発言"
+OWNER_CHOICE_SOURCE = "2d23cdf:reviews/T-020.md 2026-10-08 オーナーの発言（原文のまま記録）"
 
 # 照合に使う欄。区分表のこの二つの欄だけを使う（ほかの欄は、あっても使わない）。
 MATCH_FIELDS = ("name", "description")

@@ -4,7 +4,10 @@
     PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/stats -v
 
 データもネットワークも使わない。照合に使う名前は、すべてテストのために作ったもの。
-このファイルは、除外の規則と一緒に、区分表の取得より前に封印する対象である（docs/stats/tags-naive.md 5章）。
+このファイルは、除外の規則・入れる規則と一緒に、区分表の取得より前に順番1で封印する対象である
+（docs/stats/tags-naive.md 5章）。読むのは src/stats/exclusion.py、同じく順番1で封印する
+docs/stats/tags-naive.md、git の履歴の 2d23cdf の版の reviews/T-020.md（`git show`）だけで、
+作業中の reviews/ は読まない（追記で見出しが増えても結果が変わらないようにするため）。
 K（タグを入れる規則の数値）の値には触れない。
 """
 
@@ -35,6 +38,28 @@ def read_table(name):
             break
         rows.append([c.strip() for c in line.strip().strip("|").split("|")])
     return rows[0], rows[2:]
+
+
+def _git_show(spec):
+    """git の履歴の版を読む。git が使えなければ失敗にする（飛ばさない）。"""
+    r = subprocess.run(["git", "show", spec], capture_output=True, cwd=PROJECT)
+    if r.returncode != 0:
+        raise AssertionError("git show %s に失敗：%s" % (spec, r.stderr.decode("utf-8", "replace")))
+    return r.stdout
+
+
+def owner_section(text, heading):
+    """text のうち、行の全体が "## " + heading に一致する見出しの節（次の "## " の前まで）。
+
+    一致する見出しがちょうど一つでなければ AssertionError。前方一致は使わない。
+    """
+    lines = text.splitlines()
+    starts = [k for k, line in enumerate(lines) if line == "## " + heading]
+    if len(starts) != 1:
+        raise AssertionError("見出し「%s」が %d 個ある（ちょうど一つであること）" % (heading, len(starts)))
+    k = starts[0]
+    end = next((m for m in range(k + 1, len(lines)) if lines[m].startswith("## ")), len(lines))
+    return "\n".join(lines[k:end]).rstrip()   # 末尾の空行は節に含めない
 
 
 V1_TERMS = (
@@ -85,7 +110,7 @@ V1_TERMS = (
 
 
 # 選べる区分の設定。2026-10-08 のオーナーの決定（0章7：案B、0章8：民族・宗教の集団を加える）。
-# 出どころは exclusion.OWNER_CHOICE_SOURCE。テスト test_owner_choice_source が reviews/ の記録と照らす。
+# 出どころは exclusion.OWNER_CHOICE_SOURCE。テスト test_owner_choice_source が 2d23cdf の版の記録と照らす。
 OWNER_CHOICE = ("ethnic_religious_group",)
 # 規則そのもののテストは、選べる区分をすべて有効にして行う（オーナーの選択に依らないようにするため）。
 ALL = exclusion.OPTIONAL_CATEGORIES
@@ -151,7 +176,7 @@ class TestExclusion(unittest.TestCase):
 
     def test_v1_terms_still_excluded(self):
         # 1cb463a の版の語（CRISISLEX を除く）は、今の版でもすべて外れる（後戻りが無いこと）。
-        # V1_TERMS は git show 1cb463a:src/stats/exclusion.py の EXCLUSION_TERMS の写し。
+        # V1_TERMS は git show 1cb463a:src/stats/tagrules.py の EXCLUSION_TERMS の写し。
         # 名前の欄と説明の欄の両方で確かめる（説明の欄ではくっつき一致を使わないため、別に見る）。
         for t in V1_TERMS:
             self.assertTrue(self.ex(t.replace(" ", "_")), t)
@@ -288,22 +313,27 @@ class TestExclusion(unittest.TestCase):
         self.assertEqual(exclusion.optional_choice_status(), "decided")
 
     def test_owner_choice_source(self):
-        # 出どころ（ファイルと見出し）が実在し、その節にオーナーの決定の文があること。
-        src = exclusion.OWNER_CHOICE_SOURCE
-        path, heading = src.split(" ", 1)
-        self.assertEqual(path, "reviews/T-020.md")
-        full = os.path.join(PROJECT, path)
-        self.assertTrue(os.path.isfile(full))
-        with open(full, encoding="utf-8") as f:
-            lines = f.read().splitlines()
-        starts = [k for k, line in enumerate(lines) if line.startswith("## ") and line[3:].startswith(heading)]
-        self.assertEqual(len(starts), 1, "見出しがちょうど一つあること")
-        k = starts[0]
-        end = next((m for m in range(k + 1, len(lines)) if lines[m].startswith("## ")), len(lines))
-        section = "\n".join(lines[k:end])
+        # 出どころ（commit:ファイル と見出し）が git の履歴に実在し、その節にオーナーの決定の文があること。
+        # 作業中の reviews/T-020.md は読まない。2d23cdf の版を git show で読む。
+        spec, heading = exclusion.OWNER_CHOICE_SOURCE.split(" ", 1)
+        self.assertEqual(spec, "2d23cdf:reviews/T-020.md")
+        section = owner_section(_git_show(spec).decode("utf-8"), heading)
         self.assertIn("> 病名は案B", section)
         self.assertIn("> 民族、宗教の集団は除外の区分に加える。", section)
         self.assertIn("> そのほかこのまま承認の項目は承認します", section)
+
+    def test_owner_section_exact_heading(self):
+        # 見出しは完全一致で照らす。同じ日の別の見出しが後から追記されても、節は一つに決まる。
+        text = _git_show("2d23cdf:reviews/T-020.md").decode("utf-8")
+        heading = exclusion.OWNER_CHOICE_SOURCE.split(" ", 1)[1]
+        want = owner_section(text, heading)
+        appended = text + "\n## 2026-10-08 オーナーの発言（追記）\n\n> 別の発言\n" \
+                          "\n## %s 2\n\n> さらに別の発言\n" % heading
+        self.assertEqual(owner_section(appended, heading), want)
+        with self.assertRaises(AssertionError):
+            owner_section(text + "\n## %s\n" % heading, heading)   # 完全に同じ見出しが二つなら止まる
+        with self.assertRaises(AssertionError):
+            owner_section(text, "2026-10-08 オーナーの発言")          # 前方一致では当たらない
 
     # 選べる区分を外すと結果が変わる、作った名前の例（文書 2章 (8)）。
     OPTION_SENSITIVE = {
