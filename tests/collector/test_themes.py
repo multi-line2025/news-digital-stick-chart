@@ -76,7 +76,7 @@ def run_two_phase(call, manifest_path):
 
     1段目で AttemptRecorded 以外で止まれば、その例外をそのまま出す。返り値：(2段目の返り値, HEAD)。
     """
-    with mock.patch.object(themes, "_code_gate", lambda root: (CODE_SHA, b"")):
+    with mock.patch.object(themes, "_code_gate", lambda root: (CODE_SHA, b"", False)):
         try:
             call()
         except themes.AttemptRecorded:
@@ -85,14 +85,14 @@ def run_two_phase(call, manifest_path):
             raise AssertionError("1段目で止まらなかった")
     with open(manifest_path, "rb") as f:
         head = f.read()
-    with mock.patch.object(themes, "_code_gate", lambda root: (CODE_SHA, head)):
+    with mock.patch.object(themes, "_code_gate", lambda root: (CODE_SHA, head, True)):
         return call(), head
 
 
 def no_code_gate(root):
     """0.1章のコードの関門を通ったことにする（関門そのものは TestCodeGate で確かめる）。
     返り値の2つ目は HEAD のマニフェスト（空）。"""
-    return CODE_SHA, b""
+    return CODE_SHA, b"", False
 
 
 def tearDownModule():
@@ -249,8 +249,8 @@ class TestCodeGate(unittest.TestCase):
         self.mod = _load("themes_copy", os.path.join(col, "themes.py"))
 
     def test_committed_code_passes(self):
-        sha, head = self.mod._code_gate(self.root)
-        self.assertEqual((sha, head), (self.mod.code_sha256(), b""))
+        sha, head, hist = self.mod._code_gate(self.root)
+        self.assertEqual((sha, head, hist), (self.mod.code_sha256(), b"", False))
 
     def test_uncommitted_change_stops(self):
         with open(os.path.join(self.root, "src", "collector", "privacy_scan.py"), "ab") as f:
@@ -306,6 +306,69 @@ class TestCodeGate(unittest.TestCase):
         with self.assertRaisesRegex(self.mod.ThemesError, "コミットしていない変更"):
             run(tr2)
         self.assertEqual(tr2.calls, [])
+
+    def _prep_run(self):
+        os.makedirs(os.path.join(self.root, "data", "manifest"))
+        self.home = os.path.join(self.tmp, "home")
+        os.makedirs(os.path.join(self.home, *themes.STORE_PARTS))
+        gate = mock.patch.object(self.mod, "_exclusion_gate", no_gate)
+        gate.start()
+        self.addCleanup(gate.stop)
+
+    def run_mod(self, tr):
+        return self.mod.run(root=self.root, home=self.home, transport=tr, clock=lambda: 0.0,
+                            now=lambda: NOW)
+
+    def test_git_mv_after_fetch_stops(self):
+        """T-026 軽-3 (b)：マニフェストを git mv で別の名前に移してコミットしても、2回目はできない。"""
+        self._prep_run()
+        tr = FakeTransport(GOOD)
+        with self.assertRaises(self.mod.AttemptRecorded):
+            self.run_mod(tr)
+        self.taf.git(self.root, "add", "data/manifest")
+        self.taf.git(self.root, "commit", "-q", "-m", "試行の行")
+        self.run_mod(tr)
+        self.taf.git(self.root, "add", "data/manifest")
+        self.taf.git(self.root, "commit", "-q", "-m", "結果の行")
+        self.taf.git(self.root, "mv", "data/manifest/" + themes.MANIFEST_NAME,
+                     "data/manifest/old-themes.jsonl")
+        self.taf.git(self.root, "commit", "-q", "-m", "名前を変える")
+        for n in os.listdir(os.path.join(self.home, *themes.STORE_PARTS)):
+            os.rename(os.path.join(self.home, *themes.STORE_PARTS, n), os.path.join(self.tmp, n))
+        tr2 = FakeTransport(GOOD)
+        with self.assertRaisesRegex(self.mod.ThemesError, "Git の履歴がある"):
+            self.run_mod(tr2)
+        self.assertEqual(tr2.calls, [])
+        self.assertFalse(os.path.exists(os.path.join(self.root, "data", "manifest",
+                                                     themes.MANIFEST_NAME)))
+
+    def test_existing_themes_file_in_store_stops(self):
+        self._prep_run()
+        with open(os.path.join(self.home, *themes.STORE_PARTS, "gdelt-themes-x.tsv"), "wb") as f:
+            f.write(b"THEME\n")
+        tr = FakeTransport(GOOD)
+        with self.assertRaisesRegex(self.mod.ThemesError, "保存先に区分表のファイルが既にある"):
+            self.run_mod(tr)
+        self.assertEqual(tr.calls, [])
+        self.assertFalse(os.path.exists(os.path.join(self.root, "data", "manifest",
+                                                     themes.MANIFEST_NAME)))
+
+    def test_reset_of_history_is_a_documented_limit(self):
+        """限界（README 8章）：git reset で履歴そのものを戻すと、手元の検査では見分けられない。"""
+        self._prep_run()
+        tr = FakeTransport(GOOD, status=503)
+        with self.assertRaises(self.mod.AttemptRecorded):
+            self.run_mod(tr)
+        self.taf.git(self.root, "add", "data/manifest")
+        self.taf.git(self.root, "commit", "-q", "-m", "試行の行")
+        with self.assertRaises(self.mod.ThemesError):
+            self.run_mod(tr)
+        self.taf.git(self.root, "add", "data/manifest")
+        self.taf.git(self.root, "commit", "-q", "-m", "失敗の行")
+        self.taf.git(self.root, "reset", "-q", "--hard", "HEAD~1")
+        tr2 = FakeTransport(GOOD)
+        self.run_mod(tr2)
+        self.assertEqual(len(tr2.calls), 1)
 
     def test_other_root_stops(self):
         with self.assertRaisesRegex(themes.ThemesError, "root のプロジェクトのものでない"):
@@ -402,7 +465,7 @@ class TestExclusionGate(unittest.TestCase):
         import inspect
         body = inspect.getsource(themes.run).split('"""', 2)[2]
         lines = [l.strip() for l in body.splitlines() if l.strip()]
-        self.assertTrue(lines[2].startswith("sha_code, head_manifest = _code_gate(root)"),
+        self.assertTrue(lines[2].startswith("sha_code, head_manifest, has_history = _code_gate(root)"),
                         lines[:4])
         self.assertTrue(lines[3].startswith("excl = _exclusion_gate(root)"), lines[:4])
 
@@ -548,11 +611,11 @@ class RunCase(unittest.TestCase):
             return themes.run(root=self.root, home=self.home, url=url, transport=self.tr,
                               clock=lambda: 0.0, now=lambda: NOW)
         if not os.path.lexists(self.manifest_path()):
-            with mock.patch.object(themes, "_code_gate", lambda root: (CODE_SHA, b"")):
+            with mock.patch.object(themes, "_code_gate", lambda root: (CODE_SHA, b"", False)):
                 with self.assertRaises(themes.AttemptRecorded):
                     call()                             # 1段目：試行の行だけ
             self.commit_all()                          # その行をコミットしたとみなす
-        with mock.patch.object(themes, "_code_gate", lambda root: (CODE_SHA, self.head)):
+        with mock.patch.object(themes, "_code_gate", lambda root: (CODE_SHA, self.head, bool(self.head))):
             return call()
 
     def commit_all(self):
@@ -702,11 +765,11 @@ class TestRun(RunCase):
             themes.run(root=self.root, home=self.home, transport=tr, clock=lambda: 0.0,
                        now=lambda: NOW)
         self.commit_all()
-        with mock.patch.object(themes, "_code_gate", lambda root: ("cd" * 32, self.head)):
+        with mock.patch.object(themes, "_code_gate", lambda root: ("cd" * 32, self.head, True)):
             with self.assertRaisesRegex(themes.ThemesError, "既に試みた"):
                 themes.run(root=self.root, home=self.home, transport=tr, clock=lambda: 0.0,
                            now=lambda: NOW)
-        with mock.patch.object(themes, "_code_gate", lambda root: (CODE_SHA, self.head)), \
+        with mock.patch.object(themes, "_code_gate", lambda root: (CODE_SHA, self.head, bool(self.head))), \
                 mock.patch.object(themes, "_exclusion_gate",
                                   lambda root: {"seq": 8, "record_sha256": "e" * 64}):
             with self.assertRaisesRegex(themes.ThemesError, "既に試みた"):

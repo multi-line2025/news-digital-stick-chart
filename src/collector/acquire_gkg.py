@@ -120,11 +120,11 @@ DISKUTIL_TIMEOUT_SECONDS = 60
 # 取得のコードのうち、このファイル以外の4つの sha256。変えたらここも直してコミットする
 # （テストが照合する）。
 PINNED_SHA256 = (
-    (GKG_REL, "1d99cf0ab63a4a28f28b1280794ae40940c478bd623877cde634a65951817441"),
+    (GKG_REL, "de92b590f8385084beac05c7442f469e9ec54dc52945e956d16adb60c4de5a31"),
     (FILELIST_REL, "afd7a9dd47bc052a691e1a4cd558b211f4d72cf1ce1f451fa9f3016540cd04a7"),
     (PRIVACY_SCAN_REL, "68d8836d56489ca5df9f2f55e24a2642ebf3aa14afdc2e0120577c7b6c6cb887"),
     (CODEGATE_REL, "d422be41dc59c4be50689a2426453db965be506a9981770ab3eb7557ed078769"),
-    (THEMES_REL, "ba0826dbb5dbb03a750105f8dbc8382bf7e0724333c37e340381f98f0ddad08c"),
+    (THEMES_REL, "0b39e56c1a2817d865b085b4a31d88710cda9d9be541fee8c849a351e05d448c"),
 )
 CLEAN_PATHS = ("src/collector", "src/sealer")
 FILELIST_MANIFEST_REL = ("data", "manifest", "gdelt-filelist.jsonl")

@@ -265,10 +265,23 @@
         attempt の行があるファイルは、回数を最大 MAX_ATTEMPTS_PER_FILE − 1 にして、少なくとも
         1回は要求を送る）。
       - 正式な run は、再開のたびに、作業ツリーのマニフェストが HEAD とちょうど同じ（全部
-        コミットされている）ことを求める。コミットの前にマニフェストの控えを書き換えることを
-        止めるため。止まるたびに、マニフェストをコミットしてから再開する。
+        コミットされている）ことを求める。止まるたびに、マニフェストをコミットしてから再開する。
+        これが止めるのは、前のコミットより前に書いた行（コミット済みの控え・範囲）の書き換え
+        である。その回に書いた行（止まってから次のコミットまでのあいだ、作業ツリーにだけある
+        day・run-resume の行）をコミットの前に書き換えることは見分けられない（T-026 中-1）。
+        たとえば kill -9 のあと、まだコミットしていない day の行の控えを、偽の failed の行を
+        足した取得の記録に合わせて書き直すと、偽の行が使われる。これは day の行の
+        failed_files（第三者が GDELT と照らせる。README 6.5.1）で扱う。
       - 限界：信用しない範囲の attempt の行で、そのファイルの試行の回数が増える（残り1回まで）。
-        kill -9 の直前に本当に送った要求の結果も、範囲の中なので取り直しになる。
+        kill -9 の直前に本当に送った要求の結果も、範囲の中なので取り直しになる。そのため、
+        1本のファイルへの要求の総数は、MAX_ATTEMPTS_PER_FILE に kill -9 の回数を足した数まで
+        増えうる（T-026 軽-2）。実際に送った数（attempt の行の数）は、day の行の requests_sent と、
+        failed_files の各項目の requests_sent に書く。
+      - 日の集計を書いたあと day の行を書く前に止まった場合（T-026 軽-1）：再開のときにその日を
+        取り直して作った集計が、既にある日の集計と、F の行の attempts の欄のほかがすべて同じなら、
+        既にあるファイルをそのまま使い、day の行に reused_existing_day_file: true を書く
+        （attempts の欄は、信用しない範囲の試行の行を数えるかどうかで変わるため比べない）。
+        中身が違えば止まる（上書きしない）。
         試しの run のマニフェストは、正式な run の前まではコミットを求めない（5.1章の照合で補う）。
       - 主な防御は手元の検査ではなく、day の行の failed_files（その日の failed のファイルの
         file_time・reason・attempts の一覧）である。第三者は、封印済みのファイル一覧と GDELT の
@@ -322,7 +335,9 @@
 6. 集計の単位と形（ディスクに書く前に集計する。行単位のデータは保存しない）
 ------------------------------------------------------------------------
     15分ファイルごと：文書数（g ごと）と行の件数の内訳。取得の記録と、日の集計の F・FD の行に
-    書く。
+    書く。マニフェストの day の行には、failed のファイルの一覧 failed_files（file_time・reason・
+    attempts・requests_sent・listed_size・listed_md5）と、その日に送った要求の数 requests_sent を
+    書く（README 6.5.1。第三者が GDELT と照らすため）。
     日ごと（その日の取得できたファイルの合計）：下の表。1日につき1つのファイル
     gkg-<run_id>-day-<YYYYMMDD>.tsv.gz（gzip、mtime は 0。中身はタブ区切りの ASCII）。
       #   形式の名前と版、日付
@@ -1791,11 +1806,13 @@ def _run_plan(plan, mine, base, paths, log_path, run_id, mode, transport, sleep,
             lines.append((bad, _parse_log_lines(raw)[0]))
     del data
     _check_log_lines([e for _b, e in lines], run_id, mode)
+    sent = Counter()                             # 実際に送った要求の数（attempt の行の数。軽-2）
     for bad, e in lines:
         if "file_time" not in e:
             continue
         ft = e["file_time"]
         if e.get("result") == "attempt":
+            sent[ft] += 1
             (used_bad if bad else used_ok)[ft] += 1    # 最後の結果の行より後の試行の回数（5章）
             continue
         if bad:
@@ -1814,7 +1831,8 @@ def _run_plan(plan, mine, base, paths, log_path, run_id, mode, transport, sleep,
         used[ft] = n
     del lines
     state = {"transient": [], "format": 0, "retries_used": len(trips)}
-    ctx = {"paths": paths, "log_path": log_path, "run_id": run_id, "mode": mode, "now": now}
+    ctx = {"paths": paths, "log_path": log_path, "run_id": run_id, "mode": mode, "now": now,
+           "sent": sent}
     pacer = Pacer(clock, sleep)
     vocab = {}
     totals = Counter()
@@ -1831,10 +1849,15 @@ def _run_plan(plan, mine, base, paths, log_path, run_id, mode, transport, sleep,
                          written_at=_iso(now()), store_location=paths["location"],
                          fetch_log_size=size, fetch_log_sha256=sha,
                          failed_files=[{"file_time": f["file_time"], "reason": f["reason"],
-                                        "attempts": f["attempts"]}
-                                       for f in files if f["result"] != "ok"])
+                                        "attempts": f["attempts"],
+                                        "requests_sent": sent[f["file_time"]],
+                                        "listed_size": f["size"], "listed_md5": f["md5"]}
+                                       for f in files if f["result"] != "ok"],
+                         requests_sent=sum(sent[f["file_time"]] for f in files))
             if info["refilled"]:
                 dline["refilled_empty_file"] = True
+            if info["reused"]:
+                dline["reused_existing_day_file"] = True
             append_jsonl(paths["manifest"], dline, "マニフェストの行")
             log("%s：ok %d・failed %d・文書 %d" % (day, info["ok"], info["failed"],
                                                  info["docs"]))
@@ -1885,6 +1908,7 @@ def _log_attempt(ctx, entry, n):
            "result": "attempt",
            "attempt": n, "at": _iso(ctx["now"]())}
     append_store_jsonl(ctx["paths"], ctx["log_path"], rec, "取得の記録の行")
+    ctx["sent"][entry["file_time"]] += 1
 
 
 def _run_day(day, entries, latest, used, state, pacer, vocab, ctx, transport, sleep, clock, log):
@@ -1977,14 +2001,66 @@ def _write_day(day, day_agg, files, run_id, paths, disk_free):
     if disk_free(paths["store"]) < MIN_FREE_DISK_BYTES:
         raise RunInterrupted("保存先のディスクの空きが足りない（%s の集計を書く前）" % day)
     name = day_file_name(run_id, day, paths["mode"])
-    try:
-        sha, refilled = write_new_file(paths["store"], name, gz)
-    except OSError:
-        raise RunInterrupted("保存先に書けなかった（ディスクが外れたなど）。%s の集計が途中まで"
-                             "書かれていれば、再開のときに止まる（リードに報告）" % day) from None
+    reused = False
+    existing = _existing_day_file(paths["store"], name)
+    if existing:
+        # 日の集計を書いたあと day の行を書く前に止まった跡（5.2章。T-026 軽-1）。取り直して
+        # 作った集計と、F の行の attempts の欄のほかがすべて同じなら、そのファイルを使う
+        if not same_day_except_attempts(existing, gz):
+            raise GkgError("%s の日の集計が既にあり、取り直した集計と中身が違う（上書きしない。"
+                           "リードに報告）" % day)
+        sha, refilled, reused = hashlib.sha256(existing).hexdigest(), False, True
+    else:
+        try:
+            sha, refilled = write_new_file(paths["store"], name, gz)
+        except OSError:
+            raise RunInterrupted("保存先に書けなかった（ディスクが外れたなど）。%s の集計が途中まで"
+                                 "書かれていれば、再開のときに止まる（リードに報告）" % day) from None
     ok = sum(1 for f in files if f["result"] == "ok")
     return {"file_name": name, "sha256": sha, "ok": ok, "failed": len(files) - ok,
-            "docs": sum(day_agg.docs.values()), "refilled": refilled}
+            "docs": sum(day_agg.docs.values()), "refilled": refilled, "reused": reused}
+
+
+def _existing_day_file(store, name):
+    """中身のある日の集計が既にあれば、そのバイト列（0バイト・無ければ b""）。"""
+    path = os.path.join(store, name)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return b""
+    except OSError:
+        raise GkgError("同じ名前のものがあり、通常のファイルとして開けない") from None
+    with os.fdopen(fd, "rb") as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            raise GkgError("同じ名前のものがあり、通常のファイルでない")
+        return f.read()
+
+
+_F_ATTEMPTS_FIELD = 7        # serialize_day の F の行の attempts の欄（0 から数えて）
+
+
+def same_day_except_attempts(old_gz, new_gz):
+    """二つの日の集計が、F の行の attempts の欄のほかはバイト単位で同じなら True。"""
+    try:
+        old = gzip.decompress(old_gz)
+    except (OSError, EOFError, ValueError):
+        return False
+    new = gzip.decompress(new_gz)
+    a, b = old.split(b"\n"), new.split(b"\n")
+    if len(a) != len(b):
+        return False
+    for x, y in zip(a, b):
+        if x == y:
+            continue
+        if not (x.startswith(b"F\t") and y.startswith(b"F\t")):
+            return False
+        fx, fy = x.split(b"\t"), y.split(b"\t")
+        if len(fx) != len(fy) or len(fx) <= _F_ATTEMPTS_FIELD:
+            return False
+        if fx[:_F_ATTEMPTS_FIELD] + fx[_F_ATTEMPTS_FIELD + 1:] != \
+                fy[:_F_ATTEMPTS_FIELD] + fy[_F_ATTEMPTS_FIELD + 1:]:
+            return False
+    return True
 
 
 if __name__ == "__main__":

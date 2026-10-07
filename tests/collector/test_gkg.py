@@ -1761,11 +1761,115 @@ class TestRound3Reproductions(RunCase):
         self.responses[bad] = [FakeResponse(status=404)]
         self.run_gkg()
         days = [e for e in self.manifest() if e["kind"] == "day"]
+        z = self.zips[bad]
         self.assertEqual(days[0]["failed_files"],
-                         [{"file_time": bad, "reason": "http_404", "attempts": 1}])
+                         [{"file_time": bad, "reason": "http_404", "attempts": 1,
+                           "requests_sent": 1, "listed_size": len(z),
+                           "listed_md5": hashlib.md5(z).hexdigest()}])
+        self.assertEqual(days[0]["requests_sent"], self.N)
+        for d in days:
+            self.assertEqual(d["files_ok"] + d["files_failed"], d["files_listed"])
         self.assertEqual(days[1]["failed_files"], [])
         for d in days:
             self.assertEqual(len(d["failed_files"]), d["files_failed"])
+
+
+class TestT026(RunCase):
+    """T-026：正直な再開（軽-1）、実際に送った要求の数（軽-2）。"""
+
+    DAYS = ("20150302", "20150303")
+    N = 3
+
+    def lp(self):
+        return os.path.join(self.store, gkg.fetch_log_name(RUN_ID))
+
+    def stop_between_dayfile_and_dayline(self, exc, write_stop):
+        day = "2015-03-02"
+        real = gkg.append_jsonl
+
+        def app(path, obj, what, *a, **k):
+            if obj.get("kind") == "day" and obj.get("day") == day:
+                raise exc()
+            return real(path, obj, what, *a, **k)
+        patches = [mock.patch.object(gkg, "append_jsonl", app)]
+        if not write_stop:
+            patches.append(mock.patch.object(gkg, "_write_stop", lambda *a, **k: None))
+        for p in patches:
+            p.start()
+        try:
+            with self.assertRaises(exc):
+                self.run_gkg()
+        finally:
+            for p in reversed(patches):
+                p.stop()
+        self.assertTrue(os.path.exists(os.path.join(self.store, gkg.day_file_name(RUN_ID, day))))
+
+    def test_honest_resume_after_kill9_between_dayfile_and_dayline(self):
+        """軽-1（exp5 honest_kill_after_dayfile）：正直な再開は1回目で終わる。"""
+        self.stop_between_dayfile_and_dayline(Kill9, write_stop=False)
+        done = self.run_once()
+        self.assertEqual((done["files_ok"], done["files_failed"]), (2 * self.N, 0))
+        day = [e for e in self.manifest() if e["kind"] == "day"][0]
+        self.assertTrue(day["reused_existing_day_file"])
+        with open(os.path.join(self.store, day["file_name"]), "rb") as f:
+            self.assertEqual(hashlib.sha256(f.read()).hexdigest(), day["sha256"])
+
+    def test_honest_resume_after_ctrl_c_with_retried_file(self):
+        """元の集計で attempts が 2 のファイル（503 のあと ok）があっても、再開は1回目で終わる。"""
+        first = sorted(self.zips)[0]
+        self.responses[first] = [FakeResponse(status=503), ok_response(self.zips[first]),
+                                 ok_response(self.zips[first])]
+        self.stop_between_dayfile_and_dayline(KeyboardInterrupt, write_stop=True)
+        done = self.run_once()
+        self.assertEqual(done["files_failed"], 0)
+
+    def test_changed_existing_day_file_is_refused(self):
+        self.stop_between_dayfile_and_dayline(Kill9, write_stop=False)
+        p = os.path.join(self.store, gkg.day_file_name(RUN_ID, "2015-03-02"))
+        with open(p, "rb") as f:
+            text = gzip.decompress(f.read())
+        with open(p, "wb") as f:
+            f.write(gkg.gzip_bytes(text.replace(b"\nD\t1\t", b"\nD\t1\t9")))
+        with self.assertRaisesRegex(gkg.GkgError, "取り直した集計と中身が違う"):
+            self.run_once()
+
+    def test_same_day_except_attempts(self):
+        a = gkg.gzip_bytes(b"#\tx\nF\tt\tok\t-\tm\t1\ts\t1\t3\nD\t1\t3\n")
+        b = gkg.gzip_bytes(b"#\tx\nF\tt\tok\t-\tm\t1\ts\t2\t3\nD\t1\t3\n")
+        c = gkg.gzip_bytes(b"#\tx\nF\tt\tok\t-\tm\t1\ts\t2\t4\nD\t1\t3\n")
+        self.assertTrue(gkg.same_day_except_attempts(a, b))
+        self.assertFalse(gkg.same_day_except_attempts(a, c))
+        self.assertFalse(gkg.same_day_except_attempts(b"not gzip", a))
+
+    def test_requests_sent_can_exceed_limit_by_kills(self):
+        """軽-2（exp5 extra_attempts）：kill -9 のたびに、要求の総数は上限を1回ずつ超えうる。
+        実際に送った数を day の行の failed_files の requests_sent に書く。"""
+        target = ts_of(self.DAYS[0], 1)
+        sent = []
+
+        def make(kill_on):
+            inner = FakeTransport(self.responses)
+
+            def tr(url, timeout):
+                if target in url:
+                    sent.append(url)
+                    if len(sent) == kill_on:
+                        raise Kill9()
+                    return FakeResponse(status=503)
+                return inner(url, timeout)
+            return tr
+        with mock.patch.object(gkg, "_write_stop", lambda *a, **k: None):
+            with self.assertRaises(Kill9):
+                self.run_gkg(transport=make(gkg.MAX_ATTEMPTS_PER_FILE))
+            for _k in range(2):
+                with self.assertRaises(Kill9):
+                    self.run_once(transport=make(len(sent) + 1))
+        self.run_once(transport=make(10 ** 6))
+        self.assertEqual(len(sent), gkg.MAX_ATTEMPTS_PER_FILE + 3)
+        day = [e for e in self.manifest() if e["kind"] == "day"][0]
+        rec = [f for f in day["failed_files"] if f["file_time"] == target][0]
+        self.assertEqual(rec["requests_sent"], len(sent))
+        self.assertLess(rec["attempts"], rec["requests_sent"])
 
 
 class TestRound3Trial(RunCase):

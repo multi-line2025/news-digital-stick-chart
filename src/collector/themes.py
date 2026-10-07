@@ -45,7 +45,11 @@
       2段目（試行の行をコミットしたあと）：作業ツリーのマニフェストが HEAD とちょうど同じで、
       中身がこのコードとこの除外の規則の記録の試行の行1行だけのときに限り、kind が fetch の
       行を書いてから通信する。止まれば failed の行、成功すれば result の行を書く。
-      それ以外（コミットしていない変更がある・ほかの行がある）なら、通信せずに止まる。失敗した取得も、試行の行として記録に残る。
+      それ以外（コミットしていない変更がある・ほかの行がある）なら、通信せずに止まる。
+      1段目の前提（T-026 軽-3）：git log --all -- data/manifest/gdelt-themes.jsonl が空である
+      こと（マニフェストを git mv で別の名前に移しても、元の名前の履歴が残るので止まる）と、
+      保存先（~/Desktop/news-stick-data）に gdelt-themes- で始まるファイルが無いこと。
+      限界：履歴そのものを書き換えること（git reset・rebase・filter-branch など）は見分けられない。失敗した取得も、試行の行として記録に残る。
       取得に成功すれば、結果の行（kind が result）を書く。
       限界（前提 → 結論）：通信のあとの行（fetch・failed）は、コミットする前は作業ツリーに
       だけある → その行を消して HEAD と同じ形に戻すと、もう一度通信できる。2段目のあとすぐに
@@ -571,7 +575,8 @@ def _load_codegate():
 
 
 def _code_gate(root):
-    """0.1章。返り値：(themes.py の code_sha256, HEAD のマニフェストのバイト列)。
+    """0.1章。返り値：(themes.py の code_sha256, HEAD のマニフェストのバイト列,
+    マニフェストの名前の履歴があるか（git log --all -- <マニフェスト>）)。
 
     通らなければ ThemesError（何も書かない）。src/collector と src/sealer の両方を確かめる
     （除外の規則の関門が読み込む ledger.py は src/sealer にあるため。差し戻し2回目 軽-2）。
@@ -584,6 +589,10 @@ def _code_gate(root):
         codes = cg.check_clean(root, ("src/collector", "src/sealer"),
                                (CODE_REL, "src/collector/privacy_scan.py"))
         rel = "/".join(MANIFEST_DIR_PARTS + (MANIFEST_NAME,))
+        code, hist = cg.run_git(root, "log", "--all", "--format=%H", "--", rel)
+        if code != 0:
+            raise ThemesError("コードの関門：git log を実行できない")
+        has_history = bool(hist.strip())
         code, _o = cg.run_git(root, "cat-file", "-e", "HEAD:%s" % rel)
         head_manifest = b""
         if code == 0:
@@ -597,7 +606,7 @@ def _code_gate(root):
     sha = hashlib.sha256(codes[CODE_REL]).hexdigest()
     if sha != _LOADED_SHA256 or sha != code_sha256():
         raise ThemesError("動いている themes.py が、HEAD にコミットした中身と違う")
-    return sha, head_manifest
+    return sha, head_manifest, has_history
 
 
 def _read_manifest(path):
@@ -637,13 +646,20 @@ def run(*, root, home, url=None, transport=urllib_transport, clock=time.monotoni
     """
     url = THEMES_URL if url is None else url
     name = validate_doc_url(url)
-    sha_code, head_manifest = _code_gate(root)       # 0.1章。固定したコードで動くことを先に
+    sha_code, head_manifest, has_history = _code_gate(root)   # 0.1章。固定したコードで動くことを先に
     excl = _exclusion_gate(root)                      # 0章。通信の前に確かめる
     store, manifest = _resolve(root, home)
     attempt = {"kind": "attempt", "source_url": url, "code_path": CODE_REL,
                "code_sha256": sha_code, "exclusion_rule_seq": excl["seq"],
                "exclusion_rule_record_sha256": excl["record_sha256"]}
     if not os.path.lexists(manifest) and not head_manifest:
+        # 1段目の前提（T-026 軽-3）：マニフェストの名前に Git の履歴が無いこと（git mv で名前を
+        # 変えて残した場合も、元の名前の履歴が残る）と、保存先に区分表のファイルが無いこと
+        if has_history:
+            raise ThemesError("区分表のマニフェストの名前に Git の履歴がある（前に試みた跡）。"
+                              "2回目は取得しない（リードに報告）")
+        if any(n.startswith("gdelt-themes-") for n in os.listdir(store)):
+            raise ThemesError("保存先に区分表のファイルが既にある。2回目は取得しない（リードに報告）")
         _append_line(manifest, dict(attempt, attempted_at=_iso(now())), "マニフェストの行")
         raise AttemptRecorded("試行の行を書いた（通信はしていない）。data/manifest/%s をコミット"
                               "してから、同じコマンドでもう一度実行する" % MANIFEST_NAME)

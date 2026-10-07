@@ -223,12 +223,18 @@ env -u GIT_DIR -u GIT_WORK_TREE -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 \
 
 リードの方針（T-021 の差し戻し3回目）：運営側の手元のディスクの上のファイルは、運営側がいつでも書き換えられる。手元の検査だけで、すべての書き換えを防ぐことはできない。そこで、取れなかったファイルの一覧を Git に入るマニフェストに書き、第三者が GDELT と照らせるようにする。
 
-- day の行（`data/manifest/gdelt-gkg-method.jsonl`）に、その日の failed のファイルの一覧 `failed_files`（`file_time`・`reason`・`attempts`）を書く。数は `files_failed` と同じ。
-- **第三者が確かめる手順**
-  1. 封印の記録の acquisition-result の `kept_rows_sha256` と同じ sha256 のファイル一覧（手順3の本体）を用意する（自分で取り直す場合は、README 4章の注意のとおり、一覧があとで変わりうる）。
-  2. マニフェストの正式な run（最初の run-start の run_id）の day の行ごとに、`files_listed` が、一覧の gkg の行のうちファイルの日がその日のものの数と同じことを確かめる（`gkg.py` 1章の規則。2015-03-02 より前は入れない）。
-  3. `failed_files` の各 `file_time` について、`https://data.gdeltproject.org/gdeltv2/<file_time>.gkg.csv.zip` を取得し、大きさと md5 が一覧の値と合うかを見る。合えば、そのファイルは今は取れる。`reason` が `http_404` などで、GDELT が今は普通に出しているファイルが多ければ、取得のときに本当に取れなかったのかを疑う理由になる。
+- day の行（`data/manifest/gdelt-gkg-method.jsonl`）に、その日の failed のファイルの一覧 `failed_files` を書く。各項目は `file_time`・`reason`・`attempts`（規則で数えた試行の回数）・`requests_sent`（実際に送った要求の数。取得の記録の attempt の行の数）・`listed_size`・`listed_md5`（ファイル一覧の値。GDELT が公開している値）。数は `files_failed` と同じ。day の行には、その日に実際に送った要求の総数 `requests_sent` も書く。
+- **第三者が確かめる手順**（T-026 で直した）
+  1. 封印の記録の acquisition-result の `kept_rows_sha256` と同じ sha256 のファイル一覧（手順3の本体）を用意する。本体は公開していないので、自分で `https://data.gdeltproject.org/gdeltv2/masterfilelist.txt` を取り、2020-12-15 以降の行を除いて作り直す（README 4章。GDELT の一覧はあとで変わりうるので、sha256 が合うとは限らない）。
+  2. マニフェストの正式な run（最初の run-start の run_id）の day の行ごとに、次を確かめる。
+     - `files_listed` が、一覧の gkg の行のうち、ファイルの日（`gkg.py` 1章の規則。2015-03-02 より前は入れない）がその日のものの、**異なる file_time の数** と同じこと（同じ file_time の行が二つ以上あれば1本と数える。形の読めない行は数えない）。
+     - `files_ok` と `files_failed` の和が `files_listed` と同じこと。
+     - `failed_files` の数が `files_failed` と同じこと。
+  3. `failed_files` の各項目について、`https://data.gdeltproject.org/gdeltv2/<file_time>.gkg.csv.zip` を取得し、大きさと md5 が `listed_size`・`listed_md5` と合うかを見る（この2つは day の行にあるので、一覧の本体が無くても照らせる）。合えば、そのファイルは今は取れる。
+     - `reason` が確定した理由（`http_404`・`http_403`・`http_410`、`size_mismatch`・`md5_mismatch`、`too_large`、`format_…`（zip や行の形の誤り）、`ambiguous_listing`、`content_encoding`）なのに、今は合うファイルが取れるなら、取得のときに本当に取れなかったのかを疑う理由になる（`ambiguous_listing` は一覧に同じ file_time の違う行があったという意味なので、一覧と照らす）。
+     - `reason` が一時的な理由（`http_429`・`http_5xx`、`network_…`、`retry_after_too_long`、`attempts_exhausted`）なら、そのとき相手か通信が不調だったという主張である。今取れることは反証にならない。数が多い日、決まった時期への偏り、`requests_sent` が `attempts` よりずっと多い項目（止めて再開をくり返した跡。6.5.2）を見る。
   4. failed の数の多い日、決まった時期に偏った failed、`reason` の偏りを並べて見る。
+- **一覧の本体が手に入らないときに確かめられないこと**：手順2の `files_listed` の照合（その日のファイルの数を、運営側が少なく数えていないか）は、一覧の本体か、取り直した一覧が要る。取り直した一覧が封印の時の一覧と違えば（sha256 が合わなければ）、数の違いが GDELT の側の変化か、運営側の数え違いかは分からない。手順3（failed のファイルが今は取れるか）は、day の行だけでできる。
 - **確かめられないこと**：取得したときに GDELT の側で取れなかったこと（一時的な不調・あとで足されたファイル）は、あとからは示せない。照らして分かるのは「今は取れる」ことまでで、それを運営側の選び出しの疑いとして公開の場で問える、ということである。
 
 #### 6.5.2 手元の検査：何を止め、何を止めないか
@@ -236,8 +242,8 @@ env -u GIT_DIR -u GIT_WORK_TREE -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 \
 | 検査 | 止めるもの | 止めないもの（限界） |
 |---|---|---|
 | 取得の記録の控え（run-start・run-resume・day・run-stop・run-complete の行の `fetch_log_size`・`fetch_log_sha256`） | 控えより前の行を消す・書き換える。最後の控えが run-start か run-stop のときに、あとから行を足す・記録を置き換える | 控えを書けずに止まった（kill -9・停電）あとに足した行は、控えでは見分けられない（下の「信用しない範囲」で扱う）。マニフェストをコミットの前に書き換えること（下の「全部コミット」で扱う） |
-| 信用しない範囲（`untrusted_ranges`。差し戻し3回目 中-1） | 控えより後ろの行の範囲を run-resume の行に書いて引き継ぎ、以後、何回再開しても、その範囲の結果の行（ok・failed・interrupted）は使わずに取り直す。その範囲の attempt の行は回数に数えるが、それだけで使い切らせない（少なくとも1回は要求を送る） | 範囲の中の attempt の行で、そのファイルの試行の回数が増える（最大で残り1回まで減る）。kill -9 の直前に本当に送った要求も、範囲の中なので、結果は取り直しになる |
-| 再開のたびに、正式な run のマニフェストを全部コミット | コミットの前にマニフェストの控えや範囲を書き換えること（Git の履歴に残る） | 履歴そのものを書き換えること（リモートが無いので、写しを持たない第三者には見えない） |
+| 信用しない範囲（`untrusted_ranges`。差し戻し3回目 中-1） | 控えより後ろの行の範囲を run-resume の行に書いて引き継ぎ、以後、何回再開しても、その範囲の結果の行（ok・failed・interrupted）は使わずに取り直す。その範囲の attempt の行は回数に数えるが、それだけで使い切らせない（少なくとも1回は要求を送る） | 範囲の中の attempt の行で、そのファイルの試行の回数が増える（最大で残り1回まで減る）。kill -9 の直前に本当に送った要求も、範囲の中なので、結果は取り直しになる。**そのため、1本のファイルへの要求の総数は、上限（`MAX_ATTEMPTS_PER_FILE` = 3）に kill -9 の回数を足した数まで増えうる**（T-026 軽-2）。実際に送った数は `failed_files` の `requests_sent` と day の行の `requests_sent` に書くので、第三者は `attempts` との差で見つけられる |
+| 再開のたびに、正式な run のマニフェストを全部コミット | 前のコミットより前に書いた行（コミット済みの控え・範囲）を書き換えること | その回に書いた行（止まってから次のコミットまでのあいだ、作業ツリーにだけある day・run-resume の行の控えや範囲）を、コミットの前に書き換えること。たとえば kill -9 のあと、まだコミットしていない day の行の控えを、偽の failed の行を足した取得の記録に合わせて書き直すと、偽の行が使われる。見分けられないので、6.5.1（偽の failed は `failed_files` に載り、第三者が GDELT と照らせる）で扱う。履歴そのものを書き換えること（リモートが無いので、写しを持たない第三者には見えない） |
 | 保存先の一覧（gkg-method・gkg-trial。中-1・中-2） | 決まった名前でないもの（`aside-…` などに名前を変えた日の集計、「.」で始まる名前・フォルダ、リンク）がある。gkg-method に別の run のファイルがある | フォルダの外（同じディスクの別の場所や、別のディスク）へ移したもの。日の集計を書いたあと day の行を書く前に kill -9 し、中身を見てからフォルダの外へ移すことは止められない（そのあとの選び出しは、上の「信用しない範囲」と、6.5.1 の failed の一覧で扱う） |
 | 試しの run の照合（中-2） | 試しの run のマニフェストに載っていない run のファイルがある。載っている run の取得の記録が、無い・控えと合わない | 試しの run のファイルを全部フォルダの外へ移し、マニフェストからも行を消すこと（コミットの前なら見分けられない） |
 | ディスクの印（`gkg-<mode>-<run_id>-volume-mark`。オーナーの決定で、値もハッシュも記録しない） | 印のファイルが無い（印を作っていないディスクをつないだ）・形が違う・リンク | **決めた形（16進64字と改行）の値なら、どんな値でも通る**。照らす相手を公開される場所に置けないため。違うディスクをつないだ場合に主に止めるのは、取得の記録の控え（記録が無い・違うので合わない）の方である |
@@ -266,6 +272,8 @@ env -u GIT_DIR -u GIT_WORK_TREE -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 \
 - **ディスクが外れた・読み取り専用になった・保存先のフォルダが変わった**（終了コード 3。書かずに止まる）：ディスクをつなぎ直し、`mount` で `/Volumes/LACIE SHARE` が msdos で読み書きできることを確かめてから、同じコマンドで再開する。マウント先の名前が `LACIE SHARE 1` などに変わった場合は、その名前では動かない（止まる）。ディスクを取り出してつなぎ直す。
 - **書いている途中でディスクが外れた**：取得の記録の最後の行が途中で切れていると、再開のときに「最後の行に改行が無い」で止まる。日の集計が0バイトなら、再開のときに書き足す（上の規則）。中身が途中まで書かれていると「同じ名前で中身の違うファイル」で止まる。止まった場合はリードに報告する（直し方はリードが決める。ファイルは消さない）。
 - **取得の記録が控えと合わない**（終了コード 1）：run と run のあいだに取得の記録が書き換わった。再開しない。リードに報告する。
+- **日の集計を書いたあと、day の行を書く前に止まった**（kill -9・停電・Ctrl-C。T-026 軽-1）：同じコマンドで再開する。再開のときに、その日のファイルを取り直して集計を作り直し、既にある日の集計と、F の行の attempts の欄のほかがすべて同じなら、そのファイルをそのまま使う（day の行に `reused_existing_day_file: true`）。止まる前に failed だったファイルが、取り直しで ok になったときなど、中身が違えば「取り直した集計と中身が違う」で止まる。その場合は再開しないでリードに報告する（ファイルは消さない。どうするかはリードとオーナーが決める）。
+- **印のファイルを書いたあと、run-start の行を書く前に止まった**（T-026 軽-4）：再開すると「run-start の前なのに、ディスクの印のファイルが既にある」で止まり、そのあとも止まり続ける。再開をくり返さず、リードに報告する。印のファイル（`gkg-<mode>-<run_id>-volume-mark`）を保存先から外す必要があり、ファイルの削除が要るなら、リードを通してオーナーの承認を得てから行う（承認は reviews/ に記録する）。保存先の外へ移すだけでも、移したファイルの扱いをリードに報告する。
 - **ディスクの空きが 10 GiB を下回った**（終了コード 3）：他の作業をせず、リードに報告する。保存先を変えるのはコードの変更なので、別のタスクにする。正式な run の始まった後なら、続け方をオーナーが決める。既にある日の集計と取得の記録は、新しい保存先に写し（消さない）、sha256 がマニフェストと同じことを確かめる。
 - **1つのファイルが FAT32 の上限（4 GiB − 1 バイト）を超える**（終了コード 3）：再開しない（同じところでまた止まる）。リードに報告する。
 - **1日の組の種類が上限を超えた**（終了コード 3）：再開しない。リードに報告する。集計の形を見直す案（組を週ごとにまとめる、P2 をやめるなど）は別のタスク。
@@ -284,6 +292,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/collector -v
 - 差し戻し1回目の GKG 側：`test_gkg.py` の `TestLogCheckpoint`（中1）、`TestModeMarks`（中2）、`TestTrialRecordInOfficial`（中4）、`TestVolumeIdAndEmptyFile`（軽3）。`test_acquire_gkg.py` の `TestExclusionGateFirst`（重1）、`TestVolumeIdentity`（軽3）、`test_main_modes`（引用の全文）。
 - `tests/collector/test_acquire_filelist.py` の `TestGateHardening`：T-015 の監査 軽1・軽2・軽5 の対応。
 - 差し戻し3回目：`test_gkg.py` の `TestRound3Reproductions`（監査の再現 Y1・Y2・exp_peek、2回・3回の再開、day の行の `failed_files`）、`TestRound3Trial`（exp_trial2）、`TestHiddenTrial` の一覧の照合。`test_themes.py` の2段の取得（`test_first_phase_does_not_fetch`、`test_committed_attempt_must_match_code_and_rule`、`TestCodeGate.test_two_phase_with_real_git`）と、限界を確かめる `test_reverting_to_committed_attempt_allows_refetch_limit`。
+- T-026：`test_gkg.py` の `TestT026`（日の集計を書いたあとに止まった正直な再開、実際に送った要求の数）、`test_day_line_lists_failed_files`（`listed_size`・`listed_md5`・`requests_sent`、和の照合）。`test_themes.py` の `TestCodeGate.test_git_mv_after_fetch_stops`・`test_existing_themes_file_in_store_stops`・`test_reset_of_history_is_a_documented_limit`。
 - テストは、本物の `/Volumes/LACIE SHARE` を使わない。保存先のディスクは一時的なディレクトリで置き換え、マウントの検査だけを差し替える（本物の検査は `TestVolume` と、下の FAT32 のテストで確かめる）。
 
 ### 7.1 FAT32 のイメージの上でのテスト（T-021）
@@ -316,6 +325,7 @@ hdiutil detach "$SP/fatmnt/LACIE SHARE"
   3. 2段目：同じコマンドをもう一度実行する。作業ツリーのマニフェストが HEAD とちょうど同じで、中身がこのコードとこの除外の規則の記録の試行の行1行だけのときに限り、`kind: fetch` の行を書いてから通信する。止まったときは `kind: failed` の行を、成功すれば `kind: result` の行を書く。
   4. すぐにマニフェストをコミットする。
 - 止めるもの：コミットの前に試行の行を消しても、まだ通信していないので、1段目からやり直すだけになる。通信のあと（fetch・failed・result の行がある）、コミットしていない変更があれば止まる。コミットしたあとで行を消したり空にしたりしても、HEAD と合わないので止まる。マニフェストに試行の行のほかの行があれば止まる（2回目はしない）。
-- **止めないもの（限界）**：前提：通信のあとの行（fetch・failed）は、コミットする前は作業ツリーにだけある。→ 結論：その行を消して作業ツリーを HEAD と同じ形（試行の行1行）に戻すと、もう一度通信できる。手元の検査では見分けられない（テスト `test_reverting_to_committed_attempt_allows_refetch_limit` で、この限界を確かめている）。2段目のあとすぐにコミットすることで、時間の幅を小さくする。
+- 1段目の前提（T-026 軽-3）：`git log --all -- data/manifest/gdelt-themes.jsonl` が空であること（マニフェストを `git mv` で別の名前に移してコミットしても、元の名前の履歴が残るので止まる）と、保存先（`~/Desktop/news-stick-data`）に `gdelt-themes-` で始まるファイルが無いこと。
+- **止めないもの（限界）**：履歴そのものを書き換えること（`git reset --hard`・rebase・filter-branch などで、試行や結果のコミットを消すこと）は、手元の検査では見分けられない（テスト `test_reset_of_history_is_a_documented_limit`）。リモートが無いので、写しを持たない第三者にも見えない。前提：通信のあとの行（fetch・failed）は、コミットする前は作業ツリーにだけある。→ 結論：その行を消して作業ツリーを HEAD と同じ形（試行の行1行）に戻すと、もう一度通信できる。手元の検査では見分けられない（テスト `test_reverting_to_committed_attempt_allows_refetch_limit` で、この限界を確かめている）。2段目のあとすぐにコミットすることで、時間の幅を小さくする。
 - **見出しの無い「名前・件数」の2欄の表**（リードの判断。監査の条件 (1)〜(4)）：1行目に数字だけの値があるとき、どの行も欄がちょうど2つで、一方の欄の値がすべてテーマの名前の形、もう一方がすべて ASCII の数字だけ、という割り当てがちょうど1つに決まる場合に限り、名前の欄だけを残す。判定は欄の位置ではなく値の形で行う。両方の割り当てが合う場合、どちらも合わない場合は止まる。件数の欄はメモリの上で捨て、行を並べ替えてから書く。マニフェストに `headerless: true` と、捨てた欄の位置（`column_A` か `column_B`）を書く。この規則は取得の前にコミットし、試行の行の `code_sha256` で固定する。
 - **限界**：区分表は取得した時点の全テーマの一覧なので、2020-12-15 以降に生まれたテーマの名前も入る。名前があることは、そのテーマが後ろの期間に使われたことを示しうる。タグの一覧の規則は、手法を作る期間のデータでテーマの存在を確かめるので、名前だけでは一覧に入らない。
