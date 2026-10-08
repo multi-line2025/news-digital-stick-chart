@@ -1058,52 +1058,81 @@ grep -n '"kind":"stats-order1' sealed/ledger.jsonl | cut -d: -f1 || true
    ```sh
    PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/order2_gate.py
    ```
-   - 二つのマニフェストの HEAD の版（counting.md 4章 (1) と同じ版。HEAD に無ければ空）から、順番2が使う run を決める（`ledger.order2_input_run`。下の「使う run の決め方」）。
-   - その run について `ledger.require_gkg_run_result(mode, run_id)` を呼ぶ（鎖とすべての `.ots`、マニフェストの照合、その run の `gkg-run-result` の記録）。
-   - 通れば、順番2の記録に入れる `input_run` と `gkg_run_result` を JSON で書き、0 で終わる。
-   - 通らなければ理由を書いて 1 で終わる。**このときは counting.py を動かさず、順番2の記録も作らない。止まった (b) としても記録しない。** 理由（前提 → 結論）：前提1：順番3は、順番2の記録のうち、待つを除いて seq の最も小さいものを恒久に参照する（`counting.select_order2_record`。counting.md 4章 (3) の 5）。前提2：関門が閉じるのは、使う run がまだ無いか、その run のマニフェストの時刻証明がまだ無いか、マニフェストが記録と合わないときで、日の集計の値には依らない。結論：関門の失敗を記録すると、その記録が順番2として固まり、あとで正しく行った順番2が参照されなくなる。前提2 から、記録しないことで、結果を見て選べる余地は増えない。
-2. counting.md 4章 (1) の git の確かめ（作業ツリーと HEAD が同じ、過去の版が先頭と同じ）と、seal-order1.md 3章 (2) の (a)（時機の条件）・(c)（コードの sha256）の確かめを行い、順番1b の記録の版の counting.py を `apply` で当てはめる。
-3. 順番2の記録（kind は `stats-order2`。`ledger.ORDER2_KIND`）の中身に、1 の出力の `input_run`・`gkg_run_result` と、2 の `decide()` の出力そのもの（`counting_output`）を入れる。ほかのキー（参照する順番1b、時機の条件の確かめなど）は、順番2を封印するタスクで決める。
+   - (1) **git の確かめを先に行う**（T-073 差し戻し1回目 中-1）：二つのマニフェストについて、counting.md 4章 (1) と同じ条件を確かめる。一つは、作業ツリーと HEAD が同じであること（どちらにも無いのは同じとみなす。通常のファイルでなければ違う）。もう一つは、`git log --all --full-history --format=%H -- <パス>` の各 commit の版（無い版は空）が、HEAD の版の先頭と同じであること。どちらかが通らなければ、関門は閉じる。git は `GIT_` の環境変数を固定して動かす。
+   - (2) HEAD の版のバイト列から、decide() の行き先を `ledger.order2_plan` で決める（下の「行き先の決め方」）。日の集計は読まない。
+   - (3) 待つなら、関門は閉じる。日の集計を読む前に止まる形なら、run に結び付けずに開く（`input_run`・`gkg_run_result` は null）。run X の日の集計を読む形なら、`ledger.require_gkg_run_result(X)` を呼び、通れば開く。この呼び出しは、鎖とすべての `.ots`、マニフェストの照合、X の `gkg-run-result` の記録を確かめる。
+   - 開けば、順番2の記録に入れる `input_run`・`gkg_run_result` と、決めた行き先（`plan`）を JSON で書き、0 で終わる。
+   - 閉じれば理由を書いて 1 で終わる。**このときは counting.py を動かさず、順番2の記録も作らない。止まった (b) としても記録しない。** 理由（前提 → 結論）：
+     - 前提1：順番3は、順番2の記録のうち、待つを除いて seq の最も小さいものを恒久に参照する（`counting.select_order2_record`。counting.md 4章 (3) の 5）。
+     - 前提2：関門が閉じる条件は四つある。git の確かめに通らない、待つ、読む run のマニフェストの時刻証明がまだ無い、マニフェストが記録と合わない。どれも日の集計の値には依らない。
+     - 結論：関門の失敗を記録すると、その記録が順番2として固まり、あとで正しく行った順番2が参照されなくなる。前提2 から、記録しないことで、結果を見て選べる余地は増えない。
+   - git の確かめに通らないとき、封印した規則（counting.md 4章 (1)）では decide() に None を渡して (b) で止まる。関門はその前に閉じるので、(b) は記録されない。前提：作業ツリーを汚すこと（コミットしていない行を足すなど）は、運営がいつでもでき、いつでも戻せる。結論：これを (b) として恒久に記録すると、運営が作業ツリーをわざと汚して (b) を固め、基準 B1〜B5 の結果と欄の手厚さを出さないことを選べる。関門で閉じれば、その選び方はできない。コミットした版の書き換え（過去の版が先頭と同じでない）も、同じ理由で閉じる。書き換えの跡は git の履歴と `gkg-run-result` の照合に残る。
+2. seal-order1.md 3章 (2) の (a)（時機の条件）と (c)（コードの sha256）を確かめる。どちらかで止まれば、decide() は流さない。順番1b の記録の版の counting.py を `apply` で当てはめる。
+3. 順番2の記録（kind は `stats-order2`。`ledger.ORDER2_KIND`）の中身に、次を入れる。ほかのキー（参照する順番1b、時機の条件の確かめなど）は、順番2を封印するタスクで決める。
+   - `stop_kind`：null（決まった・待つ）か、`"a"`・`"b"`・`"c"`（seal-order1.md 172行。止まった記録は、どの条件で止まったかを stop_kind で残す）。
+   - `input_run`・`gkg_run_result`：1 の出力をそのまま入れる。(a)・(c) で止まった記録にも入れる。
+   - `counting_output`：decide() の出力そのもの。**decide() を流した記録（stop_kind が null か `"b"`）だけが持つ。** (a)・(c) は decide() を流す前に決まるので持たない（T-073 差し戻し1回目 中-2）。
 
 `stats-order2` は、まだ許可リスト（`ledger.ALLOWED_KINDS`）に入れていない。記録の形の残りが決まるまで、この kind の記録は鎖の検査で止まる（形の決まっていない記録を通さないため）。許可リストに入れるのは、順番2を封印するタスクである。
 
 ### 鎖の照合（`ledger.check_order2_run`。書く仕組みと verify が同じ照合をする）
 
-`ledger.check_stats_order` が、`stats-order2` の記録ごとに次を照らす。書く仕組み（`seal_records.check_new`）はどの種類を書くときも追記したあとの記録に対して `check_stats_order` を呼び、`verify.py stats-order`・`all` も同じ関数を呼ぶ。通らなければ、書く仕組みは何も書かず、verify は失敗する。
+`ledger.check_stats_order` が、`stats-order2` の記録ごとに次を照らす。書く仕組み（`seal_records.check_new`）は、どの種類を書くときも、追記したあとの記録に対して `check_stats_order` を呼ぶ。`verify.py stats-order`・`all` も同じ関数を呼ぶ。通らなければ、書く仕組みは何も書かず、verify は失敗する。
 
-- 中身に `input_run`（`{mode, run_id}`）、`gkg_run_result`（`{seq, record_sha256}`）、`counting_output` がある。
-- `gkg_run_result.seq` の記録が、**鎖の中でこの記録より前の** `gkg-run-result` で、その行の sha256 が `record_sha256` と同じ。その中身の mode・run_id が `input_run` と同じ（中身と gkg-run-start の対応は `check_gkg_result_doc`）。
-- `counting_output` が `input_run` と食い違わない：`runs.<mode>.run_id` が `input_run` の run_id。決まった（decided）なら `input_mode`・`input_run_id` が `input_run` と同じ。`steps` に段（`trial`・`official`）があれば、その段（trial なら run_id も）が `input_run` と同じ。
+- 中身に `stop_kind`・`input_run`・`gkg_run_result` がある。`stop_kind` は null か a・b・c。
+- `counting_output`：(a)・(c) の記録は持たない。null と b の記録は持つ。null なら status は decided か pending、b なら stopped。
+- `input_run` と `gkg_run_result` は、両方 null か両方ある。
+- 両方あるとき：
+  - `gkg_run_result.seq` の記録が、**鎖の中でこの記録より前の** `gkg-run-result` で、その行の sha256 が `record_sha256` と同じ。
+  - その中身の mode・run_id が `input_run` と同じ。中身と gkg-run-start の対応は `check_gkg_result_doc` で照らす。
+  - `counting_output` があれば、次を照らす。`runs.<mode>.run_id` が `input_run` の run_id。`steps` に段（`trial`・`official`）があり、それが `input_run` と同じ（trial なら run_id も）。決まった（decided）なら `input_mode`・`input_run_id` が `input_run` と同じ。
+- 両方 null のとき：`counting_output` があれば、stopped で、段が無い（日の集計を読む前に止まった）。
 
-テストは `tests/sealer/test_t073.py`（`TestChainUnit`：gkg-run-result が順番2の記録より後にある・無い・別の run・行の sha256 が違う・decide() の出力と食い違う、のどれでも止まる。`TestChainWriterAndVerify`：書く仕組みが止めて何も書かないこと、照合を飛ばして足した記録を verify が止めること。`TestGate`：gkg-run-result の前は関門が閉じ、封印のあとに開き、マニフェストを書き換えると閉じること）。
+テストは `tests/sealer/test_t073.py` にある。
+- `TestChainUnit`：gkg-run-result が順番2の記録より後にある、無い、別の run（G4）、行の sha256 が違う、decide() の出力と食い違う、stop_kind と counting_output が合わない、null の使い方が違う、のどれでも止まる。
+- `TestChainWriterAndVerify`：書く仕組みが止めて何も書かないこと。照合を飛ばして足した記録を verify が止めること。
+- `TestGate`：gkg-run-result の前は関門が閉じ、封印のあとに開くこと。作業ツリーが HEAD と違うとき、過去の版が先頭と同じでないときは、`require_gkg_run_result` だけなら通る形でも閉じること。
 
-### 使う run の決め方（`ledger.order2_input_run`）
+### 行き先の決め方（`ledger.order2_plan`。decide() と同じ）
 
-`counting.decide()` の段の決め方（counting.md 4章 (2) の表の 3）と同じにした。日の集計は読まない。
+counting.decide()（counting.md 4章 (2) の表の 1〜7）と同じ順と条件で、日の集計を読まずに、行き先を次の三つのどれかに決める。
+- 待つ（pending）
+- 日の集計を読む前に止まる（stop）
+- run X の日の集計を読む（read）
 
-- 試しの run のマニフェストの、行の並びで最初の `run-start` の run（R）に `run-complete` があれば、(trial, R)。1段目。
-- そうでなく、正式な run の `run-start` があれば、(official, その最初の `run-start` の run)。decide() は2段目に進むか止まるが、どちらでも見るのはこの run である。
-- どちらでもなければ、使う run が無い（decide() は待つを返す）ので、関門は閉じる。
+前提：日の集計を読むのは `_apply_input` だけで、そこまでの判断はマニフェストだけで決まる。結論：関門の開け閉めを、decide() の行き先とちょうど同じにできる。
 
-`tests/sealer/test_t073.py` の `TestInputRun` が、8通りのマニフェストで、関門の決める run が `decide()` の出力の段と `runs` に一致することを確かめる（counting.py は読み込むだけで変えない）。
+`TestPlanSameAsDecide` は、監査の組み合わせ（`a73fuzz.py`）を広げた形で確かめる。試しの run の11通りと、正式な run の20通りの、それぞれの組み合わせについて、封印済みの counting.decide() を流す。日の集計を読もうとした時点で止める読み込みを渡し、行き先を比べる。比べることは次の三つ。
+- decide() が pending を返すことと、関門の待つ（閉じる）が一致する。
+- decide() が日の集計を読まずに止まることと、関門の stop が一致する。
+- decide() が最初に読もうとする run の mode と、関門の read の run が一致する。
+
+監査が見つけた2つの形は、次のようにそろえた。
+- (i) 試しの run の最初の run-start の形が違う：decide() は日の集計を読む前に (b) で止まる。関門は run に結び付けずに開く（以前は閉じ続けた）。
+- (ii) 正式な run の run-start はあるが、3日の day の行がまだ無い：decide() は待つ。関門は閉じる（以前は開いた）。
+
+counting.py は読み込むだけで変えない。そろえられない形は見つかっていない。
 
 この決め方から、次のことが従う。
-
-- 2段目（正式な run の3日）で順番2を行うには、正式な run の `gkg-run-result` が要る。`gkg-run-result` は `run-complete` の行を求める（12章）ので、2段目の順番2は、正式な run の全体が終わり、そのマニフェストを封印したあとになる（decide() 自体は2段目で `run-complete` を求めない）。
-- 待つ場合は関門が閉じるので、待った試みは記録しない。counting.md 4章 (2) の「待つを含めて毎回記録する」提案は、この場合には当たらない。待った回数は第三者には分からない。ただし待つは、順番3の参照先の選び方に入らない（`select_order2_record` は待つを数えない）ので、参照先は変わらない。
+- 2段目（正式な run の3日）で日の集計を読むには、正式な run の `gkg-run-result` が要る。`gkg-run-result` は `run-complete` の行を求める（12章）。そのため、2段目の順番2は、正式な run の全体が終わり、そのマニフェストを封印したあとになる（decide() 自体は2段目で `run-complete` を求めない）。
+- 待つ場合は関門が閉じるので、待った試みは記録しない。counting.md 4章 (2) の「待つを含めて毎回記録する」提案は、この場合には当たらない。待った回数は第三者には分からない。ただし待つは、順番3の参照先の選び方に入らない（`select_order2_record` は待つを数えない）。そのため、参照先は変わらない。
+- 日の集計を読む前に止まる形（マニフェストの形が違う、trial_manifest_sha256 が合わないなど）は、(b) として記録される。これは封印した規則のとおりである。この形はコミットしたマニフェストで決まり、作業ツリーの操作では作れない（1 の git の確かめが先にある）。
 
 ### 正式な run が始まっているときの、試しの run での順番2（統計係の指摘の確認）
 
-統計係の指摘は、「decide() は正式な run の `run-start` の `trial_manifest_sha256` を照らすので、最初に正式な run のマニフェストを読む。そのため、正式な run が始まっていて `gkg-run-result` がまだ無い期間は、試しの run での順番2もできなくなるかもしれない」というもの。確かめた結果は次のとおり。
+統計係の指摘は次のとおり：decide() は、正式な run の `run-start` の `trial_manifest_sha256` を照らすので、最初に正式な run のマニフェストを読む。そのため、正式な run が始まっていて `gkg-run-result` がまだ無い期間は、試しの run での順番2もできなくなるかもしれない。確かめた結果は次のとおり。
 
-- decide() が正式な run のマニフェストから読むのは、最初の `run-start` の `trial_manifest_sha256` と `trial_run_ids` だけで、ledger は読まない。この関門が求めるのは、使う run（1段目なら R）の `gkg-run-result` だけである。前提：R が終わっていれば使う run は R。結論：正式な run の `gkg-run-result` が無くても、試しの run での順番2は関門で止まらない。指摘のとおりにはならない。
-- ただし、次の二つでは止まる。
-  - (i) 関門の `require_gkg_run_result` は、二つのマニフェストの両方を記録と照らす（`check_gkg_manifests`）。正式な run の `gkg-run-start` の記録があるのに、作業ツリーに正式な run のマニフェストが無ければ、関門は閉じる（記録は作らない。マニフェストを置いてからやり直せる）。
-  - (ii) counting.md 4章 (1) の git の確かめは、作業ツリーのマニフェストが HEAD の版と同じことを求める。正式な run が取得の途中で、コミットしていない行が正式な run のマニフェストにあれば、decide() に None が渡り、**止まった (b) として記録され、恒久に順番3の参照先になる**。これは関門の外（封印した規則）で決まることで、この関門では防げない。
-- 順番の上の結論：試しの run での順番2は、試しの run の `gkg-run-result` を封印したあと、正式な run を始める前に行う。正式な run を始めたあとで行う場合は、正式な run のマニフェストをコミットし、取得の処理が書いていないときに限る。
+- decide() が正式な run のマニフェストから読むのは、最初の `run-start` の `trial_manifest_sha256` と `trial_run_ids` だけで、ledger は読まない。この関門が `gkg-run-result` を求めるのは、日の集計を読む run（1段目なら R）だけである。前提：R が終わっていれば、読む run は R である。結論：正式な run の `gkg-run-result` が無くても、試しの run での順番2は、その理由では止まらない。指摘のとおりにはならない。
+- ただし、正式な run の取得の途中では、関門が閉じる（記録は作らない）。理由は次の二つ。
+  - 正式な run のマニフェストに、コミットしていない行があるとき。1 の git の確かめで閉じる。
+  - 正式な run の `gkg-run-start` の記録があるのに、作業ツリーにマニフェストが無いとき。`require_gkg_run_result` の照合で閉じる。
+  - どちらも、取得が終わってコミットしたあとで、やり直せる。
+- 順番の上の結論：試しの run での順番2は、試しの run の `gkg-run-result` を封印したあと、正式な run を始める前に行うのが早い。正式な run を始めたあとでも、マニフェストをコミットし、取得の処理が書いていない間なら行える。
 
 ### 限界
 
-- **counting.py を手で直接動かせば、`gkg-run-result` の封印より前に集計できる。** counting.py は関門を呼ばず、封印済みなので直せない。この関門で防げるのは、封印係の手順（`order2_gate.py`）を通る場合だけである。手で先に動かして結果を見たこと自体は、どこにも記録されない。そこで、記録の側を、**鎖の順序で事後に見つけられる**形にした：順番2の記録は、使った run の `gkg-run-result` の記録より後にしか書けず、より前に置かれた記録（や、`gkg-run-result` を指さない記録）は verify が止める。見つけられるのは、記録の並びに現れる場合だけである。
+- **counting.py を手で直接動かせば、`gkg-run-result` の封印より前に集計できる。** counting.py は関門を呼ばず、封印済みなので直せない。この関門で防げるのは、封印係の手順（`order2_gate.py`）を通る場合だけである。手で先に動かして結果を見たこと自体は、どこにも記録されない。そこで、記録の側を、**鎖の順序で事後に見つけられる**形にした。順番2の記録は、使った run の `gkg-run-result` の記録より後にしか書けない。より前に置かれた記録や、日の集計を読んだのに `gkg-run-result` を指さない記録は、verify が止める。見つけられるのは、記録の並びに現れる場合だけである。
 - 手で先に集計できる窓は、run の `run-complete` から `gkg-run-result` の封印までのあいだである。窓を短くするため、`gkg-run-result` は `run-complete` のすぐあとに封印する（12章「マニフェストの時刻証明」）。
-- 関門が閉じた試みは記録しないので、閉じた回数は第三者には分からない。閉じる条件は日の集計の値に依らない（上の手順1の前提2）。
+- 関門が閉じた試みは記録しないので、閉じた回数は第三者には分からない。閉じる条件は、日の集計の値に依らない（上の手順1の前提2）。
+- (a)・(c) の記録の `input_run`・`gkg_run_result` は関門の出力を写したもので、記録の中の decide() の出力とは照らせない（(a)・(c) は decide() の出力を持たないため）。照らすのは、指す `gkg-run-result` が鎖の中で前にあり、その run と同じことまでである。
+- `counting_output.inputs`（3日のファイルの名前と sha256）と、`gkg-run-result` で縛ったマニフェストの day の行との照合は、順番2を封印するタスクで扱う（T-073 の採点の申し送り）。

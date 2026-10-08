@@ -755,8 +755,13 @@ def cmd_stats_order(st, a):
     for r in got["order2"]:
         # T-073：check_stats_order が check_order2_run で照らした（使った run の gkg-run-result がこの記録より前）
         doc = st.file_json(r, ledger.ORDER2_KIND)
-        print("  %s seq %d（順番2）: 使った run %s・run_id %s。その run の gkg-run-result（seq %d）は、鎖の中でこの記録"
-              "より前にある" % (ledger.ORDER2_KIND, r["seq"], doc["input_run"]["mode"], doc["input_run"]["run_id"],
+        sk = "stop_kind %s" % (doc["stop_kind"] or "null")
+        if doc["input_run"] is None:
+            print("  %s seq %d（順番2）: %s。日の集計を読む前に決まった記録で、run に結び付けない（input_run・"
+                  "gkg_run_result は null）" % (ledger.ORDER2_KIND, r["seq"], sk))
+            continue
+        print("  %s seq %d（順番2）: %s。使った run %s・run_id %s。その run の gkg-run-result（seq %d）は、鎖の中でこの記録"
+              "より前にある" % (ledger.ORDER2_KIND, r["seq"], sk, doc["input_run"]["mode"], doc["input_run"]["run_id"],
                               doc["gkg_run_result"]["seq"]))
     o1 = ledger.first_order1(st.records)
     print("除外の規則の kind（%s）の記録：%s（1 件だけ）。順番1・1b は最初の method-access より前、"
