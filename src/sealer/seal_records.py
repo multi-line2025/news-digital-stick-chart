@@ -65,13 +65,25 @@ import ledger  # noqa: E402
 import netfetch  # noqa: E402
 import stamp  # noqa: E402
 import verify  # noqa: E402  T-078：順番2の記録の git を使う照合（verify と同じ関数）
-sys.path.append(os.path.join(os.path.dirname(HERE), "collector"))
-import privacy_scan  # noqa: E402  T-078 差し戻し1回目 中-3（収集係の検査器を読むだけ）
+COLLECTOR = os.path.join(os.path.dirname(HERE), "collector")
+
+
+def load_privacy_scan():
+    """収集係の検査器 src/collector/privacy_scan.py を読み込む（読むだけ。書き換えない）。順番2を書くときだけ要るので、
+    使うときに読む（src/sealer だけを写した仮のプロジェクトでも、ほかの種類の書く仕組みが動くように）。"""
+    if COLLECTOR not in sys.path:
+        sys.path.append(COLLECTOR)
+    try:
+        import privacy_scan
+    except ImportError:
+        raise ledger.LedgerError("src/collector/privacy_scan.py を読み込めない。書かない") from None
+    return privacy_scan
 
 
 def check_privacy(rec, doc):
     """記録の行と中身の全体に、privacy_scan と同じ検査（許可していないメールアドレスの形）をかける（T-078 差し戻し1回目
     中-3。順番2の記録には参照の名前などが入るため）。当たれば LedgerError（何も書かない）。見つけた文字列は出さない。"""
+    privacy_scan = load_privacy_scan()
     for what, data in (("記録の行", ledger.canonical_line(rec)), ("中身", ledger.canonical_line(doc))):
         hits = privacy_scan.find_in_bytes(data)
         if hits:

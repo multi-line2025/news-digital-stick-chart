@@ -52,11 +52,11 @@ sys.path.insert(0, HERE)
 
 import ledger  # noqa: E402
 import order2_gate  # noqa: E402
-sys.path.append(os.path.join(os.path.dirname(HERE), "collector"))
-import privacy_scan  # noqa: E402  （収集係の検査器を読むだけ。書き換えない。T-078 差し戻し1回目 中-3・コミットの作成者）
 import seal_records  # noqa: E402
 import stamp  # noqa: E402
 import verify  # noqa: E402
+
+privacy_scan = seal_records.load_privacy_scan()   # 収集係の検査器（読むだけ）。コミットの作成者のアドレスの許可の一覧に使う
 
 # コミットの作成者とコミッタ（CLAUDE.md「作成者と個人情報」）。アドレスは privacy_scan の許可の一覧の1件から取る
 AUTHOR_NAME = "Multi-line"
