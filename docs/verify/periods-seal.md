@@ -1278,7 +1278,9 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_order2.py \
 6. HEAD と作業ツリーがはじめと同じことを確かめ直し、書く（`seal_records.write_doc_record`。書く前の照合に通らなければ何も書かない）。書く前の照合には、記録の行と中身の全体に `privacy_scan` と同じ検査（許可していないメールアドレスの形）をかけることも入る（T-078 差し戻し1回目 中-3。参照の名前などが記録に入るため。当たれば何も書かない）。そのあと、その seq の `.ots` を作る。
 7. 続けて、書いた記録・中身・`.ots` だけをパス指定で add し、コミットする（作成者とコミッタは CLAUDE.md「作成者と個人情報」の1件、追記行なし。T-078 差し戻し1回目 中-2）。`.ots` が作れなかったときも、記録と中身をコミットしてから止まる。
    - コミットを固定するしかた（T-078 差し戻し2回目 中-A）：`GIT_` で始まる環境変数を決めたものだけにし（`GIT_AUTHOR_EMAIL` なども外す）、`GIT_CONFIG_GLOBAL=/dev/null` と `GIT_CONFIG_NOSYSTEM=1` で global と system の設定を読まない。`user.name`・`user.email`・`author.name`・`author.email`・`committer.name`・`committer.email` を `-c` で固定し、`-c core.hooksPath=/dev/null` と `--no-verify` でフックを、`-c commit.gpgSign=false` で署名を止める。作成者のアドレスは `seal_order2.AUTHOR_EMAIL` の定数で、`privacy_scan` の許可の一覧とちょうど同じでなければコミットしない。
+   - index に入れるときは `git add` を使わない（T-081。T-078 監査の軽-1）。各ファイルを `git hash-object -w --no-filters` でディスクのバイト列のまま blob にし、`git update-index --add --cacheinfo 100644,<blob>,<パス>` で入れる（`seal_order2.stage_raw`）。`--no-filters` なので、ローカルの設定の `filter.<名前>.clean`・`.gitattributes`・`.git/info/attributes`・`core.attributesFile`・`core.autocrlf` のどれも効かない。リンクや無いファイルは入れない。
    - コミットのあとに、`%an`・`%ae`・`%cn`・`%ce`・本文・入ったファイルを確かめる。決めた値と違う（追記行がある、など）ときは、そのコミットを push しないよう知らせて止まり、リードに報告する。
+   - 続けて、入れた各ファイルの `git cat-file blob <コミット>:<パス>` のバイト列が、ディスクのファイルのバイト列と同じことを確かめる（T-081。`seal_order2.check_committed_bytes`。`cat-file blob` は filter も textconv も通さず、replace は `GIT_NO_REPLACE_OBJECTS=1` で切ってある）。違えば、そのコミットを push しないよう知らせて止まり、リードに報告する。
    - `privacy_scan` は、ファイルのパス（`src/collector/privacy_scan.py`）を指定して読み込む。`sys.path` に同じ名前の別のファイルがあっても読まない（T-078 差し戻し2回目 軽-c）。
 
 順番の決め方（前提 → 結論）：
@@ -1323,6 +1325,7 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_order2.py \
 - `TestM6PendingCloses`・`TestM3PlanShaRow`（T-077 の監査 軽-4）。
 - 差し戻し1回目：`TestPartialTiming`（手元に無い参照を足しても、(a) の計算し直しを飛ばさない）、`TestCommitInEntry`（書いてすぐコミットする。`.ots` が作れないときも記録はコミットする）、`TestPrivacyBeforeWrite`（参照の名前にメールアドレスの形があれば書かない）、`TestLight1`（bundle の list-heads と、F の集合と `--all` の照合）。
 - 差し戻し2回目：`TestStopB.test_missing_file`（ファイルが無い・空の置き場所は (b) を記録する）、`TestCommitFixed`（git の設定・環境変数・フックがあっても、作成者・コミッタ・本文は決めた値。コミットのあとの確かめ）、`TestCommitFails`（書いたあとでコミットが失敗したら「書いた、コミットしていない」と知らせ、`--commit-written` でコミットできる。staged の照合。追跡していないファイルはコミットに入らない）、`TestPrivacyScanByPath`、`TestPartialParents`（部分照合で、手元の `f_set` の commit の親を照らす）。
+- T-081（`tests/sealer/test_t081.py`）：`TestRawStaging`（ローカルの `filter.<名前>.clean` と二つの attributes で中身を変える仮のリポジトリでも、コミットしたバイト列がディスクと同じ。`git add` に戻すと、コミットのあとの確かめで「push しない」と止まる）、`TestCommitWrittenChecks`（中身や最後の行を変えると `--commit-written` はコミットしない。`.ots` が無い形）、`TestCommitWrittenRefusals`（最後の記録が stats-order2 でない、作業ツリーにほかの変更がある）、`TestPrivacyScanSysModules`（`sys.modules` に偽物があっても読まない）、`TestDocShellVars`（この章の二つのシェルの行を bash と zsh で流す。変数の名前のすぐあとに `:` を続けると、zsh では `:s`・`:r` などの修飾子として読まれるので、`"${c}:..."` のように中かっこで囲む）。
 
 ### 書く前に確かめること（運営の手順）
 
@@ -1358,6 +1361,10 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B src/collector/privacy_scan.py --all-history
 - **書いたあとで止まったとき**（T-078 差し戻し2回目 中-B）：記録は鎖に追記してある。入口は「止まった（順番2の記録は書いた）」と出し、どこまで行ったかを書く。
   - `.ots` が作れなかった：記録と中身はコミットしてある。`stamp.py stamp --seq N` で `.ots` を作り、パスを指定してコミットする。
   - コミットが失敗した（`index.lock`、ディスク、権限など）：記録・中身・`.ots` は作業ツリーにあり、コミットしていない。消したり書き直したりしない（ledger は追記のみ。消せば、その seq を別の中身で書き直せることになる）。原因を直してから、`PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_order2.py --commit-written` で、入口と同じ固定のしかたでコミットする（最後の記録が stats-order2 で、作業ツリーの変更がその記録・中身・`.ots` だけのときに限る）。
+    - コミットの前に、記録と中身を照らす（T-081。T-078 監査の軽-2。`seal_order2.check_written`）。どれかに通らなければコミットしない（「失敗（コミットしていない）」と出して 1 で終わる）。
+      - `.ots`：最後の seq の `.ots` があれば、すべての seq の `.ots` を記録の先頭 N 行と照らす（`seal_records.load_checked`）。無ければ（`.ots` も作れなかった形）、seq 1〜N−1 の `.ots` を先頭 N−1 行と照らす。
+      - 鎖：HEAD の版の `sealed/ledger.jsonl` が、今の記録から最後の1行を除いたものとバイト列で同じ（コミットしていないのは最後の1件だけ）。
+      - 中身：`targets` がちょうど1つで、そのファイルの sha256 が記録の値と同じ。中身の `kind`、`ledger_head`、`head` が今の HEAD、順番1・1b・2 の形（`ledger.check_stats_order`）、`privacy_scan` と同じ検査。
   - コミットのあとの確かめで、作成者・本文・ファイルが決めた値と違った：そのコミットを push しない。リードに報告する。
 
 ### 第三者の確かめ方
@@ -1371,7 +1378,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py stats-order | grep -F 
 - 1行目が 0 で終わり、2行目に順番2の記録ごとの行が出る。`tests/sealer/test_t078.py` の `TestRealClone` が、この塊を本物の記録の固定したコミットの clone（順番2の記録を足したもの）で流して 0 で終わること、作り物の記録を足すと止まることを確かめている。
 - コードの版を手で確かめるには、記録の `code.sha256` と、次の出力を比べる。どの行にも無ければ (c)、あれば (c) は成り立たない。
   ```sh
-  for c in $(git rev-list HEAD -- src/stats/counting.py); do printf '%s ' "$c"; git show "$c:src/stats/counting.py" | shasum -a 256; done
+  for c in $(git rev-list HEAD -- src/stats/counting.py); do printf '%s ' "$c"; git show "${c}:src/stats/counting.py" | shasum -a 256; done
   ```
 - 日の集計を持っていれば、`verify.py stats-order --day-files <置き場所>` で決まった記録の `decide()` を流し直せる。
 - bundle を照らす（公開されたとき）：`shasum -a 256 <bundle>` が記録の `bundle.sha256` と同じで、`git bundle list-heads <bundle>` が記録の `timing_check.refs` と `worktree_heads` を含むこと。そのうえで、bundle を clone して list-heads のすべての名前を fetch した clone で、`verify.py stats-order` を流せば、push していない参照の F も計算し直せる。
@@ -1381,7 +1388,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py stats-order | grep -F 
 ```sh
 B=<bundle>; W="$(mktemp -d "${TMPDIR:-/tmp}/x.XXXXXX")"
 git clone -q "$B" "$W/c"
-n=0; git bundle list-heads "$B" | while read -r sha name; do n=$((n+1)); git -C "$W/c" fetch -q "$B" "$name:refs/bundle-heads/$n"; done
+n=0; git bundle list-heads "$B" | while read -r sha name; do n=$((n+1)); git -C "$W/c" fetch -q "$B" "${name}:refs/bundle-heads/$n"; done
 PYTHONDONTWRITEBYTECODE=1 python3 -B src/collector/privacy_scan.py --root "$W/c" --all-history
 git -C "$W/c" log --all --name-only --format= | sort -u
 ```
@@ -1393,10 +1400,10 @@ git -C "$W/c" log --all --name-only --format= | sort -u
 
 - **待った試みは記録に残らない。** 関門は R の `gkg-run-result` を求め、`gkg-run-result` は R の `run-complete` を求める（12章）。R に `run-complete` があれば `decide()` は試しの run の段に進むので、関門が開いたあとに待つは起きない（`TestPending` が監査の組み合わせで確かめた）。R の封印の前の試みは、関門で閉じて記録されない。seal-order1.md 187行と counting.md 4章 (2) の「待つを含めて毎回記録する」提案は、今の関門のもとでは満たせない（14章の「この決め方と固定の規則から、次のことが従う」）。順番3の参照先の選び方は待つを数えないので、参照先は変わらない。
 - **コミットと投稿の前に、手で捨てる形が残る**（T-078 差し戻し1回目 中-2）。
-  - 前提1：入口は、書いた記録をすぐにコミットし、結果をコミットのあとで画面に出す。
+  - 前提1：入口は、書いた記録をすぐにコミットし、結果をコミットのあとで画面に出す。ただし、運営がわざとコミットを失敗させれば（`.git/index.lock` を置く、`.git` の権限を変える、など）、入口は「止まった（順番2の記録は書いた）」で終わり、結果を画面に出さない。それでも記録と中身のファイルは作業ツリーにあるので、運営はコミットの無いまま中身のファイルを開いて結果を読める（T-081。T-078 監査の軽-3）。読んだあとで、作業ツリーの記録と中身を手で捨てれば、コミットも push も無いので、手元の履歴にも跡が残らない。
   - 前提2：コミットは手元の履歴にあるだけで、push・その seq の時刻証明の Bitcoin での確定・投稿（24時間以内）より前なら、運営は `git reset` などで手元の履歴から消せる。消したあとで別の置き場所（空の置き場所や、中身を壊したファイル）を渡せば、同じ seq に (b) の記録を書ける。ファイルが無いときに (b) を記録することは、封じた決まり（seal-order1.md 131〜132・137・142行）が受け入れている形である。
   - 前提3：その seq の `.ots` は、記録の先頭 N 行のハッシュを公開のカレンダーに送っているので、捨てた記録のハッシュはカレンダーに残る。ただし、第三者はそのハッシュを知らないので、カレンダーだけからは捨てたことを見つけられない。
-  - 結論：コミットのあと push・投稿までのあいだは、結果（中身）を見てから記録を捨てて書き直すことを、記録からは防げない。防げるのは、投稿（鎖の先頭のハッシュと時刻）か push のあとである。この窓を短くするため、書いたら速やかに push し、24時間以内に投稿する（CLAUDE.md の決まり）。中身を見るのは push と投稿のあとにする。
+  - 結論：書いたあと（コミットしたかどうかによらない）push・投稿までのあいだは、結果（中身）を見てから記録を捨てて書き直すことを、記録からは防げない。防げるのは、投稿（鎖の先頭のハッシュと時刻）か push のあとである。この窓を短くするため、書いたら速やかに push し、24時間以内に投稿する（CLAUDE.md の決まり）。中身を見るのは push と投稿のあとにする。
 - **bundle が合わないときの扱いが、順番2と順番3とで揃っていない**（T-078 差し戻し1回目 軽-2）。順番2では、bundle の list-heads が記録する参照と合わなければ、入口は何も書かずに止まる（記録の status は decided・stopped・pending の三つで、「時機の条件を確かめられなかった」に当たる値が無いため）。順番3では、seal-order1.md 178行のとおり、止まったことを試みの記録として残す（破れとしては数えない）。そのため、順番2の bundle が合わなかった試みは、記録に残らず、回数も第三者には分からない。合わない原因は、確かめてから bundle を作るまでに参照が変わったことで、日の集計の値には依らない。
 - **記録した参照が全部かは、記録だけでは分からない。** 運営は、試みの前に参照（ブランチなど）を消せる。記録から分かるのは、記録した `refs` から計算した F だけである。bundle の list-heads は書いた時点の参照と照らしてあるので、公開された bundle があれば、記録の `refs` が bundle の参照と同じことを第三者が確かめられる。bundle が公開されなければ確かめられない（counting.md 8章 (a)(d)）。
 - `timing_guards`（graft のファイル・浅い clone）は、書いた時点の申告である。true のときは (a) になる向きにしか働かない（運営が graft のファイルを置けば (a) を起こせる。counting.md 4章 (3) の「止める手段そのものは無くせない」）。

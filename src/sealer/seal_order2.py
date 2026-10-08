@@ -27,9 +27,10 @@
   6. HEAD と作業ツリーがはじめと同じことを確かめ直し、seal_records.write_doc_record で書く（書く前の照合：
      ledger.check_order2_run・check_order2_doc・check_order2_plan と verify.check_order2_git。どれかに通らなければ
      何も書かない。記録の行と中身に privacy_scan と同じ検査もかける。差し戻し1回目 中-3）。そのあと、その seq の .ots を作る。
-  7. 書いた記録・中身・.ots だけをパス指定で add し、続けてコミットする（作成者とコミッタは noreply の1件、追記行なし。
+  7. 書いた記録・中身・.ots だけをパス指定で index に入れ、続けてコミットする（作成者とコミッタは noreply の1件、追記行なし。
      global・system の設定を読まず、フックと署名を止める。コミットのあとに作成者・本文・ファイルを確かめる。差し戻し1回目
-     中-2、差し戻し2回目 中-A）。結果は、コミットのあとで画面に出す。書いたあとで止まったときは Order2Written で知らせ、
+     中-2、差し戻し2回目 中-A）。index にはディスクのバイト列を filter・attributes を通さずに入れ、コミットのあとに、
+     コミットしたバイト列がディスクと同じことを確かめる（T-081）。結果は、コミットのあとで画面に出す。書いたあとで止まったときは Order2Written で知らせ、
      「書いていない」とは表示しない（差し戻し2回目 中-B）。
 
 (a)・(b)・(c) と決まった記録は、どれも書く。待つ（decide() が pending）は、関門が開いたあとでは起きない（関門は R の
@@ -133,15 +134,48 @@ def _cgit(root, *args):
     return r.stdout
 
 
+def stage_raw(root, paths):
+    """paths を、ディスクのバイト列のまま index に入れる（T-081。T-078 軽-1）。git add を使わず、
+    git hash-object -w --no-filters でバイト列をそのまま blob にし、git update-index --cacheinfo で入れる。
+    --no-filters なので、filter（clean・process）・.gitattributes・.git/info/attributes・core.attributesFile・
+    core.autocrlf・working-tree-encoding のどれも効かない。ファイルは、リンクでない普通のファイルに限る（mode 100644）。"""
+    for p in paths:
+        full = os.path.join(root, p)
+        if os.path.islink(full) or not os.path.isfile(full):
+            raise ledger.LedgerError("%s が普通のファイルでない（リンクか、無い）。コミットしない" % p)
+        blob = _cgit(root, "hash-object", "-w", "--no-filters", "--", p).decode().strip()
+        if not ledger.HEX40.match(blob):
+            raise ledger.LedgerError("%s の blob の ID が 40 桁の16進でない。コミットしない" % p)
+        _cgit(root, "update-index", "--add", "--cacheinfo", "100644,%s,%s" % (blob, p))
+
+
+def check_committed_bytes(root, commit, paths):
+    """コミットした各ファイルの blob（git cat-file blob <commit>:<path>。filter も textconv も通らない。replace は
+    commit_env で切ってある）のバイト列が、ディスクのファイルのバイト列と同じことを確かめる（T-081。T-078 軽-1）。
+    違えば LedgerError（push しない）。"""
+    bad = []
+    for p in paths:
+        got = _cgit(root, "cat-file", "blob", "%s:%s" % (commit, p))
+        with open(os.path.join(root, p), "rb") as f:
+            disk = f.read()
+        if got != disk:
+            bad.append(p)
+    if bad:
+        raise ledger.LedgerError("コミット %s に入った %s のバイト列が、ディスクのファイルと違う（filter などで変わった）。"
+                                 "このコミットを push しない。リードに報告する" % (commit, "、".join(bad)))
+
+
 def commit_record(repo, root, rec, ots_path):
-    """書いた記録・中身・.ots（あれば）だけを、パスを指定して add し、続けてコミットする。T-078 差し戻し1回目 中-2・
+    """書いた記録・中身・.ots（あれば）だけを、パスを指定して index に入れ、続けてコミットする。T-078 差し戻し1回目 中-2・
     差し戻し2回目 中-A：global・system の設定を読まず、作成者とコミッタを -c で固定し、フック（core.hooksPath と --no-verify）と
-    署名を止める。コミットのあとに、作成者・コミッタ・本文・入ったファイルを確かめ、決めた値と違えば止める。
+    署名を止める。T-081：index にはディスクのバイト列をそのまま入れ（stage_raw。filter・attributes を効かせない）、コミットの
+    あとに、各ファイルのコミットしたバイト列がディスクと同じことを確かめる（check_committed_bytes）。コミットのあとに、
+    作成者・コミッタ・本文・入ったファイルも確かめ、決めた値と違えば止める。
     返り値: コミットの 40 桁。失敗すれば LedgerError（呼ぶ側が「記録は書いた、コミットしていない」と知らせる）。"""
     paths = ["sealed/ledger.jsonl"] + [t["path"] for t in rec["targets"]]
     if ots_path is not None:
         paths.append(os.path.relpath(ots_path, root).replace(os.sep, "/"))
-    _cgit(root, "add", "--", *paths)
+    stage_raw(root, paths)
     staged = set(_cgit(root, "diff", "--cached", "--name-only").decode("utf-8").split())
     if staged != set(paths):
         raise ledger.LedgerError("コミットに入るファイル（%s）が、書いたもの（%s）と違う。コミットしない"
@@ -155,13 +189,50 @@ def commit_record(repo, root, rec, ots_path):
         raise ledger.LedgerError("コミット %s の作成者・コミッタ・本文・ファイルが、決めた値と違う（作成者とコミッタは %s、本文は"
                                  "決まった1行で追記行なし、ファイルは書いたものだけ）。このコミットを push しない。リードに報告する"
                                  % (commit, AUTHOR_NAME))
+    check_committed_bytes(root, commit, paths)
     return commit
+
+
+def check_written(root, repo, data, rec):
+    """--commit-written でコミットする前に、書いた記録と中身を照らす（T-081。T-078 軽-2）。どれかに通らなければ
+    LedgerError（コミットしない）。
+      - .ots：最後の seq の .ots があれば、すべての seq の .ots を記録の先頭 N 行と照らす（ledger.check_anchors。
+        seal_records.load_checked と同じ）。無ければ（.ots を作れなかった形）、seq 1〜N−1 の .ots を先頭 N−1 行と照らす。
+      - 鎖：HEAD の版の sealed/ledger.jsonl が、今の記録から最後の1行を除いたものとバイト列で同じ（コミットしていないのは
+        最後の1件だけ）。
+      - 中身：targets がちょうど1つで、そのファイルの sha256 が記録の値と同じ（ledger.read_target_json）。中身の kind、
+        ledger_head、head が今の HEAD、順番1・1b・2 の形（ledger.check_stats_order）、privacy_scan と同じ検査。"""
+    sealed = os.path.join(root, "sealed")
+    lines = ledger.split_lines(data)
+    prefix = b"".join(x + b"\n" for x in lines[:-1])
+    if os.path.isfile(os.path.join(sealed, ledger.ots_name(rec["seq"]))):
+        seal_records.load_checked(root, None)
+    else:
+        ledger.check_anchors(prefix, sealed)
+    head = _git(repo, "rev-parse", "--verify", "HEAD^{commit}").decode().strip()
+    r = subprocess.run(["git", "-C", root, "cat-file", "blob", "HEAD:sealed/ledger.jsonl"], capture_output=True,
+                       env=ledger.fixed_git_env())
+    if r.returncode != 0 or r.stdout != prefix:
+        raise ledger.LedgerError("HEAD の版の sealed/ledger.jsonl が、今の記録から最後の seq %d を除いたものと同じでない"
+                                 "（コミットしていない記録が最後の1件だけでない）。コミットしない" % rec["seq"])
+    if len(rec["targets"]) != 1:
+        raise ledger.LedgerError("seq %d の targets がちょうど1つでない。コミットしない" % rec["seq"])
+    doc = ledger.read_target_json(root, rec, ledger.ORDER2_KIND)
+    if not isinstance(doc, dict) or doc.get("kind") != ledger.ORDER2_KIND:
+        raise ledger.LedgerError("seq %d の中身の kind が stats-order2 でない。コミットしない" % rec["seq"])
+    ledger.check_ledger_head(data, rec, doc)
+    if doc.get("head") != head:
+        raise ledger.LedgerError("seq %d の中身の head が、今の HEAD と違う。コミットしない" % rec["seq"])
+    ledger.check_stats_order(ledger.verify_chain(data), lambda x, role: ledger.read_target_json(root, x, role))
+    seal_records.check_privacy(rec, doc)
 
 
 def commit_written(root):
     """書いたがコミットしていない順番2の記録を、入口と同じ固定のしかたでコミットする（--commit-written。差し戻し2回目
-    中-B）。最後の記録が stats-order2 で、作業ツリーの変更がその記録・中身・.ots（あれば）だけのときに限る。"""
+    中-B）。最後の記録が stats-order2 で、作業ツリーの変更がその記録・中身・.ots（あれば）だけのときに限る。
+    T-081：コミットの前に、記録と中身を照らす（check_written）。"""
     repo = verify.Repo(root)
+    ledger.check_sealed_inside(root)
     data = ledger.read_ledger(os.path.join(root, "sealed", "ledger.jsonl"))
     rec = ledger.verify_chain(data)[-1]
     if rec["kind"] != ledger.ORDER2_KIND:
@@ -177,6 +248,7 @@ def commit_written(root):
     if not changed or not changed <= paths:
         raise ledger.LedgerError("作業ツリーの変更（%s）が、最後の stats-order2 の記録・中身・.ots だけでない。コミットしない"
                                  % "、".join(sorted(changed)))
+    check_written(root, repo, data, rec)
     return commit_record(repo, root, rec, ots)
 
 
