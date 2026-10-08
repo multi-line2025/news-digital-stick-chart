@@ -225,6 +225,7 @@ class TestDecided(Synth):
                                        "commit": self.counting_commit})
         self.assertTrue(doc["timing_check"]["ok"])
         self.assertTrue(doc["timing_check"]["f_set"])
+        self.assertEqual(doc["manifest_sha256"], {"trial": ledger.sha256_hex(self.manifest()), "official": None})
         self.assertEqual(doc["ref_1b_seq"], [r for r in self.records() if r["kind"] == ledger.ORDER1B_KIND][-1]["seq"])
         # 書いた decide() の出力は、封印した版の decide() を同じ3日に当てはめた出力と同じ
         self.assertEqual(doc["counting_output"], self.sealed_decide())
@@ -547,6 +548,11 @@ class TestForgeries(Synth):
         doc = self.honest()
         doc = dict({k: v for k, v in doc.items() if k != "counting_output"}, stop_kind="c", status="stopped")
         self.forged(doc, "版が git の履歴に\\s*ある|版が履歴にあれば")
+
+    def test_manifest_sha256(self):
+        doc = self.honest()
+        self.forged(dict(doc, manifest_sha256=dict(doc["manifest_sha256"], official="0" * 64)),
+                    "manifest_sha256 が、head [0-9a-f]{12} の版の二つのマニフェストの sha256 と違う")
 
     def test_head_not_current(self):
         doc = self.honest()

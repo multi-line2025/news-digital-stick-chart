@@ -870,7 +870,7 @@ def check_order2_git(repo, data, records, rec, doc, base, read_json):
     """順番2の記録の、git を使う照合（T-078）。書く仕組み（seal_records.check_new。base は HEAD）と verify（base は記録を
     最初に含んだコミット）が呼ぶ。
       - head の commit があり、その版の sealed/ledger.jsonl がこの記録を足す直前の記録（先頭 seq−1 行）と同じ。
-        head が base の祖先（か同じ）。
+        head が base の祖先（か同じ）。manifest_sha256 が head の版の二つのマニフェストの sha256（無いか空なら null）。
       - コードの版：find_order2_code を head で計算し直し、code.found・code.commit と同じ（(c) を書いたのに版が履歴に
         ある記録、版が無いのに decide() を流したと書く記録を止める）。
       - 時機の条件：計算の前の確かめ（timing_guards・refs/replace/）に当たっていなければ、記録した refs と worktree_heads
@@ -887,6 +887,12 @@ def check_order2_git(repo, data, records, rec, doc, base, read_json):
                                  "一致しない" % (what, head[:12], rec["seq"] - 1))
     if base != head and not _git_ok(repo, "merge-base", "--is-ancestor", head, base):
         raise ledger.LedgerError("%s の head %s が、%s の祖先でない" % (what, head[:12], base[:12]))
+    want = {}
+    for mode, rel in ledger.GKG_MANIFESTS.items():
+        body = _version_or_empty(repo, head, rel)
+        want[mode] = ledger.sha256_hex(body) if body else None
+    if doc["manifest_sha256"] != want:
+        raise ledger.LedgerError("%s の manifest_sha256 が、head %s の版の二つのマニフェストの sha256 と違う" % (what, head[:12]))
     ref = ledger.order2_ref_1b(records, rec["seq"])
     d1b = read_json(ref, ledger.ORDER1B_KIND)
     commit, _code = find_order2_code(repo, head, d1b)

@@ -1287,6 +1287,7 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_order2.py \
 |---|---|
 | `kind`・`ledger_head` | `stats-order2` と、直前の記録までのハッシュ |
 | `head` | 書いた時点の HEAD（40桁）。その版の `sealed/ledger.jsonl` は、この記録を足す直前の記録と同じ |
+| `manifest_sha256` | `trial`・`official`：`head` の版の二つのマニフェストのバイト列の sha256（無いか空なら null。seal-order1.md 134行） |
 | `status` | `decided`・`stopped`・`pending`（seal-order1.md 172行。kind では分けない）。`stop_kind` が a・b・c なら `stopped` |
 | `stop_kind`・`trial_result`・`input_run`・`gkg_run_result` | 14章のとおり |
 | `ref_1b_seq`・`ref_1b_record_sha256` | 参照する順番1b の記録の seq と、その行の sha256 |
@@ -1301,7 +1302,7 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_order2.py \
 
 - 形（`ledger.check_order2_run` と `ledger.check_order2_doc`。`check_stats_order` から呼ぶ）：キーの集まり、`status` と `stop_kind` と `counting_output.status` の対応、`ref_1b_seq` の決め方、`timing_check` の形、計算の前の確かめか `refs/replace/` か ledger の条件に当たるなら `ok` が false、`ok` が false ⇔ `stop_kind` が `"a"`、`code` の形と、`"c"` なら `found` が false・null と `"b"` なら true、`bundle` の形、`counting_output` のキー・正式な数え方（順番1b の記録の `C7`・`decided`）・`steps` の形・`inputs`・`results`（基準の案の識別子。どれも `official: false`）・`coverage` の形。
 - 行き先と出力（`ledger.check_order2_plan`）：14章の照合に加えて、`counting_output.runs` がマニフェストから計算し直したものと同じこと、決まった記録の `counting_output.inputs` が、`input_run` の run の `gkg-run-result` が縛るマニフェストの day の行（3日のファイルの名前と sha256）と同じこと。
-- git（`verify.check_order2_git`）：`head` の版の記録、`head` が記録を最初に含んだコミット（書く仕組みでは今の HEAD）の祖先、コードの版を探し直した結果が `code.found`・`code.commit` と同じ（(c) を書いたのに版が履歴にある記録は、ここで止まる）、記録した `refs`・`worktree_heads` から F の集合と親を計算し直して `f_set` と同じ、それと ledger から計算し直した (a) の結果が `timing_check.ok` と同じ。
+- git（`verify.check_order2_git`）：`head` の版の記録、`head` の版の二つのマニフェストの sha256 が `manifest_sha256` と同じ、`head` が記録を最初に含んだコミット（書く仕組みでは今の HEAD）の祖先、コードの版を探し直した結果が `code.found`・`code.commit` と同じ（(c) を書いたのに版が履歴にある記録は、ここで止まる）、記録した `refs`・`worktree_heads` から F の集合と親を計算し直して `f_set` と同じ、それと ledger から計算し直した (a) の結果が `timing_check.ok` と同じ。
   - 記録した参照の commit がリポジトリに無い（push していない参照など）ときは、F を計算し直さず「照らさなかった」と出す。そのときは bundle で照らす（下の「第三者の確かめ方」）。
 - `decide()` の流し直し（`verify.py stats-order --day-files <置き場所>`、`all --day-files`）：決まった記録の3日のファイルが置き場所にそろっていれば、封印した版の `decide()` を同じ形で流し直し、出力が `counting_output` と同じことを確かめる。置き場所を渡さないときは「照らさなかった」と出す。基準の結果（`results`）と欄の手厚さ（`coverage`）の値は、日の集計が無いと照らせないためである。
 

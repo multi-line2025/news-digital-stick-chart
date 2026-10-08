@@ -235,7 +235,9 @@ class Order2Case(Clone):
         if stop_kind == "c":
             commit = None
         status = "stopped" if stop_kind is not None else (out.get("status") if isinstance(out, dict) else None)
+        ms = {m: verify._version_or_empty(repo, tc["head"], rel) for m, rel in ledger.GKG_MANIFESTS.items()}
         return {"ledger_head": ledger.expected_ledger_head(self.ledger_bytes(), seq), "head": tc["head"],
+                "manifest_sha256": {m: ledger.sha256_hex(v) if v else None for m, v in ms.items()},
                 "status": status, "ref_1b_seq": b["seq"], "ref_1b_record_sha256": line_sha(b),
                 "timing_check": tc, "timing_guards": guards,
                 "code": {"path": ledger.COUNTING_SCRIPT, "sha256": {f["path"]: f["sha256"] for f in d1b["files"]}

@@ -156,6 +156,8 @@ def build_doc(root, data, records, stores, bundle_out):
         "kind": ledger.ORDER2_KIND,
         "ledger_head": ledger.expected_ledger_head(data, seq),
         "head": head,
+        "manifest_sha256": {"trial": ledger.sha256_hex(trial) if trial else None,
+                            "official": ledger.sha256_hex(official) if official else None},
         "status": "stopped" if stop_kind is not None else out["status"],
         "stop_kind": stop_kind,
         "trial_result": got["trial_result"],

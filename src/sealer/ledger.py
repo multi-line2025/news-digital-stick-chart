@@ -2361,6 +2361,8 @@ def require_order2_gate(trial_manifest, official_manifest):
 #   kind・ledger_head        いつもの形（ledger_head は直前の記録までのハッシュ）
 #   head                     書いた時点の HEAD（40 桁）。マニフェストは、この版（書く仕組み）と、記録を最初に含んだコミットの
 #                            版（verify）で読む
+#   manifest_sha256          {"trial", "official"}：head の版の二つのマニフェストのバイト列の sha256（無いか空なら null。
+#                            seal-order1.md 134行「二つのマニフェストの HEAD の版の sha256」）。verify は head の版から計算し直す
 #   status                   "decided"・"stopped"・"pending"（seal-order1.md 172行。kind では分けない）。stop_kind が
 #                            a・b・c なら stopped、null なら counting_output.status
 #   stop_kind・trial_result・input_run・gkg_run_result   T-073 のとおり
@@ -2379,9 +2381,9 @@ def require_order2_gate(trial_manifest, official_manifest):
 #   python                   decide() を流した Python の版（sys.version の最初の語）
 #   counting_output          decide() の出力（stop_kind が null か "b" の記録だけ。T-073）
 
-ORDER2_DOC_KEYS = ("bundle", "code", "gkg_run_result", "head", "input_run", "kind", "ledger_head", "python",
-                   "ref_1b_record_sha256", "ref_1b_seq", "status", "stop_kind", "timing_check", "timing_guards",
-                   "trial_result")
+ORDER2_DOC_KEYS = ("bundle", "code", "gkg_run_result", "head", "input_run", "kind", "ledger_head", "manifest_sha256",
+                   "python", "ref_1b_record_sha256", "ref_1b_seq", "status", "stop_kind", "timing_check",
+                   "timing_guards", "trial_result")
 ORDER2_TIMING_KEYS = ("f_set", "head", "ok", "reason", "ref_1b_seq", "refs", "worktree_heads")
 ORDER2_GUARD_KEYS = ("graft_file", "shallow")
 ORDER2_CODE_KEYS = ("commit", "found", "path", "sha256")
@@ -2569,6 +2571,10 @@ def check_order2_doc(records, record, doc, read_json):
     if set(doc) != want:
         raise LedgerError("%s の中身のキーが、決まったもの（%s）と一致しない" % (what, "、".join(sorted(want))))
     _check_hex(doc["head"], HEX40, what + " の head")
+    ms = doc["manifest_sha256"]
+    if not isinstance(ms, dict) or sorted(ms) != ["official", "trial"] \
+            or not all(v is None or (isinstance(v, str) and HEX64.match(v)) for v in ms.values()):
+        raise LedgerError("%s の manifest_sha256 が {trial, official}（64 桁か null）でない" % what)
     out = doc.get("counting_output")
     want_status = "stopped" if sk is not None else out["status"]
     if doc["status"] != want_status:
