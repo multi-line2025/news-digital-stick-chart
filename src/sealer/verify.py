@@ -823,7 +823,7 @@ def gkg_manifests_check(st, day_dirs=()):
                 manifests[mode] = f.read()
     got = ledger.check_gkg_manifests(st.records, st.file_json, manifests)
     results = ledger.check_gkg_results(st.records, st.file_json, manifests)
-    day_rows, states = [], {}
+    day_rows, states, runs_by_key = [], {}, {}
     for mode, res in got.items():
         rel = ledger.GKG_MANIFESTS[mode]
         if res is None:
@@ -837,10 +837,12 @@ def gkg_manifests_check(st, day_dirs=()):
             c = run["complete"]
             print("  run_id %s：run-start の入力の値（code_sha256・trial_days・method_access_seq・filelist_sha256・"
                   "除外の規則の記録・mode・run_id）は gkg-run-start（seq %d）の中身と同じ。day の行 %d 行（日付は区画の"
-                  "中で重ならない）。%s" % (rid, run["start"]["gkg_run_seq"], len(run["days"]),
+                  "中で重ならない）。files_failed の合計 %d（day の行の合計。T-070）。%s"
+                  % (rid, run["start"]["gkg_run_seq"], len(run["days"]), sum(d["files_failed"] for d in run["days"]),
                                           "run-complete（%d 行目）の数は day の行の合計と合う" % run["complete_lineno"]
                                           if c else "run-complete はまだ無い（取得の途中か、止まっている）"))
             day_rows += [(mode, d) for d in run["days"]]
+            runs_by_key[(mode, rid)] = run
             states[(mode, rid)] = "run-complete まである" if c is not None else \
                 "終わっていない run（run-complete の行が無い）"
             if c is not None:
@@ -866,12 +868,57 @@ def gkg_manifests_check(st, day_dirs=()):
                                 % (rel, d["run_id"], state))
             print("照らさなかった：seq %d の run（%s・run_id %s）のマニフェストの時刻証明が無い（gkg-run-result の記録が"
                   "無い。%s）" % (r["seq"], d["mode"], d["run_id"], state))
+        _check_plan_body(st, r, d, runs_by_key.get(key), day_dirs)
         if d["mode"] == "official" and "days" not in d:
             st.unchecked.append("seq %d の gkg-run-start（official）の取得の計画（days・files_selected が記録に無い）"
                                 % r["seq"])
             print("照らさなかった：seq %d の gkg-run-start（official）に取得の計画（days・files_selected）が無いので、"
                   "日とファイルの数を、データを受け取る前の記録と照らしていない" % r["seq"])
     _check_day_files(st, day_rows, day_dirs)
+
+
+def plan_file_name(mode, run_id):
+    """計画の本体（ledger.gkg_plan_canonical のバイト列）のファイルの名前（T-070）。収集係が日の集計と同じ置き場所に
+    書く（T-071）。"""
+    return "gkg-%s-%s-plan.json" % (mode, run_id)
+
+
+def _check_plan_body(st, r, d, run, day_dirs):
+    """gkg-run-start の plan_sha256 と、計画の本体（--day-files の置き場所の gkg-<mode>-<run_id>-plan.json）を照らし、
+    本体があれば、マニフェストの day の行の日付・files_listed・failed_files がその一覧と合うことを照らす（T-070）。
+    本体が無ければ「照らさなかった」。plan_sha256 の無い official の記録も「照らさなかった」。"""
+    if ledger.GKG_RUN_PLAN_SHA_KEY not in d:
+        if d["mode"] == "official" and "days" in d:
+            st.unchecked.append("seq %d の gkg-run-start（official）の計画の一覧（plan_sha256 が記録に無い）" % r["seq"])
+            print("照らさなかった：seq %d の gkg-run-start（official）に plan_sha256 が無いので、どの日のどのファイルかを"
+                  "データを受け取る前の記録と照らしていない（数だけを照らした）" % r["seq"])
+        return
+    name = plan_file_name(d["mode"], d["run_id"])
+    found = None
+    for dd in day_dirs:
+        p = os.path.join(dd, name)
+        if os.path.isfile(p) and not os.path.islink(p):
+            found = p
+            break
+    if found is None:
+        st.unchecked.append("seq %d の run の計画の本体（%s。--day-files の置き場所に無い）との照合" % (r["seq"], name))
+        print("照らさなかった：seq %d の run の計画の本体 %s が、--day-files の置き場所に無い（plan_sha256 は記録にある）"
+              % (r["seq"], name))
+        return
+    with open(found, "rb") as f:
+        data = f.read()
+    if ledger.sha256_hex(data) != d[ledger.GKG_RUN_PLAN_SHA_KEY]:
+        raise ledger.LedgerError("%s の sha256 が、seq %d の gkg-run-start の plan_sha256 と違う" % (name, r["seq"]))
+    plan = ledger.parse_gkg_plan(data)
+    if (len(plan), sum(len(v) for v in plan.values())) != (d["days"], d["files_selected"]):
+        raise ledger.LedgerError("%s の日の数・ファイルの数が、seq %d の gkg-run-start の days・files_selected と違う"
+                                 % (name, r["seq"]))
+    if d["mode"] == "trial" and sorted(plan) != list(d["trial_days"]):
+        raise ledger.LedgerError("%s の日が、seq %d の trial_days と違う" % (name, r["seq"]))
+    if run is not None:
+        ledger.check_plan_rows(plan, run, "%s（seq %d の run）" % (ledger.GKG_MANIFESTS[d["mode"]], r["seq"]))
+    print("seq %d の run：計画の本体 %s の sha256 は plan_sha256 と同じで、day の行の日付・files_listed・failed_files は"
+          "その一覧と合う" % (r["seq"], name))
 
 
 def _check_result_commit(st, r, doc):

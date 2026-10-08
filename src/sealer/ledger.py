@@ -936,7 +936,11 @@ GKG_RUN_DOC_KEYS = ("code_path", "code_sha256", "drand", "exclusion_rule_record_
 # 追記のみなので書き換えない。試しの run は trial_days で日が決まっている）
 GKG_RUN_PLAN_KEYS = ("days", "files_selected")
 GKG_RUN_DOC_KEYS_PLAN = tuple(sorted(GKG_RUN_DOC_KEYS + GKG_RUN_PLAN_KEYS))
-# 正式な run に計画を必ず求めるか。収集係の取得のコード（gkg.py の start_hook）が計画を渡すようになるまで
+# T-070（T-068 の監査 中-B）：計画の一覧そのもの（どの日のどのファイルか）の sha256 も足した 16 個の形。
+# 一覧の正規の形は gkg_plan_canonical（収集係の select_files の出力から決まる）
+GKG_RUN_PLAN_SHA_KEY = "plan_sha256"
+GKG_RUN_DOC_KEYS_PLAN_SHA = tuple(sorted(GKG_RUN_DOC_KEYS + GKG_RUN_PLAN_KEYS + (GKG_RUN_PLAN_SHA_KEY,)))
+# 正式な run に計画（days・files_selected・plan_sha256 の 16 個の形。T-070 から plan_sha256 も）を必ず求めるか。収集係の取得のコード（gkg.py の start_hook）が計画を渡すようになるまで
 # （T-069）は False で、計画の無い official の記録は、verify が「照らさなかった」と出す。T-069 のあとに True に
 # する（その変更はコミットとして履歴に残る）。True のとき、計画の無い official は書く仕組みも verify も止める
 GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL = False
@@ -981,21 +985,27 @@ def check_gkg_run_doc(records, record, doc, read_json):
     """
     seq = record["seq"]
     _check_doc_kind(record, doc)
-    if not isinstance(doc, dict) or tuple(sorted(doc)) not in (GKG_RUN_DOC_KEYS, GKG_RUN_DOC_KEYS_PLAN):
+    if not isinstance(doc, dict) or tuple(sorted(doc)) not in (GKG_RUN_DOC_KEYS, GKG_RUN_DOC_KEYS_PLAN,
+                                                                GKG_RUN_DOC_KEYS_PLAN_SHA):
         raise LedgerError("seq %d の gkg-run-start の中身のキーが、決まった %d 個（%s）と一致しない（T-068 からは、"
-                          "これに %s を足した %d 個の形もある）"
+                          "これに %s を足した %d 個、T-070 からはさらに %s を足した %d 個の形もある）"
                           % (seq, len(GKG_RUN_DOC_KEYS), "、".join(GKG_RUN_DOC_KEYS), "・".join(GKG_RUN_PLAN_KEYS),
-                             len(GKG_RUN_DOC_KEYS_PLAN)))
+                             len(GKG_RUN_DOC_KEYS_PLAN), GKG_RUN_PLAN_SHA_KEY, len(GKG_RUN_DOC_KEYS_PLAN_SHA)))
     if "days" in doc:
         if type(doc["days"]) is not int or doc["days"] < 1 or type(doc["files_selected"]) is not int \
                 or doc["files_selected"] < 1:
             raise LedgerError("seq %d の gkg-run-start の days・files_selected が 1 以上の整数でない" % seq)
+        # T-070（T-068 の監査 軽-B）：試しの run の計画の日の数は、trial_days の数とちょうど同じ
         if doc["mode"] == "trial" and isinstance(doc.get("trial_days"), list) \
-                and doc["days"] > len(doc["trial_days"]):
-            raise LedgerError("seq %d の gkg-run-start の days が trial_days の数より多い" % seq)
-    elif doc.get("mode") == "official" and GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL:
-        raise LedgerError("seq %d の gkg-run-start（official）に、取得の計画（%s）が無い。正式な run は、データを"
-                          "受け取る前に日とファイルの数を縛る（T-068）" % (seq, "・".join(GKG_RUN_PLAN_KEYS)))
+                and doc["days"] != len(doc["trial_days"]):
+            raise LedgerError("seq %d の gkg-run-start の days が trial_days の数と同じでない" % seq)
+        if GKG_RUN_PLAN_SHA_KEY in doc:
+            _check_hex(doc[GKG_RUN_PLAN_SHA_KEY], HEX64, "seq %d の gkg-run-start の %s" % (seq, GKG_RUN_PLAN_SHA_KEY))
+    if doc.get("mode") == "official" and GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL \
+            and tuple(sorted(doc)) != GKG_RUN_DOC_KEYS_PLAN_SHA:
+        raise LedgerError("seq %d の gkg-run-start（official）に、取得の計画（%s・%s）が無い。正式な run は、データを"
+                          "受け取る前に日とファイルの数と一覧を縛る（T-068、T-070）"
+                          % (seq, "・".join(GKG_RUN_PLAN_KEYS), GKG_RUN_PLAN_SHA_KEY))
     if type(doc["step"]) is not int or doc["step"] != 4:
         raise LedgerError("seq %d の gkg-run-start の step が 4 でない" % seq)
     mode = doc["mode"]
@@ -1289,8 +1299,13 @@ def check_gkg_manifest_rows(records, read_json, mode, body):
                                      mdoc.get("block_start"), mdoc.get("block_end")))
             if not _nonneg_int(row.get("days")) or not _nonneg_int(row.get("files_selected")):
                 raise LedgerError("%s の days・files_selected が 0 以上の整数でない" % where)
-            if mode == "trial" and row["days"] > len(doc.get("trial_days") or []):
-                raise LedgerError("%s の days %d が、trial_days の数より多い" % (where, row["days"]))
+            if mode == "trial" and row["days"] != len(doc.get("trial_days") or []):
+                # T-070（T-068 の監査 軽-B）：決まった試しの日のうち1日を後から抜けないよう、ちょうど同じ
+                raise LedgerError("%s の days %d が、trial_days の数と同じでない" % (where, row["days"]))
+            if GKG_RUN_PLAN_SHA_KEY in doc and row.get(GKG_RUN_PLAN_SHA_KEY) != doc[GKG_RUN_PLAN_SHA_KEY]:
+                raise LedgerError("%s の %s %r が、gkg-run-start（seq %s）の計画の %s と違う"
+                                  % (where, GKG_RUN_PLAN_SHA_KEY, row.get(GKG_RUN_PLAN_SHA_KEY), row.get("gkg_run_seq"),
+                                     doc[GKG_RUN_PLAN_SHA_KEY]))
             for k in GKG_RUN_PLAN_KEYS:
                 # T-068：gkg-run-start に計画があれば、run-start の行の値はそれと同じ
                 if k in doc and row.get(k) != doc[k]:
@@ -1354,6 +1369,71 @@ def check_gkg_manifest_rows(records, read_json, mode, body):
         run.pop("lo_hi", None)
     return runs
 
+
+
+# ---- T-070：計画の一覧（取得する日とファイル）の正規の形
+
+def gkg_plan_canonical(plan):
+    """収集係の select_files（試しの run は trial_plan）の出力 {日付: [entry, ...]} の正規の形のバイト列。
+
+    [[日付, [[file_time, size, md5], ...]], ...] を、日付の順・各日は file_time の順に並べ、
+    json.dumps(..., separators=(",", ":"), ensure_ascii=True) で書いた ASCII のバイト列（末尾の改行なし）。
+    entry の ambiguous は入れない（ファイル一覧から決まる付記で、取得するファイルを決めるのは file_time・size・md5）。
+    plan_sha256 は、このバイト列の sha256。"""
+    out = []
+    for day in sorted(plan):
+        files = sorted(plan[day], key=lambda e: e["file_time"])
+        out.append([day, [[e["file_time"], e["size"], e["md5"]] for e in files]])
+    return json.dumps(out, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+
+
+def gkg_plan_sha256(plan):
+    return sha256_hex(gkg_plan_canonical(plan))
+
+
+def parse_gkg_plan(data):
+    """gkg_plan_canonical の形のバイト列を {日付: [(file_time, size, md5), ...]} にする。形が違えば LedgerError
+    （読み直して同じバイト列になることまで確かめる）。"""
+    try:
+        raw = json.loads(data.decode("ascii"))
+        plan = {}
+        for day, files in raw:
+            if not isinstance(day, str) or not _DAY_RE.match(day) or day in plan or not isinstance(files, list):
+                raise ValueError
+            plan[day] = []
+            for ft, size, md5 in files:
+                if not (isinstance(ft, str) and re.fullmatch(r"\d{14}", ft) and type(size) is int and size >= 0
+                        and isinstance(md5, str) and re.fullmatch(r"[0-9a-f]{32}", md5)):
+                    raise ValueError
+                plan[day].append({"file_time": ft, "size": size, "md5": md5})
+    except (UnicodeDecodeError, ValueError, TypeError):
+        raise LedgerError("計画の本体が、決まった形（gkg_plan_canonical）でない") from None
+    if gkg_plan_canonical(plan) != data:
+        raise LedgerError("計画の本体が、正規の形（gkg_plan_canonical）のバイト列でない")
+    return plan
+
+
+def check_plan_rows(plan, run, where):
+    """計画の本体と、その run のマニフェストの day・run-complete の行を照らす（T-070）。
+      - day の行の日付が、どれも計画の日である（計画に無い日に差し替えていない）。
+      - day の行の files_listed が、その日の計画のファイルの数と同じ（日ごとの数を付け替えていない）。
+      - failed_files の file_time が、どれもその日の計画のファイルである。
+      - run-complete があれば、day の行の日付の集まりが計画の日の集まりと同じ（抜いた日が無い）。
+    返り値: (計画の日の数, 計画のファイルの数)。"""
+    for d in run["days"]:
+        day = d["day"]
+        if day not in plan:
+            raise LedgerError("%s：day %s が、計画の本体の日でない（計画に無い日）" % (where, day))
+        if d["files_listed"] != len(plan[day]):
+            raise LedgerError("%s：day %s の files_listed %d が、計画の本体のその日のファイルの数 %d と違う"
+                              % (where, day, d["files_listed"], len(plan[day])))
+        times = {e["file_time"] for e in plan[day]}
+        bad = [f.get("file_time") for f in d["failed_files"] if not isinstance(f, dict) or f.get("file_time") not in times]
+        if bad:
+            raise LedgerError("%s：day %s の failed_files に、計画の本体のその日に無いファイル %s がある" % (where, day, bad))
+    if run["complete"] is not None and {d["day"] for d in run["days"]} != set(plan):
+        raise LedgerError("%s：day の行の日付の集まりが、計画の本体の日の集まりと違う（抜いた日・足した日がある）" % where)
+    return len(plan), sum(len(v) for v in plan.values())
 
 GKG_RESULT_DOC_KEYS = ("gkg_run_record_sha256", "gkg_run_seq", "kind", "ledger_head", "manifest_commit",
                        "manifest_lines", "manifest_path", "manifest_sha256", "mode", "run_complete_line_sha256",

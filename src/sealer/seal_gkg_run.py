@@ -23,6 +23,7 @@ docs/verify/periods-seal.md 12章。
     trial_days                     試しの run の日（YYYY-MM-DD の list）。official なら None
     days・files_selected           （T-068。キーワード）取得する日の数とファイルの数（計画）。データを受け取る
                                    前に縛る。gkg.py の run-start の行の days・files_selected と同じ値
+    plan_sha256                    （T-070。キーワード）計画の一覧の正規の形（ledger.gkg_plan_canonical）の sha256
     exclusion_rule_seq             除外の規則の封印の記録の seq
     exclusion_rule_record_sha256   その記録の行の正規の形の sha256
     now                            datetime（UTC）
@@ -163,8 +164,8 @@ def _reuse(project, records, runs, mode, run_id, code_sha, filelist_sha256, meth
             "trial_days": None if trial_days is None else list(trial_days)}
     # T-068：計画（days・files_selected）も同じでなければ使い回さない（計画を持たない古い形の記録は、計画を
     # 渡さないときだけ使い回せる）
-    for k in ledger.GKG_RUN_PLAN_KEYS:
-        want[k] = None if plan is None else plan[k]
+    for k in ledger.GKG_RUN_PLAN_KEYS + (ledger.GKG_RUN_PLAN_SHA_KEY,):
+        want[k] = None if plan is None else plan.get(k)
     diff = sorted(k for k, v in want.items() if d.get(k) != v)
     if diff:
         raise ledger.LedgerError("同じ mode・run_id %s の gkg-run-start（seq %d）が既にあるが、%s が違う。"
@@ -183,23 +184,33 @@ def _reuse(project, records, runs, mode, run_id, code_sha, filelist_sha256, meth
 
 def start(project, mode, code_rel, run_id, filelist_sha256, method_access_seq, trial_days,
           exclusion_rule_seq, exclusion_rule_record_sha256, now, ots_cmd, drand_fetch=None,
-          runner=subprocess.run, days=None, files_selected=None):
+          runner=subprocess.run, days=None, files_selected=None, plan_sha256=None):
     """gkg-run-start を 1 件追記する（または、同じ run の記録を使い回す。_reuse）。
     days・files_selected（T-068）：取得する日の数とファイルの数（収集係の計画。gkg.py の run-start の行の
     days・files_selected と同じ値）。データを受け取る前に縛る。ledger.GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL が
     True なら official では必ず渡す（渡さなければ止まる。収集係が渡すようになる T-069 のあとに True にする）。
     渡さなければ、計画を持たない古い形で書く。
+    plan_sha256（T-070）：取得する日とファイルの一覧（収集係の select_files の出力。試しの run は trial_plan）の
+    正規の形（ledger.gkg_plan_canonical）の sha256。渡すときは days・files_selected も渡す。
+    GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL が True なら、official では 3つとも必ず渡す。
     返り値: (記録, 中身のパス, .ots のパス か None)。"""
     project = os.path.abspath(project)
     if (days is None) != (files_selected is None):
         raise ledger.LedgerError("days と files_selected は、両方渡すか両方渡さない。追記しない")
-    if mode == "official" and days is None and ledger.GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL:
-        raise ledger.LedgerError("正式な run（official）は、取得の計画（days・files_selected）を渡す（T-068）。追記しない")
+    if plan_sha256 is not None and days is None:
+        raise ledger.LedgerError("plan_sha256 を渡すときは、days・files_selected も渡す。追記しない")
+    if mode == "official" and plan_sha256 is None and ledger.GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL:
+        raise ledger.LedgerError("正式な run（official）は、取得の計画（days・files_selected・plan_sha256）を渡す"
+                                 "（T-068、T-070）。追記しない")
     plan = None
     if days is not None:
         if type(days) is not int or days < 1 or type(files_selected) is not int or files_selected < 1:
             raise ledger.LedgerError("days・files_selected は 1 以上の整数。追記しない")
         plan = {"days": days, "files_selected": files_selected}
+        if plan_sha256 is not None:
+            if not isinstance(plan_sha256, str) or not ledger.HEX64.match(plan_sha256):
+                raise ledger.LedgerError("plan_sha256 は 64 桁の16進。追記しない")
+            plan[ledger.GKG_RUN_PLAN_SHA_KEY] = plan_sha256
     data, records = seal_records.load_checked(project, ots_cmd, runner=runner)
     runs = _precheck(project, records, mode)
     o1 = ledger.first_order1(records)
@@ -256,6 +267,7 @@ def main(argv=None):
     s.add_argument("--exclusion-rule-record-sha256", required=True)
     s.add_argument("--days", type=int, default=None)
     s.add_argument("--files-selected", type=int, default=None)
+    s.add_argument("--plan-sha256", default=None)
     s.add_argument("--ots", default=stamp.DEFAULT_OTS)
     s.add_argument("--root", default=PROJECT)
     a = p.parse_args(argv)
@@ -265,7 +277,7 @@ def main(argv=None):
         rec, rel, ots_path = start(root, a.mode, a.code, a.run_id, a.filelist_sha256,
                                    a.method_access_seq, a.trial_day, a.exclusion_rule_seq,
                                    a.exclusion_rule_record_sha256, now, a.ots, days=a.days,
-                                   files_selected=a.files_selected)
+                                   files_selected=a.files_selected, plan_sha256=a.plan_sha256)
     except ledger.LedgerError as e:
         print("失敗: %s" % e, file=sys.stderr)
         return 1

@@ -1,4 +1,4 @@
-# 期間の区切りと候補の封印を検証する手順（T-005、T-007、T-008、T-009、T-013、T-014、T-017、T-023、T-027、T-031、T-037、T-041、T-043、T-049、T-056、T-058、T-059、T-060、T-065、T-066、T-068）
+# 期間の区切りと候補の封印を検証する手順（T-005、T-007、T-008、T-009、T-013、T-014、T-017、T-023、T-027、T-031、T-037、T-041、T-043、T-049、T-056、T-058、T-059、T-060、T-065、T-066、T-068、T-070）
 
 この文書は、第三者が次のことを自分で確かめるための手順である。
 
@@ -781,7 +781,12 @@ Data: The GDELT Project (https://www.gdeltproject.org/). This project is not aff
 - 中身は `sealed/gkg-run-start-<sha256>.json` として新しく書き、記録の `targets` に `role` = `gkg-run-start` で1件だけ載せる。
 - **取得の計画（T-068。T-066 の監査 中-3）**：上の13個に `days`（取得する日の数）と `files_selected`（取得するファイルの数）を足した15個の形もある（`ledger.GKG_RUN_PLAN_KEYS`）。値は、収集係のマニフェストの run-start の行の `days`・`files_selected` と同じで、データを受け取る前（GKG への要求を送る前）に縛る。verify は、計画のある記録について、run-start の行の `days`・`files_selected` が記録と同じであることを照らす。run-complete の `days` と day の行の数、day の行の `files_listed` の合計は、run-start の行と照らすので、計画とも合う。
   - 正式な run（official）は、計画のある形でなければならない。ただし、収集係の取得のコード（`gkg.py` の start_hook）が計画を渡すようになるまで（T-069）は `ledger.GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL` を False にしてあり、計画の無い official の記録は、verify が「照らさなかった：…取得の計画…」と出す。T-069 のあとに True にし、計画の無い official は書く仕組みも verify も止める。
-  - 試しの run は、どちらの形でもよい。既にある seq 8（試しの run）は計画の無い古い形で、追記のみなので書き換えない。試しの run の日は `trial_days` で決まっている。
+  - 試しの run は、どちらの形でもよい。既にある seq 8（試しの run）は計画の無い古い形で、追記のみなので書き換えない。試しの run の日は `trial_days` で決まっている。試しの run の `days`（記録の計画と、マニフェストの run-start の行）は、`trial_days` の数とちょうど同じでなければならない（T-070。T-068 の監査 軽-B。決まった3日のうち1日を後から抜けないように）。
+- **計画の一覧の sha256（T-070。T-068 の監査 中-B）**：さらに `plan_sha256` を足した16個の形もある（`ledger.GKG_RUN_PLAN_SHA_KEY`）。`days`・`files_selected` は数だけを縛り、どの日のどのファイルかは縛らないので、取得する日とファイルの一覧そのものの sha256 を、データを受け取る前に縛る。
+  - 一覧の正規の形（`ledger.gkg_plan_canonical`）：収集係の `select_files` の出力（試しの run は `trial_plan` で3日に絞ったもの）`{日付: [entry, ...]}` を、`[[日付, [[file_time, size, md5], ...]], ...]` の形にし、日付の順、各日は `file_time` の順に並べ、`json.dumps(…, separators=(",", ":"), ensure_ascii=True)` で書いた ASCII のバイト列（末尾の改行なし）。`entry` の `ambiguous` は入れない。`plan_sha256` はこのバイト列の sha256。
+  - マニフェストの run-start の行にも同じ `plan_sha256` を書き、verify は記録と照らす（違えば止める）。
+  - 計画の本体（上のバイト列）は、収集係が日の集計と同じ置き場所に `gkg-<mode>-<run_id>-plan.json` として書く（T-071 で収集係が行う）。`verify.py gkg-runs --day-files <置き場所>` で本体があれば、その sha256 が `plan_sha256` と同じこと、日の数とファイルの数が `days`・`files_selected` と同じこと（試しの run は日が `trial_days` と同じこと）、day の行の日付がどれも計画の日で、`files_listed` がその日の計画のファイルの数と同じで、`failed_files` がその日の計画のファイルであること、run-complete があれば day の行の日付の集まりが計画の日の集まりと同じことを照らす（`ledger.check_plan_rows`）。本体が無ければ「照らさなかった」と出す。`plan_sha256` の無い official の記録も「照らさなかった」と出す。
+  - `GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL` を True にすると、official は `plan_sha256` を含む16個の形でなければならない（書く仕組みも verify も止める）。今は False（収集係が値を渡す T-071 のあとに、別のタスクで True にする）。
 
 ### 照合（`ledger.check_gkg_run_doc`・`ledger.check_gkg_runs`。書く仕組みと `verify.py gkg-runs`・`all` が同じ照合をする）
 
@@ -861,7 +866,11 @@ grep -n '"kind":"gkg-run-start"' sealed/ledger.jsonl | cut -d: -f1 || true
   - 前提：day の行に日の集計の sha256 が入っていて、記録がマニフェストの先頭の行の sha256 を縛る。結論：記録の .ots の確定時刻より後に、マニフェストも日の集計も差し替えられない（差し替えれば verify が止まる。日の集計は `--day-files` で照らせる）。
   - 前提：マニフェストの行と日の集計を縛るのはこの記録だけで、それより前は、取得の開始（`gkg-run-start` の記録。マニフェストでは run-start の `started_at`、または最初の day の行）から、何も縛っていない。結論：縛られない時間は、取得の開始からこの記録までで、**正式な run では取得の全期間（数日から数週間）にわたる**（T-068 で書き方を直した。T-066 の監査 中-3）。その間に、マニフェストと日の集計を選び直す余地は、この記録では閉じられない。たとえば次のことができる。
     - 別の内容で取り直した日の集計と day の行に入れ替える。
-    - **件数をそろえて日を抜く**：都合の悪い日の day の行を書かずに、ほかの日を取り直すなどして、run-complete の数（`days`・`files_ok` など）を day の行の合計にそろえる。行の照合はつじつまが合えば通る。ただし、計画（`days`・`files_selected`）のある `gkg-run-start` では、日の数とファイルの数が取得の前に縛られているので、日を抜けば数が合わずに止まる（中身を入れ替えることは、数だけでは止められない）。
+    - **件数をそろえて日を抜く**：都合の悪い日の day の行を書かず、run-complete の数（`days`・`files_ok` など）を day の行の合計にそろえる。計画が無い場合は、抜いた日の数に合わせて run-start の行の `days`・`files_selected` も書き換えれば、行の照合は通る（T-070 で書き方を直した。T-068 の監査 軽-A）。計画（`days`・`files_selected`）のある `gkg-run-start` では、日の数とファイルの数が取得の前に縛られているので、日を抜けば数が合わずに止まる。
+    - 計画のある場合に、数をそろえたまま行える選び直しと、計画の一覧の sha256（`plan_sha256`）で閉じるか（T-070。T-068 の監査 中-B）：
+      - (a) **都合の悪いファイルを failed_files に回す**（取得できたファイルを、取得に失敗したことにして日の集計から外す）。`files_listed` は変わらず、`files_ok` と `files_failed` の和も変わらないので、数の照合も、計画の一覧の照合も通る。**ファイルごとの成否は、この記録までの間は縛られないので、この選び直しは `plan_sha256` でも閉じない。** 残る限界である。verify は、run ごとに `files_failed` の合計を表示する（多ければ読む人が気づけるように）。失敗の理由と試行の回数は取得の記録（fetch log。sha256 は run-complete の行にある）にあるが、その中身も、この記録までは縛られない。
+      - (b) **計画に無い日に差し替える**（区画の中の別の日の day の行にする）。日の数は変わらない。`plan_sha256` と計画の本体があれば、day の行の日付が計画の日でないので止まる（本体が手元にある場合だけ。無ければ「照らさなかった」）。試しの run は、日が `trial_days` で決まっているので、本体が無くても止まる。
+      - (c) **日ごとの files_listed を付け替える**（ある日の数を増やし、別の日の数を減らして、合計を `files_selected` にそろえる）。`plan_sha256` と計画の本体があれば、日ごとの数が計画と合わないので止まる（本体が手元にある場合だけ）。
   - 閉じているのは、`gkg-run-start`（取得の前の記録）が縛る入力の値（コード・一覧・試しの日・計画）と、上の行の照合で見つかる食い違いまでである。
   - 前提：記録の .ots は、run-complete のあと、結果を見る前に作る運用である。結論：run-complete から記録までを短くしても、取得の間の選び直しの余地は残る。長さは、記録の `recorded_at`（申告）と、run-start の `started_at`・run-complete の `completed_at`（申告）の差で読むしかなく、証明ではない。
 - **試しの run にも後から付けられる**：既にコミットされている `data/manifest/gdelt-gkg-trial.jsonl`（run_id e15ed53595c70035）にも、同じコマンドで記録を足せる（記録の時点のマニフェスト全体を縛る）。本物の記録への書き込みはオーナーの承認を得てから行う（T-066 では書いていない）。それまで、verify は「照らさなかった」と出す。

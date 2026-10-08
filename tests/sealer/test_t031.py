@@ -95,6 +95,8 @@ class GkgCase(t23.JCase):
                    days=doc.get("days", len(doc["trial_days"]) if doc["trial_days"] else 0))
         if doc["mode"] == "trial":
             row.update(trial=True, trial_days=doc["trial_days"])
+        if ledger.GKG_RUN_PLAN_SHA_KEY in doc:                    # T-070：計画の一覧の sha256 も行に書く
+            row[ledger.GKG_RUN_PLAN_SHA_KEY] = doc[ledger.GKG_RUN_PLAN_SHA_KEY]
         if doc["mode"] == "official":
             row["trial_run_ids"] = [ledger.read_target_json(self.root, r, ledger.GKG_RUN_KIND)["run_id"]
                                     for r in self.records() if r["kind"] == ledger.GKG_RUN_KIND

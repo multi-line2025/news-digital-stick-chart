@@ -127,7 +127,7 @@ class TestPlan(t31.GkgCase):
 
     def test_plan_shape_and_reuse(self):
         self.ready()
-        for plan, text in (((0, 5), "1 以上の整数"), ((2, None), "両方渡す"), ((4, 10), "trial_days の数より多い")):
+        for plan, text in (((0, 5), "1 以上の整数"), ((2, None), "両方渡す"), ((4, 10), "trial_days の数と同じでない")):
             with self.subTest(plan=plan):
                 with self.assertRaisesRegex(ledger.LedgerError, text):
                     self.start_run(T0 + 4 * H, manifest=False, plan=plan)
