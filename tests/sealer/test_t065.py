@@ -29,8 +29,11 @@ import json, sys
 sys.path.insert(0, sys.argv[1]); sys.path.insert(0, sys.argv[2])
 import netfetch, test_t014
 out = {}
-for code in (301, 302, 303, 307, 308):
-    h = test_t014.FakeHTTPS({netfetch.DRAND_URLS[0]: (code, "https://example.com/elsewhere", b"")})
+CASES = {str(c): (c, "https://example.com/elsewhere") for c in (300, 301, 302, 303, 307, 308)}
+CASES["302-no-location"] = (302, None)                       # T-068：Location の無い 3xx
+CASES["302-file"] = (302, "file:///etc/passwd")             # T-068：http(s) 以外への 3xx
+for key, (code, loc) in CASES.items():
+    h = test_t014.FakeHTTPS({netfetch.DRAND_URLS[0]: (code, loc, b"")})
     op = netfetch.build_no_redirect_opener(h)
     sleeps = []
     try:
@@ -38,7 +41,7 @@ for code in (301, 302, 303, 307, 308):
         err = None
     except Exception as e:
         err = type(e).__name__
-    out[code] = [err, len(h.seen), len(sleeps), any("example.com" in u for u in h.seen)]
+    out[key] = [err, len(h.seen), len(sleeps), any("example.com" in u or u.startswith("file:") for u in h.seen)]
 print(json.dumps(out))
 """
 
@@ -50,7 +53,8 @@ class TestRedirect308BothPythons(unittest.TestCase):
                                capture_output=True, env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
             self.assertEqual(r.returncode, 0, (py, r.stderr.decode()[-2000:]))
             out = json.loads(r.stdout)
-            for code in ("301", "302", "303", "307", "308"):
+            self.assertEqual(len(out), 8)
+            for code in out:
                 # RedirectRefused で止まり、要求は1回だけ、再試行の待ちも無く、転送先には送らない
                 self.assertEqual(out[code], ["RedirectRefused", 1, 0, False], (py, code))
 

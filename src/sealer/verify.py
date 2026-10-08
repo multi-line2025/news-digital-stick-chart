@@ -823,7 +823,7 @@ def gkg_manifests_check(st, day_dirs=()):
                 manifests[mode] = f.read()
     got = ledger.check_gkg_manifests(st.records, st.file_json, manifests)
     results = ledger.check_gkg_results(st.records, st.file_json, manifests)
-    day_rows = []
+    day_rows, states = [], {}
     for mode, res in got.items():
         rel = ledger.GKG_MANIFESTS[mode]
         if res is None:
@@ -841,19 +841,36 @@ def gkg_manifests_check(st, day_dirs=()):
                                           "run-complete（%d 行目）の数は day の行の合計と合う" % run["complete_lineno"]
                                           if c else "run-complete はまだ無い（取得の途中か、止まっている）"))
             day_rows += [(mode, d) for d in run["days"]]
+            states[(mode, rid)] = "run-complete まである" if c is not None else \
+                "終わっていない run（run-complete の行が無い）"
             if c is not None:
                 day_rows.append((mode, {"file_name": c.get("fetch_log_file"), "sha256": c.get("fetch_log_sha256"),
                                         "size": c.get("fetch_log_size"), "log": True}))
                 r = results.get((mode, rid))
-                if r is None:
-                    st.unchecked.append("%s の run_id %s のマニフェストの時刻証明（gkg-run-result の記録が無い）" % (rel, rid))
-                    print("  照らさなかった：run_id %s は run-complete まであるが、gkg-run-result の記録が無い（マニフェストの"
-                          "時刻証明が無い）" % rid)
-                else:
+                if r is not None:
                     doc = st.file_json(r, ledger.GKG_RESULT_KIND)
                     print("  run_id %s：gkg-run-result（seq %d）の manifest_sha256 は %s の先頭 %d 行と同じで、"
                           "run-complete の行を含む" % (rid, r["seq"], rel, doc["manifest_lines"]))
                     _check_result_commit(st, r, doc)
+    # T-068（T-066 の監査 中-2）：gkg-run-result の無い run は、マニフェストの状態（run-complete があるか、行が
+    # あるか）によらず、gkg-run-start の記録ごとに「照らさなかった」に出す。行を消しても、この数は減らない
+    for r in st.records:
+        if r["kind"] != ledger.GKG_RUN_KIND:
+            continue
+        d = st.file_json(r, ledger.GKG_RUN_KIND)
+        key = (d["mode"], d["run_id"])
+        rel = ledger.GKG_MANIFESTS[d["mode"]]
+        if key not in results:
+            state = states.get(key, "マニフェストに行が無い")
+            st.unchecked.append("%s の run_id %s のマニフェストの時刻証明（gkg-run-result の記録が無い。%s）"
+                                % (rel, d["run_id"], state))
+            print("照らさなかった：seq %d の run（%s・run_id %s）のマニフェストの時刻証明が無い（gkg-run-result の記録が"
+                  "無い。%s）" % (r["seq"], d["mode"], d["run_id"], state))
+        if d["mode"] == "official" and "days" not in d:
+            st.unchecked.append("seq %d の gkg-run-start（official）の取得の計画（days・files_selected が記録に無い）"
+                                % r["seq"])
+            print("照らさなかった：seq %d の gkg-run-start（official）に取得の計画（days・files_selected）が無いので、"
+                  "日とファイルの数を、データを受け取る前の記録と照らしていない" % r["seq"])
     _check_day_files(st, day_rows, day_dirs)
 
 

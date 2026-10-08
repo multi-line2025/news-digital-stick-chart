@@ -222,11 +222,26 @@ except ledger.LedgerError as e:
 """
 
 
+_PYTHONS = None
+
+
 def pythons():
-    out = [sys.executable]
-    if os.path.exists("/usr/bin/python3"):
-        out.append("/usr/bin/python3")
-    return out
+    """照合を流す Python の一覧。プロジェクトの .venv（3.14）と /usr/bin/python3（3.9）を、版の重ならない形で
+    返す（T-068。T-065 の監査 軽微6：/usr/bin/python3 でテストを流しても、3.14 も確かめる）。"""
+    global _PYTHONS
+    if _PYTHONS is None:
+        cands = [sys.executable, os.path.join(tl.PROJECT, ".venv", "bin", "python"), "/usr/bin/python3"]
+        out, seen = [], set()
+        for py in cands:
+            if not os.path.exists(py):
+                continue
+            r = subprocess.run([py, "-B", "-c", "import sys; print(sys.version)"], capture_output=True)
+            v = r.stdout.strip()
+            if r.returncode == 0 and v not in seen:
+                seen.add(v)
+                out.append(py)
+        _PYTHONS = out
+    return _PYTHONS
 
 
 class TestForgedHeadsBothPythons(CloneCase):

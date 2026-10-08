@@ -1,4 +1,4 @@
-# 期間の区切りと候補の封印を検証する手順（T-005、T-007、T-008、T-009、T-013、T-014、T-017、T-023、T-027、T-031、T-037、T-041、T-043、T-049、T-056、T-058、T-059、T-060、T-065、T-066）
+# 期間の区切りと候補の封印を検証する手順（T-005、T-007、T-008、T-009、T-013、T-014、T-017、T-023、T-027、T-031、T-037、T-041、T-043、T-049、T-056、T-058、T-059、T-060、T-065、T-066、T-068）
 
 この文書は、第三者が次のことを自分で確かめるための手順である。
 
@@ -779,6 +779,9 @@ Data: The GDELT Project (https://www.gdeltproject.org/). This project is not aff
 
 - キーはこの13個だけ（`ledger.GKG_RUN_DOC_KEYS`：`code_path`・`code_sha256`・`drand`・`exclusion_rule_record_sha256`・`exclusion_rule_seq`・`filelist_sha256`・`kind`・`ledger_head`・`method_access_seq`・`mode`・`run_id`・`step`・`trial_days`）。公開してよい値だけで、保存先（ディスク・フォルダ）、ユーザー名、VolumeUUID は入れない。パスは、リポジトリの中の取得のコードの相対パスだけである。
 - 中身は `sealed/gkg-run-start-<sha256>.json` として新しく書き、記録の `targets` に `role` = `gkg-run-start` で1件だけ載せる。
+- **取得の計画（T-068。T-066 の監査 中-3）**：上の13個に `days`（取得する日の数）と `files_selected`（取得するファイルの数）を足した15個の形もある（`ledger.GKG_RUN_PLAN_KEYS`）。値は、収集係のマニフェストの run-start の行の `days`・`files_selected` と同じで、データを受け取る前（GKG への要求を送る前）に縛る。verify は、計画のある記録について、run-start の行の `days`・`files_selected` が記録と同じであることを照らす。run-complete の `days` と day の行の数、day の行の `files_listed` の合計は、run-start の行と照らすので、計画とも合う。
+  - 正式な run（official）は、計画のある形でなければならない。ただし、収集係の取得のコード（`gkg.py` の start_hook）が計画を渡すようになるまで（T-069）は `ledger.GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL` を False にしてあり、計画の無い official の記録は、verify が「照らさなかった：…取得の計画…」と出す。T-069 のあとに True にし、計画の無い official は書く仕組みも verify も止める。
+  - 試しの run は、どちらの形でもよい。既にある seq 8（試しの run）は計画の無い古い形で、追記のみなので書き換えない。試しの run の日は `trial_days` で決まっている。
 
 ### 照合（`ledger.check_gkg_run_doc`・`ledger.check_gkg_runs`。書く仕組みと `verify.py gkg-runs`・`all` が同じ照合をする）
 
@@ -856,9 +859,15 @@ grep -n '"kind":"gkg-run-start"' sealed/ledger.jsonl | cut -d: -f1 || true
 - **verify が照らすこと**（`ledger.check_gkg_result_doc`・`ledger.check_gkg_results`。`gkg-runs` と `all`）：中身の形、`ledger_head`、指す `gkg-run-start`（seq・行の sha256・mode・run_id）、同じ run の記録は1件だけ、作業ツリーのマニフェストの先頭 `manifest_lines` 行の sha256 が `manifest_sha256` と同じ（マニフェストは追記のみなので、後ろに行が増えても先頭は変わらない）、その中に run-complete の行があって sha256 が同じ。git の履歴があれば、`manifest_commit` の版のマニフェストの先頭も同じ。run-complete まである run に `gkg-run-result` が無ければ「照らさなかった：…マニフェストの時刻証明（gkg-run-result の記録が無い）」と出す（終了コードは 0 のまま）。
 - **書く時機と、守れること・守れないこと**：この記録は、データを受け取ったあと（run-complete のあと）に書く。そのため次のことが言える（前提 → 結論）。
   - 前提：day の行に日の集計の sha256 が入っていて、記録がマニフェストの先頭の行の sha256 を縛る。結論：記録の .ots の確定時刻より後に、マニフェストも日の集計も差し替えられない（差し替えれば verify が止まる。日の集計は `--day-files` で照らせる）。
-  - 前提：記録を書くのは取得が終わったあとで、取得から記録までの間は何も縛っていない。結論：その間に、マニフェストと日の集計を選び直す余地（たとえば、別の内容で取り直した日の集計と day の行に入れ替える）は、この記録では閉じられない。閉じているのは、`gkg-run-start`（取得の前の記録）が縛る入力の値（コード・一覧・試しの日）と、上の行の照合で見つかる食い違いまでである。
-  - 前提：記録の .ots は、run-complete のあと、結果を見る前に作る運用である。結論：この間を短くするほど選び直しの余地は小さくなるが、長さは記録の `recorded_at`（申告）と run-complete の `completed_at`（申告）の差で読むしかなく、証明ではない。
+  - 前提：マニフェストの行と日の集計を縛るのはこの記録だけで、それより前は、取得の開始（`gkg-run-start` の記録。マニフェストでは run-start の `started_at`、または最初の day の行）から、何も縛っていない。結論：縛られない時間は、取得の開始からこの記録までで、**正式な run では取得の全期間（数日から数週間）にわたる**（T-068 で書き方を直した。T-066 の監査 中-3）。その間に、マニフェストと日の集計を選び直す余地は、この記録では閉じられない。たとえば次のことができる。
+    - 別の内容で取り直した日の集計と day の行に入れ替える。
+    - **件数をそろえて日を抜く**：都合の悪い日の day の行を書かずに、ほかの日を取り直すなどして、run-complete の数（`days`・`files_ok` など）を day の行の合計にそろえる。行の照合はつじつまが合えば通る。ただし、計画（`days`・`files_selected`）のある `gkg-run-start` では、日の数とファイルの数が取得の前に縛られているので、日を抜けば数が合わずに止まる（中身を入れ替えることは、数だけでは止められない）。
+  - 閉じているのは、`gkg-run-start`（取得の前の記録）が縛る入力の値（コード・一覧・試しの日・計画）と、上の行の照合で見つかる食い違いまでである。
+  - 前提：記録の .ots は、run-complete のあと、結果を見る前に作る運用である。結論：run-complete から記録までを短くしても、取得の間の選び直しの余地は残る。長さは、記録の `recorded_at`（申告）と、run-start の `started_at`・run-complete の `completed_at`（申告）の差で読むしかなく、証明ではない。
 - **試しの run にも後から付けられる**：既にコミットされている `data/manifest/gdelt-gkg-trial.jsonl`（run_id e15ed53595c70035）にも、同じコマンドで記録を足せる（記録の時点のマニフェスト全体を縛る）。本物の記録への書き込みはオーナーの承認を得てから行う（T-066 では書いていない）。それまで、verify は「照らさなかった」と出す。
+  - **事後の縛りでしかない（T-068。T-066 の監査 軽-3）**：試しの run の結果は、オーナーが既に見ている（T-063）。そのため、後から付ける `gkg-run-result` が示すのは「記録の時点より後に変えていない」ことだけで、結果を見る前のマニフェストがこれと同じだったことは示せない。
+  - 試しのマニフェストは、正式な run の run-start の行の `trial_manifest_sha256`（試しのマニフェストの全体の sha256）でも縛られる。正式な run を始めた時点（収集係の関門が照らす。12章の上の「`trial_manifest_sha256` は、この照合では照らさない」）より後に変えれば、正式な run の再開が止まる。ただし、その値は正式な run のマニフェストの行で、時刻証明は正式な run の `gkg-run-result` を通じてしか付かない。
+- **まとめの「照らさなかった」（T-068。T-066 の監査 中-2）**：verify は、`gkg-run-result` の無い run を、`gkg-run-start` の記録ごとに「照らさなかった：…マニフェストの時刻証明（gkg-run-result の記録が無い。<状態>）」と出す。状態は「run-complete まである」「終わっていない run（run-complete の行が無い）」「マニフェストに行が無い」のどれか。記録ごとに数えるので、マニフェストの run-complete の行を消しても、この数は減らない（T-066 までは、run-complete の行がある run だけを出していた）。
 - **関門の位置（提案）**：日の集計を使うコード（正式な run の結果を集計に使う統計係・収集係のコード）は、最初に `ledger.require_gkg_run_result(mode, run_id)` を呼ぶ。鎖と .ots、マニフェストの照合、その run の `gkg-run-result` の照合に通るときだけ記録を返し、そうでなければ `GkgRunResultRequired` で止まる。正式な run は、この関門を通るまで「完了」と扱わない（例：`gkg.official_day_records` が run-complete に加えてこの関門を求める）。どこから呼ぶかは、リードが収集係・統計係に割り振る。
 - **照らす時機（T-043。T-041 の監査 軽-3）**：試しの run のマニフェストは、run が終わってからコミットされる（src/collector/README.md 6.4）。封印の記録（`gkg-run-start`）は run の前に書かれ、ハッシュは24時間以内に投稿されるので、記録だけ先に公開された間は、マニフェストの行が無いか件数が合わず、この照合は失敗することがある。第三者は、マニフェストのコミットのあとで照らす。
 - 限界：コミットと、記録のハッシュの公開（X への投稿）の前に、記録の末尾の行と中身のファイルとマニフェストの行をまとめて戻すことは見つけられない。戻したあとの記録とマニフェストは、互いにつじつまが合うからである。7章の「別の系列が無かったこと」と同じ限界で、記録の先頭のハッシュを公開した時点より前の部分だけが固まる。末尾の行と中身とマニフェストの行をまとめて戻すことを見つけるには、投稿したハッシュと照らす（docs/verify/x-post.md）。
@@ -999,6 +1008,7 @@ grep -n '"kind":"stats-order1' sealed/ledger.jsonl | cut -d: -f1 || true
   sed -n 5p sealed/ledger.jsonl | tr -d '\n' | shasum -a 256                      # order1_ref.record_sha256（seq 5 の行）
   ```
   `R` は verify の `RUNNER` と同じで、`-I` が外すスクリプトのフォルダだけを戻す（`tagrules.py` が同じフォルダの `exclusion.py` を読むため）。1cb463a の版は、seal-order1.md 1章では `tagrules.py` として書く形だが、`src/stats/tagrules.py` として書いても出力は同じ（verify はこちらの形）。書き出すファイルの名前は、決まった一覧（順番1b は `ledger.ORDER1B_REQUIRED_FILES` の4件、順番1 は `ledger.ORDER1_TARGET_NAMES` のうちファイルそのものの名前）として手順の `for` の行に固定で書いてある（シェルの変数に並べて分けると、zsh では分かれないため）。記録の `files`・`targets` がその一覧とちょうど一致することは、書き出す前の確認の行（`ok` と出ること）で確かめる（T-065。T-060 の軽-1）。確認の行は、`tests/sealer/test_t065.py` が本物の記録で `ok` を出し、1件足した中身では `ok` を出さないことを、両方の Python で確かめている。
+- **テストを流す Python（T-068。T-065 の監査 中-1）**：`tests/sealer` の `test_t037.TestRealClone.test_before_order1_at_77d0dd2` は、順番1 の封印の直前の commit（77d0dd2）の clone で順番1 と順番1b を封印し直し、その版の `tests/stats` を流す。流す Python は、順番1 の記録の `python.version`（3.14.2）と同じ版（3.14）に固定する。プロジェクトの `.venv/bin/python` があればそれを使い、無ければテストを流している Python が同じ版のときだけ使い、どちらも無ければ skip する（3.9 では 77d0dd2 の `tests/stats` の test_t019 の2件が、開くファイルが違って落ちるため。T-059 の報告）。第三者は、`python3 -m venv .venv`（3.14）を用意してから `tests/sealer` を流す。また、この clone は `git init` と、その commit だけの `git fetch` で作る（後の参照を持たない。T-065）。参照でない commit を取るのは git の protocol v2 に頼るので、テストは `-c protocol.version=2` を付ける（git 2.18 以降）。
 - 記録の10件の sha256 を作業ツリーで計算し直して照らす手順は、docs/stats/seal-order1.md 3章 (1) のとおり（`shasum -a 256 <ファイル>`、`git show <commit>:<path> | shasum -a 256`、`PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/stats/exclusion.py | shasum -a 256` など）。順番1b の `counting.output_sha256` は `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/stats/counting.py | shasum -a 256` と照らす。
 
 ### 順番2 への申し送り（統計係の T-036 の監査の軽-4）

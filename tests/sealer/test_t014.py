@@ -517,10 +517,13 @@ class TestGateRoot(Case):
         self.method_gate()
         self.threshold_gate()
         self.assertEqual(os.path.realpath(ledger.PROJECT_ROOT), os.path.realpath(PROJECT))
+        self.check_gates_read(PROJECT)
+
+    def check_gates_read(self, root):
+        """関門が root の記録を読むこと（仮のプロジェクトの記録ではない）。T-065：root の記録の状態
+        （method-access・threshold-access があるか）によらず確かめる。無ければ止まり、あれば root の鎖の記録を返す。"""
         real = ledger.verify_chain(ledger.read_ledger(
-            os.path.join(PROJECT, "sealed", "ledger.jsonl")))
-        # T-065：本物の記録の状態（method-access・threshold-access があるか）によらず確かめる。
-        # 無ければ止まり、あれば本物の鎖の記録を返す（仮のプロジェクトの記録ではない）
+            os.path.join(root, "sealed", "ledger.jsonl")))
         for kind, gate, err, text in (
                 (ledger.METHOD_ACCESS_KIND, ledger.require_method_access, ledger.MethodAccessRequired,
                  "method-access の記録が鎖に無い"),
@@ -535,6 +538,30 @@ class TestGateRoot(Case):
                 got = got[0] if isinstance(got, tuple) else got
                 self.assertIn(got, real, kind)              # 本物の鎖の記録
                 self.assertEqual(got["kind"], kind)
+        return {r["kind"] for r in real}
+
+    def test_absent_branch_with_root_before_method_access(self):
+        """T-068（T-065 の監査 軽微3）：本物には method-access があるので「無い」側の道が流れない。
+        method-access も threshold-access も無い commit（77d0dd2）の clone を関門のルートにして、仮のプロジェクトに
+        両方があっても、関門が「鎖に無い」で止まる側の道を確かめる。"""
+        self.seal()
+        self.step3(T0 + H)
+        self.method(T0 + 3 * H)
+        self.access(T0 + 4 * H)
+        self.method_gate()
+        self.threshold_gate()
+        from unittest import mock
+        commit = "77d0dd22d8e397a9b1e53b079a31bb93db765452"
+        with tempfile.TemporaryDirectory() as d:
+            c = os.path.join(d, "before-method")
+            subprocess.run(["git", "init", "-q", c], check=True, capture_output=True)
+            subprocess.run(["git", "-c", "protocol.version=2", "-C", c, "fetch", "-q", "--no-tags", PROJECT, commit],
+                           check=True, capture_output=True)
+            subprocess.run(["git", "-C", c, "checkout", "-q", "--detach", commit], check=True, capture_output=True)
+            with mock.patch.object(ledger, "PROJECT_ROOT", c):
+                kinds = self.check_gates_read(c)
+        self.assertNotIn(ledger.METHOD_ACCESS_KIND, kinds)
+        self.assertNotIn(ledger.THRESHOLD_ACCESS_KIND, kinds)
 
     def test_access_gate_cli_rejects_root(self):
         r = subprocess.run([sys.executable, "-B", os.path.join(tl.SRC, "seal_access.py"), "gate",
@@ -562,8 +589,9 @@ class TestDocStatements(unittest.TestCase):
                 "リダイレクト"):
             self.assertIn(phrase, self.text)
 
-    def test_kind_count_is_seven(self):
-        self.assertIn("下の表の11だけ", self.text)   # T-031・T-037・T-066 で kind を加えた
+    def test_kind_count_matches_allowed_kinds(self):
+        # T-068（T-066 の監査 軽-4）：名前を中身に合わせた。数は ledger.ALLOWED_KINDS から取る
+        self.assertIn("下の表の%dだけ" % len(ledger.ALLOWED_KINDS), self.text)   # T-031・T-037・T-066 で kind を加えた
         self.assertIn("| `method-access` |", self.text)
 
 

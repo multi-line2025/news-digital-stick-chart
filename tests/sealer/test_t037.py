@@ -720,10 +720,16 @@ class TestRealClone(unittest.TestCase):
       - test_before_order1_at_77d0dd2：順番1 の封印の直前の commit（77d0dd2。本物の記録は seq 1〜4）に
         clone を合わせ、順番1 → 順番1b の流れを通す。commit を固定するので、本物の記録が先へ進んでも
         変わらない。
-      - test_head_with_real_order1：HEAD の clone。本物の記録に順番1 があればそれを使い（seal_order1 は
-        呼ばない）、無ければ封印する。method-access がまだ無ければ順番1b を封印し、verify stats-order を
-        確かめる。method-access があれば（本物の記録が先へ進んだら）、順番1b は書けないので、verify
-        stats-order だけを確かめる。
+      - test_head_with_real_order1：HEAD の clone。T-065 から、状態で分けない。本物の記録には順番1・1b・
+        method-access が封印済みで消えないので、2件目の順番1 と method-access のあとの順番1b が拒まれ、
+        ledger が変わらず、verify stats-order が通ることを毎回確かめる。
+    T-065：commit を指定した clone は、git init と、その commit だけの fetch で作る（後の参照を持たない）。
+    T-068（T-065 の監査 軽微1）：fetch は protocol v2 に頼る（v0 では、参照でない commit を取れない）ので、
+    利用者の設定によらないよう -c protocol.version=2 を付ける。
+    T-068（T-065 の監査 中-1）：clone の .venv/bin/python は、順番1 の封印に使った Python と同じ版
+    （記録の python.version。3.14.2）に固定する。プロジェクトの .venv があればそれ、無ければ sys.executable が
+    同じ版のときだけ使い、どちらも無ければ skip する（77d0dd2 の tests/stats の test_t019 の2件は、3.9 では
+    開くファイルが違って落ちるため。docs/verify/periods-seal.md 13章「テストを流す Python」）。
     """
 
     BEFORE_ORDER1 = "77d0dd22d8e397a9b1e53b079a31bb93db765452"
@@ -739,16 +745,28 @@ class TestRealClone(unittest.TestCase):
             # 残り、`git log --all` が後の commit のマニフェストの履歴を見つけてしまう。本物の記録・マニフェストが
             # 伸びても、commit の時点の状態だけで確かめられるようにする）。参照は1つも作らず、HEAD を commit にする
             subprocess.run(["git", "init", "-q", c], check=True, capture_output=True)
-            subprocess.run(["git", "-C", c, "fetch", "-q", "--no-tags", tl.PROJECT, commit], check=True,
-                           capture_output=True)
+            subprocess.run(["git", "-c", "protocol.version=2", "-C", c, "fetch", "-q", "--no-tags", tl.PROJECT,
+                            commit], check=True, capture_output=True)
             subprocess.run(["git", "-C", c, "checkout", "-q", "--detach", commit], check=True, capture_output=True)
             refs = subprocess.run(["git", "-C", c, "for-each-ref"], check=True, capture_output=True).stdout
             self.assertEqual(refs, b"")             # commit より後を指す参照は無い
         os.makedirs(os.path.join(c, ".venv", "bin"))
-        os.symlink(os.path.realpath(os.path.join(tl.PROJECT, ".venv", "bin", "python"))
-                   if os.path.exists(os.path.join(tl.PROJECT, ".venv", "bin", "python")) else sys.executable,
-                   os.path.join(c, ".venv", "bin", "python"))
+        os.symlink(self.sealing_python(), os.path.join(c, ".venv", "bin", "python"))
         return c
+
+    def sealing_python(self):
+        """順番1 の封印に使った Python と同じ版（major.minor）の Python。無ければ skip（T-068）。"""
+        with open(os.path.join(tl.PROJECT, self.REAL_ORDER1), encoding="utf-8") as f:
+            want = json.load(f)["python"]["version"]                       # 例："Python 3.14.2"
+        want_mm = ".".join(want.split()[1].split(".")[:2])
+        for py in (os.path.join(tl.PROJECT, ".venv", "bin", "python"), sys.executable):
+            if not os.path.exists(py):
+                continue
+            r = subprocess.run([os.path.realpath(py), "-B", "-c",
+                                "import sys; print('%d.%d' % sys.version_info[:2])"], capture_output=True)
+            if r.returncode == 0 and r.stdout.decode().strip() == want_mm:
+                return os.path.realpath(py)
+        self.skipTest("順番1 の封印に使った Python（%s）と同じ版が無い（.venv を用意して流す。手順書 13章）" % want)
 
     def records(self, c):
         return ledger.verify_chain(ledger.read_ledger(os.path.join(c, "sealed", "ledger.jsonl")))
@@ -810,12 +828,14 @@ class TestRealClone(unittest.TestCase):
             o1 = ledger.first_order1(self.records(c))
             self.assertIsNotNone(o1)
             self.assertTrue(any(r["kind"] == ledger.METHOD_ACCESS_KIND for r in self.records(c)))
-            before = open(os.path.join(c, "sealed", "ledger.jsonl"), "rb").read()
+            with open(os.path.join(c, "sealed", "ledger.jsonl"), "rb") as f:
+                before = f.read()
             with self.assertRaisesRegex(ledger.LedgerError, "stats-order1 の記録が既にある"):
                 seal_stats.seal_order1(c, now, "ots", runner=tw.FakeOts())
             with self.assertRaisesRegex(ledger.LedgerError, "method-access の記録がある"):
                 seal_stats.seal_order1b(c, ORDER1B_FILES, [], now, "ots", runner=tw.FakeOts())
-            self.assertEqual(open(os.path.join(c, "sealed", "ledger.jsonl"), "rb").read(), before)
+            with open(os.path.join(c, "sealed", "ledger.jsonl"), "rb") as f:
+                self.assertEqual(f.read(), before)
             code, out, err = tl.run_verify_inproc(c, "stats-order")
             self.assertEqual(code, 0, err)
             self.assertIn("除外の規則の kind（stats-order1）の記録：seq %d（1 件だけ）" % o1["seq"], out)

@@ -21,6 +21,8 @@ docs/verify/periods-seal.md 12章。
     filelist_sha256                使うファイル一覧の sha256。acquisition-result の kept_rows_sha256
     method_access_seq              最初の method-access の記録の seq
     trial_days                     試しの run の日（YYYY-MM-DD の list）。official なら None
+    days・files_selected           （T-068。キーワード）取得する日の数とファイルの数（計画）。データを受け取る
+                                   前に縛る。gkg.py の run-start の行の days・files_selected と同じ値
     exclusion_rule_seq             除外の規則の封印の記録の seq
     exclusion_rule_record_sha256   その記録の行の正規の形の sha256
     now                            datetime（UTC）
@@ -140,7 +142,7 @@ def _manifest_run_start_rows(project, mode):
 
 
 def _reuse(project, records, runs, mode, run_id, code_sha, filelist_sha256, method_access_seq,
-           trial_days, exclusion_rule_seq, exclusion_rule_record_sha256, ots_cmd, runner):
+           trial_days, exclusion_rule_seq, exclusion_rule_record_sha256, ots_cmd, runner, plan=None):
     """同じ mode・run_id の gkg-run-start が既にあれば、それを使い回す（T-043。T-041 の監査 中-1）。
 
     stamp が失敗したあと（記録は ledger に残り、.ots は stamp.py stamp --seq N で後から作る）や、
@@ -159,6 +161,10 @@ def _reuse(project, records, runs, mode, run_id, code_sha, filelist_sha256, meth
             "method_access_seq": method_access_seq, "exclusion_rule_seq": exclusion_rule_seq,
             "exclusion_rule_record_sha256": exclusion_rule_record_sha256,
             "trial_days": None if trial_days is None else list(trial_days)}
+    # T-068：計画（days・files_selected）も同じでなければ使い回さない（計画を持たない古い形の記録は、計画を
+    # 渡さないときだけ使い回せる）
+    for k in ledger.GKG_RUN_PLAN_KEYS:
+        want[k] = None if plan is None else plan[k]
     diff = sorted(k for k, v in want.items() if d.get(k) != v)
     if diff:
         raise ledger.LedgerError("同じ mode・run_id %s の gkg-run-start（seq %d）が既にあるが、%s が違う。"
@@ -177,10 +183,23 @@ def _reuse(project, records, runs, mode, run_id, code_sha, filelist_sha256, meth
 
 def start(project, mode, code_rel, run_id, filelist_sha256, method_access_seq, trial_days,
           exclusion_rule_seq, exclusion_rule_record_sha256, now, ots_cmd, drand_fetch=None,
-          runner=subprocess.run):
+          runner=subprocess.run, days=None, files_selected=None):
     """gkg-run-start を 1 件追記する（または、同じ run の記録を使い回す。_reuse）。
+    days・files_selected（T-068）：取得する日の数とファイルの数（収集係の計画。gkg.py の run-start の行の
+    days・files_selected と同じ値）。データを受け取る前に縛る。ledger.GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL が
+    True なら official では必ず渡す（渡さなければ止まる。収集係が渡すようになる T-069 のあとに True にする）。
+    渡さなければ、計画を持たない古い形で書く。
     返り値: (記録, 中身のパス, .ots のパス か None)。"""
     project = os.path.abspath(project)
+    if (days is None) != (files_selected is None):
+        raise ledger.LedgerError("days と files_selected は、両方渡すか両方渡さない。追記しない")
+    if mode == "official" and days is None and ledger.GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL:
+        raise ledger.LedgerError("正式な run（official）は、取得の計画（days・files_selected）を渡す（T-068）。追記しない")
+    plan = None
+    if days is not None:
+        if type(days) is not int or days < 1 or type(files_selected) is not int or files_selected < 1:
+            raise ledger.LedgerError("days・files_selected は 1 以上の整数。追記しない")
+        plan = {"days": days, "files_selected": files_selected}
     data, records = seal_records.load_checked(project, ots_cmd, runner=runner)
     runs = _precheck(project, records, mode)
     o1 = ledger.first_order1(records)
@@ -195,7 +214,7 @@ def start(project, mode, code_rel, run_id, filelist_sha256, method_access_seq, t
         raise ledger.LedgerError("run_id %r が、取得のコードの sha256 の先頭 16 桁 %s と違う。追記しない"
                                  % (run_id, code_sha[:16]))
     reused = _reuse(project, records, runs, mode, run_id, code_sha, filelist_sha256, method_access_seq,
-                    trial_days, exclusion_rule_seq, exclusion_rule_record_sha256, ots_cmd, runner)
+                    trial_days, exclusion_rule_seq, exclusion_rule_record_sha256, ots_cmd, runner, plan)
     if reused is not None:
         return reused
     ledger.check_gkg_run_modes([(r["seq"], d["mode"]) for r, d in runs] + [(len(records) + 1, mode)])
@@ -214,6 +233,8 @@ def start(project, mode, code_rel, run_id, filelist_sha256, method_access_seq, t
         "drand": seal_records.drand_part(now, drand_fetch),
         "ledger_head": ledger.expected_ledger_head(data, len(records) + 1),
     }
+    if plan is not None:
+        doc.update(plan)
     n = sum(1 for r in records if r["kind"] == ledger.GKG_RUN_KIND) + 1
     note = ("GKG の取得の run の開始（%s。run_id %s）。gkg-run-start の %d 件目。採用の区切りには使わない。"
             % ("試しの run" if mode == "trial" else "正式な run", run_id, n))
@@ -233,6 +254,8 @@ def main(argv=None):
     s.add_argument("--trial-day", action="append", default=None)
     s.add_argument("--exclusion-rule-seq", type=int, required=True)
     s.add_argument("--exclusion-rule-record-sha256", required=True)
+    s.add_argument("--days", type=int, default=None)
+    s.add_argument("--files-selected", type=int, default=None)
     s.add_argument("--ots", default=stamp.DEFAULT_OTS)
     s.add_argument("--root", default=PROJECT)
     a = p.parse_args(argv)
@@ -241,7 +264,8 @@ def main(argv=None):
     try:
         rec, rel, ots_path = start(root, a.mode, a.code, a.run_id, a.filelist_sha256,
                                    a.method_access_seq, a.trial_day, a.exclusion_rule_seq,
-                                   a.exclusion_rule_record_sha256, now, a.ots)
+                                   a.exclusion_rule_record_sha256, now, a.ots, days=a.days,
+                                   files_selected=a.files_selected)
     except ledger.LedgerError as e:
         print("失敗: %s" % e, file=sys.stderr)
         return 1

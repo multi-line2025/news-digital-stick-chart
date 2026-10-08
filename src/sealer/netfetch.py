@@ -8,7 +8,8 @@
 通信の決まり（コードに固定する）
     - 宛先は、下の ALLOWED_URL_PREFIXES で始まる https の URL だけ。それ以外は送る前に止める。
     - リダイレクト（3xx）にはついていかない（T-014。T-009 の監査 軽1）。リダイレクトの応答を
-      受けたら、転送先には何も送らずに RedirectRefused で止める。再試行もしない。応答の URL が
+      受けたら、転送先には何も送らずに RedirectRefused で止める。再試行もしない（301・302・303・307・308 の
+      ほか、Location の無い 3xx、http(s) 以外への 3xx、300 も同じ。T-065・T-068）。応答の URL が
       要求した URL と違う場合も同じく止める（念のための二重の確認）。
     - 1 回の待ち時間の上限 TIMEOUT_SECONDS、再試行の上限 MAX_TRIES、再試行の間の待ち WAIT_SECONDS。
     - 応答の大きさの上限 MAX_BYTES。
@@ -120,6 +121,13 @@ def http_get(url, sleep=time.sleep, opener=no_redirect_urlopen):
             if len(body) > MAX_BYTES:
                 raise FetchError("応答が大きすぎる: %s" % url)
             return body
+        except urllib.error.HTTPError as e:
+            if 300 <= e.code < 400:
+                # T-068（T-065 の監査 軽微7）：Location の無い 3xx、http(s) 以外への 3xx、300 などは、urllib が
+                # 転送の前に HTTPError にする。これも転送先には送らず、再試行もせずに止める
+                raise RedirectRefused("リダイレクト（%d）にはついていかない（転送しない形の応答）: %s"
+                                      % (e.code, url)) from None
+            last = e
         except (urllib.error.URLError, OSError) as e:
             last = e
     raise FetchError("%d 回試して失敗した: %s（%s）" % (MAX_TRIES, url, type(last).__name__))

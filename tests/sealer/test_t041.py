@@ -70,8 +70,16 @@ class TestGkgManifests(t31.GkgCase):
         # T-056 差し戻し1回目 軽-5：照らさなかった項目の一覧が、期待どおり（working なので順番1・1b の
         # 計算し直しだけ。マニフェストの照合は照らした）であることを、行の全体で確かめる
         last = [l for l in out.splitlines() if l.startswith("ただし、次は照らさなかった")]
+        # T-068（T-066 の監査 中-2）：gkg-run-result の無い run は、gkg-run-start の記録ごとに並ぶ。計画の無い
+        # official の記録も並ぶ（T-069 で収集係が計画を渡すまで）
+        want = ["順番1・1b の値の計算し直し（--rev working では行わない。--rev auto で照らす）"]
+        for r, mode in ((t1, "trial"), (t2, "trial"), (off, "official")):
+            d = ledger.read_target_json(self.root, r, ledger.GKG_RUN_KIND)
+            want.append("%s の run_id %s のマニフェストの時刻証明（gkg-run-result の記録が無い。終わっていない run"
+                        "（run-complete の行が無い））" % (ledger.GKG_MANIFESTS[mode], d["run_id"]))
+        want.append("seq %d の gkg-run-start（official）の取得の計画（days・files_selected が記録に無い）" % off["seq"])
         self.assertEqual(last, ["ただし、次は照らさなかった（終了コード 0 は、照らした検査がすべて通ったことだけを示す）："
-                                "順番1・1b の値の計算し直し（--rev working では行わない。--rev auto で照らす）"])
+                                + "、".join(want)])
 
     def test_missing_manifest_without_records_is_reported(self):
         """記録が 0 件でマニフェストも無いときは、今のまま「照らさなかった」（終了コード 0）。"""

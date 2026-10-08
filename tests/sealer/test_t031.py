@@ -61,12 +61,15 @@ class GkgCase(t23.JCase):
         rec = [r for r in self.records() if r["seq"] == seq][0]
         return seq, hashlib.sha256(ledger.canonical_line(rec)).hexdigest()
 
-    def start_run(self, now, mode="trial", days=TRIAL_DAYS, manifest=True, **over):
+    def start_run(self, now, mode="trial", days=TRIAL_DAYS, manifest=True, plan=None, **over):
+        """days は試しの日（trial_days）。plan は取得の計画 (days, files_selected)（T-068）。"""
         ex_seq, ex_sha = self.excl()
         args = dict(mode=mode, code_rel=tw.CODE_REL, run_id=self.code_sha()[:16],
                     filelist_sha256=KEPT, method_access_seq=self.method_rec["seq"],
                     trial_days=days if mode == "trial" else None, exclusion_rule_seq=ex_seq,
                     exclusion_rule_record_sha256=ex_sha)
+        if plan is not None:
+            args.update(days=plan[0], files_selected=plan[1])
         args.update(over)
         got = seal_gkg_run.start(self.root, now=now, ots_cmd="ots", drand_fetch=tw.FakeDrand(now),
                                  runner=tw.FakeOts(), **args)
@@ -88,8 +91,8 @@ class GkgCase(t23.JCase):
                   "exclusion_rule_record_sha256"):
             row[k] = doc[k]
         row.update(official=doc["mode"] == "official", block_start=mdoc["block_start"],
-                   block_end=mdoc["block_end"], files_selected=0,
-                   days=len(doc["trial_days"]) if doc["trial_days"] else 0)
+                   block_end=mdoc["block_end"], files_selected=doc.get("files_selected", 0),
+                   days=doc.get("days", len(doc["trial_days"]) if doc["trial_days"] else 0))
         if doc["mode"] == "trial":
             row.update(trial=True, trial_days=doc["trial_days"])
         if doc["mode"] == "official":
