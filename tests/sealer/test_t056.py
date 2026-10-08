@@ -355,9 +355,14 @@ class TestSafeExtraction(unittest.TestCase):
             (self.info("hard", "hard", "src/ok.py"), None),
             (self.info("zz/" + "a" * 300), b"x"),                     # 長すぎる名前
             (self.info(os.fsdecode(b"zz/\xff\xfe")), b"x"),           # UTF-8 でない名前
-            (self.info("src/ok.py"), b"other\n"),                      # 同じ名前の2つ目（上書きしない）
         ]
         with tempfile.TemporaryDirectory() as d:
+            # 同じ名前の2つ目は、T-058 から、飛ばさずに「記録と合わない」で止める（T-056 の監査 重大-1）。
+            # 取り出す前に止まり、何も書き出さない
+            dup = entries + [(self.info("src/ok.py"), b"other\n")]
+            with self.assertRaisesRegex(ledger.LedgerError, "同じ名前の項目"):
+                verify.HeadTree(FakeRepo(make_tar(dup)), "d" * 40, d)
+            self.assertEqual(os.listdir(d), [])
             tree = verify.HeadTree(FakeRepo(make_tar(entries)), "a" * 40, d)
             with open(os.path.join(tree.dir, "src", "ok.py"), "rb") as f:
                 self.assertEqual(f.read(), b"print(1)\n")
@@ -365,9 +370,10 @@ class TestSafeExtraction(unittest.TestCase):
             for root, dirs, files in os.walk(d):
                 found += [os.path.relpath(os.path.join(root, n), d) for n in files]
             self.assertEqual(found, [os.path.join("tree-" + "a" * 40, "src", "ok.py")])
-            for name in ("../escape.txt", "/abs.txt", "link", "hard", "zz/" + "a" * 300, "src/ok.py"):
+            for name in ("../escape.txt", "/abs.txt", "link", "hard", "zz/" + "a" * 300):
                 self.assertIn(name, tree.skipped)
             self.assertFalse(os.path.exists(os.path.join(os.path.dirname(d), "escape.txt")))
+            self.assertNotIn("src/ok.py", tree.skipped)
 
     def test_unreadable_archive_is_mismatch(self):
         with tempfile.TemporaryDirectory() as d:
