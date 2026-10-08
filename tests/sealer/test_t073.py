@@ -97,7 +97,7 @@ def comp(rid):
 
 
 def fuzz_cases():
-    """監査の a73fuzz.py と同じ組み合わせ（試しの run の9通り × 正式な run の13通り）。(名前, 試し, 正式)"""
+    """監査の a73fuzz.py を広げた組み合わせ（試しの run の11通り × 正式な run の21通り）。(名前, 試し, 正式)"""
     td = counting.TRIAL_DAYS
     tparts = {
         "none": [], "R": [tstart(R)], "Rd1": [tstart(R), day("trial", R, td[0])],
@@ -120,61 +120,62 @@ def fuzz_cases():
                     rows = [ostart(tb if shaok else b"x", ids)] + [day("official", OF, d) for d in td[:days]]
                     offs["%s_%d_%s" % (ids_name, days, shaok)] = jl(rows)
         offs["badofficial"] = jl([dict(ostart(tb, firsts), trial=True)])
+        # 正式な run の day の行の形が違う（decide() は段を記録してから止まる。差し戻し2回目 3）
+        offs["badofficialday"] = jl([ostart(tb, firsts), dict(day("official", OF, td[0]), sha256="x")]
+                                    + [day("official", OF, d) for d in td[1:]])
         for on, ob in offs.items():
             out.append(("%s/%s" % (tn, on), tb, ob))
     return out
 
 
 def decide_route(trial, official):
-    """封印済みの counting.decide() を流し、最初に読もうとした日の集計の mode と、status を返す（読ませない）。"""
-    reads = []
-
-    def read(mode, name):
-        reads.append(mode)
-        raise counting.CountingError("読ませない")
-    out = counting.decide(trial, official, read)
-    return out, (reads[0] if reads else None)
+    """封印済みの counting.decide() を流した出力（日の集計は読ませない）。"""
+    return counting.decide(trial, official, no_day_file)
 
 
 class TestPlanSameAsDecide(unittest.TestCase):
-    """関門の開け閉め（ledger.order2_plan）が、decide() の行き先と同じこと（T-073 差し戻し1回目 軽-2）。"""
+    """関門の行き先（ledger.order2_plan）が、decide() の出力と、check_order2_run と同じ基準（段の記録の有無）で
+    一致すること（T-073 差し戻し1回目 軽-2、差し戻し2回目 3）。"""
 
     def check_case(self, name, trial, official):
-        out, read_mode = decide_route(trial, official)
+        out = decide_route(trial, official)
         plan = ledger.order2_plan(trial, official)
+        stages = [x for x in out["steps"] if x.get("step") in ("trial", "official")]
         if out["status"] == "pending":
             self.assertEqual(plan, {"action": "pending"}, name)
-        elif read_mode is None:
+        elif not stages:
             self.assertEqual(out["status"], "stopped", name)
             self.assertEqual(plan["action"], "stop", name)
         else:
-            self.assertEqual(plan["action"], "read", name)
-            self.assertEqual(plan["mode"], read_mode, name)
+            self.assertEqual(plan["action"], "stage", name)
+            self.assertEqual([x["step"] for x in stages], [plan["mode"]], name)
+            if plan["mode"] == "trial":
+                self.assertEqual(stages[0]["run_id"], plan["run_id"], name)
             self.assertEqual(out["runs"][plan["mode"]]["run_id"], plan["run_id"], name)
         return plan
 
     def test_all_cases(self):
         cases = fuzz_cases()
-        self.assertGreater(len(cases), 150)
+        self.assertGreater(len(cases), 200)
         kinds = set()
         for name, trial, official in cases:
             with self.subTest(name=name):
                 kinds.add(self.check_case(name, trial, official)["action"])
-        self.assertEqual(kinds, {"pending", "stop", "read"})
+        self.assertEqual(kinds, {"pending", "stop", "stage"})
 
     def test_audit_forms(self):
-        """監査が見つけた2つの形。(i) 試しの run の最初の run-start の形が違う：decide() は日の集計を読む前に止まり、
-        関門は run に結び付けずに開く。(ii) 正式な run の3日の day の行がまだ無い：decide() は待ち、関門は閉じる。"""
+        """(i) 試しの run の最初の run-start の形が違う：段に進む前に止まる。(ii) 正式な run の3日の day の行が
+        まだ無い：待つ。(iii) 正式な run の day の行の形が違う：段（official）を記録してから止まるので stage。"""
         bad = jl([dict(tstart(R), trial=False)])
-        plan = self.check_case("(i)", bad, b"")
-        self.assertEqual(plan["action"], "stop")
-        self.assertIsNone(ledger.order2_input_run(bad, b""))
+        self.assertEqual(self.check_case("(i)", bad, b"")["action"], "stop")
         t_open = jl([tstart(R)])
         for n in (0, 2):
             official = jl([ostart(t_open, [R])] + [day("official", OF, d) for d in counting.TRIAL_DAYS[:n]])
             self.assertEqual(self.check_case("(ii)", t_open, official), {"action": "pending"})
-            with self.assertRaises(ledger.Order2GateClosed):
-                ledger.order2_input_run(t_open, official)
+        official = jl([ostart(t_open, [R]), dict(day("official", OF, counting.TRIAL_DAYS[0]), sha256="x")])
+        plan = self.check_case("(iii)", t_open, official)
+        self.assertEqual(plan, {"action": "stage", "mode": "official", "run_id": OF})
+        self.assertEqual(decide_route(t_open, official)["status"], "stopped")
 
     def test_constants(self):
         self.assertEqual(ledger.ORDER2_STATUSES, counting.ORDER2_STATUSES)
@@ -182,40 +183,71 @@ class TestPlanSameAsDecide(unittest.TestCase):
         self.assertEqual(ledger.ORDER2_TRIAL_DAYS, counting.TRIAL_DAYS)
 
 
-# ---- 鎖の照合（check_stats_order → check_order2_run）
+class TestBlankLines(unittest.TestCase):
+    """差し戻し2回目 5：マニフェストに空の行を置かない（最後の改行のあとの空は行に数えない）。"""
+
+    def test_reject(self):
+        row = b'{"kind": "x"}'
+        self.assertEqual(len(ledger.manifest_rows(row + b"\n" + row + b"\n", "m")), 2)
+        self.assertEqual(ledger.manifest_rows(b"", "m"), [])
+        for bad in (row + b"\n\n", row + b"\n\n" + row + b"\n", b"\n" + row + b"\n", row + b"\n \n"):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(ledger.LedgerError, "空の行"):
+                    ledger.manifest_rows(bad, "m")
+
+
+# ---- 鎖の照合（check_stats_order → check_order2_run）と、行き先の照合（check_order2_plan）
 
 class Order2Case(Clone):
-    def output(self):
+    def output(self, official=b""):
         """本物の試しの run のマニフェストに decide() を当てはめた出力（日の集計は置かないので (b) で止まる）。"""
-        return counting.decide(self.body, b"", no_day_file)
+        return counting.decide(self.body, official, no_day_file)
 
-    def doc(self, res, mode="trial", rid=None, output=None, ref_sha=None, stop_kind="b"):
-        rid = rid or self.rid
-        d = {"kind": O2, "stop_kind": stop_kind, "input_run": {"mode": mode, "run_id": rid},
-             "gkg_run_result": {"seq": res["seq"], "record_sha256": ref_sha or line_sha(res)}}
+    def sealed(self):
+        self.res, _rel, _ots = self.seal_result()
+        self.recs = self.records()
+        self.o2 = {"seq": self.res["seq"] + 1, "kind": O2}
+
+    def doc(self, stop_kind="b", output=None, input_run="R", gkg_ref="R", trial_ref=None):
+        ref = {"seq": self.res["seq"], "record_sha256": line_sha(self.res)}
+        d = {"kind": O2, "stop_kind": stop_kind, "trial_result": trial_ref or ref,
+             "input_run": {"mode": "trial", "run_id": self.rid} if input_run == "R" else input_run,
+             "gkg_run_result": ref if gkg_ref == "R" else gkg_ref}
         if stop_kind not in ("a", "c"):
             d["counting_output"] = output if output is not None else self.output()
         return d
+
+    def stop_doc(self):
+        """段に進む前に止まる形の中身（正式な run の trial_manifest_sha256 が合わない）。"""
+        off = jl([ostart(b"x", [self.rid])])
+        out = self.output(off)
+        self.assertEqual([x["step"] for x in out["steps"]], ["stop"])
+        return off, self.doc(output=out, input_run=None, gkg_ref=None)
 
     def ledger_bytes(self):
         with open(os.path.join(self.c, "sealed", "ledger.jsonl"), "rb") as f:
             return f.read()
 
-    def check(self, records, o2, doc, extra=None):
+    def reader(self, o2, doc, extra=None):
         extra = dict(extra or {})
         extra[o2["seq"]] = doc
 
         def read(r, role):
             return extra[r["seq"]] if r["seq"] in extra else self.read(r, role)
-        return ledger.check_stats_order(records + [o2] if o2 not in records else records, read)
+        return read
+
+    def check(self, records, o2, doc, extra=None):
+        return ledger.check_stats_order(records + [o2] if o2 not in records else records, self.reader(o2, doc, extra))
+
+    def check_plan(self, doc, trial=None, official=b""):
+        return ledger.check_order2_plan(self.recs + [self.o2], self.o2, doc, self.reader(self.o2, doc),
+                                        self.body if trial is None else trial, official)
 
 
 class TestChainUnit(Order2Case):
     def setUp(self):
         super().setUp()
-        self.res, _rel, _ots = self.seal_result()
-        self.recs = self.records()
-        self.o2 = {"seq": self.res["seq"] + 1, "kind": O2}
+        self.sealed()
 
     def test_output_is_real_stop(self):
         out = self.output()
@@ -223,76 +255,70 @@ class TestChainUnit(Order2Case):
         self.assertIn({"step": "trial", "run_id": self.rid}, out["steps"])
 
     def test_honest_passes(self):
-        got = self.check(self.recs, self.o2, self.doc(self.res))
+        got = self.check(self.recs, self.o2, self.doc())
         self.assertEqual(got["order2"], [self.o2])
         decided = dict(self.output(), status="decided", input_mode="trial", input_run_id=self.rid)
-        self.check(self.recs, self.o2, self.doc(self.res, output=decided, stop_kind=None))
+        self.check(self.recs, self.o2, self.doc(output=decided, stop_kind=None))
 
     def test_result_after_order2_stops(self):
-        """順序の照合：gkg-run-result が順番2の記録より後にあれば止まる（中身が正しくても）。"""
+        """順序の照合：R の gkg-run-result が順番2の記録より後にあれば止まる（中身が正しくても）。"""
         before = [r for r in self.recs if r["seq"] < self.res["seq"]]
         o2 = {"seq": self.res["seq"], "kind": O2}
         late = dict(self.res, seq=self.res["seq"] + 1)
-        doc = self.doc(late)
+        ref = {"seq": late["seq"], "record_sha256": line_sha(late)}
+        doc = self.doc(trial_ref=ref, gkg_ref=ref)
         with self.assertRaisesRegex(ledger.LedgerError, "鎖の中でこの記録より前に無い"):
             self.check(before + [o2, late], o2, doc)
 
     def test_no_result_stops(self):
-        before = [r for r in self.recs if r["seq"] < self.res["seq"]]
-        o2 = {"seq": self.res["seq"], "kind": O2}
-        start = [r for r in before if r["kind"] == ledger.GKG_RUN_KIND][0]
-        with self.assertRaisesRegex(ledger.LedgerError, "鎖の中でこの記録より前に無い"):
-            self.check(before, o2, self.doc(start))
+        """R の gkg-run-result が無ければ、stop_kind が何でも止まる（(a)・(c)・段に進む前に止まる形も）。"""
+        start = [r for r in self.recs if r["kind"] == ledger.GKG_RUN_KIND][0]
+        ref = {"seq": start["seq"], "record_sha256": line_sha(start)}
+        _off, null = self.stop_doc()
+        for name, doc in (("b", self.doc(trial_ref=ref, gkg_ref=ref)), ("a", self.doc("a", trial_ref=ref, gkg_ref=ref)),
+                          ("c", self.doc("c", trial_ref=ref, input_run=None, gkg_ref=None)),
+                          ("null", dict(null, trial_result=ref))):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ledger.LedgerError, "trial_result.*鎖の中でこの記録より前に無い"):
+                    self.check(self.recs, self.o2, doc)
+        with self.assertRaisesRegex(ledger.LedgerError, "決まったキー"):
+            self.check(self.recs, self.o2, {k: v for k, v in null.items() if k != "trial_result"})
 
     def test_result_of_other_run_stops(self):
-        """G4：別の run の正しい gkg-run-result を指すと、gkg-run-result の mode・run_id と input_run の照合だけが
-        止める（input_run と counting_output は本物の run R で食い違わない）。"""
+        """G4：正式な run の段の記録で、gkg_run_result が別の run の正しい gkg-run-result を指すと、gkg-run-result の
+        run_id と input_run の照合だけが止める（input_run と counting_output は食い違わない）。"""
         rdoc = self.read(self.res, ledger.GKG_RESULT_KIND)
         sdoc = self.read(self.recs[rdoc["gkg_run_seq"] - 1], ledger.GKG_RUN_KIND)
         n = self.res["seq"]
         fstart = {"seq": n + 1, "kind": ledger.GKG_RUN_KIND, "targets": [], "note": "別の run（テスト）"}
         fres = {"seq": n + 2, "kind": ledger.GKG_RESULT_KIND, "targets": [], "note": "別の run の結果（テスト）"}
-        extra = {n + 1: dict(sdoc, run_id="f" * 16),
-                 n + 2: dict(rdoc, run_id="f" * 16, gkg_run_seq=n + 1, gkg_run_record_sha256=line_sha(fstart))}
+        extra = {n + 1: dict(sdoc, mode="official", run_id="f" * 16, trial_days=None),
+                 n + 2: dict(rdoc, mode="official", run_id="f" * 16, manifest_path=ledger.GKG_MANIFESTS["official"],
+                             gkg_run_seq=n + 1, gkg_run_record_sha256=line_sha(fstart))}
         o2 = {"seq": n + 3, "kind": O2}
-        doc = self.doc(fres)
-        with self.assertRaisesRegex(ledger.LedgerError, "の記録で、input_run（trial・%s）と違う" % self.rid):
+        out = dict(self.output(), steps=[{"step": "official", "reason": "trial_not_complete"}, {"step": "stop"}],
+                   runs={"trial": {"run_id": self.rid}, "official": {"run_id": OF}})
+        doc = self.doc(output=out, input_run={"mode": "official", "run_id": OF},
+                       gkg_ref={"seq": fres["seq"], "record_sha256": line_sha(fres)})
+        with self.assertRaisesRegex(ledger.LedgerError, "gkg_run_result（seq %d）は mode official・run_id f{16} の記録で、"
+                                                        "求める run（official・%s）と違う" % (fres["seq"], OF)):
             self.check(self.recs + [fstart, fres], o2, doc, extra)
 
     def test_stop_kinds(self):
-        """(a)・(c) の記録は counting_output を持たず、stop_kind・input_run・gkg_run_result を持つ（seal-order1.md 172行）。"""
+        """(a)・(c) の記録は counting_output を持たず、stop_kind・trial_result・input_run・gkg_run_result を持つ。"""
         for sk in ("a", "c"):
             with self.subTest(stop_kind=sk):
-                self.check(self.recs, self.o2, self.doc(self.res, stop_kind=sk))
-                null = dict(self.doc(self.res, stop_kind=sk), input_run=None, gkg_run_result=None)
-                self.check(self.recs, self.o2, null)
+                self.check(self.recs, self.o2, self.doc(sk))
                 with self.assertRaisesRegex(ledger.LedgerError, "counting_output を持たない"):
-                    self.check(self.recs, self.o2, dict(self.doc(self.res, stop_kind=sk), counting_output=self.output()))
+                    self.check(self.recs, self.o2, dict(self.doc(sk), counting_output=self.output()))
         decided = dict(self.output(), status="decided", input_mode="trial", input_run_id=self.rid)
-        bad = {
-            "null なのに stopped": (self.doc(self.res, stop_kind=None), "stop_kind"),
-            "b なのに decided": (self.doc(self.res, output=decided), "stop_kind"),
-            "知らない stop_kind": (self.doc(self.res, stop_kind="d"), "stop_kind"),
-        }
-        nod = self.doc(self.res, stop_kind=None)
+        nod = self.doc(stop_kind=None)
         del nod["counting_output"]
-        bad["null なのに counting_output が無い"] = (nod, "counting_output")
+        bad = {"null なのに stopped": (self.doc(stop_kind=None), "stop_kind"),
+               "b なのに decided": (self.doc(output=decided), "stop_kind"),
+               "知らない stop_kind": (self.doc(stop_kind="d"), "stop_kind"),
+               "null なのに counting_output が無い": (nod, "counting_output")}
         for name, (doc, text) in bad.items():
-            with self.subTest(name=name):
-                with self.assertRaisesRegex(ledger.LedgerError, text):
-                    self.check(self.recs, self.o2, doc)
-
-    def test_null_run(self):
-        """decide() が日の集計を読む前に止まった記録だけが、input_run・gkg_run_result を null にできる。"""
-        early = counting.decide(jl([dict(tstart(R), trial=False)]), b"", no_day_file)
-        self.assertEqual([s["step"] for s in early["steps"]], ["stop"])
-        ok = {"kind": O2, "stop_kind": "b", "input_run": None, "gkg_run_result": None, "counting_output": early}
-        self.check(self.recs, self.o2, ok)
-        for name, doc, text in (
-                ("段に進んだ出力", dict(ok, counting_output=self.output()), "日の集計を読む段"),
-                ("片方だけ null", dict(self.doc(self.res), gkg_run_result=None), "両方 null"),
-                ("run があるのに段が無い", dict(self.doc(self.res), counting_output=dict(early, runs=self.output()["runs"])),
-                 "段（trial・official）が無い")):
             with self.subTest(name=name):
                 with self.assertRaisesRegex(ledger.LedgerError, text):
                     self.check(self.recs, self.o2, doc)
@@ -302,67 +328,151 @@ class TestChainUnit(Order2Case):
         other = dict(out, runs=dict(out["runs"], trial=dict(out["runs"]["trial"], run_id="f" * 16)))
         decided_other = dict(out, status="decided", input_mode="trial", input_run_id="f" * 16)
         steps_official = dict(out, steps=[{"step": "official", "reason": "trial_no_trial"}])
+        _off, null = self.stop_doc()
         bad = {
-            "別の run の gkg-run-result": (self.doc(self.res, rid="f" * 16), "input_run"),
-            "mode が違う": (self.doc(self.res, mode="official"), "input_run"),
-            "record_sha256 が違う": (self.doc(self.res, ref_sha="0" * 64), "record_sha256"),
-            "runs の run_id が違う": (self.doc(self.res, output=other), "runs"),
-            "決まった入力の run が違う": (self.doc(self.res, output=decided_other, stop_kind=None), "input_run_id"),
-            "段が違う": (self.doc(self.res, output=steps_official), "steps"),
-            "status が無い": (self.doc(self.res, output={"runs": {}, "steps": []}), "counting_output"),
+            "input_run が R でない": (self.doc(input_run={"mode": "trial", "run_id": "f" * 16}), "求める run（trial・f{16}）"),
+            "record_sha256 が違う": (self.doc(gkg_ref={"seq": self.res["seq"], "record_sha256": "0" * 64}), "record_sha256"),
+            "runs の run_id が違う": (self.doc(output=other), "runs.trial"),
+            "決まった入力の run が違う": (self.doc(output=decided_other, stop_kind=None), "input_run_id"),
+            "段が違う": (self.doc(output=steps_official), "steps"),
+            "status が無い": (self.doc(output={"runs": {}, "steps": []}), "counting_output"),
+            "片方だけ null": (self.doc(gkg_ref=None), "両方 null"),
+            "null なのに段に進んだ出力": (dict(null, counting_output=out), "段に進んでいる"),
+            "run があるのに段が無い": (self.doc(output=null["counting_output"]), "段（trial・official）が無い"),
         }
         for name, (doc, text) in bad.items():
             with self.subTest(name=name):
                 with self.assertRaisesRegex(ledger.LedgerError, text):
                     self.check(self.recs, self.o2, doc)
         for k in ledger.ORDER2_RUN_KEYS:
-            doc = self.doc(self.res)
+            doc = self.doc()
             del doc[k]
             with self.subTest(missing=k):
                 with self.assertRaisesRegex(ledger.LedgerError, "決まったキー"):
                     self.check(self.recs, self.o2, doc)
 
 
-class TestChainWriterAndVerify(Order2Case):
-    """書く仕組み（seal_records.write_doc_record の check_new → check_stats_order）と verify が同じ照合をする。
-    順番2の kind は、このテストの中だけ許可する。"""
+class TestPlanCheck(Order2Case):
+    """行き先の照合（ledger.check_order2_plan）：マニフェストから R と行き先を計算し直して、記録と照らす。"""
 
-    def write(self, doc, seq_hint):
+    def setUp(self):
+        super().setUp()
+        self.sealed()
+
+    def test_honest(self):
+        self.assertEqual(self.check_plan(self.doc())["action"], "stage")
+        for sk in ("a", "c"):
+            self.check_plan(self.doc(sk))
+        off, null = self.stop_doc()
+        self.assertEqual(self.check_plan(null, official=off)["action"], "stop")
+        self.check_plan(dict(self.doc("a"), input_run=None, gkg_run_result=None), official=off)
+
+    def test_trial_manifest_whole(self):
+        """R のマニフェストは全体が gkg-run-result の縛るバイト列と同じ（あとの行・改行を許さない）。監査の中-1 の形：
+        改行を1つ足し、正式な run の trial_manifest_sha256 が合わなくなった「段に進む前に止まる」形も止まる。"""
+        _off, null = self.stop_doc()
+        trial = self.body + b"\n"
+        official = jl([ostart(self.body, [self.rid])])
+        self.assertEqual(ledger.order2_plan(trial, official)["action"], "stop")
+        for doc in (null, self.doc()):
+            with self.assertRaisesRegex(ledger.LedgerError, "全体"):
+                self.check_plan(doc, trial=trial, official=official)
+
+    def test_mismatches(self):
+        off, null = self.stop_doc()
+        cases = {
+            "段の形なのに input_run が null": (null, None, b"", "input_run・stop_kind が合わない|段なのに"),
+            "止まる形なのに input_run がある": (self.doc(), None, off, "input_run・stop_kind が合わない"),
+            "R が違う": (self.doc(), jl([tstart(S)]) + self.body, b"", "マニフェストの R"),
+            "R が決まらない": (self.doc(), b"", b"", "R"),
+            "正式な run の段なのに試しの run": (self.doc(), None, jl([ostart(self.body, [self.rid])]
+                                                                    + [day("official", OF, d) for d in counting.TRIAL_DAYS]),
+                                          None),
+        }
+        for name, (doc, trial, official, text) in cases.items():
+            with self.subTest(name=name):
+                if text is None:
+                    # R が完了しているので、正式な run が始まっていても行き先は試しの run の段（通る）
+                    self.check_plan(doc, trial=trial, official=official)
+                    continue
+                with self.assertRaisesRegex(ledger.LedgerError, text):
+                    self.check_plan(doc, trial=trial, official=official)
+
+
+class TestChainWriterAndVerify(Order2Case):
+    """書く仕組み（seal_records.write_doc_record の check_new）と verify が同じ照合をする。順番2の kind は、この
+    テストの中だけ許可する。"""
+
+    def write(self, doc, hours):
         data = ledger.read_ledger(os.path.join(self.c, "sealed", "ledger.jsonl"))
-        return seal_records.write_doc_record(self.c, O2, doc, data, "順番2（テスト）", NOW + datetime.timedelta(hours=seq_hint),
+        return seal_records.write_doc_record(self.c, O2, doc, data, "順番2（テスト）", NOW + datetime.timedelta(hours=hours),
                                              "ots", runner=tw.FakeOts())
 
     def test_writer_refuses_without_result(self):
-        recs = self.records()
-        start = [r for r in recs if r["kind"] == ledger.GKG_RUN_KIND][0]
+        self.res = [r for r in self.records() if r["kind"] == ledger.GKG_RUN_KIND][0]   # R の結果ではない記録を指す
         before = self.ledger_bytes()
         with order2_allowed():
             with self.assertRaisesRegex(ledger.LedgerError, "鎖の中でこの記録より前に無い"):
-                self.write(self.doc(start), 1)
+                self.write(self.doc(), 1)
         self.assertEqual(self.ledger_bytes(), before)
 
     def test_writer_and_verify_after_result(self):
-        res, _rel, _ots = self.seal_result()
+        self.sealed()
         self.commit("gkg-run-result")
         with order2_allowed():
-            rec, _rel, _ots = self.write(self.doc(res), 2)
+            rec, _rel, _ots = self.write(self.doc(), 2)
             self.commit("順番2（テスト）")
             code, out, err = tl.run_verify_inproc(self.c, "stats-order")
         self.assertEqual(code, 0, err)
-        self.assertIn("%s seq %d（順番2）: stop_kind b。使った run trial・run_id %s。その run の gkg-run-result（seq %d）は、"
-                      "鎖の中でこの記録より前にある" % (O2, rec["seq"], self.rid, res["seq"]), out)
+        self.assertIn("%s seq %d（順番2）: stop_kind b、input_run trial・%s、trial_result は seq %d"
+                      % (O2, rec["seq"], self.rid, self.res["seq"]), out)
+        self.assertIn("のマニフェストから計算し直した行き先（trial の段）と R は、記録と同じ", out)
         # 許可リストに入れていない今の仕組みでは、順番2の kind の記録は鎖の検査で止まる
         code, _out, err = tl.run_verify_inproc(self.c, "stats-order")
         self.assertEqual(code, 1)
         self.assertIn(O2, err)
 
-    def test_verify_stops_record_without_result(self):
-        """書く仕組みを通らずに足した（照合を飛ばした）順番2の記録も、verify が止める。"""
-        recs = self.records()
-        start = [r for r in recs if r["kind"] == ledger.GKG_RUN_KIND][0]
+    def test_writer_refuses_wrong_plan(self):
+        """形は通るが行き先が食い違う記録（試しの run の段の形なのに、段に進む前に止まったと申告する）は書かない。"""
+        self.sealed()
+        self.commit("gkg-run-result")
+        _off, null = self.stop_doc()
+        before = self.ledger_bytes()
+        with order2_allowed():
+            self.check(self.recs, self.o2, null)               # 形の照合だけなら通る
+            with self.assertRaisesRegex(ledger.LedgerError, "計算し直した行き先"):
+                self.write(null, 2)
+        self.assertEqual(self.ledger_bytes(), before)
+
+    def test_verify_recomputes_plan(self):
+        """書く仕組みの照合を飛ばして足した、行き先の食い違う記録は、verify が計算し直して止める。浅い clone では
+        「照らさなかった」。"""
+        self.sealed()
+        self.commit("gkg-run-result")
+        _off, null = self.stop_doc()
         with order2_allowed():
             with mock.patch.object(seal_records, "check_new", lambda *a, **k: None):
-                self.write(self.doc(start), 1)
+                self.write(null, 2)
+            self.commit("食い違う順番2（テスト）")
+            code, _out, err = tl.run_verify_inproc(self.c, "stats-order")
+            self.assertEqual(code, 1)
+            self.assertIn("計算し直した行き先", err)
+            shallow = os.path.join(self.td.name, "shallow")
+            subprocess.run(["git", "clone", "-q", "--depth", "1", "file://" + self.c, shallow], check=True,
+                           capture_output=True)
+            st = verify.State(shallow, None)
+            got = ledger.check_stats_order(st.records, st.file_json)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                verify.check_order2_plans(st, got["order2"])
+        self.assertIn("照らさなかった：浅い clone なので", out.getvalue())
+        self.assertTrue(any("浅い clone" in u for u in st.unchecked))
+
+    def test_verify_stops_record_without_result(self):
+        """書く仕組みを通らずに足した、R の gkg-run-result を指さない記録も、verify が止める。"""
+        self.res = [r for r in self.records() if r["kind"] == ledger.GKG_RUN_KIND][0]
+        with order2_allowed():
+            with mock.patch.object(seal_records, "check_new", lambda *a, **k: None):
+                self.write(self.doc(), 1)
             code, _out, err = tl.run_verify_inproc(self.c, "stats-order")
         self.assertEqual(code, 1)
         self.assertIn("鎖の中でこの記録より前に無い", err)
@@ -379,7 +489,7 @@ class TestGate(Order2Case):
 
     def test_gate(self):
         with mock.patch.object(ledger, "PROJECT_ROOT", self.c):
-            # gkg-run-result の前：関門が閉じる（counting.py を動かさず、記録も作らない）
+            # R の gkg-run-result の前：関門が閉じる（counting.py を動かさず、記録も作らない）
             before = self.ledger_bytes()
             with self.assertRaisesRegex(ledger.Order2GateClosed, "gkg-run-result の記録が無い"):
                 order2_gate.gate()
@@ -388,25 +498,45 @@ class TestGate(Order2Case):
             self.assertIn("順番2の記録も作らない", err)
             self.assertEqual(self.ledger_bytes(), before)
             # 封印のあと：通り、記録に入れる値を返す
-            res, _rel, _ots = self.seal_result()
+            self.sealed()
             self.commit("gkg-run-result")
             got = order2_gate.gate()
-            self.assertEqual(got["input_run"], {"mode": "trial", "run_id": self.rid})
-            self.assertEqual(got["gkg_run_result"], {"seq": res["seq"], "record_sha256": line_sha(res)})
-            self.assertEqual(got["plan"], {"action": "read", "mode": "trial", "run_id": self.rid})
+            ref = {"seq": self.res["seq"], "record_sha256": line_sha(self.res)}
+            self.assertEqual(got, {"trial_result": ref, "input_run": {"mode": "trial", "run_id": self.rid},
+                                   "gkg_run_result": ref,
+                                   "plan": {"action": "stage", "mode": "trial", "run_id": self.rid}})
             code, out, _err = self.run_main()
             self.assertEqual(code, 0)
             self.assertEqual(json.loads(out), got)
-            # 関門の値で作った順番2の中身は、鎖の照合に通る
-            doc = {"kind": O2, "stop_kind": "b", "input_run": got["input_run"],
-                   "gkg_run_result": got["gkg_run_result"], "counting_output": self.output()}
-            self.check(self.records(), {"seq": res["seq"] + 1, "kind": O2}, doc)
+            # 関門の値で作った順番2の中身は、形の照合にも行き先の照合にも通る
+            doc = dict({k: got[k] for k in ("trial_result", "input_run", "gkg_run_result")},
+                       kind=O2, stop_kind="b", counting_output=self.output())
+            self.check(self.records(), self.o2, doc)
+            self.check_plan(doc)
 
-    def gate_after_result(self):
-        self.seal_result()
+    def test_whole_trial_manifest_required(self):
+        """R のマニフェストの全体の照合：行の照合（require_gkg_run_result）が見落とす形でも、全体が縛るバイト列と
+        違えば閉じる（require_gkg_run_result が通る形を作るため、ここだけ置き換える）。"""
+        self.sealed()
         self.commit("gkg-run-result")
+        with mock.patch.object(ledger, "PROJECT_ROOT", self.c), \
+                mock.patch.object(ledger, "require_gkg_run_result", lambda mode, rid: self.res):
+            ledger.require_order2_gate(self.body, b"")
+            for extra in (b"\n", b'{"kind": "note"}\n'):
+                with self.subTest(extra=extra):
+                    with self.assertRaisesRegex(ledger.Order2GateClosed, "全体"):
+                        ledger.require_order2_gate(self.body + extra, b"")
+
+    def test_newline_after_result_closes(self):
+        """監査の中-1 の形：R の封印のあとで、試しの run のマニフェストに改行を足してコミットすると閉じる。"""
+        self.sealed()
+        self.commit("gkg-run-result")
+        with open(os.path.join(self.c, ledger.GKG_MANIFESTS["trial"]), "ab") as f:
+            f.write(b"\n")
+        self.commit("改行を足した（テスト）")
         with mock.patch.object(ledger, "PROJECT_ROOT", self.c):
-            order2_gate.gate()
+            with self.assertRaises(ledger.Order2GateClosed):
+                order2_gate.gate()
 
     def assert_closed_but_result_ok(self, text):
         """関門は git の確かめで閉じる。require_gkg_run_result だけなら通る形（git の確かめが無ければ開いた）。"""
@@ -419,25 +549,22 @@ class TestGate(Order2Case):
             self.assertEqual(code, 1)
             self.assertEqual(self.ledger_bytes(), before)
 
-    def test_dirty_worktree_closes(self):
-        """中-1：作業ツリーのマニフェストが HEAD の版と違う（取得の途中のコミットしていない行など）と閉じる。"""
-        self.gate_after_result()
-        path = os.path.join(self.c, ledger.GKG_MANIFESTS["trial"])
-        with open(path, "ab") as f:
-            f.write(b"\n")
-        self.assert_closed_but_result_ok("HEAD の版と違う")
-        with open(path, "wb") as f:
-            f.write(self.body)
+    def gate_after_result(self):
+        self.sealed()
+        self.commit("gkg-run-result")
         with mock.patch.object(ledger, "PROJECT_ROOT", self.c):
             order2_gate.gate()
-        # HEAD に無い正式な run のマニフェストが作業ツリーにだけある
+
+    def test_dirty_worktree_closes(self):
+        """作業ツリーのマニフェストが HEAD の版と違う（取得の途中のコミットしていない行など）と閉じる。"""
+        self.gate_after_result()
         off = os.path.join(self.c, ledger.GKG_MANIFESTS["official"])
         with open(off, "wb") as f:
             f.write(b"")
         self.assert_closed_but_result_ok("HEAD の版と違う")
 
     def test_rewritten_history_closes(self):
-        """中-1：過去の版が HEAD の版の先頭と同じでない（コミットした行を書き換えて戻した）と閉じる。"""
+        """過去の版が HEAD の版の先頭と同じでない（コミットした行を書き換えて戻した）と閉じる。"""
         self.gate_after_result()
         path = os.path.join(self.c, ledger.GKG_MANIFESTS["trial"])
         with open(path, "wb") as f:
@@ -449,7 +576,6 @@ class TestGate(Order2Case):
         self.assert_closed_but_result_ok("先頭と合わない")
 
     def test_head_without_manifest(self):
-        """HEAD にも作業ツリーにも無い版で、過去の版があれば閉じる（追記だけでない）。"""
         git(self.c, "mv", ledger.GKG_MANIFESTS["trial"], "data/manifest/moved-for-test.jsonl")
         self.commit("マニフェストを外した版（テスト）")
         with mock.patch.object(ledger, "PROJECT_ROOT", self.c):
@@ -637,7 +763,8 @@ class TestDocT073(unittest.TestCase):
                        "第三者は永久に照らせない", "運営の手元の一覧の本体だけ",
                        "## 14. 順番2の前の関門", "src/sealer/order2_gate.py", "止まった (b) としても記録しない",
                        "counting.py を手で直接動かせば", "鎖の順序で事後に見つけられる", ledger.ORDER2_KIND,
-                       "作業ツリーと HEAD が同じ", "stop_kind", "日の集計を読む前に止まる"):
+                       "作業ツリーと HEAD が同じ", "stop_kind", "trial_result", "記録を最初に含んだコミット",
+                       "空の行"):
             self.assertIn(phrase, text)
 
 

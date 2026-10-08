@@ -126,6 +126,18 @@ def _reader(project, rec, doc):
     return read
 
 
+def head_manifest(project, rel):
+    """HEAD の版のマニフェストのバイト列（HEAD に無ければ b""）。git は GIT_ の環境変数を固定して動かす。T-073。"""
+    env = ledger.fixed_git_env()
+    base = ["git", "-C", project]
+    if subprocess.run(base + ["cat-file", "-e", "HEAD:" + rel], capture_output=True, env=env).returncode != 0:
+        return b""
+    r = subprocess.run(base + ["show", "HEAD:" + rel], capture_output=True, env=env)
+    if r.returncode != 0:
+        raise ledger.LedgerError("HEAD の版の %s を読めない" % rel)
+    return r.stdout
+
+
 def check_new(project, data_after, records_after, rec, doc):
     """手順 3。追記した後の記録に対して、新しい記録の照合をする。"""
     kind = rec["kind"]
@@ -136,6 +148,13 @@ def check_new(project, data_after, records_after, rec, doc):
     read = _reader(project, rec, doc)
     # T-037：順番1・1b の数・中身・位置（method-access より前、gkg-run-start の前に順番1b）
     ledger.check_stats_order(records_after, read)
+    if kind == ledger.ORDER2_KIND:
+        # T-073 差し戻し2回目 2：HEAD のマニフェストから R と decide() の行き先を計算し直して照らす（verify は、記録を
+        # 最初に含んだコミットの版で同じ計算をする）
+        ledger.check_order2_plan(records_after, rec, doc, read,
+                                 head_manifest(project, ledger.GKG_MANIFESTS["trial"]),
+                                 head_manifest(project, ledger.GKG_MANIFESTS["official"]))
+        return
     if kind == ledger.GKG_RESULT_KIND:
         # T-066：中身の形・ledger_head・指す gkg-run-start、マニフェストの先頭と run-complete の行
         ledger.check_gkg_result_doc(records_after, rec, doc, read, data_after)

@@ -722,6 +722,48 @@ def recompute_orders(st, repo, got):
     return checked, unchecked
 
 
+def _version_or_empty(repo, commit, rel):
+    try:
+        _rgit(repo, "cat-file", "-e", "%s:%s" % (commit, rel))
+    except ledger.LedgerError:
+        return b""
+    return _rgit(repo, "show", "%s:%s" % (commit, rel))
+
+
+def check_order2_plans(st, records):
+    """順番2の記録ごとに、記録を最初に含んだコミットのマニフェストから R と decide() の行き先（ledger.order2_plan）を
+    計算し直し、記録の trial_result・stop_kind・input_run と照らす（T-073 差し戻し2回目 2。ledger.check_order2_plan）。
+    git の履歴が無いとき・浅い clone のときは「照らさなかった」。食い違えば LedgerError。"""
+    repo = Repo(st.root)
+    why = None
+    try:
+        repo.git("rev-parse", "--git-dir")
+    except (ledger.LedgerError, OSError):
+        why = "git の履歴が無い"
+    if why is None and not _not_shallow(repo):
+        why = "浅い clone"
+    commits = None
+    for r in records:
+        doc = st.file_json(r, ledger.ORDER2_KIND)
+        run = doc["input_run"]
+        desc = "input_run なし（段に進む前に止まる）" if run is None else "input_run %s・%s" % (run["mode"], run["run_id"])
+        print("  %s seq %d（順番2）: stop_kind %s、%s、trial_result は seq %d（R の gkg-run-result。この記録より前）"
+              % (ledger.ORDER2_KIND, r["seq"], doc["stop_kind"] or "null", desc, doc["trial_result"]["seq"]))
+        if why is not None:
+            st.unchecked.append("seq %d の順番2の行き先の計算し直し（%s）" % (r["seq"], why))
+            print("照らさなかった：%s なので、seq %d の順番2の行き先をマニフェストから計算し直していない" % (why, r["seq"]))
+            continue
+        if commits is None:
+            commits = repo.commit_for_seq(st.data)
+        c = commits[r["seq"]]
+        plan = ledger.check_order2_plan(st.records, r, doc, st.file_json,
+                                        _version_or_empty(repo, c, ledger.GKG_MANIFESTS["trial"]),
+                                        _version_or_empty(repo, c, ledger.GKG_MANIFESTS["official"]))
+        print("    記録を最初に含んだコミット %s のマニフェストから計算し直した行き先（%s）と R は、記録と同じ。試しの run の"
+              "マニフェストの全体は R の gkg-run-result が縛るバイト列と同じ"
+              % (c[:12], plan["action"] if plan["action"] != "stage" else "%s の段" % plan["mode"]))
+
+
 def cmd_stats_order(st, a):
     """統計係の順番1・順番1b の記録の照合と一覧。T-037（差し戻し1回目で改めた）、T-056。"""
     got = ledger.check_stats_order(st.records, st.file_json)
@@ -752,17 +794,8 @@ def cmd_stats_order(st, a):
               % (doc["owner_approval"]["source"], doc["owner_approval"]["heading"], doc["owner_approval"]["line"]))
         for path in sorted(files):
             print("      %s  %s" % (files[path], path))
-    for r in got["order2"]:
-        # T-073：check_stats_order が check_order2_run で照らした（使った run の gkg-run-result がこの記録より前）
-        doc = st.file_json(r, ledger.ORDER2_KIND)
-        sk = "stop_kind %s" % (doc["stop_kind"] or "null")
-        if doc["input_run"] is None:
-            print("  %s seq %d（順番2）: %s。日の集計を読む前に決まった記録で、run に結び付けない（input_run・"
-                  "gkg_run_result は null）" % (ledger.ORDER2_KIND, r["seq"], sk))
-            continue
-        print("  %s seq %d（順番2）: %s。使った run %s・run_id %s。その run の gkg-run-result（seq %d）は、鎖の中でこの記録"
-              "より前にある" % (ledger.ORDER2_KIND, r["seq"], sk, doc["input_run"]["mode"], doc["input_run"]["run_id"],
-                              doc["gkg_run_result"]["seq"]))
+    if got["order2"]:
+        check_order2_plans(st, got["order2"])
     o1 = ledger.first_order1(st.records)
     print("除外の規則の kind（%s）の記録：%s（1 件だけ）。順番1・1b は最初の method-access より前、"
           "最初の gkg-run-start の前に順番1b。" % (ledger.ORDER1_KIND, "無し" if o1 is None else "seq %d" % o1["seq"]))

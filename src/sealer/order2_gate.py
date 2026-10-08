@@ -9,13 +9,13 @@
      の git の確かめを先に行う：作業ツリーのファイルが HEAD の版と同じ（どちらにも無いのは同じとみなす）、
      `git log --all --full-history --format=%H -- <パス>` の各 commit の版（無い版は空）が HEAD の版の先頭と同じ。
      どちらかが通らなければ関門は閉じる（git は GIT_ の環境変数を固定して動かす：ledger.fixed_git_env）。
-  2. HEAD の版のバイト列から、ledger.order2_plan で decide() の行き先を決める（decide() と同じ決め方。データは
-     読まない）。待つなら閉じる。日の集計を読む前に止まる形なら、run に結び付けずに開く（input_run・
-     gkg_run_result は null）。
-  3. 日の集計を読む run があれば、ledger.require_gkg_run_result(mode, run_id) を呼ぶ（鎖・すべての .ots・
-     マニフェストの照合と、その run の gkg-run-result の記録）。
-  通れば、順番2の記録に入れる input_run と gkg_run_result（と、決めた行き先 plan）を JSON で標準出力に書き、
-  終了コード 0。通らなければ理由を標準エラーに書き、終了コード 1。このときは counting.py を動かさず、順番2の
+  2. R（試しの run のマニフェストの最初の run-start の run）を決め、ledger.require_gkg_run_result("trial", R) を
+     必ず呼ぶ。試しの run のマニフェストのファイル全体のバイト列が、その gkg-run-result が縛るバイト列と同じこと
+     （R は完了しているので、あとの行を許さない）。
+  3. HEAD の版のバイト列から、ledger.order2_plan で decide() の行き先を決める（decide() と同じ決め方。データは
+     読まない）。待つなら閉じる。正式な run X の段に進むなら、require_gkg_run_result("official", X) も呼ぶ。
+  通れば、順番2の記録に入れる trial_result・input_run・gkg_run_result（と、決めた行き先 plan）を JSON で標準出力に
+  書き、終了コード 0。通らなければ理由を標準エラーに書き、終了コード 1。このときは counting.py を動かさず、順番2の
   記録も作らない（止まった (b) としても記録しない。docs/verify/periods-seal.md 14章）。
 
 ネットワークは使わない。何も書かない。
