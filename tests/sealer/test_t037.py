@@ -761,9 +761,17 @@ class TestRealClone(unittest.TestCase):
                 doc = json.load(f)
             self.assertEqual(sorted(t["name"] for t in doc["targets"]), sorted(ledger.ORDER1_TARGET_NAMES))
             self.assertEqual(doc["head"], self.BEFORE_ORDER1)
-            # T-052（T-049 の監査 軽-2）：clone で作った順番1 の中身は、本物の seq 5 の中身と同じバイト列
+            # T-052（T-049 の監査 軽-2）：clone で作った順番1 の中身は、本物の seq 5 の中身と同じ。
+            # T-056（T-052 の監査 軽-3）：Python の版は機械で違いうるので、python.version を除いて比べ、
+            # 版が同じときだけバイト列の一致も求める
             with open(os.path.join(c, rel), "rb") as f, open(os.path.join(tl.PROJECT, self.REAL_ORDER1), "rb") as g:
-                self.assertEqual(f.read(), g.read())
+                mine_b, real_b = f.read(), g.read()
+            mine, real = json.loads(mine_b), json.loads(real_b)
+            self.assertTrue(mine["python"]["version"].startswith("Python "))
+            mv, rv = mine["python"].pop("version"), real["python"].pop("version")
+            self.assertEqual(mine, real)
+            if mv == rv:
+                self.assertEqual(mine_b, real_b)
             self.commit(c, "順番1")
             self.seal_1b_and_check(c, now, rec["seq"])
             code, out, err = tl.run_verify_inproc(c, "stats-order")

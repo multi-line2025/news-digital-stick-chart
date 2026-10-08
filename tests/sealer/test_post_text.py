@@ -340,8 +340,8 @@ class TestRealLedger(unittest.TestCase):
         最初の投稿と並べて照らす。照らす時刻は 2 つめの投稿の時点に固定する（それより後の記録は保留）。"""
         data = subprocess.run(["git", "-C", PROJECT, "show", "HEAD:sealed/ledger.jsonl"],
                               check=True, capture_output=True).stdout
-        if len(ledger.verify_chain(data)) < 5:
-            self.skipTest("記録に seq 5 が無い")
+        # T-056（T-052 の監査 軽-1）：記録が切り詰められていれば、skip ではなく失敗にする
+        self.assertGreaterEqual(len(ledger.verify_chain(data)), 5, "記録に seq 5 が無い（切り詰められた）")
         account = doc_fixed(PROJECT, "account")
         # T-052（T-049 の監査 軽-1）：一覧のハッシュは、実際に投稿した値の固定の文字列（reviews/T-048.md）。
         # 記録から計算した値をそのまま入れると、記録が書き換わっても一致してしまうため
@@ -962,7 +962,8 @@ class TestDocProcedure(unittest.TestCase):
         late5 = "%s %d %s" % (x_url(acc, rec5 + 25 * tl.H), n, h5)
         self.assertListOk([self.first_line(), ok5])
         self.assertListFails([self.first_line(), late5], "上限 24 時間を超える")
-        # seq 5 の投稿が無いとき：今が recorded_at から 24 時間の中なら保留、過ぎていれば合わない
+        # seq 5 の投稿が無いとき：今が recorded_at から 24 時間の中なら保留、過ぎていれば合わない。
+        # 保留の分岐は test_list_seq5_pending が毎回動かす（T-056。T-052 の監査 軽-2）
         now = datetime.datetime.now(datetime.timezone.utc)
         if now - rec5 <= datetime.timedelta(hours=24):
             for sh, code, out in self.run_list([self.first_line()]):
@@ -970,6 +971,16 @@ class TestDocProcedure(unittest.TestCase):
                 self.assertIn("seq 5: 保留", out, sh)
         else:
             self.assertListFails([self.first_line()], "seq 5: 投稿が無い")
+
+    def test_list_seq5_pending(self):
+        """T-056（T-052 の監査 軽-2）：仮の seq 5 の recorded_at を今の 1 時間前にして、投稿が無いときの
+        「保留」（まだ期限の前）の分岐を毎回動かす（固定の時刻だと、その時刻を過ぎると動かなくなるため）。"""
+        self.use_sealed_at(self.FOUR_RECORDS)
+        rec5 = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0) - tl.H
+        self.append_fake_record(rec5)
+        for sh, code, out in self.run_list([self.first_line()]):
+            self.assertEqual(code, 0, "%s: %s" % (sh, out))
+            self.assertIn("seq 5: 保留", out, sh)
 
 
 if __name__ == "__main__":

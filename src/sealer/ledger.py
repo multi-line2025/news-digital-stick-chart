@@ -1311,6 +1311,16 @@ def expected_owner_choice():
             "lines": list(OWNER_CHOICE[3])}
 
 
+def fixed_git_env():
+    """git を、GIT_ で始まる環境変数を決めたものだけに固定して動かすための環境（T-056。T-054 の軽-1）。
+    docs/stats/counting.md 4章 (3) と同じ固定の仕方：GIT_ で始まる環境変数を除き、
+    GIT_NO_REPLACE_OBJECTS=1 と、存在しないパスの GIT_GRAFT_FILE だけを入れる。"""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    env["GIT_GRAFT_FILE"] = "/dev/null/no-graft-file"
+    return env
+
+
 def check_ledger_head(data, record, doc):
     """中身の ledger_head が、記録の先頭 seq−1 行のハッシュと一致するか（drand を持たない種類）。"""
     head = doc.get("ledger_head") if isinstance(doc, dict) else None

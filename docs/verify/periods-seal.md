@@ -1,4 +1,4 @@
-# 期間の区切りと候補の封印を検証する手順（T-005、T-007、T-008、T-009、T-013、T-014、T-017、T-023、T-027、T-031、T-037、T-041、T-043、T-049）
+# 期間の区切りと候補の封印を検証する手順（T-005、T-007、T-008、T-009、T-013、T-014、T-017、T-023、T-027、T-031、T-037、T-041、T-043、T-049、T-056）
 
 この文書は、第三者が次のことを自分で確かめるための手順である。
 
@@ -869,7 +869,7 @@ grep -n '"kind":"gkg-run-start"' sealed/ledger.jsonl | cut -d: -f1 || true
 - `owner_choice`：2d23cdf の版の reviews/T-020.md の見出しと三行（`{"source", "heading", "lines"}`。`ledger.OWNER_CHOICE`）。
 - `checks`：`worktree_clean`・`not_shallow`・`method_access_absent`・`themes_manifest_absent`・`gkg_manifests_absent`（どれも true）、`optional_choice_status`（"decided"）、`acquisition_starts`（照らした acquisition-start の一覧）、`stats_tests`（"OK (N tests)"）、`targets_only_copy`（`{"tests": "OK (N tests)", "files": [写しに置いた5件]}`。下の項目10）。
 - `ledger_head`：この行を足す前の記録の先頭 seq 行の sha256。
-- **記録の行の `recorded_at` は、封印を始めた時刻である**（T-049。T-048 の監査 軽-2）。`seal_stats.seal_order1`・`seal_order1b` は、始めた時点の時計の時刻を `recorded_at` に入れ、そのあとで関門の確認、10件の計算、`tests/stats`、対象だけの写しのテストを行ってから、ledger に書く。そのため、ledger に書いた時刻は `recorded_at` より後になる。ledger に書いた時刻そのものは記録に残らないので、第三者は確かめられない。目安として、T-048 の監査は seq 5 について、`recorded_at` 23:14:39Z、OpenTimestamps のカレンダーが受け取った時刻 23:15:06〜07Z、コミット 23:15:26Z（どれも 2026-10-07、UTC）を観測した（reviews/T-048.md）。差は約27秒だが、カレンダーの時刻は .ots の Pending からは読めず、確かめられる値ではない。どちらも記録した機械の時計による申告で、証明ではない（1章）。書いた時刻の上限は、その seq の `.ots` の確定時刻で決まる。
+- **記録の行の `recorded_at` は、封印を始めた時刻である**（T-049。T-048 の監査 軽-2）。`seal_stats.seal_order1`・`seal_order1b` は、始めた時点の時計の時刻を `recorded_at` に入れ、そのあとで関門の確認、10件の計算、`tests/stats`、対象だけの写しのテストを行ってから、ledger に書く。そのため、ledger に書いた時刻は `recorded_at` より後になる。ledger に書いた時刻そのものは記録に残らないので、第三者は確かめられない。目安として、T-048 の監査は seq 5 について、`recorded_at` 23:14:39Z、OpenTimestamps のカレンダーが受け取った時刻 23:15:06〜07Z、コミット 23:15:26Z（どれも 2026-10-07、UTC）を観測した（reviews/T-048.md）。`recorded_at` とカレンダーの受け取りの差（約27秒）は、ledger に書くまでの遅れの上限の目安（書き込みの遅れの上限の目安）で、書き込みの遅れそのものではない（書いたのは、受け取りより前の、stamp を始める直前である）。カレンダーの時刻は .ots の Pending からは読めず、確かめられる値ではない（T-056。T-052 の監査 軽-4）。どちらも記録した機械の時計による申告で、証明ではない（1章）。書いた時刻の上限は、その seq の `.ots` の確定時刻で決まる。
 
 `stats-order1b` の中身（キーはこの11個だけ：`ancestors`・`approvals`・`checks`・`counting`・`files`・`head`・`kind`・`ledger_head`・`order1_ref`・`owner_approval`・`python`）：
 - `files`：封印の対象のファイルのパスと sha256（`[{"path", "sha256"}]`）。`ledger.ORDER1B_REQUIRED_FILES`（`docs/stats/counting.md`・`src/stats/counting.py`・`tests/stats/test_counting.py`・`docs/stats/seal-order1.md`）を必ず含む（T-037 の差し戻し1回目 中2）。
@@ -901,7 +901,7 @@ rec, rel, ots_path = seal_stats.seal_order1b(project, files, approvals, now, ots
   - F のどの commit についても、その親（`git rev-parse <C>^@`）のうち少なくとも一つの版の `sealed/ledger.jsonl` に、`stats-order1` の記録の行（正規の形のバイト列）がある。F が空でないのに `stats-order1` が無いとき、親の無い commit が F にあるときも失敗する（seal-order1.md 3章 (2) と同じ考え方）。
   - 作業ツリーのマニフェストの各行の `exclusion_rule_seq`・`exclusion_rule_record_sha256` が、`stats-order1` の記録の seq と行の sha256 と一致する（`ledger.check_themes_manifest_refs`）。
   - git の履歴が無いところ（`.git` の無い写し）では、この照合を行わず、そう表示する（止めない）。`verify.py all` は最後の行に「ただし、次は照らさなかった（終了コード 0 は、照らした検査がすべて通ったことだけを示す）：区分表の取得と順番1 の前後」と出す。**終了コード 0 は、照らした検査がすべて通ったことだけを示す。** 照らさなかったものがあるかは、出力の最後の行で確かめる（T-037 再提出1回目 軽2）。`--rev auto` は git の履歴を要るので、第三者は履歴のある clone で確かめる。
-  - **浅い clone では照らせない。** `verify.py stats-order`（と `all`）は、git の履歴があって浅い clone のとき、マニフェストに行のある commit が0件でも、浅い clone なら止まる（「浅い clone である。区分表の取得との前後の照合には履歴が要る」と出して終了コード 1。照合を始める前に `git rev-parse --is-shallow-repository` で確かめるため。浅い clone では、行のある commit が本当に0件かどうかも、親の版も確かめられない）。`--depth` を付けずに clone する（`git fetch --unshallow` でもよい）（T-037 再提出1回目 軽1、T-041 で書き方を実際の条件に合わせた）。
+  - **浅い clone では照らせない。** `verify.py stats-order`（と `all`）は、git の履歴があって浅い clone のとき、マニフェストに行のある commit が0件でも、浅い clone なら止まる（「浅い clone である。区分表の取得との前後の照合には履歴が要る」と出して終了コード 1。照合を始める前に `git rev-parse --is-shallow-repository` で確かめるため。浅い clone では、行のある commit が本当に0件かどうかも、親の版も確かめられない）。`--depth` を付けずに clone する（`git fetch --unshallow` でもよい）（T-037 再提出1回目 軽1、T-041 で書き方を実際の条件に合わせた）。浅い clone の確かめ（`--is-shallow-repository`）は、`seal_stats.py` でも `verify.py` でも、GIT_ で始まる環境変数を決めたもの（`GIT_NO_REPLACE_OBJECTS=1` と、存在しないパスの `GIT_GRAFT_FILE`）だけに固定した環境で行う（`ledger.fixed_git_env`。docs/stats/counting.md 4章 (3) と同じ固定の仕方。T-056。T-054 の軽-1）。
   - 書く仕組みの側は、`seal_order1` が、区分表のマニフェストが作業ツリーにも履歴にも無いことを確かめる（2章の項目2）。
   - **この照合の根拠と限界（T-037 再提出1回目 中-C）。**
     - 根拠：区分表のマニフェストの各行には `exclusion_rule_record_sha256`（`stats-order1` の記録の行の sha256）が入り、上の照合はそれが記録と一致することを求める。sha256 は、記録の行ができる前には作れない（記録の行には、直前の行のハッシュ `prev_hash` と `recorded_at`、中身のファイル（封印した時点の HEAD と10件の sha256 を含む）の sha256 が入る）。そのため、照合に通る行は、`stats-order1` の記録ができたあとに書かれたものである。「マニフェストの行を書いたのは順番1 より後」は、暗号的に言える。
@@ -920,7 +920,24 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py stats-order
 grep -n '"kind":"stats-order1' sealed/ledger.jsonl | cut -d: -f1 || true
 ```
 
-- **`verify.py all`（と `stats-order`）は、順番1 の10件の sha256 を計算し直さない**（T-049。T-048 の監査 軽-1）。verify が照らすのは、記録の中身の形と、名前・承認・出どころ・祖先などが決まった値と同じことまでで、10件の値そのものは記録に写した値をそのまま表示する。凍結の確認（作業ツリーの10件が、封印したときと同じであること）は、docs/stats/seal-order1.md 3章 (1) の手順で、自分で計算し直して行う。
+- **`verify.py stats-order` と `all` は、`--rev auto` か `--rev <コミット>` のとき、順番1・1b の値を、記録の head の版から計算し直して照らす（T-056。T-055 の監査 中-1、T-048 の軽-1）。**（T-049 の時点では計算し直さなかった。）照らすこと（`verify.recompute_orders`）：
+  - 記録の `head` の commit がリポジトリにあり、その版の `sealed/ledger.jsonl` が、その記録を足す直前の記録（先頭 seq−1 行）と同じであること。`ancestors` の各 commit が `head` の祖先であること。
+  - 順番1：10件の sha256 を、seal-order1.md 1章のバイト列の定義どおりに計算し直す。ファイルは `head` の版、「の出力」は `head` の版を一時フォルダに取り出して（`git archive`）流した出力、`1cb463a:` と `2d23cdf:` で始まるものは `git show` の出力、1cb463a の版の出力は一時フォルダで流した出力。
+  - 順番1b：`files` の各 sha256 を `head` の版のファイルと、`order1_ref` を `stats-order1` の記録の seq と行の sha256 と、`counting` を `head` の版の `counting.py` を流した出力（sha256、`candidate_ids`・`criteria_ids`・`official_candidate`・`official_status`）と照らす。
+  - 流す Python は、verify を動かしている Python（`sys.executable`）である。出力は Python の版に左右されないはずだが、違う版で値が違えば止まる。
+  - 値が一つでも違えば、終了コード 1 で止まる。git の履歴が無いとき、計算し直せないとき（Python で流せないなど）は、止めずに「照らさなかった」と出し、`all` の最後の行にも出す。`--rev working`（既定）でも計算し直さず、そう表示する。テスト用の仮の記録（実在しない head を持つもの）を使うテストが `--rev working` で verify を流すためで、第三者は `--rev auto` で確かめる。
+  - これで照らせるのは「記録の値が、`head` の版から計算した値と同じ」ことまでである。作業ツリーの今のファイルが封印したときと同じか（凍結）は、docs/stats/seal-order1.md 3章 (1) の手順で、作業ツリーの値を計算して記録と比べる。
+- **verify を使わずに手で確かめる手順（T-056）**：記録の中身のファイル（`sealed/stats-order1-….json`・`sealed/stats-order1b-….json`）の `head` を H として、
+  ```sh
+  git cat-file -e H^{commit} && git show H:sealed/ledger.jsonl | wc -l     # 記録の seq − 1 行
+  git merge-base --is-ancestor <ancestors の各 commit> H && echo ok
+  git show H:docs/stats/counting.md | shasum -a 256                          # files の各パスも同じ形
+  mkdir -p /tmp/h && git archive H | tar -x -C /tmp/h                         # head の版を取り出す（場所は自分で決める）
+  (cd /tmp/h && PYTHONDONTWRITEBYTECODE=1 python3 -B src/stats/counting.py | shasum -a 256)   # counting.output_sha256
+  (cd /tmp/h && PYTHONDONTWRITEBYTECODE=1 python3 -B src/stats/exclusion.py | shasum -a 256) # 順番1 の「の出力」（tagrules.py も同じ）
+  sed -n 5p sealed/ledger.jsonl | tr -d '\n' | shasum -a 256                   # order1_ref.record_sha256（seq 5 の行）
+  ```
+  1cb463a の版の出力は、`git show 1cb463a:src/stats/tagrules.py > tagrules.py` で一時フォルダに取り出して流す（seal-order1.md 1章）。
 - 記録の10件の sha256 を作業ツリーで計算し直して照らす手順は、docs/stats/seal-order1.md 3章 (1) のとおり（`shasum -a 256 <ファイル>`、`git show <commit>:<path> | shasum -a 256`、`PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/stats/exclusion.py | shasum -a 256` など）。順番1b の `counting.output_sha256` は `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/stats/counting.py | shasum -a 256` と照らす。
 
 ### 順番2 への申し送り（統計係の T-036 の監査の軽-4）

@@ -67,7 +67,7 @@ class TestGkgManifests(t31.GkgCase):
         self.assertIn("%s：run-start の行 3 行、異なる run_id 2 個" % TRIAL, out)
         self.assertIn("%s：run-start の行 1 行、異なる run_id 1 個" % OFFICIAL, out)
         out = self.verify_ok("all")
-        self.assertNotIn("ただし、次は照らさなかった", out)
+        self.assertNotIn("run-start の行と gkg-run-start の記録の照合（マニフェストが無い）", out)
 
     def test_missing_manifest_without_records_is_reported(self):
         """記録が 0 件でマニフェストも無いときは、今のまま「照らさなかった」（終了コード 0）。"""
@@ -259,8 +259,8 @@ class TestDocT049(unittest.TestCase):
     def test_statements(self):
         with open(DOC, encoding="utf-8") as f:
             text = f.read()
-        for phrase in ("`verify.py all`（と `stats-order`）は、順番1 の10件の sha256 を計算し直さない",
-                       "docs/stats/seal-order1.md 3章 (1) の手順で、自分で計算し直して行う",
+        for phrase in ("T-049 の時点では計算し直さなかった",      # T-056 で計算し直す形に改めた
+                       "docs/stats/seal-order1.md 3章 (1) の手順で、作業ツリーの値を計算して記録と比べる",
                        "記録の行の `recorded_at` は、封印を始めた時刻である",
                        "ledger に書いた時刻は `recorded_at` より後になる",
                        "ledger に書いた時刻そのものは記録に残らないので、第三者は確かめられない",

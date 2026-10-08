@@ -164,7 +164,10 @@ class TestMethodAccessWriter(Case):
         self.assertIn("区画 2015-03-02〜2020-12-14 は periods の 1 件目の method の区画と一致", out)
         self.assertIn("採用は保留（threshold-access の記録が無いため）", out)
         self.commit("記録")
-        self.verify_ok("all", "--rev", "auto")
+        # T-056：仮の順番1・1b の記録（head が実在しない）では、--rev auto の順番1・1b の計算し直しが止まるので、
+        # 時刻証明と対象のファイルは targets --rev auto で、残りは all（working）で確かめる
+        self.verify_ok("targets", "--rev", "auto")
+        self.verify_ok("all")
 
     def test_refused_without_candidates(self):
         self.seal(with_cand=False)

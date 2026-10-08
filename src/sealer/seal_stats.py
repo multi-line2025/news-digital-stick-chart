@@ -116,7 +116,9 @@ def git_state(project):
     """2章の項目3・5 と HEAD。返り値: HEAD の 40 桁。"""
     if _git(project, "status", "--porcelain").stdout.strip():
         raise ledger.LedgerError("作業ツリーがきれいでない（git status --porcelain が空でない）。封印しない")
-    if _git(project, "rev-parse", "--is-shallow-repository").stdout.strip() != b"false":
+    shallow = subprocess.run(["git", "-C", project, "rev-parse", "--is-shallow-repository"],
+                             capture_output=True, env=ledger.fixed_git_env())   # T-056：固定した環境で
+    if shallow.returncode != 0 or shallow.stdout.strip() != b"false":
         raise ledger.LedgerError("浅い clone である。封印しない")
     head = _git(project, "rev-parse", "HEAD").stdout.decode().strip()
     if not ledger.HEX40.match(head):

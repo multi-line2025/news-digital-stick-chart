@@ -144,7 +144,10 @@ class TestGkgRunStart(GkgCase):
         r2, _rel2, _o = self.start_run(T0 + 5 * H)
         self.assertEqual(self.doc_of(rel1)["trial_days"], TRIAL_DAYS)
         self.commit("試しの run")
-        for args in (("gkg-runs",), ("all", "--rev", "auto")):
+        # T-056：仮の順番1・1b の記録（head が実在しない）では、--rev auto の順番1・1b の計算し直しが止まるので、
+        # 時刻証明と対象のファイルは targets --rev auto で、残りは all（working）で確かめる
+        self.verify_ok("targets", "--rev", "auto")
+        for args in (("gkg-runs",), ("all",)):
             out = self.verify_ok(*args)
             self.assertIn("試しの run 2 回、正式な run 0 回", out)
             self.assertIn("  seq %d  試しの run（trial）  run_id %s  code_sha256 %s（%s）  日 %s"
@@ -379,7 +382,10 @@ class TestGkgRunStart(GkgCase):
         self.start_run(T0 + 6 * H, mode="official")
         self.write_access(T0 + 7 * H)
         self.commit("記録")
-        out = self.verify_ok("all", "--rev", "auto")
+        # T-056：仮の順番1・1b の記録（head が実在しない）では、--rev auto の順番1・1b の計算し直しが止まるので、
+        # 時刻証明と対象のファイルは targets --rev auto で、残りは all（working）で確かめる
+        self.verify_ok("targets", "--rev", "auto")
+        out = self.verify_ok("all")
         self.assertIn("試しの run 2 回、正式な run 1 回", out)
         self.method_gate()
         self.threshold_gate()
