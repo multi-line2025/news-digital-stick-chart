@@ -1930,7 +1930,143 @@ def check_stats_order(records, read_json):
     if g is not None and not any(r["seq"] < g["seq"] for r in o1b):
         raise LedgerError("最初の gkg-run-start の記録（seq %d）より前に、stats-order1b（順番1b）の記録が無い"
                           % g["seq"])
-    return {"order1": o1, "order1b": o1b}
+    # T-073：順番2の記録は、使った run の gkg-run-result（マニフェストの時刻証明）より後にだけ置ける
+    o2 = [r for r in records if r["kind"] == ORDER2_KIND]
+    for r in o2:
+        check_order2_run(records, r, read_json(r, ORDER2_KIND), read_json)
+    return {"order1": o1, "order1b": o1b, "order2": o2}
+
+
+# ---- T-073：順番2の前の関門（使う run の gkg-run-result が鎖の中で順番2の記録より前にあること）
+#
+# 順番2（docs/stats/counting.md 4章）は、封印係が、順番1b で sha256 を封印した src/stats/counting.py を
+# 当てはめる。counting.py は日の集計を自分で読み、require_gkg_run_result を呼ばない（T-069 の監査 中-1。
+# counting.py は封印済みなので直さない。reviews/T-072.md）。そこで関門を封印係の側に置く：
+#   (1) 書く前：order2_gate.py（require_order2_gate）が、counting.py を動かす前に、順番2が使う run を
+#       マニフェストから決め、require_gkg_run_result(mode, run_id) を呼ぶ。通らなければ counting.py を
+#       動かさず、順番2の記録も作らない（止まった (b) としても記録しない。seq の最も小さい記録が恒久に
+#       選ばれる規則（counting.select_order2_record）があるため）。
+#   (2) 鎖：check_stats_order が、順番2の記録ごとに check_order2_run で、記録が持つ run（input_run）の
+#       gkg-run-result の記録が、鎖の中でそれより前にあることを照らす。書く仕組みも verify も同じ照合をする。
+#
+# 順番2の kind は ORDER2_KIND に決めるが、許可リスト（ALLOWED_KINDS）にはまだ入れない。記録の中身の残りの
+# 形（参照する順番1b、時機の条件の確かめなど。docs/stats/seal-order1.md 3章 (2)）は、順番2を封印するタスクで
+# 決める。それまでは、この kind の記録は鎖の検査（verify_chain）で止まる（形の決まっていない記録を通さない）。
+# このタスクで決めるのは、run を持たせる次の3つのキーだけ（ORDER2_RUN_KEYS）：
+#   input_run       {"mode": "trial" | "official", "run_id": 16 桁}  順番2が使う run（order2_input_run）
+#   gkg_run_result  {"seq": その run の gkg-run-result の seq, "record_sha256": その行の sha256}
+#   counting_output counting.py の decide() の出力（そのまま）。runs・input_mode・input_run_id・steps を
+#                   input_run と照らす
+ORDER2_KIND = "stats-order2"
+ORDER2_RUN_KEYS = ("counting_output", "gkg_run_result", "input_run")
+ORDER2_STATUSES = ("decided", "stopped", "pending")
+
+
+class Order2GateClosed(LedgerError):
+    """順番2の前の関門が通らない（使う run が決まらない、またはその run の gkg-run-result が無い）。T-073。"""
+
+
+def _first_run_start(body, mode, path):
+    """マニフェストの行の並びで最初の run-start の run_id（無ければ None）。counting._first_start と同じ決め方で、
+    形の違う最初の run-start は Order2GateClosed。"""
+    rows = manifest_rows(body, path) if body else []
+    start = next((row for _i, row in rows if row.get("kind") == "run-start"), None)
+    if start is None:
+        return None, rows
+    rid = start.get("run_id")
+    if not isinstance(rid, str) or not RUN_ID_RE.match(rid) or start.get("mode") != mode \
+            or start.get("trial") is not (mode == "trial") or start.get("official") is not (mode == "official"):
+        raise Order2GateClosed("%s の最初の run-start の形が違う（run_id・mode・trial・official）" % path)
+    return rid, rows
+
+
+def order2_input_run(trial_manifest, official_manifest):
+    """順番2が使う run を、二つのマニフェスト（順番2を封印する HEAD の版のバイト列。無ければ b""）から決める。
+    counting.decide() の段の決め方（counting.md 4章 (2) の表の 3）と同じ：
+      - 試しの run のマニフェストの最初の run-start の run（R）に run-complete があれば (trial, R)（1段目）。
+      - そうでなく、正式な run の run-start があれば (official, その最初の run-start の run)（2段目に進むか、
+        止まる。どちらでも decide() が見るのはこの run）。
+      - どちらでもなければ、使う run が無い（decide() は「待つ」を返す）ので Order2GateClosed。
+    データ（日の集計）は読まない。返り値: {"mode", "run_id"}。"""
+    try:
+        rid, rows = _first_run_start(trial_manifest, "trial", GKG_MANIFESTS["trial"])
+        if rid is not None and any(row.get("kind") == "run-complete" and row.get("run_id") == rid
+                                   for _i, row in rows):
+            return {"mode": "trial", "run_id": rid}
+        orid, _rows = _first_run_start(official_manifest, "official", GKG_MANIFESTS["official"])
+    except Order2GateClosed:
+        raise
+    except LedgerError as e:
+        raise Order2GateClosed("マニフェストを読めない（%s）" % e) from None
+    if orid is not None:
+        return {"mode": "official", "run_id": orid}
+    raise Order2GateClosed("順番2が使う run がまだ無い（試しの run の最初の run が終わっておらず、正式な run も"
+                           "始まっていない）。counting.py は動かさず、順番2の記録も作らない")
+
+
+def check_order2_run(records, record, doc, read_json):
+    """順番2の記録（kind が ORDER2_KIND）が持つ run と、その run の gkg-run-result の位置を照らす（T-073）。
+      - doc に ORDER2_RUN_KEYS の3つがある。input_run は {mode, run_id}。
+      - gkg_run_result.seq の記録が、この記録より前の gkg-run-result で、行の sha256 が record_sha256 と同じ。
+        その中身の mode・run_id が input_run と同じ（中身と gkg-run-start の対応は check_gkg_result_doc）。
+        つまり、使った run のマニフェストの時刻証明が、鎖の中で順番2の記録より前にある。
+      - counting_output（decide() の出力）が input_run と食い違わない：runs[mode].run_id が input_run の run_id、
+        決まった（decided）なら input_mode・input_run_id が input_run と同じ、steps に段（trial・official）の
+        記録があれば、その段（と trial なら run_id）が input_run と同じ。
+    満たさなければ LedgerError。返り値: 指している gkg-run-result の記録。"""
+    what = "seq %d の %s（順番2）" % (record["seq"], ORDER2_KIND)
+    if not isinstance(doc, dict) or any(k not in doc for k in ORDER2_RUN_KEYS):
+        raise LedgerError("%s の中身に、使った run を示すキー（%s）が無い" % (what, "・".join(ORDER2_RUN_KEYS)))
+    run = doc["input_run"]
+    if not isinstance(run, dict) or sorted(run) != ["mode", "run_id"] or run["mode"] not in GKG_MANIFESTS \
+            or not isinstance(run["run_id"], str) or not RUN_ID_RE.match(run["run_id"]):
+        raise LedgerError("%s の input_run が {mode: trial か official, run_id: 16 桁} でない" % what)
+    ref = doc["gkg_run_result"]
+    if not isinstance(ref, dict) or sorted(ref) != ["record_sha256", "seq"] or type(ref["seq"]) is not int:
+        raise LedgerError("%s の gkg_run_result が {seq, record_sha256} でない" % what)
+    by_seq = {r["seq"]: r for r in records}
+    res = by_seq.get(ref["seq"])
+    if res is None or res["kind"] != GKG_RESULT_KIND or res["seq"] >= record["seq"]:
+        raise LedgerError("%s が使った run（%s・run_id %s）の gkg-run-result の記録が、鎖の中でこの記録より前に無い"
+                          "（gkg_run_result.seq %r）。マニフェストの時刻証明の前に集計した順番2は通さない"
+                          % (what, run["mode"], run["run_id"], ref["seq"]))
+    if sha256_hex(canonical_line(res)) != ref["record_sha256"]:
+        raise LedgerError("%s の gkg_run_result.record_sha256 が、seq %d の行の sha256 と違う" % (what, res["seq"]))
+    rdoc = check_gkg_result_doc(records, res, read_json(res, GKG_RESULT_KIND), read_json)
+    if (rdoc["mode"], rdoc["run_id"]) != (run["mode"], run["run_id"]):
+        raise LedgerError("%s の gkg_run_result（seq %d）は mode %s・run_id %s の記録で、input_run（%s・%s）と違う"
+                          % (what, res["seq"], rdoc["mode"], rdoc["run_id"], run["mode"], run["run_id"]))
+    out = doc["counting_output"]
+    if not isinstance(out, dict) or out.get("status") not in ORDER2_STATUSES or not isinstance(out.get("runs"), dict) \
+            or not isinstance(out.get("steps"), list):
+        raise LedgerError("%s の counting_output が decide() の出力の形（status・runs・steps）でない" % what)
+    have = out["runs"].get(run["mode"])
+    if not isinstance(have, dict) or have.get("run_id") != run["run_id"]:
+        raise LedgerError("%s の counting_output.runs.%s.run_id が input_run の run_id %s と違う"
+                          % (what, run["mode"], run["run_id"]))
+    if out["status"] == "decided" and (out.get("input_mode"), out.get("input_run_id")) != (run["mode"], run["run_id"]):
+        raise LedgerError("%s の counting_output の input_mode・input_run_id が input_run と違う" % what)
+    for s in out["steps"]:
+        if not isinstance(s, dict) or s.get("step") not in GKG_MANIFESTS:
+            continue
+        if s["step"] != run["mode"] or (s["step"] == "trial" and s.get("run_id") != run["run_id"]):
+            raise LedgerError("%s の counting_output.steps の段 %r が input_run（%s・%s）と違う"
+                              % (what, s, run["mode"], run["run_id"]))
+    return res
+
+
+def require_order2_gate(trial_manifest, official_manifest):
+    """順番2で counting.py を動かす前に呼ぶ関門（T-073）。order2_input_run で使う run を決め、
+    require_gkg_run_result(mode, run_id) を呼ぶ。通れば、順番2の記録に入れる値
+    {"input_run": {mode, run_id}, "gkg_run_result": {seq, record_sha256}} を返す。
+    通らなければ Order2GateClosed（GkgRunResultRequired も Order2GateClosed にする）。このときは counting.py を
+    動かさず、順番2の記録も作らない。"""
+    run = order2_input_run(trial_manifest, official_manifest)
+    try:
+        rec = require_gkg_run_result(run["mode"], run["run_id"])
+    except GkgRunResultRequired as e:
+        raise Order2GateClosed("順番2が使う run（%s・run_id %s）：%s" % (run["mode"], run["run_id"], e)) from None
+    return {"input_run": run, "gkg_run_result": {"seq": rec["seq"], "record_sha256": sha256_hex(canonical_line(rec))}}
 
 
 def themes_manifest_commits(git):

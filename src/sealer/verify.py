@@ -25,6 +25,11 @@
     python3 -B src/sealer/verify.py gkg-runs           GKG の取得の run の開始（gkg-run-start。T-031）の
                                                        ledger_head・drand・中身・順序。試しの run の回数と、
                                                        各 run の run_id・code_sha256・日を並べる
+    python3 -B src/sealer/verify.py filelist-rebuild --masterfilelist F [--out O]
+                                                       GDELT の公開の一覧 F を、acquisition-start が固定する
+                                                       版の filelist.py の規則で絞り、sha256 を kept_rows_sha256
+                                                       と照らす（T-073）。一致すれば --out に本体を書く
+                                                       （gkg-runs --filelist に渡す）。all には入らない
     python3 -B src/sealer/verify.py periods            区画の境目と deadline_status の照合
     python3 -B src/sealer/verify.py candidates         閾値と判定期間の候補の記録の形・出力の形、
                                                        最初の acquisition-start より前にあること（T-013）、
@@ -747,6 +752,12 @@ def cmd_stats_order(st, a):
               % (doc["owner_approval"]["source"], doc["owner_approval"]["heading"], doc["owner_approval"]["line"]))
         for path in sorted(files):
             print("      %s  %s" % (files[path], path))
+    for r in got["order2"]:
+        # T-073：check_stats_order が check_order2_run で照らした（使った run の gkg-run-result がこの記録より前）
+        doc = st.file_json(r, ledger.ORDER2_KIND)
+        print("  %s seq %d（順番2）: 使った run %s・run_id %s。その run の gkg-run-result（seq %d）は、鎖の中でこの記録"
+              "より前にある" % (ledger.ORDER2_KIND, r["seq"], doc["input_run"]["mode"], doc["input_run"]["run_id"],
+                              doc["gkg_run_result"]["seq"]))
     o1 = ledger.first_order1(st.records)
     print("除外の規則の kind（%s）の記録：%s（1 件だけ）。順番1・1b は最初の method-access より前、"
           "最初の gkg-run-start の前に順番1b。" % (ledger.ORDER1_KIND, "無し" if o1 is None else "seq %d" % o1["seq"]))
@@ -763,7 +774,7 @@ def cmd_stats_order(st, a):
             st.unchecked.append("順番1・1b の値の計算し直し（git の履歴が無いため）")
             print("照らさなかった：git の履歴が無いので、順番1・1b の値を head の版から計算し直していない")
         return
-    if repo.git("rev-parse", "--is-shallow-repository", env=ledger.fixed_git_env()).strip() != b"false":
+    if not _not_shallow(repo):
         # 軽1：浅い clone では親が取れず、照合の理由が分かりにくいので、先に止めて理由を出す
         raise ledger.LedgerError("浅い clone である。区分表の取得との前後の照合には履歴が要るので、"
                                  "--depth を付けない clone（git fetch --unshallow でもよい）で確かめる")
@@ -985,6 +996,98 @@ def rebuild_plan(repo, d, body, tmp, cache, what):
         raise ledger.LedgerError("%s：作り直した計画を読めない" % what) from None
 
 
+# 封印済みのファイル一覧を、GDELT の公開の一覧から作り直す小さなプログラム（T-073。T-070 再提出2回目の監査 軽-1）。
+# -I で流し、取り出した版の filelist.py（同じフォルダの privacy_scan.py を読み込む）の、取得のときと同じ関数
+# （_read_kept_lines：2020-12-14 以前と判定できた行だけを残す、parse_kept_line：許可リストの4項目、
+# serialize_rows：本体の書き方）で、本体と同じ形のバイト列を標準出力に書く
+FILELIST_REBUILDER = r"""
+import importlib.util, os, sys
+root, src = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("filelist", os.path.join(root, "src", "collector", "filelist.py"))
+fl = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fl)
+with open(src, "rb") as f:
+    lines = fl._read_kept_lines(f, lambda: 0.0, 1.0)
+rows = [r for r in (fl.parse_kept_line(x) for x in lines) if r is not None]
+sys.stdout.buffer.write(fl.serialize_rows(rows))
+"""
+FILELIST_REL = "src/collector/filelist.py"
+
+
+def filelist_source(records, read_json):
+    """gkg-run-start が使う一覧（ledger.gkg_filelist_sha256 と同じ、最初の method-access より前のただ1件の
+    acquisition-result）と、その acquisition-start の取得のコード。返り値: (code_path, code_sha256, kept_rows_sha256,
+    acquisition-result の seq)。"""
+    kept = ledger.gkg_filelist_sha256(records, read_json)
+    m = ledger._first_of_kind(records, ledger.METHOD_ACCESS_KIND)
+    res = [r for r in records if r["kind"] == ledger.ACQ_RESULT_KIND and (m is None or r["seq"] < m["seq"])][0]
+    start_seq, _kept = ledger.acquisition_result_fields(res, read_json(res, ledger.ACQ_RESULT_KIND))
+    start = {r["seq"]: r for r in records}.get(start_seq)
+    if start is None or start["kind"] != ledger.ACQ_START_KIND:
+        raise ledger.LedgerError("seq %d の acquisition-result の start_seq %d が acquisition-start でない"
+                                 % (res["seq"], start_seq))
+    code_path, code_sha = ledger.acquisition_start_fields(read_json(start, ledger.ACQ_START_KIND))
+    return code_path, code_sha, kept, res["seq"]
+
+
+def rebuild_filelist(repo, code_rel, code_sha, master_path, tmp, cache, what):
+    """GDELT の公開の一覧（master_path）を、acquisition-start が固定する版の filelist.py の規則で絞り、封印済みの
+    一覧の本体と同じ形のバイト列を作る（T-073）。固定の連なり：code_sha256 → その版の取得の入口のコード
+    （acquire_filelist.py）→ その中の PINNED_SHA256 → filelist.py・privacy_scan.py（など、PINNED_SHA256 のすべて）。
+    版は git の履歴から sha256 で探し（HEAD の版は使わない）、_BoundDir に書き出して -I で流す。"""
+    acq = _find_version(repo, code_rel, code_sha, cache)
+    if acq is None:
+        raise ledger.LedgerError("%s：code_sha256 %s の %s の版が、git の履歴に無い" % (what, code_sha[:12], code_rel))
+    pinned = pinned_of_acquire(acq)
+    if FILELIST_REL not in pinned:
+        raise ledger.LedgerError("%s：%s の PINNED_SHA256 に %s が無い" % (what, code_rel, FILELIST_REL))
+    blobs, files = {code_rel: acq}, [(code_rel, code_sha)]
+    for rel, sha in sorted(pinned.items()):
+        data = _find_version(repo, rel, sha, cache)
+        if data is None:
+            raise ledger.LedgerError("%s：PINNED_SHA256 の %s（%s）の版が、git の履歴に無い" % (what, rel, sha[:12]))
+        blobs[rel] = data
+        files.append((rel, sha))
+    bound = _BoundDir(repo, None, files, tmp, what, blobs=blobs)
+    return _run_script(bound.dir, FILELIST_REL, what, code=FILELIST_REBUILDER,
+                       args=(bound.dir, os.path.abspath(master_path)))
+
+
+def cmd_filelist_rebuild(st, a):
+    """第三者の手順（12章の「第三者が照らす手順」の 2・3）：GDELT の公開の一覧から、封印した規則で一覧の本体を
+    作り直し、sha256 を acquisition-result の kept_rows_sha256 と照らす（T-073）。--out を渡すと、一致したときだけ
+    作った本体をそこに新しく書く（gkg-runs --filelist に渡すため。既にあるファイルは上書きしない）。
+    一致しなければ失敗（終了コード 1）。git の履歴が無い・浅い clone のときも、版を探せないので失敗。"""
+    code_rel, code_sha, kept, res_seq = filelist_source(st.records, st.file_json)
+    repo = Repo(st.root)
+    try:
+        repo.git("rev-parse", "--git-dir")
+    except (ledger.LedgerError, OSError):
+        raise ledger.LedgerError("git の履歴が無いので、固定された版の filelist.py を探せない") from None
+    if not _not_shallow(repo):
+        raise ledger.LedgerError("浅い clone なので、固定された版の filelist.py を探せない（--depth を付けない clone か "
+                                 "git fetch --unshallow のあとで流す）")
+    what = "一覧の作り直し（acquisition-start の %s・%s…）" % (code_rel, code_sha[:12])
+    with tempfile.TemporaryDirectory() as tmp:
+        body = rebuild_filelist(repo, code_rel, code_sha, a.masterfilelist, tmp, {}, what)
+    got = ledger.sha256_hex(body)
+    lines = body.count(b"\n") - 1
+    if got != kept:
+        raise ledger.LedgerError("作り直した一覧（%d 行）の sha256 %s が、seq %d の acquisition-result の kept_rows_sha256 %s と"
+                                 "一致しない。渡した公開の一覧が、取得のときと違う（GDELT が一覧を変えたか、別の一覧を"
+                                 "渡した）か、封印した一覧が規則どおりでない。どちらかは、この検査では区別できない"
+                                 % (lines, got, res_seq, kept))
+    print("作り直した一覧（%d 行）の sha256 %s は、seq %d の acquisition-result の kept_rows_sha256 と同じ（規則は "
+          "acquisition-start が固定する版の %s。HEAD の版は使っていない）" % (lines, got, res_seq, FILELIST_REL))
+    if a.out:
+        try:
+            with open(a.out, "xb") as f:
+                f.write(body)
+        except OSError as e:
+            raise ledger.LedgerError("--out に書けない（%s。既にあるファイルは上書きしない）" % e.__class__.__name__) from None
+        print("作った本体を %s に書いた。gkg-runs --filelist に渡す" % a.out)
+
+
 def _check_plan_body(st, r, d, run, filelists):
     """gkg-run-start の plan_sha256 を、封印済みのファイル一覧の本体から作り直した計画と照らし、マニフェストの
     day の行の日付・files_listed・failed_files がその計画と合うことを照らす（T-070 差し戻し2回目）。
@@ -1010,6 +1113,14 @@ def _check_plan_body(st, r, d, run, filelists):
     except (ledger.LedgerError, OSError):
         st.unchecked.append("%s（git の履歴が無い）" % what)
         print("照らさなかった：git の履歴が無いので、%s はしていない" % what)
+        return
+    if not _not_shallow(repo):
+        # T-073（T-070 再提出2回目の監査 中-1）：浅い clone では、記録が固定する版が履歴に無いことがあり、正直な
+        # 記録でも「版が git の履歴に無い」で止まってしまう。stats-order と同じやり方（--is-shallow-repository を
+        # GIT_ の環境変数を固定して確かめる）で見分け、作り直しはせず「照らさなかった」にする
+        st.unchecked.append("%s（浅い clone）" % what)
+        print("照らさなかった：浅い clone なので、%s はしていない（--depth を付けない clone か "
+              "git fetch --unshallow のあとで照らす）" % what)
         return
     if not hasattr(st, "_version_cache"):
         st._version_cache = {}
@@ -1037,6 +1148,15 @@ def _check_plan_body(st, r, d, run, filelists):
     ledger.check_plan_rows(plan, run, "%s（seq %d の run）" % (ledger.GKG_MANIFESTS[d["mode"]], r["seq"]))
     print("seq %d の run：封印済みのファイル一覧から、記録が固定する版の select_files で作り直した計画の sha256 は "
           "plan_sha256 と同じで、day の行の日付・files_listed・failed_files はその計画と合う" % r["seq"])
+
+
+def _not_shallow(repo):
+    """浅い clone でないか（git rev-parse --is-shallow-repository が false）。cmd_stats_order と同じ確かめ方で、
+    GIT_ の環境変数を固定して動かす。T-073。"""
+    try:
+        return repo.git("rev-parse", "--is-shallow-repository", env=ledger.fixed_git_env()).strip() == b"false"
+    except (ledger.LedgerError, OSError):
+        return False
 
 
 def read_filelists(paths):
@@ -1275,7 +1395,7 @@ def main(argv=None):
     sub = p.add_subparsers(dest="cmd", required=True)
     parsers = {}
     for name in ("chain", "anchors", "targets", "access", "acquisition", "stats-order", "method",
-                 "gkg-runs",
+                 "gkg-runs", "filelist-rebuild",
                  "periods", "candidates", "adopted", "all"):
         s = sub.add_parser(name, allow_abbrev=False)
         s.add_argument("--btc-header", type=_parse_header_arg, action="append",
@@ -1291,8 +1411,11 @@ def main(argv=None):
         # T-070 差し戻し2回目：封印済みのファイル一覧の本体。sha256 が記録の filelist_sha256 と同じものだけを使い、
         # 計画を作り直して plan_sha256 と照らす
         parsers[name].add_argument("--filelist", action="append", default=[])
+    # T-073：GDELT の公開の一覧（masterfilelist.txt を取ったファイル）から、封印した規則で一覧の本体を作り直す
+    parsers["filelist-rebuild"].add_argument("--masterfilelist", required=True)
+    parsers["filelist-rebuild"].add_argument("--out")
     a = p.parse_args(argv)
-    fn = {"chain": cmd_chain, "anchors": cmd_anchors, "targets": cmd_targets,
+    fn = {"chain": cmd_chain, "filelist-rebuild": cmd_filelist_rebuild, "anchors": cmd_anchors, "targets": cmd_targets,
           "access": cmd_access, "acquisition": cmd_acquisition, "method": cmd_method,
           "gkg-runs": cmd_gkg_runs, "stats-order": cmd_stats_order,
           "periods": cmd_periods,
