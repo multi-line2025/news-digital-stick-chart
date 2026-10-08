@@ -411,6 +411,15 @@ class TestExclusionGate(unittest.TestCase):
         self.assertEqual(themes.EXCLUSION_RULE_KIND, self.ledger.ORDER1_KIND)
         self.assertIn(themes.EXCLUSION_RULE_KIND, self.ledger.ALLOWED_KINDS)
 
+    @staticmethod
+    def files_under(top, skip=None):
+        out = []
+        for d, ds, fs in os.walk(top):
+            if skip is not None and d == top and skip in ds:
+                ds.remove(skip)
+            out += [os.path.relpath(os.path.join(d, f), top) for f in fs]
+        return sorted(out)
+
     def test_ledger_without_order1_stops_before_network(self):
         """封印の記録に stats-order1 の記録が無ければ、関門が通信の前に止まる。T-050：本物の記録の
         状態に頼らず（本物には seq 5 に stats-order1 がある）、順番1b・method-access・gkg-run-start は
@@ -428,15 +437,17 @@ class TestExclusionGate(unittest.TestCase):
                         themes.run(root=root, home=self.home, transport=self.tr,
                                    clock=lambda: 0.0, now=lambda: NOW)
                 self.assertEqual(self.tr.calls, [])
-                self.assertFalse(os.path.exists(os.path.join(root, "data", "manifest",
-                                                             themes.MANIFEST_NAME)))
+                # 書き込み0件：root（仮の封印の記録のほか）と home の全体に、何も書かれていない
+                self.assertEqual(self.files_under(root, skip="sealed"), [])
+                self.assertEqual(self.files_under(self.home), [])
 
     def test_ledger_with_order1_passes_the_gate(self):
-        """対照：同じ仮の記録に stats-order1 を足すと、関門を通る（記録を読めていることの確かめ）。"""
+        """対照：仮の記録の7種類（stats-order1 の無い並び）の後ろに stats-order1 を1件足すと、関門を通る
+        （ほかの種類が並ぶ中から読めていることの確かめ）。"""
         import test_gkg as tg
         root = tempfile.mkdtemp(prefix="themes-order1-")
         self.addCleanup(shutil.rmtree, root, True)
-        recs = tg.make_sealed_project(root, tg.KINDS_WITHOUT_ORDER1[:4] + ("stats-order1",))
+        recs = tg.make_sealed_project(root, tg.KINDS_WITH_ORDER1)
         with mock.patch.object(self.ledger, "PROJECT_ROOT", root):
             rec, gate_root = themes.require_exclusion_rules_sealed()
         self.assertEqual((rec["seq"], rec["kind"]), (recs[-1]["seq"], "stats-order1"))

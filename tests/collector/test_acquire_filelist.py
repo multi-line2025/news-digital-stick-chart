@@ -202,8 +202,9 @@ def rollback_to_before_step3(dst):
     """写しを、T-016（手順3の本番の取得）より前の状態に戻す（T-018）。
 
     本物の記録には T-016 の seq 3・4 があるので、そのままでは手順3の取得をもう一度通せない。
-    写しの中だけで、periods（seq 1）と candidates（seq 2）より後の記録の行・中身・.ots を外し、
-    ファイル一覧のマニフェストを空にする。本物には触れない。
+    写しの中だけで、periods（seq 1）と candidates（seq 2）より後の記録の行・.ots と、残した記録から
+    指されない中身のファイル（sealed/<種類>-<sha256>.json。T-057）を外し、ファイル一覧のマニフェストを
+    空にする。本物には触れない。
     """
     sealed = os.path.join(dst, "sealed")
     path = os.path.join(sealed, "ledger.jsonl")
@@ -215,10 +216,14 @@ def rollback_to_before_step3(dst):
         keep += 1
     with open(path, "wb") as f:
         f.write(b"".join(lines[:keep]))
+    # 残した記録が指す中身のファイル（targets の path）。T-057（T-050 の監査 軽-4）：どの記録からも
+    # 指されない中身のファイル（stats-order1-*.json、stats-order1b-*.json、gkg-run-start-*.json、
+    # acquisition-*.json など、外した記録の中身）は、種類の名前によらず写しから外す
+    referenced = {t["path"] for l in lines[:keep] for t in json.loads(l)["targets"]}
     for name in os.listdir(sealed):
         m = re.match(r"ledger\.jsonl\.seq(\d{6})(\.bitcoin)?\.ots\Z", name)
-        if (m and int(m.group(1)) > keep) or name.startswith(("acquisition-", "method-access-",
-                                                              "threshold-access-")):
+        content = re.match(r"[a-z0-9][a-z0-9-]*-[0-9a-f]{64}\.json\Z", name)
+        if (m and int(m.group(1)) > keep) or (content and "sealed/" + name not in referenced):
             os.remove(os.path.join(sealed, name))
     open(os.path.join(dst, "data", "manifest", "gdelt-filelist.jsonl"), "wb").close()
 

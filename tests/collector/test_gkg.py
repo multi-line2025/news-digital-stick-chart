@@ -495,6 +495,15 @@ EXCL_REF = {"seq": 7, "record_sha256": "e" * 64}
 # stats-order1 を除いて、本物の記録に足されうる種類（順番1b・method-access・gkg-run-start）を含める。
 KINDS_WITHOUT_ORDER1 = ("periods", "candidates", "acquisition-start", "acquisition-result",
                         "stats-order1b", "method-access", "gkg-run-start")
+# 対照：上の7種類の後ろに stats-order1 を1件足した並び（ほかの種類が並ぶ中から拾えることを確かめる）
+KINDS_WITH_ORDER1 = KINDS_WITHOUT_ORDER1 + ("stats-order1",)
+
+
+def _under_tmp(path):
+    """acquire_gkg._checked_test_seams の _under_tmp と同じ形：一時的なディレクトリの下（それ自身は除く）。"""
+    tmp = os.path.realpath(tempfile.gettempdir())
+    real = os.path.realpath(path)
+    return real != tmp and os.path.commonpath([tmp, real]) == tmp
 
 
 def make_sealed_project(root, kinds):
@@ -502,7 +511,11 @@ def make_sealed_project(root, kinds):
 
     中身は仮のファイル（照合の関門は、鎖と .ots だけを見る）。.ots はテストの差し替えの ots で作る。
     本物の sealed/ には書かない。返り値: 記録の一覧。T-050。
+    root が一時的なディレクトリの下でなければ（本物のプロジェクトを含む）、何も書かずに止まる
+    （T-057。T-050 の監査 軽-3）。
     """
+    if not _under_tmp(root):
+        raise ValueError("make_sealed_project の書き込み先が、一時的なディレクトリの下でない")
     if HERE not in sys.path:
         sys.path.insert(0, HERE)
     import test_acquire_filelist as taf
@@ -1693,9 +1706,10 @@ class TestExclusionRecord(RunCase):
                 self.assertEqual(os.listdir(self.store), [])
 
     def test_real_chain_check_with_order1_record_goes_past_the_missing_check(self):
-        """対照：同じ仮の記録に stats-order1 を足すと「無い」では止まらない（記録を読めていることの確かめ）。
-        渡した除外の規則の記録（仮の seq 7）が鎖の上の記録と違うので、要求の前に止まる。"""
-        root_patch, chain_patch = self.real_chain(KINDS_WITHOUT_ORDER1[:4] + ("stats-order1",))
+        """対照：仮の記録の7種類（stats-order1 の無い並び）の後ろに stats-order1 を1件足すと、「無い」では
+        止まらない（ほかの種類が並ぶ中から読めていることの確かめ）。渡した除外の規則の記録（仮の seq 7）が
+        鎖の上の記録（seq 8）と違うので、要求の前に止まる。"""
+        root_patch, chain_patch = self.real_chain(KINDS_WITH_ORDER1)
         with root_patch, chain_patch:
             with self.assertRaisesRegex(gkg.GkgError, "鎖の上の記録と違う"):
                 self.run_once()
@@ -2356,6 +2370,41 @@ class TestCheckSealedRun(RunCase):
                     gkg.check_sealed_run(self.root, dict({"gkg_run_seq": 21,
                                                           "gkg_run_record_sha256": "a" * 64}, **bad),
                                          "official", RUN_ID)
+
+
+class TestT057(RunCase):
+    """T-057：仮の封印の記録の道具の守り（T-050 の監査 軽-3）、gkg_run_seq の無い行（T-045 の監査 軽-1）。"""
+
+    def test_make_sealed_project_refuses_real_project_and_outside_tmp(self):
+        led = os.path.join(PROJECT, "sealed", "ledger.jsonl")
+        with open(led, "rb") as f:
+            before = hashlib.sha256(f.read()).hexdigest()
+        for bad in (PROJECT, os.path.join(PROJECT, "sealed"), tempfile.gettempdir(), "/"):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(ValueError, "一時的なディレクトリの下でない"):
+                    make_sealed_project(bad, ("periods",))
+        with open(led, "rb") as f:
+            self.assertEqual(hashlib.sha256(f.read()).hexdigest(), before)
+        self.assertEqual(len(make_sealed_project(os.path.join(self.tmp, "ok"), ("periods",))), 1)
+
+    def test_trial_row_without_gkg_run_seq_stops_official_start(self):
+        self.run_once(mode="trial", committed_manifest=None)
+        p = self.manifest_path(gkg.TRIAL_MANIFEST_NAME)
+        rows = gkg.read_jsonl(p)
+        for bad in (None, 0, "21"):
+            with self.subTest(bad=bad):
+                rows2 = [dict(r) for r in rows]
+                if bad is None:
+                    rows2[0].pop("gkg_run_seq")
+                else:
+                    rows2[0]["gkg_run_seq"] = bad
+                with open(p, "w") as f:
+                    for r in rows2:
+                        f.write(json.dumps(r, sort_keys=True) + "\n")
+                with self.assertRaisesRegex(gkg.GkgError, "gkg_run_seq が無い"):
+                    self.run_once()
+                self.assertEqual(self.transport.calls, [])
+                self.assertFalse(os.path.exists(self.manifest_path()))
 
 
 class TestT032Vocab(unittest.TestCase):

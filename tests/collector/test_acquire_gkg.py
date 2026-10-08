@@ -192,9 +192,9 @@ class TestExclusionGateFirst(unittest.TestCase):
                 never.assert_not_called()
 
     def test_real_gate_passes_with_order1(self):
-        """対照：同じ仮の記録に stats-order1 を足すと、除外の規則の関門は通り、次の method-access の
-        関門まで進む（記録を読めていることの確かめ）。"""
-        project = self.mini_project(tg.KINDS_WITHOUT_ORDER1[:4] + ("stats-order1",))
+        """対照：仮の記録の7種類（stats-order1 の無い並び）の後ろに stats-order1 を1件足すと、除外の規則の
+        関門は通り、次の method-access の関門まで進む（ほかの種類が並ぶ中から読めていることの確かめ）。"""
+        project = self.mini_project(tg.KINDS_WITH_ORDER1)
         stop = mock.Mock(side_effect=ledger.MethodAccessRequired("見本：次の関門"))
         p1, p2 = self.run_production_on(project)
         with p1, p2, mock.patch.object(ag, "_check_code", file_codes), \
@@ -772,8 +772,11 @@ class TestT045(E2ECase):
         self.assertEqual(len(runs), 1)                      # 記録は残り、.ots は無い
         seq = runs[0]["seq"]
         self.assertFalse(os.path.exists(os.path.join(self.project, "sealed", ledger.ots_name(seq))))
-        with self.assertRaises(Exception):
+        with self.assertRaises(Exception) as cm:
             self.acquire(self.gseams(), mode="trial")       # .ots を作らずに再実行
+        # 止まる理由：その seq の .ots が無い（最初に照らす関門の check_anchors が見つける。
+        # 関門より先に進んでも、seal_gkg_run.start の最初の load_checked が同じ照合で止める）
+        self.assertIn("seq %d の記録に、その seq 自身の時刻証明（.ots）が無い" % seq, str(cm.exception))
         self.assertEqual(self.gtransport.calls, [])
         self.assertEqual((self.gsnapshot()["store"], self.gsnapshot()["trial"]), before)
         stamp.stamp_seq(self.ledger_path(), seq, "ots", runner=taf.FakeOts())   # stamp.py の手順
