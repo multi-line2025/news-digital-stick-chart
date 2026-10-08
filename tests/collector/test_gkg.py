@@ -613,11 +613,12 @@ class RunCase(unittest.TestCase):
     def manifest_path(self, name=None):
         return os.path.join(self.root, "data", "manifest", name or gkg.MANIFEST_NAME)
 
-    def start_hook(self, *, mode, run_id, trial_days, days, files_selected):
+    def start_hook(self, *, mode, run_id, trial_days, days, files_selected, plan_sha256):
         """封印の記録に gkg-run-start を書く入口の差し替え（本物は acquire_gkg.make_start_hook）。
-        取得の計画（days・files_selected。T-069）は self.sealed_plans に控える。"""
+        取得の計画（days・files_selected。T-069。plan_sha256。T-071）は self.sealed_plans に控える。"""
         self.sealed_runs.append((mode, run_id, trial_days))
-        self.sealed_plans.append({"days": days, "files_selected": files_selected})
+        self.sealed_plans.append({"days": days, "files_selected": files_selected,
+                                  "plan_sha256": plan_sha256})
         seq = 20 + len(self.sealed_runs)
         line = json.dumps({"seq": seq, "kind": "gkg-run-start", "mode": mode, "run_id": run_id},
                           sort_keys=True).encode()
@@ -810,7 +811,7 @@ class TestRun(RunCase):
         m = self.manifest()
         self.assertEqual(gkg.official_run_id(m), RUN_ID)
         self.assertTrue(m[0]["official"])
-        days = gkg.day_records_of(m)
+        days = gkg._day_records_of(m)
         self.assertEqual([d["day"] for d in days], ["2015-03-02", "2015-03-03"])
 
     def test_new_run_refused_even_if_first_did_not_finish(self):
@@ -821,7 +822,7 @@ class TestRun(RunCase):
         with self.assertRaisesRegex(gkg.GkgError, "別の run"):
             self.run_gkg(code_sha256="cd" * 32)
         with self.assertRaisesRegex(gkg.GkgError, "終わっていない"):
-            gkg.day_records_of(self.manifest())
+            gkg._day_records_of(self.manifest())
 
     def test_format_breaker(self):
         for ts in self.zips:
@@ -2298,13 +2299,51 @@ class TestT032(RunCase):
         m0 = self.manifest()[0]
         self.run_once()                                   # 再開：もう渡さない
         self.assertEqual(self.sealed_plans,
-                         [{"days": t0["days"], "files_selected": t0["files_selected"]},
-                          {"days": m0["days"], "files_selected": m0["files_selected"]}])
+                         [{"days": t0["days"], "files_selected": t0["files_selected"],
+                           "plan_sha256": t0["plan_sha256"]},
+                          {"days": m0["days"], "files_selected": m0["files_selected"],
+                           "plan_sha256": m0["plan_sha256"]}])
+        # T-071：plan_sha256 は、ファイル一覧の行から select_files（試しの run は trial_plan も）で
+        # 作った計画の、封印係の ledger.gkg_plan_sha256 の値
+        ledger = gkg._load_sibling("themes")._import_ledger()
+        plan = gkg.select_files(self.rows)
+        self.assertEqual(m0["plan_sha256"], ledger.gkg_plan_sha256(plan))
+        self.assertEqual(t0["plan_sha256"], ledger.gkg_plan_sha256(gkg.trial_plan(plan)))
         self.assertEqual(t0["days"], len(t0["trial_days"]))
         self.assertEqual(m0["days"], len(self.DAYS))
         self.assertEqual(m0["files_selected"], sum(1 for _ in self.zips))
         done = [e for e in self.manifest() if e["kind"] == "run-complete"][0]
         self.assertEqual(done["days"], m0["days"])
+
+    def test_trial_plan_sha256_is_after_trial_plan(self):
+        """T-071：ファイル一覧に試しの run の日の外の日があるとき、試しの run の plan_sha256 は trial_plan の
+        あとの計画のもので、select_files の出力の全体のものではない。"""
+        ts = ts_of("20150310", 0)
+        z = make_zip(ts, standard_rows(ts))
+        self.rows.append(listing(ts, z))
+        self.run_once(mode="trial", committed_manifest=None)
+        t0 = self.manifest(gkg.TRIAL_MANIFEST_NAME)[0]
+        ledger = gkg._load_sibling("themes")._import_ledger()
+        full = gkg.select_files(self.rows)
+        self.assertIn("2015-03-10", full)
+        self.assertEqual(t0["plan_sha256"], ledger.gkg_plan_sha256(gkg.trial_plan(full)))
+        self.assertNotEqual(t0["plan_sha256"], ledger.gkg_plan_sha256(full))
+        self.assertEqual(self.sealed_plans[-1]["plan_sha256"], t0["plan_sha256"])
+        self.assertEqual((t0["days"], t0["files_selected"]),
+                         (len(self.DAYS), len(self.zips)))
+
+    def test_resume_with_other_plan_stops(self):
+        """T-071：再開のとき、作り直した計画の plan_sha256 が run-start の行と違えば、要求を送らずに
+        止まる（ファイル一覧の行を差し替えて、封印した計画と違うファイルを取る道を塞ぐ）。"""
+        with self.assertRaises(gkg.RunStartWritten):
+            self.run_once()
+        before = gkg.read_bytes_nofollow(self.manifest_path())
+        self.rows = [r for r in self.rows if r[0] != max(self.zips)]   # 計画の最後のファイルを抜く
+        with self.assertRaisesRegex(gkg.GkgError, "plan_sha256"):
+            self.run_once()
+        self.assertEqual(self.transport.calls, [])
+        self.assertEqual(gkg.read_bytes_nofollow(self.manifest_path()), before)
+        self.assertEqual(len(self.sealed_runs), 1)
 
     def test_resume_does_not_write_again(self):
         self.low_after = 2
@@ -2786,7 +2825,7 @@ class ChildRun:
                 gkg_path = os.path.join(tops["code"], "gkg.py")
                 with open(gkg_path, "w", encoding="utf-8") as f:
                     f.write(src)
-                for name in ("filelist.py", "privacy_scan.py"):
+                for name in ("filelist.py", "privacy_scan.py", "themes.py"):
                     shutil.copyfile(os.path.join(SRC, name), os.path.join(tops["code"], name))
             real_store = os.path.realpath(store)
             allowed = []
@@ -2905,6 +2944,64 @@ class TestNoNetworkGuard(unittest.TestCase):
     def test_guard_active(self):
         with self.assertRaises(NetworkUsed):
             socket.create_connection(("192.0.2.1", 443), timeout=1)
+
+
+def day_records_call_sites(root):
+    """root（src）の下の .py で、名前が day_records_of で終わるものを呼ぶ・参照するところの
+    [(相対パス, 囲む関数の名前)]。定義（def）そのものは数えない。限界：文字列から名前を組み立てて
+    呼ぶ形（getattr(gkg, "_day_" + ...)）は見つけない。"""
+    import ast
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+        for n in sorted(filenames):
+            if not n.endswith(".py"):
+                continue
+            path = os.path.join(dirpath, n)
+            with open(path, "rb") as f:
+                tree = ast.parse(f.read(), path)
+            rel = os.path.relpath(path, root)
+
+            def walk(node, fn):
+                for ch in ast.iter_child_nodes(node):
+                    name = None
+                    if isinstance(ch, ast.Name):
+                        name = ch.id
+                    elif isinstance(ch, ast.Attribute):
+                        name = ch.attr
+                    if name is not None and name.endswith("day_records_of"):
+                        out.append((rel, fn))
+                    walk(ch, ch.name if isinstance(ch, (ast.FunctionDef, ast.AsyncFunctionDef))
+                         else fn)
+            walk(tree, None)
+    return out
+
+
+class TestDayRecordsOfCallSites(unittest.TestCase):
+    """T-071（T-069 の監査 軽-1）：関門を通らない部品 _day_records_of を、src の下で呼ぶところは
+    gkg.official_day_records の中の1か所だけ（本番のコードが関門を飛ばして正式な run の結果を読まない）。"""
+
+    def test_only_official_day_records_calls_it(self):
+        self.assertEqual(day_records_call_sites(os.path.join(PROJECT, "src")),
+                         [(os.path.join("collector", "gkg.py"), "official_day_records")])
+        self.assertFalse(hasattr(gkg, "day_records_of"))
+        self.assertTrue(callable(gkg._day_records_of))
+
+    def test_detects_a_second_caller(self):
+        """誤りを入れた写し（ほかの関数からも呼ぶ）では、2か所目が見つかる。"""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        os.makedirs(os.path.join(tmp, "collector"))
+        with open(os.path.join(SRC, "gkg.py"), "rb") as f:
+            src = f.read()
+        src += b"\n\ndef sneaky(m):\n    return _day_records_of(m)\n"
+        with open(os.path.join(tmp, "collector", "gkg.py"), "wb") as f:
+            f.write(src)
+        with open(os.path.join(tmp, "collector", "other.py"), "wb") as f:
+            f.write(b"import gkg\nx = gkg.day_records_of\n")
+        got = day_records_call_sites(tmp)
+        self.assertIn((os.path.join("collector", "gkg.py"), "sneaky"), got)
+        self.assertIn((os.path.join("collector", "other.py"), None), got)
 
 
 if __name__ == "__main__":

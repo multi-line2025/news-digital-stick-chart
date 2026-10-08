@@ -348,7 +348,13 @@
     書く前、GKG への要求を送る前に、start_hook を1回だけ呼ぶ。入口のスクリプトは、封印係の
     seal_gkg_run.start（src/sealer。docs/verify/periods-seal.md 12章）で封印の記録に
     gkg-run-start を書く（mode・run_id・code_sha256・filelist_sha256・method_access_seq・
-    trial_days・除外の規則の記録の seq と sha256）。書けなければ（関門で止まった・通信の失敗
+    trial_days・除外の規則の記録の seq と sha256、取得の計画の days・files_selected・plan_sha256）。
+    取得の計画（T-069・T-071）：plan は、封印済みのファイル一覧の行から select_files で作り、試しの
+    run は trial_plan を通したもの。plan_sha256 は、封印係の ledger.gkg_plan_sha256(plan)（計画の
+    正規の形の sha256）。計画の本体はどこにも書かない。同じ plan_sha256 を run-start の行にも書き、
+    再開のたびに、作り直した計画の plan_sha256 が run-start の行と同じことを確かめる（違えば止まる）。
+    封印係の verify は、封印済みのファイル一覧と、記録の code_sha256 が固定する版の select_files
+    （試しの run は trial_plan も）から計画を作り直して照らす。書けなければ（関門で止まった・通信の失敗
     など）、何も書かずに GkgError で止まり、要求は1件も送らない。
     run-start の行には、その記録の seq（gkg_run_seq）と、記録の行の正規の形の sha256
     （gkg_run_record_sha256）を書く。同じ run の再開と、正式な run の2回目の実行では呼ばない。
@@ -467,7 +473,8 @@
     gdelt-gkg-trial.jsonl）に追記する（過去の行は書き換えない）。マニフェストは手元の
     プロジェクトの中（APFS）で、外付けディスクには置かない。
       run-start   取得の最初の要求より前に1回（run_id、code_sha256、filelist_sha256、
-                  method_access_seq、選んだファイルと日の数、started_at）
+                  method_access_seq、選んだファイルと日の数、計画の plan_sha256（5.5章）、
+                  started_at）
       run-resume  再開のたび
       day         日の集計を書くたび（file_name、sha256、files_listed・ok・failed、docs）
       run-complete 全部の日が終わったとき（取得の記録のファイル名と sha256）
@@ -1480,10 +1487,12 @@ def official_run_id(manifest):
     return None
 
 
-def day_records_of(manifest):
+def _day_records_of(manifest):
     """正式な run の day の行（日付の順）。マニフェストの行の一覧だけから作る（関門を通らない）。
 
-    run の途中の検査とテストのための部品。正式な run の結果を使うコードは、関門を通る
+    関門を通る official_day_records() の中だけで使う部品（T-071。T-069 の監査 軽-1 で、名前を _ で
+    始まる形にした。src の下で呼ぶところが official_day_records の中の1か所だけであることを、
+    tests/collector の test_gkg.py が確かめる）。正式な run の結果を使うコードは、
     official_day_records() を使う（T-069）。正式な run が run-complete まで終わっていなければ GkgError。
     """
     rid = official_run_id(manifest)
@@ -1554,7 +1563,7 @@ def official_day_records():
                 raise GkgError("マニフェストに JSON でない行がある") from None
     if official_run_id(rows) != run_id:
         raise GkgError("マニフェストの最初の run-start が、封印の記録の正式な run と違う")
-    return day_records_of(rows)
+    return _day_records_of(rows)
 
 
 def trial_plan(plan):
@@ -1860,9 +1869,9 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
     committed_trial_manifest：HEAD の試しの run のマニフェスト（正式な run だけ。5.1章）。
     exclusion_rule：除外の規則の封印の記録の {"seq", "record_sha256"}（5.3章）。ここでも鎖の上の
       記録と照らす（関門を通らずにこの関数を呼んでも、取得は始まらない）。
-    start_hook(mode=, run_id=, trial_days=, days=, files_selected=)：run の最初の実行で、run-start の
-      行を書く前（要求を送る前）に1回だけ呼ぶ。days・files_selected は取得の計画（run-start の行の
-      days・files_selected と同じ値。T-069）。封印の記録に gkg-run-start を書き、その記録の
+    start_hook(mode=, run_id=, trial_days=, days=, files_selected=, plan_sha256=)：run の最初の実行で、
+      run-start の行を書く前（要求を送る前）に1回だけ呼ぶ。days・files_selected・plan_sha256 は取得の計画
+      （run-start の行の days・files_selected・plan_sha256 と同じ値。T-069・T-071。5.5章）。封印の記録に gkg-run-start を書き、その記録の
       {"seq", "record_sha256"} を返す（5.5章。T-032）。入口のスクリプトが渡す。無ければ止まる。
     """
     if not re.fullmatch(r"[0-9a-f]{64}", code_sha256 or ""):
@@ -1890,6 +1899,7 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
         raise GkgError("この run_id の取得は完了している（取り直さない）")
     start = [e for e in mine if e.get("kind") == "run-start"]
     n_files = sum(len(v) for v in plan.values())
+    plan_sha256 = plan_sha256_of(plan)
     base = {"run_id": run_id, "mode": mode, "code_path": CODE_REL, "code_sha256": code_sha256,
             "filelist_sha256": filelist_sha256, "method_access_seq": method_access_seq,
             "official": mode == "official"}
@@ -1906,6 +1916,9 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
         for k in ("code_sha256", "filelist_sha256", "method_access_seq", "mode"):
             if s0.get(k) != base[k]:
                 raise GkgError("再開しようとした run の %s が、最初の run-start と違う" % k)
+        if s0.get("plan_sha256") != plan_sha256:
+            raise GkgError("再開しようとした run の取得の計画（plan_sha256）が、最初の run-start と違う"
+                           "（5.5章。T-071）")
         if mode == "official":
             current = read_bytes_nofollow(paths["manifest"])
             check_committed_start(current, committed_manifest)
@@ -1936,12 +1949,14 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
         check_exclusion_record(root, exclusion_rule, None)
         run_ref = _seal_run_start(start_hook, mode, run_id,
                                   sorted(plan) if mode == "trial" else None,
-                                  days=len(plan), files_selected=n_files)
+                                  days=len(plan), files_selected=n_files,
+                                  plan_sha256=plan_sha256)
         write_volume_mark(paths, run_id, mode)
         size, sha = _log_state(log_path)
         untrusted = []
         head = dict(base, kind="run-start", started_at=_iso(now()), files_selected=n_files,
-                    days=len(plan), block_start=METHOD_BLOCK[0], block_end=METHOD_BLOCK[1],
+                    days=len(plan), plan_sha256=plan_sha256,
+                    block_start=METHOD_BLOCK[0], block_end=METHOD_BLOCK[1],
                     store_location=paths["location"],
                     fetch_log_size=size, fetch_log_sha256=sha,
                     exclusion_rule_seq=exclusion_rule["seq"],
@@ -2018,17 +2033,28 @@ def check_sealed_run(root, s0, mode, run_id):
                        "（リードに報告）" % (seq, mode, run_id))
 
 
-def _seal_run_start(start_hook, mode, run_id, trial_days, *, days, files_selected):
+def plan_sha256_of(plan):
+    """5.5章（T-071）：取得の計画 plan（select_files の出力。試しの run は trial_plan のあと）の
+    plan_sha256。封印係の ledger.gkg_plan_sha256 で求める（封印係の verify が作り直す値と同じ式）。"""
+    ledger = _load_sibling("themes")._import_ledger()
+    try:
+        return ledger.gkg_plan_sha256(plan)
+    except ledger.LedgerError as e:
+        raise GkgError("取得の計画の plan_sha256 を求められない：%s" % e) from None
+
+
+def _seal_run_start(start_hook, mode, run_id, trial_days, *, days, files_selected, plan_sha256):
     """5.5章（T-032）：封印の記録に gkg-run-start を書く。書けなければ何も書かずに止まる。
 
     days・files_selected（T-069）：取得の計画。run-start の行に書く days（len(plan)）と
-    files_selected（n_files）と同じ値を、データを受け取る前に封印の記録に入れる（封印係の T-068）。"""
+    files_selected（n_files）と同じ値を、データを受け取る前に封印の記録に入れる（封印係の T-068）。
+    plan_sha256（T-071）：run-start の行に書く plan_sha256 と同じ値（封印係の T-070）。"""
     if start_hook is None:
         raise GkgError("封印の記録（gkg-run-start）に書く仕組みを受け取っていない（入口のスクリプト"
                        "から実行する）")
     try:
         ref = start_hook(mode=mode, run_id=run_id, trial_days=trial_days, days=days,
-                         files_selected=files_selected)
+                         files_selected=files_selected, plan_sha256=plan_sha256)
     except (GkgError, RunInterrupted):
         raise
     except Exception as e:

@@ -7,8 +7,8 @@
     2. sys.addaudithook で、filelist_child.make_hook の見張りを入れる。許すイベントの一覧
        （filelist_child.ALLOWED_EVENTS）に無いイベントは止め、書き込みの open は、親が渡した
        パス（allowed：日の集計・取得の記録・マニフェスト）のほかはすべて止める。
-       **gkg.py（と、それが読み込む filelist.py・privacy_scan.py）を読み込むのは、見張りを
-       入れた後である。**
+       **gkg.py（と、それが読み込む filelist.py・privacy_scan.py・themes.py と封印係の ledger.py）を
+       読み込むのは、見張りを入れた後である。**
     3. mode が "run" なら gkg.run_gkg を、"aggregate" なら gkg.aggregate_zip を1回動かす
        （aggregate のときは allowed は空で、書き込みは一つも許さない）。
     4. 結果を report_fd に os.write で書く。止めた記録は、止めたその時に violation_fd に書く
@@ -27,6 +27,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FAKE_RUN_LINE = b'{"kind":"gkg-run-start","seq":21}'
 FAKE_RUN_SHA = hashlib.sha256(FAKE_RUN_LINE).hexdigest()
 sys.path.insert(0, HERE)
+# T-071：gkg.run_gkg は取得の計画の plan_sha256 を封印係の ledger.gkg_plan_sha256 で求める（themes.py の
+# _import_ledger で src/sealer の ledger を読む）。gkg.py の写し（source_mutation）を一時的なフォルダから
+# 読むときも、本物の src/sealer の ledger を読めるようにする（読むだけ）
+sys.path.insert(1, os.path.join(os.path.dirname(os.path.dirname(HERE)), "src", "sealer"))
 
 import filelist_child as fc  # noqa: E402  （見張りの部品。変異のモジュールもここで読み込む）
 

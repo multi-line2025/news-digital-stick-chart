@@ -393,6 +393,56 @@ class E2ECase(taf.CopyCase):
                 "store": taf.tree_files(self.gkg_store),
                 "trial": taf.tree_files(self.trial_store)}
 
+    def filelist_body(self):
+        """写しの封印済みのファイル一覧の本体（仮のホームの下。合成の一覧）。"""
+        fl = filelist_entry(self.project)
+        with open(os.path.join(self.home, *gkg.FILELIST_STORE_PARTS, fl["file_name"]), "rb") as f:
+            return f.read()
+
+    def assert_plan_sha256(self, mode):
+        """T-071：mode の run の run-start の行と gkg-run-start の記録の plan_sha256 が、封印済みのファイル
+        一覧から ledger.gkg_plan_sha256 で作り直した値と同じ（試しの run は trial_plan のあと）。"""
+        name = gkg.MANIFEST_NAME if mode == "official" else gkg.TRIAL_MANIFEST_NAME
+        starts = [e for e in gkg.read_jsonl(os.path.join(self.project, "data", "manifest", name))
+                  if e["kind"] == "run-start"]
+        plan = gkg.select_files(gkg.parse_filelist(self.filelist_body()))
+        if mode == "trial":
+            plan = gkg.trial_plan(plan)
+        want = ledger.gkg_plan_sha256(plan)
+        docs = {d["run_id"]: d for _r, d in gkg_run_docs(self.project) if d["mode"] == mode}
+        self.assertTrue(starts)
+        for e in starts:
+            self.assertEqual(e["plan_sha256"], want)
+            self.assertEqual(docs[e["run_id"]]["plan_sha256"], want)
+            self.assertEqual((e["days"], e["files_selected"]),
+                             (len(plan), sum(len(v) for v in plan.values())))
+        return want
+
+    def verify_plans(self, filelists):
+        """T-071：封印係の verify の計画の作り直し（verify.py gkg-runs --filelist と同じ _check_plan_body）を、
+        写しの上で流す。写しの sealed/ の .ots は本物の Bitcoin のヘッダと合わないので、verify.py の全体は
+        通さず、記録とマニフェストの照合と計画の作り直しだけを行う。返り値: (照らさなかったものの一覧, 出力)。"""
+        verify = importlib.import_module("verify")
+        data = ledger.read_ledger(os.path.join(self.project, "sealed", "ledger.jsonl"))
+        records = ledger.verify_chain(data)
+
+        def file_json(r, role):
+            return ledger.read_target_json(self.project, r, role)
+        st = types.SimpleNamespace(root=self.project, unchecked=[])
+        out = io.StringIO()
+        n = 0
+        with mock.patch("sys.stdout", out):
+            for r in records:
+                if r["kind"] != ledger.GKG_RUN_KIND:
+                    continue
+                d = file_json(r, ledger.GKG_RUN_KIND)
+                with open(os.path.join(self.project, ledger.GKG_MANIFESTS[d["mode"]]), "rb") as f:
+                    runs = ledger.check_gkg_manifest_rows(records, file_json, d["mode"], f.read())
+                verify._check_plan_body(st, r, d, runs.get(d["run_id"]), filelists)
+                n += 1
+        self.assertGreater(n, 0)
+        return st.unchecked, out.getvalue()
+
     def refuse(self, pattern, mode="official", **kw):
         before = self.gsnapshot()
         s = self.gseams(**kw)
@@ -434,6 +484,8 @@ class TestEndToEnd(E2ECase):
         # T-069：取得の計画（days・files_selected）が、run-start の行と同じ値で記録に入る
         self.assertEqual((d["days"], d["files_selected"]), (man[0]["days"], man[0]["files_selected"]))
         self.assertEqual((d["days"], d["files_selected"]), (len(self.DAYS), len(self.zips)))
+        # T-071：plan_sha256 が、封印済みのファイル一覧から作り直した値と同じ
+        self.assertEqual(d["plan_sha256"], self.assert_plan_sha256("official"))
         with open(ENTRY, "rb") as f:
             entry_sha = hashlib.sha256(f.read()).hexdigest()
         self.assertEqual(man[0]["code_sha256"], entry_sha)
@@ -498,6 +550,9 @@ class TestEndToEnd(E2ECase):
         self.assertEqual(out["days"], len(self.DAYS))
         man = gkg.read_jsonl(os.path.join(self.project, "data", "manifest", gkg.MANIFEST_NAME))
         self.assertEqual(man[0]["trial_run_ids"], [out["run_id"]])
+        # T-071：試しの run も正式な run も、plan_sha256 が作り直した値と同じ
+        self.assert_plan_sha256("trial")
+        self.assert_plan_sha256("official")
         with self.assertRaises(Exception) as cm:
             self.acquire(self.gseams(), mode="trial")
         self.assertIn("試しの run はしない", str(cm.exception))
@@ -1102,7 +1157,7 @@ class TestOfficialResultGate(E2ECase):
         never = mock.Mock(side_effect=AssertionError("関門より前に、マニフェストを読んではいけない"))
         with mock.patch.object(gkg, "read_bytes_nofollow", never), \
                 mock.patch.object(gkg, "read_jsonl", never), \
-                mock.patch.object(gkg, "day_records_of", never):
+                mock.patch.object(gkg, "_day_records_of", never):
             with self.assertRaises(gkg.GkgError) as cm:
                 self.entry()
         self.assertRegex(str(cm.exception), pattern)
@@ -1125,7 +1180,7 @@ class TestOfficialResultGate(E2ECase):
         with mock.patch.object(ledger, "require_gkg_run_result", gate):
             days = self.entry()
         self.assertEqual(calls[-1], ("official", out["run_id"]))
-        self.assertEqual(days, gkg.day_records_of(self.manifest_rows()))
+        self.assertEqual(days, gkg._day_records_of(self.manifest_rows()))
         self.assertEqual(len(days), len(self.DAYS))
 
     def test_stops_on_rewrite_before_or_after_gate(self):
@@ -1172,8 +1227,73 @@ class TestOfficialResultGate(E2ECase):
         self.assertEqual(list(inspect.signature(gkg.official_day_records).parameters), [])
         src = inspect.getsource(gkg.official_day_records).split('"""', 2)[2]
         gate_at = src.index("ledger.require_gkg_run_result(\"official\", run_id)")
-        for later in ("read_bytes_nofollow(", "manifest_prefix(", "day_records_of("):
+        for later in ("read_bytes_nofollow(", "manifest_prefix(", "_day_records_of("):
             self.assertLess(gate_at, src.index(later), later)
+
+
+class TestPlanSha256Verify(E2ECase):
+    """T-071：書いた plan_sha256 を、封印係の verify の作り直し（--filelist）で照らすと通る。合成の一覧で流す。"""
+
+    # 試しの run の3日のほかに1日（2015-03-05）を一覧に入れる。試しの run の計画（trial_plan のあと）と
+    # 正式な run の計画（select_files の全体）が違う形にして、どちらの計画の sha256 を書いたかを見分ける
+    DAYS = E2ECase.DAYS + ("20150305",)
+
+    def run_both(self):
+        self.add_method_access()
+        self.acquire(self.gseams(), mode="trial")
+        self.commit_manifest("試しの run")
+        self.acquire_official(self.gseams())
+        self.commit_manifest("正式な run")
+
+    def test_verify_rebuild_passes(self):
+        self.run_both()
+        body = self.filelist_body()
+        unchecked, out = self.verify_plans({ledger.sha256_hex(body): body})
+        self.assertEqual(unchecked, [])
+        trial = self.assert_plan_sha256("trial")
+        self.assertNotEqual(trial, self.assert_plan_sha256("official"))
+        self.assertEqual([d["days"] for _r, d in gkg_run_docs(self.project)], [3, 4])
+        self.assertEqual(out.count("plan_sha256 と同じで、day の行の日付・files_listed・failed_files はその計画と合う"),
+                         2, out)
+        self.assertNotIn("照らさなかった", out)
+
+    def test_verify_without_filelist_says_unchecked(self):
+        """対照：一覧の本体を渡さなければ、照らさなかったと出る（黙って通さない）。"""
+        self.run_both()
+        unchecked, _out = self.verify_plans({})
+        self.assertEqual(len(unchecked), 2)
+
+    def test_verify_catches_other_plan(self):
+        """対照：記録の plan_sha256 を作り直した値と違う値にすると、verify の作り直しで止まる。"""
+        self.run_both()
+        body = self.filelist_body()
+        real = ledger.read_target_json
+
+        def forged(project, r, role):
+            d = real(project, r, role)
+            if role == ledger.GKG_RUN_KIND and d.get("mode") == "official":
+                d = dict(d, plan_sha256="0" * 64)
+            return d
+        with mock.patch.object(ledger, "read_target_json", forged):
+            with self.assertRaisesRegex(ledger.LedgerError, "plan_sha256"):
+                self.verify_plans({ledger.sha256_hex(body): body})
+
+    def test_hook_refuses_plan_other_than_gate(self):
+        """hook は、関門で照らした一覧から作り直した計画が、gkg.run_gkg から受け取った計画と違えば、記録を
+        書かずに止まる（作り直しの結果だけを、違う値に差し替えて確かめる）。"""
+        self.add_method_access()
+        before = self.gsnapshot()
+        for mode in ("trial", "official"):
+            with self.subTest(mode=mode):
+                real = ag.plan_of_gate
+                with mock.patch.object(ag, "plan_of_gate",
+                                       lambda gate, m: real(gate, m)[:2] + ("0" * 64,)):
+                    with self.assertRaises(Exception) as cm:
+                        self.acquire(self.gseams(), mode=mode)
+                self.assertIn("関門で照らしたファイル一覧から作り直した計画と違う", str(cm.exception))
+                self.assertEqual(self.gtransport.calls, [])
+                self.assertEqual(gkg_run_docs(self.project), [])
+                self.assertEqual(self.gsnapshot(), before)
 
 
 # --- T-069：封印係が ledger.GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL を True にしたあとも通ること ---------
@@ -1205,7 +1325,7 @@ class TestPlanRequiredSwitch(E2ECase):
         self.add_method_access()
         real = ag.seal_gkg_run.start
 
-        def without_plan(*a, days=None, files_selected=None, **k):
+        def without_plan(*a, days=None, files_selected=None, plan_sha256=None, **k):
             return real(*a, **k)
         with mock.patch.object(ag.seal_gkg_run, "start", without_plan):
             with self.assertRaises(Exception) as cm:
@@ -1214,9 +1334,23 @@ class TestPlanRequiredSwitch(E2ECase):
         self.assertEqual(self.gtransport.calls, [])
         self.assertEqual(gkg_run_docs(self.project), [])
 
+    def test_official_with_counts_but_without_plan_sha256_is_refused(self):
+        """T-071：days・files_selected だけを渡す hook（T-069 の形）でも、正式な run は止まる。"""
+        self.add_method_access()
+        real = ag.seal_gkg_run.start
+
+        def counts_only(*a, plan_sha256=None, **k):
+            return real(*a, **k)
+        with mock.patch.object(ag.seal_gkg_run, "start", counts_only):
+            with self.assertRaises(Exception) as cm:
+                self.acquire(self.gseams())
+        self.assertIn("plan_sha256", str(cm.exception))
+        self.assertEqual(self.gtransport.calls, [])
+        self.assertEqual(gkg_run_docs(self.project), [])
+
 
 for _base in (TestEndToEnd, TestEndToEndOnFat32, TestSealGkgRun, TestT045, TestSealedRunCheck,
-              TestOfficialResultGate):
+              TestOfficialResultGate, TestPlanSha256Verify):
     _name = _base.__name__ + "PlanRequired"
     globals()[_name] = type(_name, (_PlanRequired, _base),
                             {"__doc__": "%s を、GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL = True で流す（T-069）。"

@@ -124,10 +124,10 @@ THEMES_REL = "src/collector/themes.py"
 DISKUTIL = "/usr/sbin/diskutil"
 DISKUTIL_TIMEOUT_SECONDS = 60
 
-# 取得のコードのうち、このファイル以外の4つの sha256。変えたらここも直してコミットする
-# （テストが照合する）。
+# 取得のコードのうち、このファイル以外の5つ（gkg.py・filelist.py・privacy_scan.py・codegate.py・
+# themes.py）の sha256。変えたらここも直してコミットする（テストが照合する）。
 PINNED_SHA256 = (
-    (GKG_REL, "4014be707879d7b243a0c0e160417e4e4207e6bc5b2200bd88ba637625d13014"),
+    (GKG_REL, "d2b85960d23db8ca96ef01fd8de19b5254cd026753e9ef774f6e5d6efe594dc2"),
     (FILELIST_REL, "afd7a9dd47bc052a691e1a4cd558b211f4d72cf1ce1f451fa9f3016540cd04a7"),
     (PRIVACY_SCAN_REL, "68d8836d56489ca5df9f2f55e24a2642ebf3aa14afdc2e0120577c7b6c6cb887"),
     (CODEGATE_REL, "d422be41dc59c4be50689a2426453db965be506a9981770ab3eb7557ed078769"),
@@ -408,6 +408,17 @@ def record_ref(rec):
     return {"seq": rec["seq"], "record_sha256": ledger.sha256_hex(ledger.canonical_line(rec))}
 
 
+def plan_of_gate(gate, mode):
+    """T-071：関門で封印済みと照らしたファイル一覧の行から作った取得の計画の
+    (日の数, ファイルの数, plan_sha256)。計画は gkg.select_files の出力（試しの run は gkg.trial_plan の
+    あと）、plan_sha256 は ledger.gkg_plan_sha256(計画)。"""
+    gkg = gate["gkg"]
+    plan = gkg.select_files(gate["filelist_rows"])
+    if mode == "trial":
+        plan = gkg.trial_plan(plan)
+    return len(plan), sum(len(v) for v in plan.values()), ledger.gkg_plan_sha256(plan)
+
+
 def make_start_hook(s, gate, exclusion_rule):
     """手順3a（T-032・T-045）：gkg.run_gkg が run の最初の実行で呼ぶ。封印係の seal_gkg_run.start で
     gkg-run-start を封印の記録に書き、その記録の {"seq", "record_sha256"} を返す。
@@ -419,13 +430,24 @@ def make_start_hook(s, gate, exclusion_rule):
     （要求を1件も送らない）。
     T-069：取得の計画（days・files_selected。gkg.py が run-start の行に書く値と同じ）も、試しの run・
     正式な run のどちらでも start に渡す（封印係の T-068）。
+    T-071：計画の一覧の sha256（plan_sha256）も、試しの run・正式な run のどちらでも start に渡す
+    （封印係の T-070）。計画は、関門で封印済みと照らしたファイル一覧の行（gate["filelist_rows"]）から
+    gkg.select_files で作ったもの（試しの run は gkg.trial_plan のあと）。plan_sha256 は
+    ledger.gkg_plan_sha256(計画) で、gkg.run_gkg が run-start の行に書く値と同じ。計画の本体は
+    どこにも書かない。hook は、関門で照らした一覧から計画を自分でも作り直し、gkg.run_gkg から
+    受け取った days・files_selected・plan_sha256 と同じことを確かめてから start を呼ぶ（違えば
+    GateError。何も書かない）。
     """
-    def hook(*, mode, run_id, trial_days, days, files_selected):
+    def hook(*, mode, run_id, trial_days, days, files_selected, plan_sha256):
+        want = plan_of_gate(gate, mode)
+        if (days, files_selected, plan_sha256) != want:
+            raise GateError("取得の計画（days・files_selected・plan_sha256）が、関門で照らしたファイル"
+                            "一覧から作り直した計画と違う")
         rec, _rel, _ots = seal_gkg_run.start(
             s.project, mode, CODE_REL, run_id, gate["filelist_sha256"],
             gate["method_access_seq"], trial_days, exclusion_rule["seq"],
             exclusion_rule["record_sha256"], s.now(), s.ots_cmd, drand_fetch=s.drand_fetch,
-            runner=s.ots_runner, days=days, files_selected=files_selected)
+            runner=s.ots_runner, days=days, files_selected=files_selected, plan_sha256=plan_sha256)
         return record_ref(rec)
     return hook
 

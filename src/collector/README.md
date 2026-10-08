@@ -168,13 +168,15 @@ mkdir "/Volumes/LACIE SHARE/news-stick-data/gkg-method"
 - **正式な run の判定には数えない。** 正式な run のマニフェスト（`gdelt-gkg-method.jsonl`）には何も書かない。正式な run の run-start がある場合は、試しの run は始まらない（試しの run は正式な run の前にだけ）。
 - 正式な run は、試しの run の3日も含めて全部の日を取り直す。試しの run の集計は、正式な run の結果に使わない。
 - 終了コード 0：3日が終わった。1：関門。3：止まる条件（同じコマンドで再開）。
-- 測るもの（どれも件数と大きさだけ。テーマごとの報道量などの中身は見ない）
-  - 日の集計の大きさ：`stat -f '%z %N' "/Volumes/LACIE SHARE/news-stick-data/gkg-trial/"gkg-trial-*-day-*`（バイト数と名前だけが出る。`ls -l` は所有者のユーザー名も出すので使わない）。3日の平均 × 2,115 日で全体を見積もる
+- 測るもの（どれも件数と大きさだけ。テーマごとの報道量などの中身は見ない）。**順序：日の集計を開かずに測れるもの（大きさ・メモリ）だけを先に測り、マニフェストをコミットして `gkg-run-result` を封印・コミットしてから、日の集計を開く測定（組の種類の数）をする**（T-071。T-069 の監査 軽-2）
+  - 封印の前（日の集計を開かない）
+    - 日の集計の大きさ：`stat -f '%z %N' "/Volumes/LACIE SHARE/news-stick-data/gkg-trial/"gkg-trial-*-day-*`（バイト数と名前だけが出る。`ls -l` は所有者のユーザー名も出すので使わない）。3日の平均 × 2,115 日で全体を見積もる
+    - 最大のメモリ：`/usr/bin/time -l` の maximum resident set size
+  - 封印のあと（下の `gkg-run-result` を書いてコミットしたあと）
+    - 1日の組の種類：`gzip -dc <日の集計> | grep -c '^P1'`（P2 も同じ）。`MAX_PAIR_KEYS`（4千万）との比。日の集計を展開して読むので、封印より前にはしない（出るのは行の数だけ）
   - 記録（reviews/ や報告）に写すのは、大きさ・メモリ・組の種類の**数字だけ**とする。パス・ユーザー名・コマンドの出力そのものは写さない
-  - 最大のメモリ：`/usr/bin/time -l` の maximum resident set size
-  - 1日の組の種類：`gzip -dc <日の集計> | grep -c '^P1'`（P2 も同じ）。`MAX_PAIR_KEYS`（4千万）との比
 - 終わったら、`data/manifest/gdelt-gkg-trial.jsonl` をコミットする（前と後に privacy_scan。6.5 の手順2と同じ）。試しの run のファイルは消さない。
-- **マニフェストをコミットしたら、すぐに（日の集計の中身を見る前に）、`seal_gkg_result.py seal --mode trial --run-id <run_id>` で、マニフェストの時刻証明（`gkg-run-result`）を封印の記録に書く**（T-069。封印係の T-066。条件は、マニフェストがコミット済みで、その run の run-complete の行があること）。run_id は、終了のときに標準出力に出る16桁（マニフェストの run-start の行の `run_id` と同じ）。書いた記録・中身・`.ots` をコミットし、**記録のハッシュを、記録の時刻から24時間以内に X に投稿する**（CLAUDE.md の「公開前の検査」。投稿はリードが行い、収集係は X に接続しない）。ots のカレンダーに通信する（drand は使わない）。
+- **マニフェストをコミットしたら、すぐに（日の集計の中身を見る前に。上の「封印のあと」の測定もまだしない）、`seal_gkg_result.py seal --mode trial --run-id <run_id>` で、マニフェストの時刻証明（`gkg-run-result`）を封印の記録に書く**（T-069。封印係の T-066。条件は、マニフェストがコミット済みで、その run の run-complete の行があること）。run_id は、終了のときに標準出力に出る16桁（マニフェストの run-start の行の `run_id` と同じ）。書いた記録・中身・`.ots` をコミットし、**記録のハッシュを、記録の時刻から24時間以内に X に投稿する**（CLAUDE.md の「公開前の検査」。投稿はリードが行い、収集係は X に接続しない）。ots のカレンダーに通信する（drand は使わない）。
    ```sh
    PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_gkg_result.py seal --mode trial --run-id <run_id>
    python3 -B src/collector/privacy_scan.py
@@ -193,6 +195,18 @@ mkdir "/Volumes/LACIE SHARE/news-stick-data/gkg-method"
 3. 変えるかどうかはリードとオーナーが決め、別のタスクで、正式な run の run-start より前に行う。理由と、試しの run の測定の数字をタスクの記録（reviews/）に残す。
 4. コードを変えると run_id が変わる。測り直す場合は、新しい run_id の試しの run を同じ3日で行う。前の試しの run のマニフェストの行とファイルは残す（消さない）。
 5. 正式な run の run-start のあとは、試しの run はできない（コードで止まる）。正式な run の途中で形を変える場合は、6.7 の「次の手」のとおり、続け方をオーナーが決める。
+
+### 6.4.0 既に済んだ試しの run（seq 8、run_id e15ed53595c70035）の扱い（T-071。T-069 の監査 軽-2）
+
+- この試しの run は、2026-10-08 に、`gkg-run-result` の仕組み（封印係の T-066、収集係の手順は T-069）ができる前に完了した。封印の記録の `gkg-run-start` は seq 8（recorded_at 2026-10-08T04:32:35Z）。マニフェスト `data/manifest/gdelt-gkg-trial.jsonl`（5行）と seq 8 は、コミット 8b9dafd に入っている（reviews/T-063.md）。
+- **この run の `gkg-run-result` は、まだ無い。これから書く**（上の 6.4 の `seal_gkg_result.py seal --mode trial --run-id e15ed53595c70035`）。reviews/T-069.md の判定では、統計係が `counting.py` で試しの run のデータを読むより前に書く。
+- seq 8 の記録には、取得の計画（`days`・`files_selected`・`plan_sha256`）が無い。計画を記録に入れる形（封印係の T-068・T-070）より前に書いたため。試しの run には計画は必須でない。
+- **`gkg-run-result` より前にしたこと**（reviews/T-063.md に書かれている事実だけ）
+  - 取得の結果：3日とも 96件中 96件が成功、失敗0。送った要求 288件（取得の記録 fetch-log の attempt と ok の行が、どちらも 288行）。所要 752秒。最大のメモリは約 2.57 GB。
+  - 日の集計の大きさ：約 18.7〜19.3 MB／日。2,115日の全体の見積もりは約 40 GB。
+  - 監査係が、日の集計3つと fetch-log の sha256 をマニフェストと照らし、保存先のフォルダに決まった名前のほかに無いこと、gkg-method が空であることを確かめた。さらに、日の集計の中身を機械的に調べ、`OUTPUT_ALPHABET` の外の文字・`@`・http・www・座標の形の小数が0件であること、行の種類と欄の数が決まった形であることを確かめた。
+  - reviews/T-063.md には、組の種類の数（`grep -c '^P1'`）を測ったという記載も、テーマごとの数を見たという記載も無い。
+- **限界**：この run の `gkg-run-result` は、上の監査（日の集計の中身を機械的に調べたもの）のあとに書く。そのため、`gkg-run-result` の時刻は「マニフェストがその時点でこの形だった」ことを示すが、「封印より前に日の集計の中身を見ていない」ことは示さない。マニフェストの5行は 8b9dafd でコミットしたが、そのコミットに時刻証明は付いていない。seq 8 の記録が縛るのは run の入力の値（run-start の行と照らす値）だけで、day の行と run-complete の行は縛らない。day の行と run-complete の行を時刻証明で縛るのは、これから書く `gkg-run-result` が初めてである。
 
 ### 6.4.1 試しの run と正式な run の区別（T-021 の差し戻し1回目・2回目）
 
@@ -302,7 +316,7 @@ env -u GIT_DIR -u GIT_WORK_TREE -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 \
 
 #### 6.5.5 run の開始の封印の記録（gkg-run-start。T-032）
 
-- 試しの run と正式な run のどちらも、run の最初の実行（マニフェストに run-start の行を書く実行）で、run-start の行を書く前・印のファイルを書く前・GKG に要求を送る前に、封印係の `seal_gkg_run.start`（`src/sealer/seal_gkg_run.py`。`docs/verify/periods-seal.md` 12章）で、封印の記録 `sealed/ledger.jsonl` に `gkg-run-start` を1件書く。中身は、mode・run_id・取得のコードのパスと sha256・ファイル一覧の sha256・method-access の seq・試しの run の日（正式な run は null）・除外の規則の記録（`stats-order1`）の seq と sha256・取得の計画（`days`・`files_selected`。T-069。6.5.6）・drand・ledger_head だけ（保存先・ユーザー名・VolumeUUID は入れない）。
+- 試しの run と正式な run のどちらも、run の最初の実行（マニフェストに run-start の行を書く実行）で、run-start の行を書く前・印のファイルを書く前・GKG に要求を送る前に、封印係の `seal_gkg_run.start`（`src/sealer/seal_gkg_run.py`。`docs/verify/periods-seal.md` 12章）で、封印の記録 `sealed/ledger.jsonl` に `gkg-run-start` を1件書く。中身は、mode・run_id・取得のコードのパスと sha256・ファイル一覧の sha256・method-access の seq・試しの run の日（正式な run は null）・除外の規則の記録（`stats-order1`）の seq と sha256・取得の計画（`days`・`files_selected`。T-069。`plan_sha256`。T-071。6.5.6）・drand・ledger_head だけ（保存先・ユーザー名・VolumeUUID は入れない）。
 - 書くときに、drand（`api.drand.sh` ほか）と OpenTimestamps のカレンダーに通信する（3章の表と同じ宛先）。書けなければ（封印係の関門で止まった・通信の失敗など）、マニフェスト・印のファイル・取得の記録のどれも書かずに止まり、GKG への要求は1件も送らない。
 - 同じ run の再開と、正式な run の2回目の実行（1回目は run-start を書いて止まる）では書かない。記録を書いたあと run-start の行を書く前に止まった場合は、次の実行で、同じ mode・run_id の記録を新しく書かずに使う。使い回すかどうかの判断と照合は、封印係の `seal_gkg_run.start` が行う。入力がすべて同じ・run-start の行がまだ無い・試しの run なら正式な run の記録がまだ無い、は `start` の使い回しの照合（`_reuse`）が確かめる。すべての記録に `.ots` があることは、`start` の最初の `seal_records.load_checked`（`check_anchors`）が確かめる（実際には、それより前に、このスクリプトの除外の規則と method-access の関門の `check_anchors` が、`.ots` の無い記録で止める。T-057）。このスクリプトは、自分では使い回さず、常に `seal_gkg_run.start` を呼ぶ（T-045）。条件に合わなければ止まり、要求は送らない。ots の stamp が失敗したときは、封印係の手順（`stamp.py stamp --seq N` で `.ots` を作る）のあとで、同じコマンドでやり直す。
 - **再開のときの照合**（T-032 の差し戻し1回目 中-1）：run-start の行が既にあるとき（再開・正式な run の2回目の実行）は、その行の `gkg_run_seq` の記録を封印の記録から読み、kind が `gkg-run-start` で、行の正規の形の sha256 が `gkg_run_record_sha256` と同じで、中身の mode と run_id がこの run と同じことを確かめる。無い・合わなければ、要求を送らず、何も書かずに止まる。手で書いた run-start の行を置いて、記録を書かずに試しの run を走らせる道は、ここで止まる。
@@ -322,11 +336,15 @@ env -u GIT_DIR -u GIT_WORK_TREE -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 \
 #### 6.5.6 取得の計画と、結果を使う入口の関門（T-069）
 
 - **取得の計画**：`gkg-run-start` の記録に、取得する日の数（`days`）とファイルの数（`files_selected`）を入れる（封印係の T-068）。値は、マニフェストの run-start の行に書く `days`（`len(plan)`）と `files_selected` と同じで、`gkg.run_gkg` が `start_hook(..., days=, files_selected=)` で渡し、`acquire_gkg.make_start_hook` が `seal_gkg_run.start(..., days=, files_selected=)` に渡す。試しの run も正式な run も渡す。データを1本も受け取る前に記録に入るので、あとから日やファイルを減らした（選び直した）run は、記録と行の食い違いとして見える（照合は封印係の `verify.py`）。封印係が `ledger.GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL` を True にすると、計画の無い正式な run の記録は書けなくなる（テスト `TestPlanRequiredSwitch` と、E2E のテストを True で流す `*PlanRequired`）。
+- **計画の一覧の sha256（`plan_sha256`。T-071。封印係の T-070）**：計画は、関門で封印済みと照らしたファイル一覧（`filelist_sha256`）の行から `gkg.select_files` で作ったもの（試しの run は `gkg.trial_plan` のあと）。`plan_sha256 = ledger.gkg_plan_sha256(計画)`（計画の正規の形の sha256。封印係の `src/sealer/ledger.py`）。
+  - `gkg.run_gkg` が計画から `plan_sha256` を求め、`start_hook(..., days=len(計画), files_selected=ファイルの数, plan_sha256=)` で渡す。`acquire_gkg.make_start_hook` は、関門で照らした一覧から計画を自分でも作り直し（`acquire_gkg.plan_of_gate`）、受け取った3つの値と同じことを確かめてから、`seal_gkg_run.start(..., days=, files_selected=, plan_sha256=)` を呼ぶ。違えば何も書かずに止まる。試しの run も同じ。
+  - マニフェストの run-start の行にも、同じ `plan_sha256` を書く。再開のたびに、作り直した計画の `plan_sha256` が run-start の行と同じことを確かめる（違えば要求を送らずに止まる）。
+  - **計画の本体のファイルは、どこにも書かない**（Git にも保存先にも）。第三者は、封印済みのファイル一覧の本体（4章の手順で作り直したもの）を `verify.py gkg-runs --filelist <本体>` に渡す。verify は、記録の `code_sha256` → その版の `acquire_gkg.py` の `PINNED_SHA256` が固定する版の `select_files`（試しの run は `trial_plan` も）で計画を作り直し、`plan_sha256` と照らす（封印係の `docs/verify/`）。
 - **結果を使う入口**：正式な run の結果を使うコードは、`gkg.official_day_records()`（引数なし）を通す。手法を作る期間の欠けた日の一覧と、統計係に渡す日の集計（day の行の `file_name`・`sha256`）は、ここで返った day の行だけから作る。
   1. run_id は、封印の記録の official の `gkg-run-start` の記録から取る（この時点では、マニフェストも日の集計も読まない）。official の記録が1件でなければ止まる。
   2. 最初に、封印係の関門 `ledger.require_gkg_run_result("official", run_id)` を呼ぶ。`gkg-run-result` が無い・マニフェストと合わない（封印のあとに書き換えた・短くした）ときは、`GkgError` で止まる（元の `GkgRunResultRequired` は `__cause__` に残る）。
   3. 読むのは、`gkg-run-result` が封印したマニフェストの先頭 `manifest_lines` 行だけ。関門のあとで読み直したバイト列の先頭の sha256 が、記録の `manifest_sha256` と同じことを確かめる。
-  - 関門を通さない部品 `gkg.day_records_of(manifest)` は、run の途中の検査とテストのためだけに使う。
+  - 関門を通さない部品 `gkg._day_records_of(manifest)`（T-071 で名前を `_` で始まる形にした）は、`official_day_records` の中だけで使う。`src` の下で呼ぶところがその1か所だけであることを、`test_gkg.py` の `TestDayRecordsOfCallSites` が確かめる（文字列から名前を組み立てて呼ぶ形は見つけない）。
   - 統計係の `src/stats/counting.py` は、日の集計を自分で読む（収集係の範囲の外）。この関門をそちらから呼ぶかどうかは、統計係のタスクで決める。
 
 ### 6.6 本番の規模とメモリ
@@ -376,6 +394,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/collector -v
 - T-032 差し戻し1回目：`test_acquire_gkg.py` の `TestSealedRunCheck`（手で書いた run-start の行、seq の欠け、sha256 の食い違い、別の run_id・別の kind の記録を指す行で、再開が要求0件で止まること）、`test_gkg.py` の `TestCheckSealedRun`。
 - T-032：`test_gkg.py` の `TestT032`（start_hook の呼び方、書けなければ要求0件、vocab の分け方、日の集計のファイルのバイト列の検査、T-035 の軽-1）。`test_acquire_gkg.py` の `TestSealGkgRun`（一時の写しの封印の記録に、試しの run 2回で2件、正式な run で1件。書けなければ要求0件）。
 - T-069：`test_gkg.py` の `TestT032.test_hook_receives_plan_equal_to_run_start_row`（start_hook に渡す計画が run-start の行と同じ）、`test_acquire_gkg.py` の `test_full_run`・`test_two_trial_runs_leave_two_records`（記録の `days`・`files_selected`）、`TestOfficialResultGate`（`gkg-run-result` の無い run で読まずに止まり、ある run で通る。封印のあとの書き換え・関門と読み取りのあいだの書き換えで止まる）、`TestPlanRequiredSwitch` と `*PlanRequired`（`GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL` を True にした E2E）。
+- T-071：`test_gkg.py` の `TestT032.test_hook_receives_plan_equal_to_run_start_row`（start_hook に渡す `plan_sha256` が run-start の行と同じで、`ledger.gkg_plan_sha256(select_files(一覧))`（試しの run は `trial_plan` のあと）と同じ）・`test_trial_plan_sha256_is_after_trial_plan`（一覧に試しの run の日の外の日があるとき、試しの run の `plan_sha256` は `trial_plan` のあとの計画のもの）・`test_resume_with_other_plan_stops`（再開のときに計画が違えば要求0件で止まる）・`TestDayRecordsOfCallSites`。`test_acquire_gkg.py` の `test_full_run`・`test_trial_run_then_official`（記録と行の `plan_sha256` が、封印済みの合成の一覧から作り直した値と同じ）、`TestPlanSha256Verify`（一覧に試しの run の日の外の1日を足し、試しの run と正式な run の計画が違う形で流す。封印係の verify の作り直し `_check_plan_body` を、合成の一覧を渡して流すと通る。渡さなければ「照らさなかった」。記録の値を変えると止まる。hook が関門の一覧から作り直した計画と違えば記録を書かずに止まる）、`TestPlanRequiredSwitch.test_official_with_counts_but_without_plan_sha256_is_refused`。`*PlanRequired` に `TestPlanSha256VerifyPlanRequired` を足した。
 - T-064：プロジェクトの写し（`test_acquire_filelist.pristine_copy`）では、`data/manifest` も手順3より前の形（`.gitkeep` と空の `gdelt-filelist.jsonl` だけ）にし、試しの run（T-063）・正式な run・区分表のマニフェストなど、後から本物に足されたマニフェストを名前によらず外す。本物に試しの run の記録とマニフェストが入ったあと、写しの上のテスト（`test_acquire_gkg.py` の `TestEndToEnd`・`TestSealGkgRun`・`TestSealedRunCheck`・`TestT045`）が「この run_id の取得は完了している」で止まっていたため。`TestPristineCopy` が、写しの形と、後から足されうる記録・`.ots`・中身・マニフェストを外すことを確かめる。`TestProductionPath.test_test_seams_cannot_point_at_real_places` は、一時的なディレクトリの判定を差し替えて確かめ、プロジェクトの置き場所（一時的なディレクトリの下の clone など）に左右されない。`test_gkg.py` の `TestT057.test_make_sealed_project_refuses_inside_project_under_tmp` は、`PROJECT` を一時的なディレクトリの下に差し替えて、仮の封印の記録の道具の「このプロジェクトの中か」の判定を、本物のプロジェクトから流すときも確かめる。
 - テストは、本物の `/Volumes/LACIE SHARE` を使わない。保存先のディスクは一時的なディレクトリで置き換え、マウントの検査だけを差し替える（本物の検査は `TestVolume` と、下の FAT32 のテストで確かめる）。
 
