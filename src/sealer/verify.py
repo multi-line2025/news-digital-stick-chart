@@ -77,13 +77,11 @@ drand の照合の幅（T-008）
 """
 
 import argparse
-import io
 import json
 import os
 import re
 import subprocess
 import sys
-import tarfile
 import tempfile
 import unicodedata
 
@@ -427,33 +425,48 @@ def cmd_acquisition(st, _a):
 
 
 class Unchecked(Exception):
-    """利用者の環境の都合で計算し直せない（Python を起動できない、取り出せないなど）。止めずに
+    """利用者の環境の都合で計算し直せない（Python を起動できない。T-059 から、git archive をやめたので取り出しの理由は無い）。止めずに
     「照らさなかった」と出す。head の版のスクリプトが 0 以外で終わる・出力が読めないのは、これに
     当たらず、記録と合わないとして止める（T-056 差し戻し1回目 中-2。リードの判断）。"""
 
 
-def _child_env():
+def _child_env(pycache):
     env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON") and k != "STATS_AUDIT_LOG"}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["PYTHONPYCACHEPREFIX"] = pycache       # -I では読まれない。読ませないのは -X pycache_prefix で行う
     return env
 
 
 # head の版のスクリプトを流す時間の上限（秒）。超えたら「記録と合わない」（T-056 再提出1回目 中-A）
 RUN_TIMEOUT_SECONDS = 1800
 
+# 流すスクリプトを起こす小さなプログラム（T-059）。-I は、環境変数と利用者の site を無視するのに加えて、
+# スクリプトのフォルダを sys.path に入れない。順番1 の tagrules.py は同じフォルダの exclusion.py（記録が
+# sha256 で縛っているファイル）を読み込むので、スクリプトのフォルダだけを、ふつうにスクリプトを流したときと
+# 同じ sys.path の先頭に戻す。そのフォルダには、記録が縛っているファイルしか置かない（_BoundDir）。
+RUNNER = ("import os, runpy, sys; p = sys.argv[1]; sys.argv = sys.argv[1:]; "
+          "sys.path.insert(0, os.path.dirname(os.path.abspath(p))); runpy.run_path(p, run_name='__main__')")
+
+
+def python_command(rel, pycache):
+    """流すときの引数（T-059）。-I（環境変数・利用者の site・カレントフォルダを使わない）、-B（.pyc を書かない）、
+    -X pycache_prefix=<空の一時フォルダ>（.pyc をそこからしか読まない。-I では PYTHONPYCACHEPREFIX が読まれないため）。"""
+    return [sys.executable, "-I", "-B", "-X", "pycache_prefix=" + pycache, "-c", RUNNER, rel]
+
 
 def _run_script(cwd, rel, what):
-    """sys.executable -B rel（引数なし）を cwd で流した標準出力。
+    """python_command(rel) を cwd で流した標準出力（T-059 から -I・-B・空の pycache_prefix）。
     Python を起動できなければ Unchecked（利用者の環境の都合）。0 以外で終わる、または時間内に終わらなければ
     LedgerError（記録と合わない。記録を作る側の commit の中身で起こせることなので）。"""
-    try:
-        r = subprocess.run([sys.executable, "-B", rel], cwd=cwd, capture_output=True, env=_child_env(),
-                           timeout=RUN_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
-        raise ledger.LedgerError("%s：head の版の %s が %s 秒の上限の中に終わらなかった（記録と合わない）"
-                                 % (what, rel, RUN_TIMEOUT_SECONDS)) from None
-    except OSError as e:
-        raise Unchecked("%s：Python を起動できない（%s）" % (what, e.__class__.__name__)) from None
+    with tempfile.TemporaryDirectory() as pycache:
+        try:
+            r = subprocess.run(python_command(rel, pycache), cwd=cwd, capture_output=True,
+                               env=_child_env(pycache), timeout=RUN_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            raise ledger.LedgerError("%s：head の版の %s が %s 秒の上限の中に終わらなかった（記録と合わない）"
+                                     % (what, rel, RUN_TIMEOUT_SECONDS)) from None
+        except OSError as e:
+            raise Unchecked("%s：Python を起動できない（%s）" % (what, e.__class__.__name__)) from None
     if r.returncode != 0:
         raise ledger.LedgerError("%s：head の版の %s が終了コード %d で終わった（記録は、その版で流した出力が"
                                  "あると主張している）" % (what, rel, r.returncode))
@@ -465,139 +478,79 @@ def _rgit(repo, *args):
     return repo.git(*args, env=ledger.fixed_git_env())
 
 
-def _safe_member(m):
-    """取り出してよい tar の項目か（通常のファイルとディレクトリだけ。symlink・hardlink・デバイスなどは不可。
-    絶対パス・.. を含む名前・バックスラッシュ・NUL を含む名前は不可）。"""
-    name = m.name
-    if not (m.isfile() or m.isdir()):
-        return False
-    if not name or name.startswith("/") or "\\" in name or "\x00" in name:
-        return False
-    return all(part != ".." for part in name.split("/"))
-
-
 def _name_key(name):
     """名前のぶつかりを調べる鍵。Unicode の正規化（NFC と NFD を同じに扱うため NFD にそろえる）と、大文字小文字
-    （casefold）をそろえる（T-058。大文字小文字を区別しない、正規化を区別しないファイルシステムで同じ場所になる
-    名前を、同じ鍵にする）。"""
+    （casefold）をそろえる（T-058）。"""
     return unicodedata.normalize("NFD", unicodedata.normalize("NFD", name).casefold())
 
 
-def _check_name_collisions(head, members):
-    """取り出す前に、全項目の名前（とその途中のフォルダの名前）を _name_key でそろえて比べる。違う名前が同じ鍵に
-    なる、または同じ名前の項目が2つある、なら LedgerError（記録と合わない）。T-058（T-056 の監査 重大-1：
-    Src/stats/counting.py が本物の src/stats/counting.py を先取りして流れる穴）。"""
-    seen, names = {}, set()
-    for m in members:
-        name = m.name.rstrip("/")
-        if name in names:
-            raise ledger.LedgerError("記録の head %s の版に、同じ名前の項目 %r が2つある（記録と合わない）"
-                                     % (head[:12], name))
-        names.add(name)
+def _check_name_collisions(where, names):
+    """書き出す名前（とその途中のフォルダの名前）を _name_key でそろえて比べる。違う名前が同じ鍵になる、または
+    同じ名前が2つある、なら LedgerError（記録と合わない）。T-058。"""
+    seen, done = {}, set()
+    for name in names:
+        name = name.rstrip("/")
+        if name in done:
+            raise ledger.LedgerError("%s に、同じ名前の項目 %r が2つある（記録と合わない）" % (where, name))
+        done.add(name)
         parts = name.split("/")
         for i in range(1, len(parts) + 1):
             p = "/".join(parts[:i])
             k = _name_key(p)
             if seen.setdefault(k, p) != p:
-                raise ledger.LedgerError("記録の head %s の版に、大文字小文字か Unicode の正規化だけが違う名前 %r と %r が"
-                                         "ある（取り出すと同じ場所になりうる。記録と合わない）" % (head[:12], seen[k], p))
+                raise ledger.LedgerError("%s に、大文字小文字か Unicode の正規化だけが違う名前 %r と %r がある"
+                                         "（書き出すと同じ場所になりうる。記録と合わない）" % (where, seen[k], p))
 
 
-class HeadTree:
-    """記録の head の版のファイルを一時フォルダに取り出したもの（git archive）。T-056、T-058。
-    取り出す前に、全項目の名前を、大文字小文字と Unicode の正規化をそろえて比べ、重なりがあれば「記録と合わない」
-    として止める（T-058）。そのうえで、tarfile の filter 引数（Python 3.12 以降）に頼らず、各項目の名前と種類を
-    確かめて、通常のファイルとディレクトリだけを自分で書き出す（Python 3.9 でも動く。T-056 差し戻し1回目 中-1）。
-    symlink などは書き出さない。書き出せない項目（長すぎる名前、手元のファイルシステムで使えない名前など）は
-    飛ばして続ける（T-056 再提出1回目 中-A）。流すスクリプトとそのフォルダの中は、流す前に check_folder で
-    git show のバイト列と照らす（T-058）。git archive ができない（記録の head の commit を git が読めない）
-    ときだけ「照らさなかった」にする。self.skipped に飛ばした項目の名前を残す。"""
+def _bound_path_ok(path):
+    """書き出してよい名前か（相対パスで、空・.・.. の部分が無く、バックスラッシュと NUL を含まない）。"""
+    if not path or path.startswith("/") or "\\" in path or "\x00" in path:
+        return False
+    return all(part not in ("", ".", "..") for part in path.split("/"))
 
-    def __init__(self, repo, head, tmp):
-        self.repo, self.head = repo, head
-        self.dir = os.path.join(tmp, "tree-" + head)
-        self.skipped = []
-        self.checked_folders = set()
-        if os.path.isdir(self.dir):
-            return
-        try:
-            data = _rgit(repo, "archive", "--format=tar", head)
-        except ledger.LedgerError:
-            raise Unchecked("git archive %s ができない" % head[:12]) from None
-        try:
-            t = tarfile.open(fileobj=io.BytesIO(data))
-            members = t.getmembers()
-        except tarfile.TarError as e:
-            raise ledger.LedgerError("記録の head %s の版の git archive を読めない（%s。記録と合わない）"
-                                     % (head[:12], e.__class__.__name__)) from None
-        _check_name_collisions(head, members)
-        os.makedirs(self.dir)
-        with t:
-            for m in members:
-                if not _safe_member(m):
-                    self.skipped.append(m.name)
-                    continue
-                dest = os.path.join(self.dir, *m.name.split("/"))
-                try:
-                    if m.isdir():
-                        os.makedirs(dest, exist_ok=True)
-                        continue
-                    content = t.extractfile(m).read()
-                    os.makedirs(os.path.dirname(dest), exist_ok=True)
-                    with open(dest, "xb") as f:
-                        f.write(content)
-                except (OSError, ValueError, tarfile.TarError):
-                    # OSError（長すぎる名前など）と ValueError（UnicodeEncodeError を含む。手元で使えない文字の
-                    # 名前）。飛ばして続ける。流すスクリプトのフォルダの中なら、check_folder で止まる
-                    self.skipped.append(m.name)
 
-    def check_folder(self, rel):
-        """流すスクリプト rel のフォルダ（その下を含む）にある通常のファイルを、取り出したものと
-        git show <head>:<path> のバイト列で照らす（T-058。スクリプトが読み込む同じフォルダのモジュールを含む）。
-        rel が通常のファイルとして無い、書き出されていない、バイト列が違う（.gitattributes の export-subst などで
-        git archive の中身が変わる場合を含む）、または git の版に無いファイルがそのフォルダに取り出されている、
-        なら LedgerError（記録と合わない）。"""
-        folder = rel.rsplit("/", 1)[0] if "/" in rel else ""
-        if folder in self.checked_folders:
-            return
-        if folder:
-            out = _rgit(self.repo, "ls-tree", "-r", "-z", self.head, "--", folder + "/")
-        else:
-            out = _rgit(self.repo, "ls-tree", "-r", "-z", self.head)
-        regular = set()
-        for e in out.split(b"\0"):
-            if not e:
-                continue
-            meta, path = e.split(b"\t", 1)
-            mode, kind = meta.split(b" ")[:2]
-            if kind == b"blob" and mode in (b"100644", b"100755"):
-                regular.add(os.fsdecode(path))
-        if rel not in regular:
-            raise ledger.LedgerError("記録の head %s の版に、流す %s が通常のファイルとして無い（記録と合わない）"
-                                     % (self.head[:12], rel))
-        for path in sorted(regular):
+class _BoundDir:
+    """記録が sha256 で縛っているファイルだけを、git show <commit>:<path> のバイト列から、空の新しいフォルダに
+    書き出したもの（T-059。T-058 の監査 重大-A）。git archive は使わない。__pycache__・ほかの .py・.pth・
+    .gitattributes など、縛られていないファイルは置かない。書いたあとに読み戻して、バイト列と sha256 を照らす。
+    files: [(path, sha256)]。名前がぶつかる、git の版に無い、sha256 が違う、書き出せない、なら LedgerError。"""
+
+    def __init__(self, repo, commit, files, tmp, what):
+        self.commit, self.what = commit, what
+        self.paths = [p for p, _ in files]
+        where = "%s の、記録が縛っているファイルの名前" % what
+        for p in self.paths:
+            if not _bound_path_ok(p):
+                raise ledger.LedgerError("%s %r は、書き出せる相対パスでない（記録と合わない）" % (where, p))
+        _check_name_collisions(where, self.paths)
+        self.dir = tempfile.mkdtemp(prefix="bound-", dir=tmp)
+        for path, sha in files:
+            data = _show(repo, commit, path)
+            if ledger.sha256_hex(data) != sha:
+                raise ledger.LedgerError("%s：%s:%s の sha256 %s が、記録の %s と違う" % (
+                    what, commit[:12], path, ledger.sha256_hex(data), sha))
+            dest = os.path.join(self.dir, *path.split("/"))
             try:
-                with open(os.path.join(self.dir, *path.split("/")), "rb") as f:
-                    got = f.read()
-            except (OSError, ValueError):
-                raise ledger.LedgerError("記録の head %s の版の %s（流す %s と同じフォルダ）を取り出せなかった"
-                                         "（記録と合わない）" % (self.head[:12], path, rel)) from None
-            if got != _show(self.repo, self.head, path):
-                raise ledger.LedgerError("記録の head %s の版から取り出した %s が、git show %s:%s のバイト列と違う"
-                                         "（記録と合わない）" % (self.head[:12], path, self.head[:12], path))
-        base = os.path.join(self.dir, *folder.split("/")) if folder else self.dir
-        for root, dirs, files in os.walk(base):
-            for n in files:
-                path = os.path.relpath(os.path.join(root, n), self.dir).replace(os.sep, "/")
-                if path not in regular:
-                    raise ledger.LedgerError("記録の head %s の版を取り出したフォルダ %s に、git の版に無いファイル %r "
-                                             "がある（記録と合わない）" % (self.head[:12], folder or ".", path))
-        self.checked_folders.add(folder)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                with open(dest, "xb") as f:
+                    f.write(data)
+                with open(dest, "rb") as f:
+                    back = f.read()
+            except (OSError, ValueError) as e:
+                raise ledger.LedgerError("%s：%s を書き出せない（%s。記録と合わない）"
+                                         % (what, path, e.__class__.__name__)) from None
+            if back != data:
+                raise ledger.LedgerError("%s：書き出した %s が git show のバイト列と違う（記録と合わない）" % (what, path))
+        found = []
+        for root, dirs, names in os.walk(self.dir):
+            found += [os.path.relpath(os.path.join(root, n), self.dir).replace(os.sep, "/") for n in names]
+        if sorted(found) != sorted(self.paths):
+            raise ledger.LedgerError("%s：書き出したフォルダの中身が、記録が縛っているファイルと違う（記録と合わない）" % what)
 
-    def run(self, rel, what):
-        """check_folder で照らしてから、取り出した版の rel を流す（T-058）。"""
-        self.check_folder(rel)
-        return _run_script(self.dir, rel, what)
+    def run(self, rel, label):
+        if rel not in self.paths:
+            raise ledger.LedgerError("%s：流す %s を、記録が sha256 で縛っていない（記録と合わない）" % (label, rel))
+        return _run_script(self.dir, rel, label)
 
 
 def _show(repo, head, path):
@@ -635,23 +588,26 @@ def recompute_orders(st, repo, got):
       - Python の要らない照合（必ず行う）：head が、その記録を足す直前の記録を持つ commit であること、
         ancestors が head の祖先であること、順番1 の対象のうちファイルのもの（head の版と、1cb463a: などの
         git show）、順番1b の files、order1_ref。
-      - Python の要る照合：順番1 の「の出力」（head の版を一時フォルダに取り出して流す。1cb463a の版の出力は
-        一時フォルダで流す）、順番1b の counting（head の版の counting.py を流した出力の sha256 と値）。
-    値が違う、または head の版のスクリプトが 0 以外で終わる・出力が読めない、なら LedgerError（止める）。
-    head の版を取り出すときの名前のぶつかり（大文字小文字・Unicode の正規化）と、流すスクリプトのフォルダの中身と
-    git show のバイト列の食い違いも LedgerError（T-058。HeadTree・HeadTree.check_folder）。
-    利用者の環境の都合で計算し直せない項目（Python を起動できない、取り出せない）は、止めずに列挙する。
+      - Python の要る照合：順番1 の「の出力」と、順番1b の counting（counting.py を流した出力の sha256 と値）。
+        流すフォルダには、記録が sha256 で縛っているファイル（順番1 は targets のうち「の出力」でないもの、
+        順番1b は files）だけを、git show のバイト列から空の新しいフォルダに書き出す（T-059。_BoundDir）。
+        Python は -I・-B・空の pycache_prefix で流す（python_command）。
+    値が違う、または流したスクリプトが 0 以外で終わる・出力が読めない、なら LedgerError（止める）。
+    縛られたファイルの名前のぶつかり（大文字小文字・Unicode の正規化）、流すスクリプトが縛られていない、も
+    LedgerError。利用者の環境の都合で計算し直せない項目（Python を起動できない）は、止めずに列挙する。
     流すのは、この verify を動かしている Python（sys.executable）。
     返り値: (照らした項目の数, 照らさなかった項目の一覧)。
     """
     checked, unchecked = 0, []
     with tempfile.TemporaryDirectory() as tmp:
-        trees = {}
+        bound = {}
 
-        def tree_of(head):
-            if head not in trees:
-                trees[head] = HeadTree(repo, head, tmp)
-            return trees[head]
+        def bound_dir(commit, files, what):
+            """記録が縛っているファイルだけのフォルダ（commit と files ごとに一つ）。T-059。"""
+            key = (commit, tuple(files))
+            if key not in bound:
+                bound[key] = _BoundDir(repo, commit, files, tmp, what)
+            return bound[key]
 
         def python_item(label, fn):
             nonlocal checked
@@ -665,6 +621,14 @@ def recompute_orders(st, repo, got):
             _check_head(st, repo, r, doc)
             checked += 1 + len(doc["ancestors"])
             head = doc["head"]
+            what1 = "seq %d の stats-order1" % r["seq"]
+            # 記録が sha256 で縛っているファイル（targets のうち「の出力」でないもの）を、commit ごとに分ける
+            groups = {}
+            for t in doc["targets"]:
+                if t["name"].endswith(" の出力"):
+                    continue
+                short, path = t["name"].split(":", 1) if ":" in t["name"] else (None, t["name"])
+                groups.setdefault(short, []).append((path, t["sha256"]))
             for t in doc["targets"]:
                 name = t["name"]
                 output = name.endswith(" の出力")
@@ -678,36 +642,21 @@ def recompute_orders(st, repo, got):
                                                  "値 %s と違う" % (r["seq"], name, t["sha256"], head[:12], v))
                 if ":" in base:
                     short, path = base.split(":", 1)
-                    full = ledger.ORDER1_ANCESTORS.get(short)
-                    if full is None:
+                    commit = ledger.ORDER1_ANCESTORS.get(short)
+                    if commit is None:
                         raise ledger.LedgerError("対象 %s の commit %s が、決まった祖先の一覧に無い" % (name, short))
-                    data = _show(repo, full, path)
-                    if not output:
-                        compare(data)
-                        checked += 1
-                        continue
-
-                    def run_hist(data=data, full=full, path=path, label=label, compare=compare):
-                        # git show のバイト列を、空のフォルダにそれだけ書いて流す（git archive を通さない。T-058）
-                        d = tempfile.mkdtemp(prefix="hist-", dir=tmp)
-                        dest = os.path.join(d, os.path.basename(path))
-                        with open(dest, "xb") as f:
-                            f.write(data)
-                        with open(dest, "rb") as f:
-                            if f.read() != data or os.listdir(d) != [os.path.basename(path)]:
-                                raise ledger.LedgerError("%s：git show のバイト列を書き出せなかった（記録と合わない）"
-                                                         % label)
-                        compare(_run_script(d, os.path.basename(path), label))
-                    python_item(label, run_hist)
-                elif output:
-                    _show(repo, head, base)
-
-                    def run_head(base=base, label=label, compare=compare):
-                        compare(tree_of(head).run(base, label))
-                    python_item(label, run_head)
                 else:
-                    compare(_show(repo, head, base))
+                    short, path, commit = None, base, head
+                if not output:
+                    compare(_show(repo, commit, path))
                     checked += 1
+                    continue
+                _show(repo, commit, path)
+
+                def run_output(commit=commit, short=short, path=path, label=label, compare=compare):
+                    d = bound_dir(commit, groups.get(short, []), "%s（%s の版）" % (what1, commit[:12]))
+                    compare(d.run(path, label))
+                python_item(label, run_output)
         for r in got["order1b"]:
             doc = st.file_json(r, ledger.ORDER1B_KIND)
             what = "seq %d の stats-order1b" % r["seq"]
@@ -733,7 +682,8 @@ def recompute_orders(st, repo, got):
 
             def run_counting(doc=doc, what=what, head=head):
                 label = "%s の counting" % what
-                out = tree_of(head).run(ledger.COUNTING_SCRIPT, label)
+                files = [(f["path"], f["sha256"]) for f in doc["files"]]
+                out = bound_dir(head, files, "%s（%s の版）" % (what, head[:12])).run(ledger.COUNTING_SCRIPT, label)
                 c = doc["counting"]
                 if ledger.sha256_hex(out) != c["output_sha256"]:
                     raise ledger.LedgerError("%s の counting.output_sha256 %s が、head %s の版の counting.py の出力 %s と違う"

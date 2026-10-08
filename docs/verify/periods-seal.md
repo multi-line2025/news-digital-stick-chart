@@ -1,4 +1,4 @@
-# 期間の区切りと候補の封印を検証する手順（T-005、T-007、T-008、T-009、T-013、T-014、T-017、T-023、T-027、T-031、T-037、T-041、T-043、T-049、T-056、T-058）
+# 期間の区切りと候補の封印を検証する手順（T-005、T-007、T-008、T-009、T-013、T-014、T-017、T-023、T-027、T-031、T-037、T-041、T-043、T-049、T-056、T-058、T-059）
 
 この文書は、第三者が次のことを自分で確かめるための手順である。
 
@@ -922,21 +922,22 @@ grep -n '"kind":"stats-order1' sealed/ledger.jsonl | cut -d: -f1 || true
 
 - **`verify.py stats-order` と `all` は、`--rev` が `working` でないとき（`--rev auto` で使う。コミットを渡しても同じで、その値は使わない）、順番1・1b の値を、記録の head の版から計算し直して照らす（T-056。T-055 の監査 中-1、T-048 の軽-1）。**（T-049 の時点では計算し直さなかった。）計算し直しに使うのは、`--rev` の値ではなく、記録の `head` である。照らすこと（`verify.recompute_orders`）：
   - **Python の要らない照合（必ず行う）**：記録の `head` の commit がリポジトリにあり、その版の `sealed/ledger.jsonl` が、その記録を足す直前の記録（先頭 seq−1 行）とバイト列で同じであること。`ancestors` の各 commit が `head` の祖先であること。順番1 の対象のうちファイルのもの（`head` の版のファイルと、`1cb463a:`・`2d23cdf:` で始まるものの `git show` の出力）の sha256。順番1b の `files` の各 sha256（`head` の版）と、`order1_ref`（`stats-order1` の記録の seq と行の sha256）。
-  - **Python の要る照合**：順番1 の「の出力」（`head` の版を一時フォルダに取り出して（`git archive`）流した出力。1cb463a の版の出力は一時フォルダで流した出力）と、順番1b の `counting`（`head` の版の `counting.py` を流した出力の sha256 と、`candidate_ids`・`criteria_ids`・`official_candidate`・`official_status`）。
-  - **取り出しの前とあとの照合（T-058。T-056 の監査 重大-1）**：取り出す前に、`git archive` の全項目の名前（途中のフォルダの名前を含む）を、大文字小文字と Unicode の正規化をそろえて（NFD にそろえ、casefold する。NFC と NFD は同じに扱う）比べ、違う名前が同じになる、または同じ名前の項目が2つある、なら「記録と合わない」として止める（大文字小文字や正規化を区別しないファイルシステム（macOS の標準など）では、`Src/stats/counting.py` が本物の `src/stats/counting.py` と同じ場所になり、先に来たほうが流れてしまうため）。取り出したあと、流すスクリプト（`counting.py`・`exclusion.py`・`tagrules.py`）のフォルダ（`src/stats/`、その下を含む）にある通常のファイルを、どれも `git show <head>:<path>` のバイト列と照らす（git show のバイト列と照らす）。スクリプトが読み込む同じフォルダのモジュールもこれに入る。違う、書き出されていない、または git の版に無いファイルがそのフォルダにある、なら「記録と合わない」として止める（`.gitattributes` の `export-subst` などで、`git archive` の中身だけが `git show` と変わる版も、ここで止まる）。1cb463a の `tagrules.py` は `git archive` を通さず、`git show` のバイト列を空のフォルダにそれだけ書いて流す。
-  - 計算し直しの git（`cat-file`・`show`・`archive`・`merge-base`）は、GIT_ で始まる環境変数を固定した環境（`ledger.fixed_git_env`）で行う。
-  - 流す Python は、verify を動かしている Python（`sys.executable`）である。動作を確かめた版は、Python 3.14.2（`.venv/bin/python`）と 3.9.6（macOS の `/usr/bin/python3`）で、どちらでも本物の記録（seq 1〜6）で終了コード 0、照らした項目は 25 で、値は記録と一致した（T-056 差し戻し1回目。T-058 の照合を加えたあとも同じ）。取り出しは tarfile の `filter` 引数（3.12 以降）に頼らず、各項目の名前と種類を確かめて、通常のファイルとディレクトリだけを書き出す。
+  - **Python の要る照合**：順番1 の「の出力」と、順番1b の `counting`（`counting.py` を流した出力の sha256 と、`candidate_ids`・`criteria_ids`・`official_candidate`・`official_status`）。
+  - **流すフォルダには、記録が sha256 で縛っているファイルだけを置く（T-059。T-058 の監査 重大-A）**。順番1b は記録の `files`（4つ）、順番1 は記録の `targets` のうちファイルそのもの（「の出力」でないもの）を、commit ごとに分けて使う（`head` の版の5つと、`1cb463a:` の `src/stats/tagrules.py`）。それぞれを `git show <commit>:<path>` のバイト列から、空の新しいフォルダの同じパスに書き出し、書いたあとに読み戻して sha256 を記録と照らす。git archive は使わない。`__pycache__`・ほかの `.py`・`.pth`・`.gitattributes` など、縛られていないファイルは置かない。そのため、偽る側が commit に足したファイル（`src/stats/__pycache__` の .pyc、標準ライブラリを隠す `src/stats/fractions.py`、`Src/stats/counting.py` など）は流れない。流すスクリプトが縛られたファイルでない、縛られたファイルの名前が大文字小文字か Unicode の正規化（NFD にそろえて casefold。NFC と NFD は同じに扱う）だけで重なる、書き出せない、書いたフォルダの中身が縛られたファイルと違う、なら「記録と合わない」として止める（T-058 の名前のぶつかりの照合は、この名前に当てる形で残した）。
+  - **Python の流し方（T-059）**：`<python> -I -B -X pycache_prefix=<空の一時フォルダ> -c <起こすプログラム> <スクリプト>`（`verify.python_command`）。`-I` で環境変数（`PYTHONPATH` など）・利用者の site・カレントフォルダを使わない。`-B` で .pyc を書かない。`-I` では `PYTHONPYCACHEPREFIX` が読まれないので、`-X pycache_prefix=` で空のフォルダを指し、.pyc をそこからしか読ませない（スクリプトの隣の `__pycache__` も、macOS の `/usr/bin/python3` が既定で使う `~/Library/Caches/com.apple.python` も読まない）。`-I` はスクリプトのフォルダも `sys.path` に入れないが、順番1 の `tagrules.py` は同じフォルダの `exclusion.py`（縛られたファイル）を読み込むので、起こすプログラム（`verify.RUNNER`）が、スクリプトのフォルダだけを `sys.path` の先頭に戻してから `runpy.run_path` で流す（ふつうにスクリプトを流したときと同じ並び。そのフォルダには縛られたファイルしか無い）。
+  - 計算し直しの git（`cat-file`・`show`・`merge-base`）は、GIT_ で始まる環境変数を固定した環境（`ledger.fixed_git_env`）で行う。
+  - 流す Python は、verify を動かしている Python（`sys.executable`）である。動作を確かめた版は、Python 3.14.2（`.venv/bin/python`）と 3.9.6（macOS の `/usr/bin/python3`）で、どちらでも本物の記録（seq 1〜6）で終了コード 0、照らした項目は 25 で、値は記録と一致した（T-056 差し戻し1回目。T-059 の形（縛られたファイルだけ、`-I`）でも同じ）。
   - **止めるとき**：値が一つでも違うとき。`head` の版のスクリプトが 0 以外で終わる、または出力が読めないときも、「記録と合わない」として終了コード 1 で止める（記録は、その版で流した出力があると主張しているため。リードの判断）。
-  - **照らさなかったとするとき**：利用者の環境の都合で計算し直せない項目だけ。具体的には、Python を起動できない、git の履歴が無い、記録の head の commit を git が読めない（`git archive` ができない）、の3つに限る（T-056 再提出1回目 中-A）。止めずに、項目ごとに「照らさなかった：順番1・1b の値：<項目>（理由）」と出し、`all` の最後の行にも並べる。照らさなかった項目があっても、ほかの項目と記録の照合は続ける。`--rev working`（既定）でも計算し直さず、そう表示する（テスト用の仮の記録（実在しない head を持つもの）を使うテストが `--rev working` で verify を流すため）。第三者は `--rev auto` で確かめ、最後の行を読む。
-  - **記録を作る側の commit の中身で起こせることは、どれも「照らさなかった」にしない**（T-056 再提出1回目 中-A）。名前のぶつかり（`src/` に対する `Src/` など）は、取り出す前に「記録と合わない」で止まる（T-058。T-056 の再提出2回目までは飛ばしていた）。それ以外の書き出せない項目（長すぎる名前、UTF-8 でない名前など）は、symlink と同じように飛ばして続ける。流すスクリプトのフォルダの中で書き出せない項目があれば、上の取り出したあとの照合で「記録と合わない」で止まる。スクリプトが時間内（`verify.RUN_TIMEOUT_SECONDS`、1800 秒）に終わらないときも、「記録と合わない」で止まる。`git archive` の出力を tar として読めないときも同じ。
+  - **照らさなかったとするとき**：利用者の環境の都合で計算し直せない項目だけ。具体的には、Python を起動できない、git の履歴が無い、の2つに限る（T-056 再提出1回目 中-A。T-059 で git archive をやめたので、「git archive ができない」は無くなった。記録の head の commit や縛られたファイルを git が読めないときは、「記録と合わない」で止まる）。止めずに、項目ごとに「照らさなかった：順番1・1b の値：<項目>（理由）」と出し、`all` の最後の行にも並べる。照らさなかった項目があっても、ほかの項目と記録の照合は続ける。`--rev working`（既定）でも計算し直さず、そう表示する（テスト用の仮の記録（実在しない head を持つもの）を使うテストが `--rev working` で verify を流すため）。第三者は `--rev auto` で確かめ、最後の行を読む。
+  - **記録を作る側の commit の中身で起こせることは、どれも「照らさなかった」にしない**（T-056 再提出1回目 中-A）。縛られていないファイルは置かないので、commit に足した名前（長すぎる名前、UTF-8 でない名前、`Src/` など）は流れに関わらない。縛られたファイルが流したときに 0 以外で終わる、時間内（`verify.RUN_TIMEOUT_SECONDS`、1800 秒）に終わらない、出力が読めない、なら「記録と合わない」で止まる。
   - **信用できない記録を確かめるとき**：計算し直すと、記録の `head` の版のコード（`counting.py` など）が手元で動く。記録やリポジトリを信用できないときは、隔離した環境（使い捨ての仮想の機械やコンテナ）で、ネットワークを切って流す（T-056 差し戻し1回目 軽-1）。
   - これで照らせるのは「記録の値が、`head` の版から計算した値と同じ」ことまでである。作業ツリーの今のファイルが封印したときと同じか（凍結）は、docs/stats/seal-order1.md 3章 (1) の手順で、作業ツリーの値を計算して記録と比べる。
-- **verify を使わずに手で確かめる手順（T-056）**：記録の中身のファイル（`sealed/stats-order1-….json`・`sealed/stats-order1b-….json`）の `head` を H、その記録の seq を N とする。上の注意のとおり、信用できない記録は隔離した環境で行う。
+- **verify を使わずに手で確かめる手順（T-056、T-059）**：記録の中身のファイル（`sealed/stats-order1-….json`・`sealed/stats-order1b-….json`）の `head` を H、その記録の seq を N とする。上の注意のとおり、信用できない記録は隔離した環境で行う。bash・zsh・macOS の `/bin/sh` のどれでも動く書き方にしてある。
   ```sh
+  PY=/usr/bin/python3                                                           # 使う Python を決めて書く。.venv/bin/python（3.14.2。記録を作った版）でも同じ値になる（T-059 で両方を確かめた）
   H=<記録の head の40桁>; N=<記録の seq>                                          # zsh でも同じに動くよう、変数は "${H}" の形で使う
   # verify と同じく、git は GIT_ の環境変数を固定して動かす（replace・grafts で読む版が変わらないように）。
-  # ほかの GIT_ の環境変数（GIT_DIR など）は、あらかじめ外しておく。次の1行で外せる（bash・zsh。何も無くても失敗しない）。
-  # または、要るものだけを渡した新しいシェルで始める：env -i HOME="$HOME" PATH="$PATH" TERM="$TERM" /bin/sh
+  # ほかの GIT_ の環境変数（GIT_DIR など）は、次の1行で外す（何も無くても失敗しない）
   for v in $(env | sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$v"; done
   env | grep ^GIT_ || echo none                                                 # none と出ること
   export GIT_NO_REPLACE_OBJECTS=1 GIT_GRAFT_FILE=/dev/null/no-graft-file
@@ -945,21 +946,27 @@ grep -n '"kind":"stats-order1' sealed/ledger.jsonl | cut -d: -f1 || true
   git show "${H}:sealed/ledger.jsonl" | cmp - before.jsonl && echo same         # head の版の記録とバイト列で同じ
   git merge-base --is-ancestor <ancestors の各 commit> "${H}" && echo ok
   git show "${H}:docs/stats/counting.md" | shasum -a 256                        # files の各パスも同じ形
-  # 取り出す前に、大文字小文字だけが違う名前（と Unicode の正規化だけが違う名前）が無いことを確かめる。
-  # git ls-tree -r --name-only "${H}" の名前に、-t で途中のフォルダの名前も加え、そろえて重なりを探す
-  git ls-tree -r -t --name-only -z "${H}" | python3 -B -c 'import sys,unicodedata as u
-  k=lambda s:u.normalize("NFD",u.normalize("NFD",s).casefold()); d={}
-  for x in sys.stdin.buffer.read().split(b"\0")[:-1]: d.setdefault(k(x.decode("utf-8","surrogateescape")),[]).append(x)
-  print([v for v in d.values() if len(v)>1] or "none")'                          # none と出ること
-  D=$(mktemp -d) && git archive "${H}" | tar -x -C "$D"                         # head の版を、空の新しいフォルダに取り出す
-  # 流すスクリプトのフォルダ（src/stats/）を、git show のバイト列と照らす。何も出ないこと
-  git ls-tree -r --name-only "${H}" -- src/stats/ | while IFS= read -r p; do git show "${H}:$p" | cmp -s - "$D/$p" || echo "違う: $p"; done
-  (cd "$D" && find src/stats -type f | sort) | diff - <(git ls-tree -r --name-only "${H}" -- src/stats/ | sort)
-  (cd "$D" && PYTHONDONTWRITEBYTECODE=1 python3 -B src/stats/counting.py | shasum -a 256)    # counting.output_sha256
-  (cd "$D" && PYTHONDONTWRITEBYTECODE=1 python3 -B src/stats/exclusion.py | shasum -a 256)   # 順番1 の「の出力」（tagrules.py も同じ）
+  # 計算し直し：記録が sha256 で縛っているファイルだけを、git show から空の新しいフォルダに書く（git archive は使わない）。
+  # mktemp -d には必ず場所を付ける（macOS では、場所を付けないと TMPDIR を見ない）
+  C=$(mktemp -d "${TMPDIR:-/tmp}/pycache.XXXXXX")                             # 空の pycache_prefix
+  R='import os, runpy, sys; p = sys.argv[1]; sys.argv = sys.argv[1:]; sys.path.insert(0, os.path.dirname(os.path.abspath(p))); runpy.run_path(p, run_name="__main__")'
+  # 順番1b（stats-order1b）のとき：files の4つを書いて、counting.py を流す
+  D=$(mktemp -d "${TMPDIR:-/tmp}/verify.XXXXXX")
+  for p in docs/stats/counting.md src/stats/counting.py tests/stats/test_counting.py docs/stats/seal-order1.md; do mkdir -p "$D/$(dirname "$p")" && git show "${H}:$p" > "$D/$p" && shasum -a 256 "$D/$p"; done   # 各 sha256 が files と同じこと
+  (cd "$D" && find . -type f | sort)                                            # 書いた4つだけがあること
+  (cd "$D" && "$PY" -I -B -X pycache_prefix="$C" -c "$R" src/stats/counting.py | shasum -a 256)    # counting.output_sha256
+  # 順番1（stats-order1）のとき：別の空のフォルダに、targets のファイル（「の出力」でないもの）のうち head の版の5つを書いて流す
+  D=$(mktemp -d "${TMPDIR:-/tmp}/verify.XXXXXX")
+  for p in src/stats/exclusion.py tests/stats/test_exclusion.py src/stats/tagrules.py tests/stats/test_tagrules.py docs/stats/tags-naive.md; do mkdir -p "$D/$(dirname "$p")" && git show "${H}:$p" > "$D/$p" && shasum -a 256 "$D/$p"; done   # 各 sha256 が targets と同じこと
+  (cd "$D" && find . -type f | sort)                                            # 書いた5つだけがあること
+  (cd "$D" && "$PY" -I -B -X pycache_prefix="$C" -c "$R" src/stats/exclusion.py | shasum -a 256)   # 「src/stats/exclusion.py の出力」
+  (cd "$D" && "$PY" -I -B -X pycache_prefix="$C" -c "$R" src/stats/tagrules.py | shasum -a 256)    # 「src/stats/tagrules.py の出力」
+  # 順番1 の 1cb463a の版：もう一つ別の空のフォルダに、その1つだけを書いて流す
+  E=$(mktemp -d "${TMPDIR:-/tmp}/verify.XXXXXX"); mkdir -p "$E/src/stats" && git show 1cb463a:src/stats/tagrules.py > "$E/src/stats/tagrules.py"
+  (cd "$E" && "$PY" -I -B -X pycache_prefix="$C" -c "$R" src/stats/tagrules.py | shasum -a 256)    # 「1cb463a:src/stats/tagrules.py の出力」
   sed -n 5p sealed/ledger.jsonl | tr -d '\n' | shasum -a 256                      # order1_ref.record_sha256（seq 5 の行）
   ```
-  1cb463a の版の出力は、`git show 1cb463a:src/stats/tagrules.py > tagrules.py` で一時フォルダに取り出して流す（seal-order1.md 1章）。
+  `R` は verify の `RUNNER` と同じで、`-I` が外すスクリプトのフォルダだけを戻す（`tagrules.py` が同じフォルダの `exclusion.py` を読むため）。1cb463a の版は、seal-order1.md 1章では `tagrules.py` として書く形だが、`src/stats/tagrules.py` として書いても出力は同じ（verify はこちらの形）。ファイルの名前は、記録の `files`・`targets` に並んだものを、そのまま一つずつ書く（シェルの変数に並べて分けると、zsh では分かれないため）。
 - 記録の10件の sha256 を作業ツリーで計算し直して照らす手順は、docs/stats/seal-order1.md 3章 (1) のとおり（`shasum -a 256 <ファイル>`、`git show <commit>:<path> | shasum -a 256`、`PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/stats/exclusion.py | shasum -a 256` など）。順番1b の `counting.output_sha256` は `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/stats/counting.py | shasum -a 256` と照らす。
 
 ### 順番2 への申し送り（統計係の T-036 の監査の軽-4）

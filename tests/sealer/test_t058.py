@@ -1,5 +1,8 @@
 """T-058 のテスト：記録の head の版を取り出して流すとき、名前のぶつかりと、流すスクリプトのフォルダの中身の
 食い違いを「記録と合わない」で止めること（T-056 の監査 重大-1）。
+T-059 で、流すフォルダを記録が縛っているファイルだけにした（git archive をやめた）ので、偽の commit は
+名前のぶつかりではなく、本物が流れて偽の値と合わないことで止まる。名前のぶつかりの照合は、記録が縛っている
+ファイルの名前に当てる形で残した。
 
 実行（プロジェクトのルートで）:
     PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/sealer -v
@@ -11,7 +14,6 @@ sha256 に合わせて差し替える（監査の再現 scratchpad/a56r3pre3.sh 
 本物の sealed/ には書かない。ネットワークは使わない。
 """
 
-import io
 import json
 import os
 import subprocess
@@ -24,7 +26,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import test_ledger as tl  # noqa: E402
-from test_t056 import CloneCase, FakeRepo, make_tar, pythons  # noqa: E402
+from test_t056 import CloneCase, pythons  # noqa: E402
 
 ledger = tl.ledger
 verify = tl.verify
@@ -69,14 +71,18 @@ except ledger.LedgerError as e:
 """
 
 COLLISION = "大文字小文字か Unicode の正規化だけが違う名前"
+# T-059 から、流すフォルダには記録が縛っているファイルしか置かないので、Src/... などは書き出されず、本物が流れて
+# 偽の値と合わずに止まる
+COUNTING_MISMATCH = "counting.output_sha256"
+EXCLUSION_MISMATCH = "の対象 src/stats/exclusion.py の出力 の sha256"
 
 
 def git(*args, **kw):
     return subprocess.run(["git"] + list(args), check=True, capture_output=True, **kw).stdout
 
 
-class TestForgedSrcBothPythons(CloneCase):
-    """監査の再現（重大-1）：偽る側が head の commit に Src/... を足し、記録の値をその出力に合わせる。"""
+class ForgeBase(CloneCase):
+    """偽の commit を作り、記録の値を差し替えて、両方の Python で照らす道具（テストは持たない。T-059 でも使う）。"""
 
     @classmethod
     def setUpClass(cls):
@@ -121,6 +127,10 @@ class TestForgedSrcBothPythons(CloneCase):
             self.assertTrue(line.startswith("MISMATCH "), (py, line))
             self.assertIn(text, line, py)
 
+
+class TestForgedSrcBothPythons(ForgeBase):
+    """監査の再現（重大-1）：偽る側が head の commit に Src/... を足し、記録の値をその出力に合わせる。"""
+
     def forge_counting(self, mode):
         """seq 6 の head に、偽の出力を書く Src/stats/counting.py を足す（src/stats/counting.py はそのまま）。"""
         wt = self.worktree(self.d1b["head"])
@@ -140,10 +150,10 @@ class TestForgedSrcBothPythons(CloneCase):
         return {str(self.o1b["seq"]): {"head": head, "output_sha256": ledger.sha256_hex(fake)}}
 
     def test_src_counting_changed_definition(self):
-        self.assert_mismatch(self.check(self.forge_counting("definition")), COLLISION)
+        self.assert_mismatch(self.check(self.forge_counting("definition")), COUNTING_MISMATCH)
 
     def test_src_counting_one_more_byte(self):
-        self.assert_mismatch(self.check(self.forge_counting("tail")), COLLISION)
+        self.assert_mismatch(self.check(self.forge_counting("tail")), COUNTING_MISMATCH)
 
     def forge_exclusion(self):
         """seq 5 の head に Src/stats/exclusion.py（本物の先頭に、流したときだけ1バイト書く行を足したもの）を足す。
@@ -159,12 +169,12 @@ class TestForgedSrcBothPythons(CloneCase):
                                        "targets": {"src/stats/exclusion.py の出力": ledger.sha256_hex(b" " + real)}}}
 
     def test_src_exclusion_order1(self):
-        self.assert_mismatch(self.check(self.forge_exclusion()), COLLISION)
+        self.assert_mismatch(self.check(self.forge_exclusion()), EXCLUSION_MISMATCH)
 
     def test_export_subst_changes_archive_bytes(self):
         """.gitattributes の export-subst で、git archive の counting.py だけを変える版（名前のぶつかりは無い）。
         files の sha256 は git show のバイト列に合わせ、output_sha256 は archive の版の出力に合わせる。
-        取り出したものと git show のバイト列の照合（完了条件2）で止まる。"""
+        T-059 から git archive を使わず、git show のバイト列を流すので、偽の出力と合わずに止まる。"""
         wt = self.worktree(self.d1b["head"])
         real = self.real_output(wt, ledger.COUNTING_SCRIPT)
         src = git("-C", wt, "show", "HEAD:" + ledger.COUNTING_SCRIPT)
@@ -174,7 +184,7 @@ class TestForgedSrcBothPythons(CloneCase):
                                 ".gitattributes": b"src/stats/counting.py export-subst\n"}, "偽の版 export-subst")
         spec = {str(self.o1b["seq"]): {"head": head, "output_sha256": ledger.sha256_hex(b" " + real),
                                         "files": {ledger.COUNTING_SCRIPT: ledger.sha256_hex(pre + src)}}}
-        self.assert_mismatch(self.check(spec), "git show")
+        self.assert_mismatch(self.check(spec), COUNTING_MISMATCH)
 
     def test_real_heads_pass_in_checker(self):
         out = self.check({})
@@ -182,89 +192,39 @@ class TestForgedSrcBothPythons(CloneCase):
             self.assertEqual(line, "OK", py)
 
 
-class TestCheckFolder(CloneCase):
-    """check_folder：取り出したあとのフォルダの中身を git show のバイト列と照らす（本物の seq 6 の head）。"""
-
-    def tree(self):
-        tmp = tempfile.mkdtemp(dir=self.td.name)
-        return verify.HeadTree(self.repo, self.st.file_json(self.o1b, ledger.ORDER1B_KIND)["head"], tmp)
-
-    def test_real_tree_passes(self):
-        t = self.tree()
-        t.check_folder(ledger.COUNTING_SCRIPT)
-        t.check_folder("src/stats/tagrules.py")         # 同じフォルダは一度だけ照らす
-
-    def test_changed_module_is_mismatch(self):
-        t = self.tree()
-        with open(os.path.join(t.dir, "src", "stats", "exclusion.py"), "ab") as f:
-            f.write(b"\n")
-        with self.assertRaisesRegex(ledger.LedgerError, "git show .*のバイト列と違う"):
-            t.check_folder(ledger.COUNTING_SCRIPT)
-
-    def test_extra_file_is_mismatch(self):
-        t = self.tree()
-        with open(os.path.join(t.dir, "src", "stats", "json.py"), "xb") as f:
-            f.write(b"raise SystemExit(0)\n")
-        with self.assertRaisesRegex(ledger.LedgerError, "git の版に無いファイル"):
-            t.check_folder(ledger.COUNTING_SCRIPT)
-
-    def test_script_not_regular_file_is_mismatch(self):
-        t = self.tree()
-        with self.assertRaisesRegex(ledger.LedgerError, "通常のファイルとして無い"):
-            t.check_folder("src/stats/no_such_script.py")
-
-
 class TestNameCollisions(unittest.TestCase):
-    """取り出す前の名前のぶつかり（大文字小文字・NFC と NFD）。何も書き出さずに止まる。"""
+    """書き出す名前のぶつかり（大文字小文字・NFC と NFD）。T-059 から、記録が縛っているファイルの名前に当てる。"""
 
-    def info(self, name, kind="file"):
-        import tarfile
-        i = tarfile.TarInfo(name)
-        i.type = tarfile.DIRTYPE if kind == "dir" else tarfile.REGTYPE
-        return i
-
-    def stops(self, entries, text=COLLISION):
-        with tempfile.TemporaryDirectory() as d:
-            with self.assertRaisesRegex(ledger.LedgerError, text):
-                verify.HeadTree(FakeRepo(make_tar(entries)), "e" * 40, d)
-            self.assertEqual(os.listdir(d), [])
+    def stops(self, names, text=COLLISION):
+        with self.assertRaisesRegex(ledger.LedgerError, text):
+            verify._check_name_collisions("見本", names)
 
     def test_case_only(self):
-        self.stops([(self.info("Src/stats/counting.py"), b"x"), (self.info("src/stats/counting.py"), b"y")])
+        self.stops(["Src/stats/counting.py", "src/stats/counting.py"])
 
     def test_case_in_folder_only(self):
-        # 途中のフォルダの名前だけがぶつかる（ディレクトリの項目が無くても止まる）
-        self.stops([(self.info("Src/stats/a.py"), b"x"), (self.info("src/other.py"), b"y")])
-
-    def test_dir_member_vs_file(self):
-        self.stops([(self.info("SRC", "dir"), None), (self.info("src/a.py"), b"y")])
+        self.stops(["Src/stats/a.py", "src/other.py"])
 
     def test_nfc_nfd(self):
-        nfc = unicodedata.normalize("NFC", "src/café.py")
+        nfc = unicodedata.normalize("NFC", "src/caf\u00e9.py")
         nfd = unicodedata.normalize("NFD", nfc)
         self.assertNotEqual(nfc, nfd)
-        self.stops([(self.info(nfc), b"x"), (self.info(nfd), b"y")])
+        self.stops([nfc, nfd])
 
     def test_case_and_normalization_together(self):
-        self.stops([(self.info("src/CAFÉ.py"), b"x"),
-                    (self.info(unicodedata.normalize("NFD", "src/café.py")), b"y")])
+        self.stops(["src/CAF\u00c9.py", unicodedata.normalize("NFD", "src/caf\u00e9.py")])
 
     def test_casefold_beyond_lower(self):
-        # casefold でそろう名前（ß と ss）
-        self.stops([(self.info("src/straße.py"), b"x"), (self.info("src/STRASSE.py"), b"y")])
+        self.stops(["src/stra\u00dfe.py", "src/STRASSE.py"])
 
     def test_same_name_twice(self):
-        self.stops([(self.info("src/a.py"), b"x"), (self.info("src/a.py"), b"y")], "同じ名前の項目")
+        self.stops(["src/a.py", "src/a.py"], "同じ名前の項目")
 
     def test_distinct_names_pass(self):
-        with tempfile.TemporaryDirectory() as d:
-            t = verify.HeadTree(FakeRepo(make_tar([(self.info("src", "dir"), None),
-                                                   (self.info("src/a.py"), b"x"),
-                                                   (self.info("src/b.py"), b"y")])), "f" * 40, d)
-            self.assertEqual(sorted(os.listdir(os.path.join(t.dir, "src"))), ["a.py", "b.py"])
+        verify._check_name_collisions("見本", ["src/a.py", "src/b.py", "docs/a.md"])
 
     def test_key(self):
-        self.assertEqual(verify._name_key("Src/É"), verify._name_key("src/é"))
+        self.assertEqual(verify._name_key("Src/\u00c9"), verify._name_key("src/e\u0301"))
         self.assertNotEqual(verify._name_key("src/a"), verify._name_key("src/b"))
 
 
@@ -272,9 +232,9 @@ class TestDocT058(unittest.TestCase):
     def test_statements(self):
         with open(DOC, encoding="utf-8") as f:
             text = f.read()
-        for phrase in ('git ls-tree -r --name-only "${H}"', "大文字小文字だけが違う名前",
-                       "env -i", "unset", "git show のバイト列と照らす",
-                       "大文字小文字と Unicode の正規化"):
+        # T-059 で手の手順を、縛られたファイルだけを書く形に改めた（ls-tree での重なりの確かめと env -i の勧めは外した）
+        for phrase in ("大文字小文字か Unicode の正規化（NFD にそろえて casefold。NFC と NFD は同じに扱う）",
+                       'for v in $(env | sed -n', 'unset "$v"', "T-058 の名前のぶつかりの照合は、この名前に当てる形で残した"):
             self.assertIn(phrase, text)
 
 

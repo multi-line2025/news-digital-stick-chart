@@ -11,7 +11,6 @@
 """
 
 import copy
-import io
 import os
 import subprocess
 import sys
@@ -300,93 +299,66 @@ class TestForgedHeadsBothPythons(CloneCase):
         self.assert_mismatch(out, "counting.output_sha256")     # 偽の output_sha256 だけで止まる
 
 
-class FakeRepo:
-    """git archive の出力を返すだけのリポジトリの代わり（HeadTree の直接の確かめ）。"""
+class ShowRepo:
+    """git show <commit>:<path> だけに答えるリポジトリの代わり（_BoundDir の直接の確かめ）。T-059。"""
 
-    def __init__(self, tar_bytes):
-        self.tar_bytes = tar_bytes
+    def __init__(self, blobs):
+        self.blobs = blobs              # {(commit, path): バイト列}
+        self.calls = []
 
     def git(self, *args, env=None):
-        return self.tar_bytes
+        self.calls.append(args)
+        if args[0] == "show" and len(args) == 2:
+            commit, path = args[1].split(":", 1)
+            if (commit, path) in self.blobs:
+                return self.blobs[(commit, path)]
+        raise ledger.LedgerError("git %s が失敗した" % " ".join(args[:2]))
 
 
-def make_tar(entries):
-    """entries: [(TarInfo, 中身のバイト列か None)]。"""
-    import tarfile
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w") as t:
-        for info, data in entries:
-            if data is not None:
-                info.size = len(data)
-                t.addfile(info, io.BytesIO(data))
-            else:
-                t.addfile(info)
-    return buf.getvalue()
+class TestBoundDir(unittest.TestCase):
+    """T-056 再提出1回目 軽-B の確かめを、T-059 の形（記録が縛っているファイルだけを git show から書き出す）に
+    置き換えた。git archive は使わない。"""
 
+    C = "a" * 40
 
-class TestSafeExtraction(unittest.TestCase):
-    """T-056 再提出1回目 軽-B：_safe_member と HeadTree の安全の処理を直接確かめる。"""
+    def test_bound_path_ok(self):
+        for p in ("a.py", "src/stats/x.py"):
+            self.assertTrue(verify._bound_path_ok(p), p)
+        for p in ("/etc/passwd", "../x", "a/../../x", "a\\b", "", "a//b", "./a", "a/", "a\x00b"):
+            self.assertFalse(verify._bound_path_ok(p), p)
 
-    def info(self, name, kind="file", linkname=""):
-        import tarfile
-        i = tarfile.TarInfo(name)
-        i.type = {"file": tarfile.REGTYPE, "dir": tarfile.DIRTYPE, "sym": tarfile.SYMTYPE,
-                  "hard": tarfile.LNKTYPE, "chr": tarfile.CHRTYPE, "fifo": tarfile.FIFOTYPE}[kind]
-        i.linkname = linkname
-        return i
-
-    def test_safe_member(self):
-        ok = [self.info("a.py"), self.info("src/stats/x.py"), self.info("src", "dir")]
-        bad = [self.info("/etc/passwd"), self.info("../x"), self.info("a/../../x"), self.info("a\\b"),
-               self.info("l", "sym", "/etc"), self.info("h", "hard", "a.py"), self.info("c", "chr"),
-               self.info("f", "fifo"), self.info("")]
-        for m in ok:
-            self.assertTrue(verify._safe_member(m), m.name)
-        for m in bad:
-            self.assertFalse(verify._safe_member(m), (m.name, m.type))
-
-    def test_head_tree_skips_and_stays_inside(self):
-        entries = [
-            (self.info("src", "dir"), None),
-            (self.info("src/ok.py"), b"print(1)\n"),
-            (self.info("../escape.txt"), b"x"),
-            (self.info("/abs.txt"), b"x"),
-            (self.info("link", "sym", "/etc/passwd"), None),
-            (self.info("hard", "hard", "src/ok.py"), None),
-            (self.info("zz/" + "a" * 300), b"x"),                     # 長すぎる名前
-            (self.info(os.fsdecode(b"zz/\xff\xfe")), b"x"),           # UTF-8 でない名前
-        ]
+    def test_writes_only_bound_files(self):
+        blobs = {(self.C, "src/stats/a.py"): b"print(1)\n", (self.C, "src/stats/b.py"): b"x = 2\n",
+                 (self.C, "src/stats/__pycache__/a.cpython-39.pyc"): b"pyc"}
+        files = [(p, ledger.sha256_hex(blobs[(self.C, p)])) for p in ("src/stats/a.py", "src/stats/b.py")]
+        repo = ShowRepo(blobs)
         with tempfile.TemporaryDirectory() as d:
-            # 同じ名前の2つ目は、T-058 から、飛ばさずに「記録と合わない」で止める（T-056 の監査 重大-1）。
-            # 取り出す前に止まり、何も書き出さない
-            dup = entries + [(self.info("src/ok.py"), b"other\n")]
-            with self.assertRaisesRegex(ledger.LedgerError, "同じ名前の項目"):
-                verify.HeadTree(FakeRepo(make_tar(dup)), "d" * 40, d)
-            self.assertEqual(os.listdir(d), [])
-            tree = verify.HeadTree(FakeRepo(make_tar(entries)), "a" * 40, d)
-            with open(os.path.join(tree.dir, "src", "ok.py"), "rb") as f:
-                self.assertEqual(f.read(), b"print(1)\n")
+            b = verify._BoundDir(repo, self.C, files, d, "見本")
             found = []
-            for root, dirs, files in os.walk(d):
-                found += [os.path.relpath(os.path.join(root, n), d) for n in files]
-            self.assertEqual(found, [os.path.join("tree-" + "a" * 40, "src", "ok.py")])
-            for name in ("../escape.txt", "/abs.txt", "link", "hard", "zz/" + "a" * 300):
-                self.assertIn(name, tree.skipped)
-            self.assertFalse(os.path.exists(os.path.join(os.path.dirname(d), "escape.txt")))
-            self.assertNotIn("src/ok.py", tree.skipped)
+            for root, dirs, names in os.walk(b.dir):
+                found += [os.path.relpath(os.path.join(root, n), b.dir) for n in names]
+            self.assertEqual(sorted(found), [os.path.join("src", "stats", "a.py"), os.path.join("src", "stats", "b.py")])
+            self.assertEqual(os.listdir(d), [os.path.basename(b.dir)])     # 書いたのは、その中だけ
+            self.assertTrue(all(c[0] == "show" for c in repo.calls))      # git archive は使わない
+            self.assertEqual(b.run("src/stats/a.py", "見本"), b"1\n")
+            with self.assertRaisesRegex(ledger.LedgerError, "縛っていない"):
+                b.run("src/stats/__pycache__/a.cpython-39.pyc", "見本")
 
-    def test_unreadable_archive_is_mismatch(self):
-        with tempfile.TemporaryDirectory() as d:
-            with self.assertRaises(ledger.LedgerError):
-                verify.HeadTree(FakeRepo(b"not a tar archive" * 100), "b" * 40, d)
-
-    def test_git_archive_failure_is_unchecked(self):
-        class NoArchive:
-            def git(self, *args, env=None):
-                raise ledger.LedgerError("git archive が失敗した")
-        with tempfile.TemporaryDirectory() as d:
-            with self.assertRaises(verify.Unchecked):
-                verify.HeadTree(NoArchive(), "c" * 40, d)
+    def test_stops(self):
+        blobs = {(self.C, "src/a.py"): b"x", (self.C, "Src/a.py"): b"y"}
+        good = ledger.sha256_hex(b"x")
+        cases = [
+            ([("src/a.py", "0" * 64)], "の sha256"),                                      # 記録の sha256 と違う
+            ([("src/missing.py", good)], "無い"),                                           # git の版に無い
+            ([("src/a.py", good), ("Src/a.py", ledger.sha256_hex(b"y"))], "大文字小文字"),     # 名前のぶつかり
+            ([("src/a.py", good), ("src/a.py", good)], "同じ名前"),
+            ([("../a.py", good)], "相対パスでない"),
+        ]
+        for files, text in cases:
+            with self.subTest(text=text):
+                with tempfile.TemporaryDirectory() as d:
+                    with self.assertRaisesRegex(ledger.LedgerError, text):
+                        verify._BoundDir(ShowRepo(blobs), self.C, files, d, "見本")
 
     def test_timeout_and_launch_failure(self):
         with tempfile.TemporaryDirectory() as d:
@@ -419,9 +391,9 @@ class TestDocT056(unittest.TestCase):
                        "verify を使わずに手で確かめる手順", "GIT_ で始まる環境変数",
                        "書き込みの遅れの上限の目安", "Python 3.14.2（`.venv/bin/python`）と 3.9.6",
                        "隔離した環境", "ネットワークを切って流す", "「記録と合わない」として終了コード 1 で止める",
-                       "Python の要らない照合（必ず行う）", "cmp - before.jsonl", "D=$(mktemp -d)",
+                       "Python の要らない照合（必ず行う）", "cmp - before.jsonl", 'D=$(mktemp -d "${TMPDIR:-/tmp}/verify.XXXXXX")',
                        "記録を作る側の commit の中身で起こせることは、どれも「照らさなかった」にしない",
-                       "記録の head の commit を git が読めない（`git archive` ができない）、の3つに限る",
+                       "Python を起動できない、git の履歴が無い、の2つに限る",
                        "export GIT_NO_REPLACE_OBJECTS=1 GIT_GRAFT_FILE=/dev/null/no-graft-file"):
             self.assertIn(phrase, text)
 
