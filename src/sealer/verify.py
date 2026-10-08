@@ -21,7 +21,10 @@
     python3 -B src/sealer/verify.py stats-order        統計係の順番1・順番1b（stats-order1・stats-order1b。T-037）の
                                                        中身・ledger_head・数（順番1 は 1 件）・位置（method-access より
                                                        前、gkg-run-start の前に順番1b）と、区分表の取得との前後
-                                                       （git の履歴：マニフェストに行が入った commit の親に順番1）
+                                                       （git の履歴：マニフェストに行が入った commit の親に順番1）。
+                                                       順番2（stats-order2。T-073・T-078）の記録の形・行き先・inputs・
+                                                       時機の条件・コードの版。--day-files で決まった記録の decide() を
+                                                       流し直す（手順書16章）
     python3 -B src/sealer/verify.py gkg-runs           GKG の取得の run の開始（gkg-run-start。T-031）の
                                                        ledger_head・drand・中身・順序。試しの run の回数と、
                                                        各 run の run_id・code_sha256・日を並べる
@@ -732,9 +735,261 @@ def _version_or_empty(repo, commit, rel):
     return _rgit(repo, "show", "%s:%s" % (commit, rel))
 
 
-def check_order2_plans(st, records):
+# ---- T-078：順番2の記録の、git を使う照合（書く仕組みと verify が同じ関数を使う）と、封印した decide() の流し方
+
+ORDER2_MANIFEST_PATHS = (ledger.GKG_MANIFESTS["trial"], ledger.GKG_MANIFESTS["official"])
+ORDER2_EXIT_STATUS = {0: "decided", 1: "stopped", 3: "pending"}      # counting.EXIT_CODES と同じ（テストが照らす）
+
+
+def _git_ok(repo, *args):
+    """git が 0 で終わるか（GIT_ の環境変数を固定して動かす）。"""
+    try:
+        r = subprocess.run(["git", "-C", repo.root] + list(args), capture_output=True, env=ledger.fixed_git_env())
+    except OSError:
+        return False
+    return r.returncode == 0
+
+
+def _has_rows(repo, commit, rel):
+    """commit の版の rel に、空でない行が一つ以上あるか（無い版は False）。"""
+    if not _git_ok(repo, "cat-file", "-e", "%s:%s" % (commit, rel)):
+        return False
+    return any(line.strip() for line in _rgit(repo, "show", "%s:%s" % (commit, rel)).split(b"\n"))
+
+
+def order2_f_set(repo, starts):
+    """時機の条件の F の集合（seal-order1.md 3章 (2)）を、starts（記録した refs の commit と worktree の HEAD）から辿る範囲で
+    計算する：`git log --full-history --format=%H <starts> -- <二つのマニフェスト>` が出す commit のうち、その版の二つの
+    マニフェストのどちらかに行が一つ以上あるもの。各要素は {commit, parents}（parents は `git rev-parse C^@` の順）。
+    commit の順に並べる（集合として扱う）。git は GIT_ の環境変数を固定して動かす（GIT_NO_REPLACE_OBJECTS・GIT_GRAFT_FILE）。"""
+    if not starts:
+        return []
+    log = _rgit(repo, "log", "--full-history", "--format=%H", *starts, "--", *ORDER2_MANIFEST_PATHS).decode().split()
+    out = []
+    for c in sorted(set(log)):
+        if any(_has_rows(repo, c, p) for p in ORDER2_MANIFEST_PATHS):
+            out.append({"commit": c, "parents": _rgit(repo, "rev-parse", c + "^@").decode().split()})
+    return out
+
+
+def order2_git_ok(repo, f_set, line):
+    """F の集合のどの commit も、親のうち少なくとも一つの版の sealed/ledger.jsonl に、行の全体が line（参照する順番1b の
+    記録の行。改行を除く）と一致する行があること。親が無い commit があれば満たさない。返り値: (満たすか, 理由か None)。"""
+    for c in f_set:
+        if not c["parents"]:
+            return False, "F の commit %s に親が無い（最初の commit にマニフェストの行がある）" % c["commit"][:12]
+        if not any(line in _version_or_empty(repo, p, LEDGER_REL).split(b"\n") for p in c["parents"]):
+            return False, ("F の commit %s（マニフェストに行がある）のどの親の sealed/ledger.jsonl にも、参照する順番1b の"
+                           "記録の行が無い（順番1b が試運転のデータより前に封印されたことを、git の親子で示せない）"
+                           % c["commit"][:12])
+    return True, None
+
+
+def _main_worktree(repo):
+    """repo が本体の worktree（clone した最初の作業ツリー）か（--git-dir と --git-common-dir が同じ）。"""
+    gd = _rgit(repo, "rev-parse", "--path-format=absolute", "--git-dir").decode().strip()
+    cd = _rgit(repo, "rev-parse", "--path-format=absolute", "--git-common-dir").decode().strip()
+    return os.path.realpath(gd) == os.path.realpath(cd)
+
+
+def order2_timing_now(repo, records, ref):
+    """書く仕組みが、今のリポジトリで、参照する順番1b の記録 ref の時機の条件（(a)）を確かめる（seal-order1.md 3章 (2)。
+    119・120行の graft・浅い clone・GIT_ の環境変数の固定、counting.md 4章 (3) の F を数える範囲）。
+      1. 計算の前の確かめ（固定した環境で）：refs/replace/ の参照、--git-common-dir の下の info/grafts、浅い clone。
+         どれかに当たれば F を計算せず、ok は False（置いてあること自体を、記録に残る止まりにする）。
+      2. 参照の一覧（git for-each-ref の全行）と、各 worktree の HEAD（git worktree list --porcelain）を読む。
+      3. F の集合を、2 の commit から辿る範囲で計算し（order2_f_set）、git log --all と同じ集合であることを確かめる。
+      4. ledger の条件（順番1b が最初の method-access より前）と、git の条件（order2_git_ok）。
+    返り値: (timing_check, timing_guards)。計算できない（本体の worktree でない、参照が無い、3 の集合が違う、git が
+    失敗する）なら LedgerError（何も書かない。時機の条件の結果ではない）。"""
+    if not _main_worktree(repo):
+        raise ledger.LedgerError("本体の worktree（clone した最初の作業ツリー）でない。順番2は本体の worktree で行う"
+                                 "（counting.md 4章 (3)。F を数える範囲を git log --all とそろえるため）。書かない")
+    replace = _rgit(repo, "for-each-ref", "--format=%(refname)", ledger.REPLACE_REF_PREFIX).decode("utf-8").split()
+    common = _rgit(repo, "rev-parse", "--path-format=absolute", "--git-common-dir").decode().strip()
+    graft = os.path.lexists(os.path.join(common, "info", "grafts"))
+    shallow = _rgit(repo, "rev-parse", "--is-shallow-repository").strip() != b"false"
+    head = _rgit(repo, "rev-parse", "--verify", "HEAD^{commit}").decode().strip()
+    refs = []
+    for line in _rgit(repo, "for-each-ref", "--format=%(refname) %(objectname)").decode("utf-8").splitlines():
+        name, _sp, obj = line.partition(" ")
+        refs.append({"ref": name, "commit": obj})
+    refs.sort(key=lambda x: x["ref"])
+    heads = []
+    for line in _rgit(repo, "worktree", "list", "--porcelain").decode("utf-8").splitlines():
+        if line.startswith("HEAD ") and line[5:].strip() not in heads:
+            heads.append(line[5:].strip())
+    heads.sort()
+    reasons = []
+    if replace:
+        reasons.append("refs/replace/ に参照がある（%s）。置き換えで親を変えうるので計算しない" % "、".join(replace))
+    if graft:
+        reasons.append("graft のファイル（%s）がある。親を変えうるので計算しない" % "info/grafts")
+    if shallow:
+        reasons.append("浅い clone である。親が取れないので計算しない")
+    if not ledger.order2_ledger_timing_ok(records, ref["seq"]):
+        reasons.append("参照する順番1b の記録（seq %d）が、最初の method-access より後にある" % ref["seq"])
+    f_set = []
+    if not (replace or graft or shallow):
+        starts = sorted({x["commit"] for x in refs} | set(heads))
+        f_set = order2_f_set(repo, starts)
+        every = _rgit(repo, "log", "--all", "--full-history", "--format=%H", "--", *ORDER2_MANIFEST_PATHS).decode().split()
+        every = {c for c in set(every) if any(_has_rows(repo, c, p) for p in ORDER2_MANIFEST_PATHS)}
+        if every != {c["commit"] for c in f_set}:
+            raise ledger.LedgerError("F の集合が、git log --all と、記録する参照・worktree の HEAD から辿った範囲とで違う。書かない")
+        ok_git, why = order2_git_ok(repo, f_set, ledger.canonical_line(ref))
+        if not ok_git:
+            reasons.append(why)
+    tc = {"ok": not reasons, "ref_1b_seq": ref["seq"], "head": head, "f_set": f_set, "refs": refs,
+          "worktree_heads": heads, "reason": "。".join(reasons) if reasons else None}
+    ledger.check_order2_timing_shape(tc, "時機の条件の確かめ")
+    return tc, {"graft_file": graft, "shallow": shallow}
+
+
+def find_order2_code(repo, head, d1b):
+    """参照する順番1b の記録（中身 d1b）が縛る src/stats/counting.py の版を、git の履歴から sha256 で探す（作業ツリーの
+    ファイルは使わない）。探す場所：順番1b の記録の head の版、head から辿れる、そのパスを変えた commit の版（新しい順）。
+    返り値: (見つかった commit, バイト列) か (None, None)。"""
+    rel = ledger.COUNTING_SCRIPT
+    sha = {f["path"]: f["sha256"] for f in d1b["files"]}.get(rel)
+    cands = []
+    if _git_ok(repo, "cat-file", "-e", d1b["head"] + "^{commit}"):
+        cands.append(d1b["head"])
+    if _git_ok(repo, "cat-file", "-e", head + "^{commit}"):
+        cands += _rgit(repo, "rev-list", head, "--", rel).decode().split()
+    for c in cands:
+        if not _git_ok(repo, "cat-file", "-e", "%s:%s" % (c, rel)):
+            continue
+        data = _rgit(repo, "show", "%s:%s" % (c, rel))
+        if ledger.sha256_hex(data) == sha:
+            return c, data
+    return None, None
+
+
+def check_order2_git(repo, data, records, rec, doc, base, read_json):
+    """順番2の記録の、git を使う照合（T-078）。書く仕組み（seal_records.check_new。base は HEAD）と verify（base は記録を
+    最初に含んだコミット）が呼ぶ。
+      - head の commit があり、その版の sealed/ledger.jsonl がこの記録を足す直前の記録（先頭 seq−1 行）と同じ。
+        head が base の祖先（か同じ）。
+      - コードの版：find_order2_code を head で計算し直し、code.found・code.commit と同じ（(c) を書いたのに版が履歴に
+        ある記録、版が無いのに decide() を流したと書く記録を止める）。
+      - 時機の条件：計算の前の確かめ（timing_guards・refs/replace/）に当たっていなければ、記録した refs と worktree_heads
+        から F の集合と親を計算し直して f_set と照らし（order2_f_set）、git の条件と ledger の条件から ok を計算し直して
+        timing_check.ok と照らす。記録した参照の commit がこのリポジトリに無い（push していない参照など）ときは、F を
+        計算し直さず、照らさなかったことを返す（bundle で照らす。手順書16章）。
+    違えば LedgerError。返り値: 照らさなかったことの説明の一覧。"""
+    what = "seq %d の %s（順番2）" % (rec["seq"], ledger.ORDER2_KIND)
+    head = doc["head"]
+    if not _git_ok(repo, "cat-file", "-e", head + "^{commit}"):
+        raise ledger.LedgerError("%s の head %s の commit が、このリポジトリに無い" % (what, head[:12]))
+    if _version_or_empty(repo, head, LEDGER_REL) != ledger.prefix_bytes(data, rec["seq"] - 1):
+        raise ledger.LedgerError("%s の head %s の版の sealed/ledger.jsonl が、この記録を足す直前の記録（先頭 %d 行）と"
+                                 "一致しない" % (what, head[:12], rec["seq"] - 1))
+    if base != head and not _git_ok(repo, "merge-base", "--is-ancestor", head, base):
+        raise ledger.LedgerError("%s の head %s が、%s の祖先でない" % (what, head[:12], base[:12]))
+    ref = ledger.order2_ref_1b(records, rec["seq"])
+    d1b = read_json(ref, ledger.ORDER1B_KIND)
+    commit, _code = find_order2_code(repo, head, d1b)
+    code = doc["code"]
+    if (commit is not None) != code["found"] or commit != code["commit"]:
+        if commit is not None and doc["stop_kind"] == "c":
+            raise ledger.LedgerError("%s は (c)（コードの sha256 が合わない）で止まった記録なのに、順番1b の記録が縛る %s の版が"
+                                     "git の履歴（commit %s）にある。版が履歴にあれば (c) は成り立たない"
+                                     % (what, ledger.COUNTING_SCRIPT, commit[:12]))
+        raise ledger.LedgerError("%s の code（found %r・commit %r）が、git の履歴から探し直した結果（%r）と違う"
+                                 % (what, code["found"], code["commit"], commit))
+    tc, g = doc["timing_check"], doc["timing_guards"]
+    notes = []
+    if g["graft_file"] or g["shallow"] or any(x["ref"].startswith(ledger.REPLACE_REF_PREFIX) for x in tc["refs"]):
+        return notes                       # 計算の前の確かめで止まった記録（ok が False であることは ledger が照らす）
+    starts = sorted({x["commit"] for x in tc["refs"]} | set(tc["worktree_heads"]))
+    missing = [c for c in starts if not _git_ok(repo, "cat-file", "-e", c)]
+    if missing:
+        notes.append("seq %d の順番2の時機の条件の計算し直し（記録した参照・worktree の HEAD のうち %d 件の commit がこの"
+                     "リポジトリに無い。記録の bundle で照らす）" % (rec["seq"], len(missing)))
+        return notes
+    f = order2_f_set(repo, starts)
+    if f != sorted(tc["f_set"], key=lambda x: x["commit"]):
+        raise ledger.LedgerError("%s の timing_check.f_set が、記録した refs・worktree_heads から計算し直した F の集合と親と違う"
+                                 % what)
+    ok_git, _why = order2_git_ok(repo, f, ledger.canonical_line(ref))
+    want = ok_git and ledger.order2_ledger_timing_ok(records, ref["seq"])
+    if want != tc["ok"]:
+        raise ledger.LedgerError("%s の timing_check.ok %r が、記録した f_set と sealed/ledger.jsonl から計算し直した時機の"
+                                 "条件 %r と違う" % (what, tc["ok"], want))
+    return notes
+
+
+def run_order2_decide(code, code_sha, trial_manifest, official_manifest, stores, tmp, what):
+    """封印した版の counting.py（code。sha256 が code_sha）の decide() を、そのファイルだけを置いた空のフォルダ（_BoundDir）
+    で、-I・-B・空の pycache_prefix の Python で流す（`counting.py apply <試し> <正式> <試しの置き場所> <正式の置き場所>`）。
+    マニフェストはバイト列を一時のファイルに書いて渡す（空なら EMPTY）。stores は {mode: 置き場所の絶対パス}。
+    置き場所は、一時のフォルダの決まった名前のリンク（store-trial・store-official）を通し、流すフォルダからの相対パス
+    （../store-trial など）で渡す。decide() の止まった理由の文に置き場所のパスが入るので、記録に手元の絶対パス（利用者の名前や
+    ボリュームの名前）を入れず、どこに置いても同じ文になるようにするため。
+    日の集計を開くのは、この中で流す decide() だけである。返り値: decide() の出力（dict）。
+    終了コードが 0・1・3 でない、出力が JSON でない、status と終了コードが合わない、なら LedgerError。"""
+    tmp = tempfile.mkdtemp(prefix="decide-", dir=tmp)
+    bound = _BoundDir(None, None, [(ledger.COUNTING_SCRIPT, code_sha)], tmp, what, blobs={ledger.COUNTING_SCRIPT: code})
+    for mode in ("trial", "official"):
+        os.symlink(stores[mode], os.path.join(tmp, "store-" + mode))
+    args = ["apply"]
+    for name, body in (("trial", trial_manifest), ("official", official_manifest)):
+        if not body:
+            args.append("EMPTY")
+            continue
+        fd, path = tempfile.mkstemp(prefix="manifest-%s-" % name, dir=tmp)
+        with os.fdopen(fd, "wb") as f:
+            f.write(body)
+        args.append(path)
+    args += ["../store-trial", "../store-official"]
+    with tempfile.TemporaryDirectory(dir=tmp) as pycache:
+        try:
+            r = subprocess.run(python_command(ledger.COUNTING_SCRIPT, pycache) + args, cwd=bound.dir,
+                               capture_output=True, env=_child_env(), timeout=RUN_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            raise ledger.LedgerError("%s：decide() が %s 秒の上限の中に終わらなかった" % (what, RUN_TIMEOUT_SECONDS)) from None
+        except OSError as e:
+            raise ledger.LedgerError("%s：Python を起動できない（%s）" % (what, e.__class__.__name__)) from None
+    try:
+        out = json.loads(r.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise ledger.LedgerError("%s：封印した版の counting.py の出力が JSON でない（終了コード %d）" % (what, r.returncode)) from None
+    if not isinstance(out, dict) or ORDER2_EXIT_STATUS.get(r.returncode) != out.get("status"):
+        raise ledger.LedgerError("%s：封印した版の counting.py の終了コード %d と出力の status %r が合わない"
+                                 % (what, r.returncode, out.get("status") if isinstance(out, dict) else None))
+    return out
+
+
+def _rerun_order2(st, repo, r, doc, trial, official, day_dirs):
+    """--day-files の置き場所に、決まった記録の3日のファイルがあれば、封印した版の decide() を流し直して counting_output と
+    照らす。返り値: 照らしたか（照らさなかった理由の文字列か True）。"""
+    out = doc.get("counting_output")
+    if out is None or out["status"] != "decided":
+        return "決まった記録だけを流し直す（止まった記録は、そのときの置き場所の状態を再現できない）"
+    names = [x["file_name"] for x in out["inputs"]]
+    store = next((d for d in day_dirs if all(os.path.isfile(os.path.join(d, n)) for n in names)), None)
+    if store is None:
+        return "--day-files の置き場所に、3日のファイルがそろっていない"
+    d1b = st.file_json(ledger.order2_ref_1b(st.records, r["seq"]), ledger.ORDER1B_KIND)
+    _c, code = find_order2_code(repo, doc["head"], d1b)
+    with tempfile.TemporaryDirectory() as tmp:
+        empty = tempfile.mkdtemp(prefix="empty-store-", dir=tmp)
+        stores = {"trial": empty, "official": empty}
+        stores[doc["input_run"]["mode"]] = os.path.abspath(store)
+        got = run_order2_decide(code, doc["code"]["sha256"], trial, official, stores, tmp,
+                                "seq %d の順番2の流し直し" % r["seq"])
+    if got != out:
+        raise ledger.LedgerError("seq %d の順番2：--day-files の3日のファイルで、封印した版の decide() を流し直した出力が、記録の "
+                                 "counting_output と違う" % r["seq"])
+    return True
+
+
+def check_order2_plans(st, records, day_dirs=()):
     """順番2の記録ごとに、記録を最初に含んだコミットのマニフェストから R と decide() の行き先（ledger.order2_plan）を
     計算し直し、記録の trial_result・stop_kind・input_run と照らす（T-073 差し戻し2回目 2。ledger.check_order2_plan）。
+    T-078：ledger_head、counting_output.runs・inputs（check_order2_plan の中）、時機の条件とコードの版（check_order2_git）も
+    照らし、--day-files で3日のファイルを渡せば、決まった記録の decide() を流し直す。
     git の履歴が無いとき・浅い clone のときは「照らさなかった」。食い違えば LedgerError。"""
     repo = Repo(st.root)
     why = None
@@ -747,13 +1002,19 @@ def check_order2_plans(st, records):
     commits = None
     for r in records:
         doc = st.file_json(r, ledger.ORDER2_KIND)
+        ledger.check_ledger_head(st.data, r, doc)          # T-078
         run = doc["input_run"]
         desc = "input_run なし（段に進む前に止まる）" if run is None else "input_run %s・%s" % (run["mode"], run["run_id"])
         print("  %s seq %d（順番2）: stop_kind %s、%s、trial_result は seq %d（R の gkg-run-result。この記録より前）"
               % (ledger.ORDER2_KIND, r["seq"], doc["stop_kind"] or "null", desc, doc["trial_result"]["seq"]))
+        print("    status %s、参照する順番1b は seq %d、時機の条件 %s、コードの版 %s（%s）"
+              % (doc["status"], doc["ref_1b_seq"], "満たす" if doc["timing_check"]["ok"] else
+                 "満たさない（%s）" % doc["timing_check"]["reason"],
+                 "履歴にある" if doc["code"]["found"] else "履歴に無い", doc["code"]["sha256"]))
         if why is not None:
             st.unchecked.append("seq %d の順番2の行き先の計算し直し（%s）" % (r["seq"], why))
             print("照らさなかった：%s なので、seq %d の順番2の行き先をマニフェストから計算し直していない" % (why, r["seq"]))
+            st.unchecked.append("seq %d の順番2の時機の条件とコードの版の計算し直し（%s）" % (r["seq"], why))
             continue
         if commits is None:
             commits = repo.commit_for_seq(st.data, partial=True)
@@ -765,12 +1026,26 @@ def check_order2_plans(st, records):
             print("照らさなかった：記録がまだコミットされていないので、seq %d の順番2の行き先をマニフェストから計算し直して"
                   "いない（コミットしたあとで照らす）" % r["seq"])
             continue
-        plan = ledger.check_order2_plan(st.records, r, doc, st.file_json,
-                                        _version_or_empty(repo, c, ledger.GKG_MANIFESTS["trial"]),
-                                        _version_or_empty(repo, c, ledger.GKG_MANIFESTS["official"]))
+        trial = _version_or_empty(repo, c, ledger.GKG_MANIFESTS["trial"])
+        official = _version_or_empty(repo, c, ledger.GKG_MANIFESTS["official"])
+        plan = ledger.check_order2_plan(st.records, r, doc, st.file_json, trial, official)
         print("    記録を最初に含んだコミット %s のマニフェストから計算し直した行き先（%s）と R は、記録と同じ。試しの run の"
               "マニフェストの全体は R の gkg-run-result が縛るバイト列と同じ"
               % (c[:12], plan["action"] if plan["action"] != "stage" else "%s の段" % plan["mode"]))
+        notes = check_order2_git(repo, st.data, st.records, r, doc, c, st.file_json)
+        print("    head %s の版の記録、コードの版、時機の条件（F の集合 %d 件と親、ok %s）を git から計算し直した。記録と同じ"
+              % (doc["head"][:12], len(doc["timing_check"]["f_set"]), doc["timing_check"]["ok"]))
+        for n in notes:
+            st.unchecked.append(n)
+            print("照らさなかった：%s" % n)
+        if doc.get("counting_output") is not None:
+            done = _rerun_order2(st, repo, r, doc, trial, official, day_dirs) if day_dirs else \
+                "--day-files で3日のファイルの置き場所を渡したときだけ流し直す"
+            if done is True:
+                print("    --day-files の3日のファイルで、封印した版の decide() を流し直した出力は、記録の counting_output と同じ")
+            else:
+                st.unchecked.append("seq %d の順番2の decide() の流し直し（%s）" % (r["seq"], done))
+                print("照らさなかった：seq %d の順番2の decide() の流し直し（%s）" % (r["seq"], done))
 
 
 def cmd_stats_order(st, a):
@@ -804,7 +1079,7 @@ def cmd_stats_order(st, a):
         for path in sorted(files):
             print("      %s  %s" % (files[path], path))
     if got["order2"]:
-        check_order2_plans(st, got["order2"])
+        check_order2_plans(st, got["order2"], getattr(a, "day_files", None) or ())
     o1 = ledger.first_order1(st.records)
     print("除外の規則の kind（%s）の記録：%s（1 件だけ）。順番1・1b は最初の method-access より前、"
           "最初の gkg-run-start の前に順番1b。" % (ledger.ORDER1_KIND, "無し" if o1 is None else "seq %d" % o1["seq"]))
@@ -1468,8 +1743,11 @@ def main(argv=None):
         parsers[name] = s
     for name in ("targets", "all", "stats-order"):
         parsers[name].add_argument("--rev", default="working")
+    # T-078：stats-order にも日の集計の置き場所（決まった順番2の記録の decide() を流し直す。渡したときだけ）
+    parsers["stats-order"].add_argument("--day-files", action="append", default=[])
     for name in ("gkg-runs", "all"):
-        # T-066：日の集計（と取得の記録）の置き場所。渡したときだけ sha256 を照らす（第三者はディスクを持たない）
+        # T-066：日の集計（と取得の記録）の置き場所。渡したときだけ sha256 を照らす（第三者はディスクを持たない）。
+        # all では、順番2の decide() の流し直しにも使う（T-078）
         parsers[name].add_argument("--day-files", action="append", default=[])
         # T-070 差し戻し2回目：封印済みのファイル一覧の本体。sha256 が記録の filelist_sha256 と同じものだけを使い、
         # 計画を作り直して plan_sha256 と照らす

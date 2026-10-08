@@ -7,7 +7,8 @@
 1 行の形（キーはこの 6 つだけ。ほかのキーがあれば検証で失敗にする）
     seq          通し番号。1 から始まり、行の順に 1 ずつ増える。
     prev_hash    直前の行のバイト列（末尾の改行を含めない）の sha256。1 行目は 0 が 64 個。
-    kind         種類。許可リスト（ALLOWED_KINDS）の 11 だけ（T-066 で gkg-run-result を加えた）。それ以外は検証で失敗にする。
+    kind         種類。許可リスト（ALLOWED_KINDS）の 12 だけ（T-066 で gkg-run-result、T-078 で stats-order2 を加えた）。
+                 それ以外は検証で失敗にする。
                  gkg-run-start（GKG の取得の run の開始。T-031）、stats-order1・stats-order1b
                  （統計係の順番1・順番1b の事前の封印。T-037）を加えた。
                  periods / periods-triggers / threshold-access / acquisition-start /
@@ -148,9 +149,10 @@ GKG_RUN_KIND = "gkg-run-start"      # T-031：GKG の取得の run（試し・�
 ORDER1_KIND = "stats-order1"        # T-037：統計係の順番1（除外の規則と入れる規則）。除外の規則の kind
 ORDER1B_KIND = "stats-order1b"      # T-037：統計係の順番1b（数え方の候補と基準の案）
 GKG_RESULT_KIND = "gkg-run-result"  # T-066：GKG の取得の run が終わったあとの、マニフェストの封印
+ORDER2_KIND = "stats-order2"        # T-073 で名前を決め、T-078 で許可リストに入れた：統計係の順番2の試み
 ALLOWED_KINDS = (PERIODS_KIND, TRIGGERS_KIND, THRESHOLD_ACCESS_KIND, ACQ_START_KIND,
                  ACQ_RESULT_KIND, CANDIDATES_KIND, METHOD_ACCESS_KIND, GKG_RUN_KIND,
-                 ORDER1_KIND, ORDER1B_KIND, GKG_RESULT_KIND)
+                 ORDER1_KIND, ORDER1B_KIND, GKG_RESULT_KIND, ORDER2_KIND)
 
 # stamp で使う公開カレンダー（ots の既定と同じ 4 つ）と、その集約先が返す Pending の宛先
 # （実体のカレンダー）。stamp.py はこの左側に送る。.ots の Pending の宛先は右側に限る。
@@ -1947,7 +1949,9 @@ def check_stats_order(records, read_json):
     # T-073：順番2の記録は、使った run の gkg-run-result（マニフェストの時刻証明）より後にだけ置ける
     o2 = [r for r in records if r["kind"] == ORDER2_KIND]
     for r in o2:
-        check_order2_run(records, r, read_json(r, ORDER2_KIND), read_json)
+        doc = read_json(r, ORDER2_KIND)
+        check_order2_run(records, r, doc, read_json)
+        check_order2_doc(records, r, doc, read_json)          # T-078
     return {"order1": o1, "order1b": o1b, "order2": o2}
 
 
@@ -1969,8 +1973,9 @@ def check_stats_order(records, read_json):
 #   (3) 行き先の照合（check_order2_plan）：記録を最初に含んだコミット（書く仕組みでは HEAD）のマニフェストから
 #       R と order2_plan を計算し直し、記録の trial_result・stop_kind・input_run と照らす。
 #
-# 順番2の kind は ORDER2_KIND に決めるが、許可リスト（ALLOWED_KINDS）にはまだ入れない。記録の中身の残りの
-# 形（参照する順番1b、時機の条件の確かめなど）は、順番2を封印するタスクで決める。このタスクで決めるキー：
+# 順番2の kind は ORDER2_KIND。T-078 で許可リスト（ALLOWED_KINDS）に入れた。記録の中身の残りの形（参照する
+# 順番1b、時機の条件の確かめ、コードの版など）は T-078 で決めた（下の「T-078」の節。check_order2_doc）。
+# T-073 で決めたキー：
 #   stop_kind       null（決まった・待つ）か "a"・"b"・"c"（seal-order1.md 172行）
 #   trial_result    {"seq", "record_sha256"}：R の gkg-run-result（stop_kind によらず必ず）
 #   input_run       {"mode", "run_id"} か null：decide() が段（trial・official）に進む run。null は、decide() が
@@ -1978,7 +1983,6 @@ def check_stats_order(records, read_json):
 #   gkg_run_result  {"seq", "record_sha256"} か null：input_run の run の gkg-run-result（input_run と一緒に null。
 #                   input_run が R なら trial_result と同じ）
 #   counting_output decide() の出力（そのまま）。decide() を流した記録（stop_kind が null か "b"）だけが持つ
-ORDER2_KIND = "stats-order2"
 ORDER2_RUN_KEYS = ("gkg_run_result", "input_run", "stop_kind", "trial_result")
 ORDER2_STATUSES = ("decided", "stopped", "pending")
 ORDER2_STOP_KINDS = ("a", "b", "c")
@@ -2274,6 +2278,8 @@ def check_order2_plan(records, record, doc, read_json, trial_manifest, official_
       - 行き先が待つなら、記録があること自体が食い違い。
       - stop なら input_run は null で、stop_kind は null でない（decide() は決まらない）。
       - stage なら input_run がその mode・run_id。
+      - T-078：counting_output があれば、runs がマニフェストから計算し直した order2_runs_record と同じ。決まった記録なら、
+        inputs が gkg-run-result の縛るマニフェストの day の行と同じ（check_order2_inputs）。
     段の記録と input_run の対応は check_order2_run が照らす。違えば LedgerError。返り値: 計算した行き先。"""
     what = "seq %d の %s（順番2）" % (record["seq"], ORDER2_KIND)
     got = check_order2_run(records, record, doc, read_json)
@@ -2295,11 +2301,20 @@ def check_order2_plan(records, record, doc, read_json, trial_manifest, official_
         if doc["input_run"] is not None or doc["stop_kind"] is None:
             raise LedgerError("%s：計算し直した行き先は「段に進む前に止まる」（%s）なのに、記録の input_run・stop_kind が"
                               "合わない" % (what, plan["reason"]))
-        return plan
-    want = {"mode": plan["mode"], "run_id": plan["run_id"]}
-    if doc["input_run"] != want:
-        raise LedgerError("%s：計算し直した行き先は %s・%s の段なのに、記録の input_run は %r" % (
-            what, plan["mode"], plan["run_id"], doc["input_run"]))
+    else:
+        want = {"mode": plan["mode"], "run_id": plan["run_id"]}
+        if doc["input_run"] != want:
+            raise LedgerError("%s：計算し直した行き先は %s・%s の段なのに、記録の input_run は %r" % (
+                what, plan["mode"], plan["run_id"], doc["input_run"]))
+    out = doc.get("counting_output")
+    if out is not None and out["runs"] != order2_runs_record(trial_manifest, official_manifest):
+        # T-078：decide() の出力の runs（二つの run の run_id と3日の failed_files）を、マニフェストから計算し直して照らす
+        raise LedgerError("%s の counting_output.runs が、マニフェストから計算し直した二つの run の run_id・failed_files と"
+                          "違う" % what)
+    if out is not None and out["status"] == "decided":
+        # T-078（T-073 の申し送り2）：決まった記録の inputs（3日のファイルの名前と sha256）を、gkg-run-result が縛る
+        # マニフェストの day の行と照らす
+        check_order2_inputs(records, doc, read_json, trial_manifest, official_manifest)
     return plan
 
 
@@ -2337,6 +2352,274 @@ def require_order2_gate(trial_manifest, official_manifest):
                 raise Order2GateClosed("正式な run（run_id %s）の段に進む形：%s" % (plan["run_id"], e)) from None
             out["gkg_run_result"] = _result_ref(xrec)
     return out
+
+
+# ---- T-078：順番2の記録の残りの形（決まった・待つ・止まった、参照する順番1b、時機の条件、コードの版）
+#
+# 決まり：docs/stats/seal-order1.md 3章 (2)（101・119・137〜141・172〜184行）と docs/stats/counting.md 4章 (1)(2)(3)。
+# 書く仕組みは src/sealer/seal_order2.py。手順は docs/verify/periods-seal.md 16章。キー（T-073 の4つと、ここで足すもの）：
+#   kind・ledger_head        いつもの形（ledger_head は直前の記録までのハッシュ）
+#   head                     書いた時点の HEAD（40 桁）。マニフェストは、この版（書く仕組み）と、記録を最初に含んだコミットの
+#                            版（verify）で読む
+#   status                   "decided"・"stopped"・"pending"（seal-order1.md 172行。kind では分けない）。stop_kind が
+#                            a・b・c なら stopped、null なら counting_output.status
+#   stop_kind・trial_result・input_run・gkg_run_result   T-073 のとおり
+#   ref_1b_seq・ref_1b_record_sha256   参照する順番1b の記録（この記録より seq が小さい stats-order1b の seq の最大。
+#                            counting.expected_ref_1b と同じ決め方）の seq と、その行の sha256
+#   timing_check             時機の条件（(a)）を確かめた内容。counting.check_timing_check と同じ7つのキー（ok・ref_1b_seq・head・
+#                            f_set・refs・worktree_heads・reason）。ok が False なら stop_kind は "a"
+#   timing_guards            {"graft_file", "shallow"}：計算の前の確かめ（graft のファイルがあった・浅い clone だった）。
+#                            refs/replace/ の参照の有無は refs から分かるので入れない。どれかに当たれば計算せず ok は False
+#   code                     {"path", "sha256", "found", "commit"}：参照する順番1b の記録が縛る src/stats/counting.py の
+#                            sha256 と、その版が git の履歴（HEAD から辿れる、そのパスを変えた commit と、順番1b の記録の
+#                            head）にあったか・あった commit。found が False のときだけ stop_kind "c" を書ける。
+#                            found が True なら、decide() はその版（作業ツリーの版ではない）で流す
+#   bundle                   {"sha256", "published", "reason"}：書いた時点の git bundle（--all）のバイト列の sha256。
+#                            published は書いた時点では False（公開は手順書16章の検査のあと）
+#   python                   decide() を流した Python の版（sys.version の最初の語）
+#   counting_output          decide() の出力（stop_kind が null か "b" の記録だけ。T-073）
+
+ORDER2_DOC_KEYS = ("bundle", "code", "gkg_run_result", "head", "input_run", "kind", "ledger_head", "python",
+                   "ref_1b_record_sha256", "ref_1b_seq", "status", "stop_kind", "timing_check", "timing_guards",
+                   "trial_result")
+ORDER2_TIMING_KEYS = ("f_set", "head", "ok", "reason", "ref_1b_seq", "refs", "worktree_heads")
+ORDER2_GUARD_KEYS = ("graft_file", "shallow")
+ORDER2_CODE_KEYS = ("commit", "found", "path", "sha256")
+ORDER2_BUNDLE_KEYS = ("published", "reason", "sha256")
+ORDER2_OUTPUT_KEYS = ("official_candidate", "official_status", "proposed_label", "runs", "status", "steps")
+ORDER2_DECIDED_KEYS = ("coverage", "input_mode", "input_run_id", "inputs", "results")
+REPLACE_REF_PREFIX = "refs/replace/"
+
+
+def order2_ref_1b(records, seq):
+    """seq の順番2の記録が参照する順番1b の記録：seq より小さい stats-order1b の seq の最大（counting.expected_ref_1b と
+    同じ決め方。seal-order1.md 3章 (2) の「seq が最も大きいもの」）。無ければ None。"""
+    before = [r for r in records if r["kind"] == ORDER1B_KIND and r["seq"] < seq]
+    return max(before, key=lambda r: r["seq"]) if before else None
+
+
+def order2_runs_record(trial_manifest, official_manifest):
+    """counting.runs_record と同じ（二つの run の run_id と、3日の failed_files。マニフェストだけから決まる）。
+    tests/sealer/test_t078.py が、封印済みの counting.runs_record と食い違わないことを確かめる。"""
+    out = {}
+    for mode, data in (("trial", trial_manifest), ("official", official_manifest)):
+        rec = {"run_id": None, "failed_files": None}
+        try:
+            entries = _o2_entries(data) if data is not None else []
+            _s, rid = _o2_first_start(entries, mode)
+        except _Order2Stop:
+            rid = None
+        if rid is not None:
+            ff = {}
+            for e in entries:
+                if e.get("run_id") == rid and e.get("kind") == "day" and e.get("day") in ORDER2_TRIAL_DAYS:
+                    ff[e["day"]] = e.get("failed_files")
+            rec = {"run_id": rid, "failed_files": {d: ff[d] for d in ORDER2_TRIAL_DAYS if d in ff}}
+        out[mode] = rec
+    return out
+
+
+def check_order2_inputs(records, doc, read_json, trial_manifest, official_manifest):
+    """決まった記録の counting_output.inputs（3日のファイルの名前と sha256）を、input_run の run の gkg-run-result が縛る
+    マニフェストの day の行と照らす（T-078。T-073 の申し送り2）。試しの run は、マニフェストの全体が R の gkg-run-result の
+    縛るバイト列と同じこと（check_trial_manifest_sealed）を check_order2_plan が先に確かめている。正式な run は、
+    マニフェストの先頭 manifest_lines 行の sha256 が、その gkg-run-result の manifest_sha256 と同じこと。違えば LedgerError。"""
+    run, out = doc["input_run"], doc["counting_output"]
+    what = "順番2の記録"
+    path = GKG_MANIFESTS[run["mode"]]
+    ref = doc["gkg_run_result"]
+    rres = {r["seq"]: r for r in records}.get(ref["seq"])
+    rdoc = read_json(rres, GKG_RESULT_KIND)
+    if run["mode"] == "trial":
+        body = trial_manifest
+        if sha256_hex(body) != rdoc["manifest_sha256"]:
+            raise LedgerError("%s：試しの run のマニフェストが、gkg-run-result（seq %d）の縛るバイト列と違う" % (what, rres["seq"]))
+    else:
+        body = manifest_prefix(official_manifest or b"", rdoc["manifest_lines"], path)
+        if sha256_hex(body) != rdoc["manifest_sha256"]:
+            raise LedgerError("%s：%s の先頭 %d 行が、gkg-run-result（seq %d）の manifest_sha256 と違う"
+                              % (what, path, rdoc["manifest_lines"], rres["seq"]))
+    rows = {}
+    for _i, row in manifest_rows(body, path):
+        if row.get("kind") == "day" and row.get("run_id") == run["run_id"] and row.get("day") in ORDER2_TRIAL_DAYS:
+            if row["day"] in rows:
+                raise LedgerError("%s：%s に run_id %s の day %s の行が2つある" % (what, path, run["run_id"], row["day"]))
+            rows[row["day"]] = row
+    missing = [d for d in ORDER2_TRIAL_DAYS if d not in rows]
+    if missing:
+        raise LedgerError("%s：gkg-run-result（seq %d）が縛る %s に、run_id %s の day %s の行が無い"
+                          % (what, rres["seq"], path, run["run_id"], "、".join(missing)))
+    want = [{"day": d, "file_name": rows[d].get("file_name"), "sha256": rows[d].get("sha256")} for d in ORDER2_TRIAL_DAYS]
+    if out.get("inputs") != want:
+        raise LedgerError("%s の counting_output.inputs が、gkg-run-result（seq %d）が縛る %s の day の行（3日のファイルの名前と"
+                          "sha256）と違う" % (what, rres["seq"], path))
+    return want
+
+
+def check_order2_timing_shape(tc, what):
+    """timing_check の形（counting.check_timing_check と同じ規則。LedgerError で止める）。"""
+    if not isinstance(tc, dict) or tuple(sorted(tc)) != ORDER2_TIMING_KEYS:
+        raise LedgerError("%s の timing_check のキーが、決まった %d 個（%s）でない"
+                          % (what, len(ORDER2_TIMING_KEYS), "、".join(ORDER2_TIMING_KEYS)))
+    if not isinstance(tc["ok"], bool):
+        raise LedgerError("%s の timing_check.ok が True か False でない" % what)
+    if type(tc["ref_1b_seq"]) is not int:
+        raise LedgerError("%s の timing_check.ref_1b_seq が整数でない" % what)
+    _check_hex(tc["head"], HEX40, what + " の timing_check.head")
+    if not isinstance(tc["f_set"], list):
+        raise LedgerError("%s の timing_check.f_set が一覧でない" % what)
+    seen = set()
+    for c in tc["f_set"]:
+        if not isinstance(c, dict) or sorted(c) != ["commit", "parents"] or not isinstance(c["commit"], str) \
+                or not HEX40.match(c["commit"]) or not isinstance(c["parents"], list) \
+                or not all(isinstance(x, str) and HEX40.match(x) for x in c["parents"]) or c["commit"] in seen:
+            raise LedgerError("%s の timing_check.f_set の要素が {commit: 40桁, parents: [40桁...]} でないか、重なっている" % what)
+        seen.add(c["commit"])
+    if not isinstance(tc["refs"], list) or not tc["refs"]:
+        raise LedgerError("%s の timing_check.refs が空でない一覧でない" % what)
+    names = set()
+    for r in tc["refs"]:
+        if not isinstance(r, dict) or sorted(r) != ["commit", "ref"] or not isinstance(r["ref"], str) or not r["ref"] \
+                or not isinstance(r["commit"], str) or not HEX40.match(r["commit"]) or r["ref"] in names:
+            raise LedgerError("%s の timing_check.refs の要素が {ref: 名前, commit: 40桁} でないか、名前が重なっている" % what)
+        names.add(r["ref"])
+    wh = tc["worktree_heads"]
+    if not isinstance(wh, list) or not wh or len(set(wh)) != len(wh) \
+            or not all(isinstance(x, str) and HEX40.match(x) for x in wh):
+        raise LedgerError("%s の timing_check.worktree_heads が、重ならない40桁の16進の空でない一覧でない" % what)
+    if tc["ok"] and tc["reason"] is not None:
+        raise LedgerError("%s の timing_check.ok が True なのに reason がある" % what)
+    if not tc["ok"] and (not isinstance(tc["reason"], str) or not tc["reason"]):
+        raise LedgerError("%s の timing_check.ok が False なのに reason が無い" % what)
+
+
+def order2_ledger_timing_ok(records, ref_seq):
+    """時機の条件のうち ledger の部分：参照する順番1b の seq が、最初の method-access の seq より小さい（無ければ満たす）。"""
+    m = _first_of_kind(records, METHOD_ACCESS_KIND)
+    return m is None or ref_seq < m["seq"]
+
+
+def _check_order2_output(out, d1b, what):
+    """decide() の出力の形（status ごとのキー、正式な数え方、steps、inputs・results・coverage の形）。値そのもの
+    （results・coverage）は日の集計が無いと照らせない（verify の --day-files で流し直す）。"""
+    want = set(ORDER2_OUTPUT_KEYS) | (set(ORDER2_DECIDED_KEYS) if out["status"] == "decided" else set())
+    if set(out) != want:
+        raise LedgerError("%s の counting_output のキーが、decide() の出力（status %s）のキーと違う" % (what, out["status"]))
+    c = d1b["counting"]
+    if out["official_candidate"] != c["official_candidate"] or out["official_status"] != c["official_status"]:
+        raise LedgerError("%s の counting_output の正式な数え方 %r（%r）が、参照する順番1b の記録の %r（%r）と違う（封印した"
+                          "コードと違う）" % (what, out["official_candidate"], out["official_status"],
+                                          c["official_candidate"], c["official_status"]))
+    if not isinstance(out["proposed_label"], str) or not out["proposed_label"]:
+        raise LedgerError("%s の counting_output.proposed_label が文字列でない" % what)
+    steps = out["steps"]
+    if not steps or not all(isinstance(x, dict) and isinstance(x.get("step"), str) for x in steps):
+        raise LedgerError("%s の counting_output.steps が decide() の形でない" % what)
+    names = [x["step"] for x in steps]
+    stage = [n for n in names if n in GKG_MANIFESTS]
+    if out["status"] == "decided":
+        ok = len(steps) == 1 and len(stage) == 1
+    elif out["status"] == "stopped":
+        last = steps[-1]
+        ok = (sorted(last) == ["reason", "step"] and last["step"] == "stop" and isinstance(last["reason"], str)
+              and len(steps) - 1 == len(stage) <= 1)
+    else:
+        ok = names[-1] == "wait" and len(steps) - 1 == len(stage) <= 1
+    if not ok:
+        raise LedgerError("%s の counting_output.steps %r が、status %s の decide() の steps の形でない"
+                          % (what, names, out["status"]))
+    if out["status"] != "decided":
+        return
+    if out["input_mode"] not in GKG_MANIFESTS or not isinstance(out["input_run_id"], str) \
+            or not RUN_ID_RE.match(out["input_run_id"]):
+        raise LedgerError("%s の counting_output.input_mode・input_run_id の形が違う" % what)
+    ins = out["inputs"]
+    if not isinstance(ins, list) or [x.get("day") if isinstance(x, dict) else None for x in ins] \
+            != list(ORDER2_TRIAL_DAYS) or any(sorted(x) != ["day", "file_name", "sha256"] for x in ins):
+        raise LedgerError("%s の counting_output.inputs が、3日（この順）の {day, file_name, sha256} でない" % what)
+    res = out["results"]
+    if not isinstance(res, dict) or sorted(res) != sorted(c["criteria_ids"]) \
+            or not all(isinstance(v, dict) and v.get("official") is False for v in res.values()):
+        raise LedgerError("%s の counting_output.results が、参照する順番1b の記録の基準の案（%s。どれも official: false）と"
+                          "合わない" % (what, "・".join(c["criteria_ids"])))
+    cov = out["coverage"]
+    if not isinstance(cov, list) or [x.get("day") if isinstance(x, dict) else None for x in cov] != list(ORDER2_TRIAL_DAYS):
+        raise LedgerError("%s の counting_output.coverage が、3日（この順）の日ごとの値でない" % what)
+
+
+def check_order2_doc(records, record, doc, read_json):
+    """順番2の記録の T-078 の部分の照合（git を使わない部分）。check_order2_run のあとに check_stats_order から呼ぶ
+    （書く仕組みも verify も）。git を使う部分（時機の条件の計算し直し、コードの版の有無）は verify.check_order2_git。
+      - キーがちょうど ORDER2_DOC_KEYS（と、stop_kind が null か b なら counting_output）。
+      - status：stop_kind が a・b・c なら stopped、null なら counting_output.status。
+      - ref_1b_seq がこの記録より前の stats-order1b の seq の最大（order2_ref_1b）で、ref_1b_record_sha256 がその行の sha256。
+      - timing_check の形（counting.check_timing_check と同じ）。ref_1b_seq・head が記録と同じ。head が worktree_heads にある。
+        timing_guards のどれか、refs/replace/ の参照、ledger の条件（order2_ledger_timing_ok）に当たるなら ok は False。
+        ok が False のときだけ、そしてそのときは必ず stop_kind が "a"。
+      - code.path が src/stats/counting.py で、sha256 が順番1b の記録の files のそれ。found が False なら commit は null。
+        stop_kind が "c" なら found は False（版が履歴にあれば (c) は成り立たない。T-073 の申し送り1）。
+        stop_kind が null か "b" なら found は True（decide() を流したのは、その版のはず）。
+      - bundle の形（published は False）、python が文字列。
+      - counting_output の形（_check_order2_output）。
+    違えば LedgerError。返り値: 参照する順番1b の記録。"""
+    what = "seq %d の %s（順番2）" % (record["seq"], ORDER2_KIND)
+    _check_doc_kind(record, doc)
+    sk = doc.get("stop_kind")
+    want = set(ORDER2_DOC_KEYS) | ({"counting_output"} if sk in (None, "b") else set())
+    if set(doc) != want:
+        raise LedgerError("%s の中身のキーが、決まったもの（%s）と一致しない" % (what, "、".join(sorted(want))))
+    _check_hex(doc["head"], HEX40, what + " の head")
+    out = doc.get("counting_output")
+    want_status = "stopped" if sk is not None else out["status"]
+    if doc["status"] != want_status:
+        raise LedgerError("%s の status %r が、stop_kind %r と counting_output から決まる %r と違う"
+                          % (what, doc["status"], sk, want_status))
+    ref = order2_ref_1b(records, record["seq"])
+    if ref is None:
+        raise LedgerError("%s より前に stats-order1b（順番1b）の記録が無い" % what)
+    if type(doc["ref_1b_seq"]) is not int or doc["ref_1b_seq"] != ref["seq"]:
+        raise LedgerError("%s の ref_1b_seq %r が、この記録より前の stats-order1b の seq の最大 %d と違う"
+                          "（counting.expected_ref_1b と同じ決め方）" % (what, doc["ref_1b_seq"], ref["seq"]))
+    if doc["ref_1b_record_sha256"] != sha256_hex(canonical_line(ref)):
+        raise LedgerError("%s の ref_1b_record_sha256 が、seq %d の行の sha256 と違う" % (what, ref["seq"]))
+    d1b = read_json(ref, ORDER1B_KIND)
+    tc = doc["timing_check"]
+    check_order2_timing_shape(tc, what)
+    if tc["ref_1b_seq"] != ref["seq"] or tc["head"] != doc["head"] or doc["head"] not in tc["worktree_heads"]:
+        raise LedgerError("%s の timing_check の ref_1b_seq・head が記録と違うか、head が worktree_heads に無い" % what)
+    g = doc["timing_guards"]
+    if not isinstance(g, dict) or tuple(sorted(g)) != ORDER2_GUARD_KEYS or not all(isinstance(v, bool) for v in g.values()):
+        raise LedgerError("%s の timing_guards が {graft_file, shallow}（どちらも True か False）でない" % what)
+    blocked = g["graft_file"] or g["shallow"] or any(r["ref"].startswith(REPLACE_REF_PREFIX) for r in tc["refs"])
+    if tc["ok"] and (blocked or not order2_ledger_timing_ok(records, ref["seq"])):
+        raise LedgerError("%s の timing_check.ok が True なのに、graft のファイル・浅い clone・refs/replace/ の参照、または"
+                          "順番1b が最初の method-access より後、のどれかに当たる" % what)
+    if tc["ok"] == (sk == "a"):
+        raise LedgerError("%s の stop_kind %r と timing_check.ok %r が合わない（時機の条件を満たさないときだけ、必ず (a)）"
+                          % (what, sk, tc["ok"]))
+    code = doc["code"]
+    files = {f["path"]: f["sha256"] for f in d1b["files"]}
+    if not isinstance(code, dict) or tuple(sorted(code)) != ORDER2_CODE_KEYS or code["path"] != COUNTING_SCRIPT \
+            or code["sha256"] != files.get(COUNTING_SCRIPT) or not isinstance(code["found"], bool) \
+            or (code["commit"] is None) == code["found"] \
+            or (code["commit"] is not None and not (isinstance(code["commit"], str) and HEX40.match(code["commit"]))):
+        raise LedgerError("%s の code が、{path: %s, sha256: 順番1b の記録の sha256, found, commit} の形でない"
+                          % (what, COUNTING_SCRIPT))
+    if sk == "c" and code["found"]:
+        raise LedgerError("%s は (c)（コードの sha256 が合わない）で止まった記録なのに、順番1b の記録が縛る %s の版が git の履歴に"
+                          "ある（版が履歴にあれば (c) は成り立たない）" % (what, COUNTING_SCRIPT))
+    if sk in (None, "b") and not code["found"]:
+        raise LedgerError("%s は decide() を流した記録なのに、code.found が False" % what)
+    b = doc["bundle"]
+    if not isinstance(b, dict) or tuple(sorted(b)) != ORDER2_BUNDLE_KEYS or b["published"] is not False \
+            or not isinstance(b["reason"], str) or not b["reason"]:
+        raise LedgerError("%s の bundle が {sha256, published: false, reason} でない" % what)
+    _check_hex(b["sha256"], HEX64, what + " の bundle.sha256")
+    if not isinstance(doc["python"], str) or not doc["python"]:
+        raise LedgerError("%s の python が文字列でない" % what)
+    if out is not None:
+        _check_order2_output(out, d1b, what)
+    return ref
 
 
 def themes_manifest_commits(git):

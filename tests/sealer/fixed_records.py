@@ -88,7 +88,18 @@ def _head_sha():
 def bound_paths(repo):
     """repo（取り出した直後。HEAD が固定のコミット）の記録が縛るパスの一覧：記録の targets のパスと、targets の
     中身の JSON に文字列として書かれたパスのうち、そのコミットにあるファイル（例：stats-order1b の files の
-    src/stats/counting.py）。"""
+    src/stats/counting.py）。
+
+    拾わない形（T-078。T-077 の監査 軽-2）：文字列の全体がそのコミットのファイルのパスと一致するものだけを拾う。
+    次の形は拾わない。
+      - targets のうち .json でないファイル（.jsonl・.md など）の中身に書かれたパス。
+      - 接頭辞や接尾辞の付いた形（"1cb463a:src/stats/tagrules.py"、"src/stats/exclusion.py の出力"、"./src/…"、
+        文の中に埋め込まれたパス）。
+      - そのコミットに無いパス（記録の時点で消えていたファイル）。
+    今の記録（seq 1〜9）では、拾わない形で縛られたファイルは HEAD_PATHS の3つのフォルダ（src/sealer・tests/sealer・
+    docs/verify）の中に無いので、影響は無い。3つのフォルダの中のファイルを、拾わない形で縛る記録ができたら、
+    checkout(code="head") はそのファイルを HEAD の版に置き換えるので、縛られた版が漏れる（記録の時点に存在しなかった
+    組み合わせになる）。そのときは、この関数で拾う形を足す。"""
     files = set(_git("ls-tree", "-r", "--name-only", "HEAD", cwd=repo).decode("utf-8").splitlines())
     out = set()
 

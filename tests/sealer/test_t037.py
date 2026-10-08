@@ -863,7 +863,7 @@ class TestDocT037(unittest.TestCase):
     def test_statements(self):
         for phrase in ("## 13. 統計係の順番1・順番1b の封印（stats-order1・stats-order1b。T-037）",
                        "二つの kind にした理由", "収集係への申し送り", "`seal_stats.seal_order1`",
-                       "下の表の11だけ", "threshold-access の後の取得の続き",
+                       "下の表の%dだけ" % len(ledger.ALLOWED_KINDS), "threshold-access の後の取得の続き",
                        "区分表の取得は ledger に記録を書かない", "stats-order1 は1件だけ",
                        "待つ記録は kind ではなく status で区別する", "`ledger.ORDER1_TARGET_NAMES`",
                        "対象だけを置いた写し", "この照合の根拠と限界", "暗号的に言える",

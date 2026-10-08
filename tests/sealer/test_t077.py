@@ -63,7 +63,9 @@ P_NAMES = {"PROJECT", "PROJECT_ROOT"}
 SAFE_PREFIXES = ("src/", "tests/", "docs/verify/", ".venv/", "CLAUDE.md")
 # 引数を取らず、ledger.PROJECT_ROOT の記録を読む関門
 GATE_ATTRS = {"require_method_access", "require_threshold_access", "require_gkg_run_result", "require_order2_gate"}
-GATE_MODULE_FUNCS = {("order2_gate", "gate"), ("order2_gate", "main")}
+GATE_MODULE_FUNCS = {("order2_gate", "gate"), ("order2_gate", "main"), ("order2_gate", "gate_with_manifests"),
+                     # T-078：順番2の書く入口（root は ledger.PROJECT_ROOT に固定。引数で変えられない）
+                     ("seal_order2", "seal"), ("seal_order2", "main"), ("seal_order2", "build_doc")}
 # この属性を差し替える with の中では、関門は本物の記録を読まない
 SAFE_PATCH_ATTRS = {"PROJECT_ROOT", "_load_for_gate"}
 SAFE_WITH_FUNCS = {"gate_project"}
@@ -295,7 +297,8 @@ def scan_sites(folder):
         .venv/・CLAUDE.md の下の決まった文字列>) と、assert で比べるだけの os.path.realpath・abspath 以外で使う箇所
         （git -C ルート、git clone ルート、関数にルートを渡す、別の名前に入れる、など）
       - 関門（require_method_access・require_threshold_access・require_gkg_run_result・require_order2_gate・
-        order2_gate.gate・order2_gate.main）を、PROJECT_ROOT・_load_for_gate を差し替える with の外で呼ぶ箇所
+        order2_gate.gate・order2_gate.main・order2_gate.gate_with_manifests、T-078 の seal_order2.seal・main・build_doc）を、
+        PROJECT_ROOT・_load_for_gate を差し替える with の外で呼ぶ箇所
       - 相対パスの sealed/・data/ を読む箇所、HERE・__file__ から os.path.join の .. で上る箇所
       - src のスクリプト（.py）を、--root を渡さずに subprocess で動かす箇所（相対パスのスクリプトを cwd を
         渡して動かすものは除く）。同じプロセスの main（verify・post_text・seal_* など）を、--root の無い引数の
@@ -333,6 +336,7 @@ class TestRuleScan(unittest.TestCase):
             "PROJECT_ROOT": 'def test_x():\n    ledger.read_ledger(os.path.join(ledger.PROJECT_ROOT, "sealed", "x"))\n',
             "関門": 'def test_x():\n    ledger.require_method_access()\n',
             "order2_gate": 'def test_x():\n    order2_gate.gate()\n',
+            "seal_order2（T-078）": 'def test_x():\n    seal_order2.seal({}, "b", now, "ots")\n',
             "相対パス": 'def test_x():\n    ledger.read_ledger("sealed/ledger.jsonl")\n',
             "post_text.main": 'def test_x():\n    post_text.main([])\n',
             "cwd でも絶対パスのスクリプト": 'def test_x():\n    subprocess.run([py, os.path.join(SRC, "post_text.py")], cwd=c)\n',

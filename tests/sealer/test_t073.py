@@ -210,13 +210,46 @@ class Order2Case(Clone):
         self.o2 = {"seq": self.res["seq"] + 1, "kind": O2}
 
     def doc(self, stop_kind="b", output=None, input_run="R", gkg_ref="R", trial_ref=None):
+        """順番2の中身。T-073 の4つのキーと counting_output に、T-078 のキー（ledger_head・head・status・参照する順番1b・
+        時機の条件・コードの版・bundle・python）を、今の clone から計算して足す（verify.order2_timing_now・
+        find_order2_code。(a) は ok を False にし、(c) は found を False にする）。"""
         ref = {"seq": self.res["seq"], "record_sha256": line_sha(self.res)}
         d = {"kind": O2, "stop_kind": stop_kind, "trial_result": trial_ref or ref,
              "input_run": {"mode": "trial", "run_id": self.rid} if input_run == "R" else input_run,
              "gkg_run_result": ref if gkg_ref == "R" else gkg_ref}
         if stop_kind not in ("a", "c"):
             d["counting_output"] = output if output is not None else self.output()
+        d.update(self.t078_fields(stop_kind, d.get("counting_output")))
         return d
+
+    def t078_fields(self, stop_kind, out):
+        recs = self.records()
+        seq = len(recs) + 1                                  # 書く仕組みで足すときの seq
+        b = ledger.order2_ref_1b(recs, seq)
+        repo = verify.Repo(self.c)
+        tc, guards = verify.order2_timing_now(repo, [r for r in recs if r["seq"] < seq], b)
+        d1b = self.read(b, ledger.ORDER1B_KIND)
+        commit, _code = verify.find_order2_code(repo, tc["head"], d1b)
+        if stop_kind == "a":
+            tc = dict(tc, ok=False, reason="時機の条件を満たさない形（テスト）")
+        if stop_kind == "c":
+            commit = None
+        status = "stopped" if stop_kind is not None else (out.get("status") if isinstance(out, dict) else None)
+        return {"ledger_head": ledger.expected_ledger_head(self.ledger_bytes(), seq), "head": tc["head"],
+                "status": status, "ref_1b_seq": b["seq"], "ref_1b_record_sha256": line_sha(b),
+                "timing_check": tc, "timing_guards": guards,
+                "code": {"path": ledger.COUNTING_SCRIPT, "sha256": {f["path"]: f["sha256"] for f in d1b["files"]}
+                         [ledger.COUNTING_SCRIPT], "found": commit is not None, "commit": commit},
+                "bundle": {"sha256": "0" * 64, "published": False, "reason": "テスト"}, "python": "3"}
+
+    def decided_output(self):
+        """試しの run の段で決まった形の decide() の出力（日の集計は読まない。inputs はマニフェストの day の行から作る）。"""
+        days = [r for r in (json.loads(x) for x in self.body.splitlines()) if r.get("kind") == "day"]
+        return dict(self.output(), status="decided", steps=[{"step": "trial", "run_id": self.rid}],
+                    input_mode="trial", input_run_id=self.rid,
+                    inputs=[{"day": r["day"], "file_name": r["file_name"], "sha256": r["sha256"]} for r in days],
+                    results={b: {"official": False} for b in counting.CRITERIA_IDS},
+                    coverage=[{"day": d} for d in counting.TRIAL_DAYS])
 
     def stop_doc(self):
         """段に進む前に止まる形の中身（正式な run の trial_manifest_sha256 が合わない）。"""
@@ -258,8 +291,7 @@ class TestChainUnit(Order2Case):
     def test_honest_passes(self):
         got = self.check(self.recs, self.o2, self.doc())
         self.assertEqual(got["order2"], [self.o2])
-        decided = dict(self.output(), status="decided", input_mode="trial", input_run_id=self.rid)
-        self.check(self.recs, self.o2, self.doc(output=decided, stop_kind=None))
+        self.check(self.recs, self.o2, self.doc(output=self.decided_output(), stop_kind=None))
 
     def test_result_after_order2_stops(self):
         """順序の照合：R の gkg-run-result が順番2の記録より後にあれば止まる（中身が正しくても）。"""
@@ -379,6 +411,9 @@ class TestPlanCheck(Order2Case):
             with self.assertRaisesRegex(ledger.LedgerError, "全体"):
                 self.check_plan(doc, trial=trial, official=official)
 
+    def both_official(self):
+        return jl([ostart(self.body, [self.rid])] + [day("official", OF, d) for d in counting.TRIAL_DAYS])
+
     def test_mismatches(self):
         off, null = self.stop_doc()
         cases = {
@@ -386,9 +421,10 @@ class TestPlanCheck(Order2Case):
             "止まる形なのに input_run がある": (self.doc(), None, off, "input_run・stop_kind が合わない"),
             "R が違う": (self.doc(), jl([tstart(S)]) + self.body, b"", "マニフェストの R"),
             "R が決まらない": (self.doc(), b"", b"", "R"),
-            "正式な run の段なのに試しの run": (self.doc(), None, jl([ostart(self.body, [self.rid])]
-                                                                    + [day("official", OF, d) for d in counting.TRIAL_DAYS]),
-                                          None),
+            "正式な run の段なのに試しの run": (self.doc(output=self.output(self.both_official())), None,
+                                          self.both_official(), None),
+            # T-078：counting_output.runs は、マニフェストから計算し直した二つの run と同じでなければならない
+            "runs が正式な run のマニフェストと違う": (self.doc(), None, self.both_official(), "counting_output.runs"),
         }
         for name, (doc, trial, official, text) in cases.items():
             with self.subTest(name=name):
@@ -428,10 +464,10 @@ class TestChainWriterAndVerify(Order2Case):
         self.assertIn("%s seq %d（順番2）: stop_kind b、input_run trial・%s、trial_result は seq %d"
                       % (O2, rec["seq"], self.rid, self.res["seq"]), out)
         self.assertIn("のマニフェストから計算し直した行き先（trial の段）と R は、記録と同じ", out)
-        # 許可リストに入れていない今の仕組みでは、順番2の kind の記録は鎖の検査で止まる
+        # T-078 で許可リストに入れたので、order2_allowed の外でも鎖の検査に通る
+        self.assertIn(O2, ledger.ALLOWED_KINDS)
         code, _out, err = tl.run_verify_inproc(self.c, "stats-order")
-        self.assertEqual(code, 1)
-        self.assertIn(O2, err)
+        self.assertEqual(code, 0, err)
 
     def test_writer_refuses_wrong_plan(self):
         """形は通るが行き先が食い違う記録（試しの run の段の形なのに、段に進む前に止まったと申告する）は書かない。"""
@@ -513,6 +549,7 @@ class TestGate(Order2Case):
             # 関門の値で作った順番2の中身は、形の照合にも行き先の照合にも通る
             doc = dict({k: got[k] for k in ("trial_result", "input_run", "gkg_run_result")},
                        kind=O2, stop_kind="b", counting_output=self.output())
+            doc.update(self.t078_fields("b", doc["counting_output"]))
             self.check(self.records(), self.o2, doc)
             self.check_plan(doc)
 

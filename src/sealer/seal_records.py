@@ -32,6 +32,9 @@ check_acquisition_pairs と同じ。
          通る、順番1・1b は最初の method-access より前、gkg-run-start の前に順番1b）。
          method-access の前に順番1 は求めない（収集係のテストを直すタスクのあと）。区分表の取得は
          ledger に書かれないので、その前後は verify.py stats-order が git の履歴で照らす
+       - stats-order2（T-073・T-078）：ledger_head、形（ledger.check_order2_run・check_order2_doc。check_stats_order の
+         中）、HEAD のマニフェストからの行き先と runs・inputs（ledger.check_order2_plan）、head が今の HEAD、コードの版と
+         時機の条件の計算し直し（verify.check_order2_git）。書く入口は seal_order2.py
        - gkg-run-result（T-066）：ledger_head、中身の 11 個のキー、指す gkg-run-start、マニフェストの先頭の
          manifest_lines 行の sha256 と run-complete の行（ledger.check_gkg_result_doc・check_gkg_results）、
          マニフェストの行の照合（ledger.check_gkg_manifests）
@@ -61,11 +64,12 @@ sys.path.insert(0, HERE)
 import ledger  # noqa: E402
 import netfetch  # noqa: E402
 import stamp  # noqa: E402
+import verify  # noqa: E402  T-078：順番2の記録の git を使う照合（verify と同じ関数）
 
 
 WRITTEN_KINDS = (ledger.THRESHOLD_ACCESS_KIND, ledger.ACQ_START_KIND, ledger.ACQ_RESULT_KIND,
                  ledger.METHOD_ACCESS_KIND, ledger.GKG_RUN_KIND, ledger.ORDER1_KIND,
-                 ledger.ORDER1B_KIND, ledger.GKG_RESULT_KIND)
+                 ledger.ORDER1B_KIND, ledger.GKG_RESULT_KIND, ledger.ORDER2_KIND)
 
 
 def _paths(project):
@@ -150,10 +154,20 @@ def check_new(project, data_after, records_after, rec, doc):
     ledger.check_stats_order(records_after, read)
     if kind == ledger.ORDER2_KIND:
         # T-073 差し戻し2回目 2：HEAD のマニフェストから R と decide() の行き先を計算し直して照らす（verify は、記録を
-        # 最初に含んだコミットの版で同じ計算をする）
+        # 最初に含んだコミットの版で同じ計算をする）。T-078：ledger_head、counting_output の runs・inputs（check_order2_plan
+        # の中）、記録の head が今の HEAD であること、コードの版と時機の条件の計算し直し（verify.check_order2_git。照らさな
+        # かったことが一つでもあれば書かない）
+        ledger.check_ledger_head(data_after, rec, doc)
         ledger.check_order2_plan(records_after, rec, doc, read,
                                  head_manifest(project, ledger.GKG_MANIFESTS["trial"]),
                                  head_manifest(project, ledger.GKG_MANIFESTS["official"]))
+        repo = verify.Repo(project)
+        head = verify._rgit(repo, "rev-parse", "--verify", "HEAD^{commit}").decode().strip()
+        if doc["head"] != head:
+            raise ledger.LedgerError("順番2の記録の head %s が、今の HEAD %s と違う。書かない" % (doc["head"][:12], head[:12]))
+        notes = verify.check_order2_git(repo, data_after, records_after, rec, doc, head, read)
+        if notes:
+            raise ledger.LedgerError("順番2の記録の照合で、照らせないものがある（%s）。書かない" % "、".join(notes))
         return
     if kind == ledger.GKG_RESULT_KIND:
         # T-066：中身の形・ledger_head・指す gkg-run-start、マニフェストの先頭と run-complete の行

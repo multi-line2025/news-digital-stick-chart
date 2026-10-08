@@ -625,7 +625,7 @@ class TestDocT031(unittest.TestCase):
             self.text = f.read()
 
     def test_kind_table_and_chapter(self):
-        self.assertIn("下の表の11だけ", self.text)   # T-037・T-066
+        self.assertIn("下の表の%dだけ" % len(ledger.ALLOWED_KINDS), self.text)   # T-037・T-066・T-078
         self.assertIn("| `gkg-run-start` |", self.text)
         self.assertIn("## 12. GKG の取得の run の開始（gkg-run-start。T-031）", self.text)
         for k in ledger.GKG_RUN_DOC_KEYS:

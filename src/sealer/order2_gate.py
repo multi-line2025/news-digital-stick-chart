@@ -86,12 +86,19 @@ def checked_manifest(root, rel):
     return head
 
 
-def gate():
-    """関門。通れば {"input_run", "gkg_run_result", "plan"}。通らなければ Order2GateClosed。"""
+def gate_with_manifests():
+    """関門（gate と同じ）。通れば (関門の値, 試しの run のマニフェスト, 正式な run のマニフェスト)。マニフェストは、
+    git の確かめに通った HEAD の版のバイト列（無ければ b""）。順番2の書く仕組み（seal_order2.py。T-078）が、同じ
+    バイト列を decide() に渡すために使う。通らなければ Order2GateClosed。"""
     root = ledger.check_sealed_inside(ledger.PROJECT_ROOT)
     trial = checked_manifest(root, ledger.GKG_MANIFESTS["trial"])
     official = checked_manifest(root, ledger.GKG_MANIFESTS["official"])
-    return ledger.require_order2_gate(trial, official)
+    return ledger.require_order2_gate(trial, official), trial, official
+
+
+def gate():
+    """関門。通れば {"trial_result", "input_run", "gkg_run_result", "plan"}。通らなければ Order2GateClosed。"""
+    return gate_with_manifests()[0]
 
 
 def main(argv=None):
