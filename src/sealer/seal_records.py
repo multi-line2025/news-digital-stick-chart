@@ -68,16 +68,26 @@ import verify  # noqa: E402  T-078：順番2の記録の git を使う照合（v
 COLLECTOR = os.path.join(os.path.dirname(HERE), "collector")
 
 
+_PRIVACY_SCAN = []
+
+
 def load_privacy_scan():
-    """収集係の検査器 src/collector/privacy_scan.py を読み込む（読むだけ。書き換えない）。順番2を書くときだけ要るので、
-    使うときに読む（src/sealer だけを写した仮のプロジェクトでも、ほかの種類の書く仕組みが動くように）。"""
-    if COLLECTOR not in sys.path:
-        sys.path.append(COLLECTOR)
-    try:
-        import privacy_scan
-    except ImportError:
-        raise ledger.LedgerError("src/collector/privacy_scan.py を読み込めない。書かない") from None
-    return privacy_scan
+    """収集係の検査器 src/collector/privacy_scan.py を、ファイルのパスを指定して読み込む（読むだけ。書き換えない）。
+    sys.path は使わない（PYTHONPATH などに同じ名前の別のファイルがあっても、それを読まない。T-078 差し戻し2回目 軽-c）。
+    順番2を書くときだけ要るので、使うときに読む（src/sealer だけを写した仮のプロジェクトでも、ほかの書く仕組みが動くように）。"""
+    if not _PRIVACY_SCAN:
+        path = os.path.join(COLLECTOR, "privacy_scan.py")
+        if not os.path.isfile(path):
+            raise ledger.LedgerError("src/collector/privacy_scan.py が無い。書かない")
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("privacy_scan_for_sealer", path)
+        mod = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(mod)
+        except Exception as e:
+            raise ledger.LedgerError("src/collector/privacy_scan.py を読み込めない（%s）。書かない" % e.__class__.__name__) from None
+        _PRIVACY_SCAN.append(mod)
+    return _PRIVACY_SCAN[0]
 
 
 def check_privacy(rec, doc):
