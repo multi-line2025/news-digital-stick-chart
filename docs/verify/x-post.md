@@ -132,6 +132,11 @@ case "${VOUT}" in
   *"対象 = 記録の先頭 ${SEQ} 行の sha256 ${POSTED}  一致"*) echo "(4) seq ${SEQ} の .ots の対象は投稿の値と同じ" ;;
   *) fail "(4) seq ${SEQ} の .ots の対象が投稿の値と違う" ;;
 esac
+# (4) verify が照らさなかったもの（終了コード 0 でも、照らしていない項目がありうる）を、そのまま見せる
+case "${VOUT}" in
+  *"ただし、次は照らさなかった"*) echo "(4) 注意：$(printf '%s\n' "${VOUT}" | grep '^ただし、次は照らさなかった')" ;;
+  *) echo "(4) verify が照らさなかったものは無い" ;;
+esac
 # (5) 投稿に高さがあれば、seq SEQ の .ots にその高さの証明があり、ヘッダと照合できること
 if [ "${BTC}" != pending ]; then
   case "${VOUT}" in
@@ -144,6 +149,7 @@ echo "投稿と記録は一致する"
 
 - (1) が合わないとき：投稿のあとで、記録の末尾が切り詰められた。
 - (2) が合わないとき：投稿のあとで、先頭 N 行のどれかが書き換えられたか、記録が差し替えられた。
+- (4) は、`verify.py` の終了コードと `.ots` の対象の一致に加えて、`verify.py` が照らさなかったもの（`all` の最後の行の「ただし、次は照らさなかった…」）があれば「(4) 注意：」としてそのまま出す（T-056 差し戻し1回目）。終了コード 0 は、照らした検査がすべて通ったことだけを示すので、照らさなかった項目は読んで判断する（docs/verify/periods-seal.md 13章）。
 - (4) で `verify.py` を信用しない場合は、`docs/verify/periods-seal.md` の 4章・5章の標準の道具（`head`・`shasum`・`ots info`・`ots verify`）で同じことを確かめられる。seq N の `.ots` の `File sha256 hash` が、投稿の値と同じであることを見る。
   ```sh
   .venv/bin/ots info "$(printf 'sealed/ledger.jsonl.seq%06d.ots' "${SEQ}")" | grep 'File sha256 hash'

@@ -426,7 +426,9 @@ def cmd_acquisition(st, _a):
 
 
 class Unchecked(Exception):
-    """計算し直せなかった（git の履歴が無い、Python で流せないなど）。止めずに「照らさなかった」と出す。"""
+    """利用者の環境の都合で計算し直せない（Python を起動できない、取り出せないなど）。止めずに
+    「照らさなかった」と出す。head の版のスクリプトが 0 以外で終わる・出力が読めないのは、これに
+    当たらず、記録と合わないとして止める（T-056 差し戻し1回目 中-2。リードの判断）。"""
 
 
 def _child_env():
@@ -435,39 +437,71 @@ def _child_env():
     return env
 
 
-def _run_script(cwd, rel):
-    """sys.executable -B rel（引数なし）を cwd で流した標準出力。流せなければ Unchecked。"""
+def _run_script(cwd, rel, what):
+    """sys.executable -B rel（引数なし）を cwd で流した標準出力。
+    Python を起動できなければ Unchecked。0 以外で終われば LedgerError（記録と合わない）。"""
     try:
         r = subprocess.run([sys.executable, "-B", rel], cwd=cwd, capture_output=True, env=_child_env(),
                            timeout=1800)
     except (OSError, subprocess.SubprocessError) as e:
-        raise Unchecked("%s を流せない（%s）" % (rel, e)) from None
+        raise Unchecked("%s：Python で %s を流せない（%s）" % (what, rel, e.__class__.__name__)) from None
     if r.returncode != 0:
-        raise Unchecked("%s が終了コード %d で終わった" % (rel, r.returncode))
+        raise ledger.LedgerError("%s：head の版の %s が終了コード %d で終わった（記録は、その版で流した出力が"
+                                 "あると主張している）" % (what, rel, r.returncode))
     return r.stdout
 
 
+def _rgit(repo, *args):
+    """計算し直しの git は、GIT_ の環境変数を固定した環境で行う（T-056 差し戻し1回目 軽-3）。"""
+    return repo.git(*args, env=ledger.fixed_git_env())
+
+
+def _safe_member(m):
+    """取り出してよい tar の項目か（通常のファイルとディレクトリだけ。絶対パス・.. を含む名前は不可）。"""
+    name = m.name
+    if not (m.isfile() or m.isdir()):
+        return False
+    if name.startswith("/") or "\\" in name:
+        return False
+    return all(part not in ("..",) for part in name.split("/"))
+
+
 class HeadTree:
-    """記録の head の版のファイルを一時フォルダに取り出したもの（git archive）。T-056。"""
+    """記録の head の版のファイルを一時フォルダに取り出したもの（git archive）。T-056。
+    tarfile の filter 引数（Python 3.12 以降）に頼らず、各項目の名前と種類を確かめて、通常のファイルと
+    ディレクトリだけを自分で書き出す（Python 3.9 でも動く。差し戻し1回目 中-1）。symlink などは書き出さない。"""
 
     def __init__(self, repo, head, tmp):
         self.repo, self.head = repo, head
         self.dir = os.path.join(tmp, "tree-" + head)
-        if not os.path.isdir(self.dir):
-            os.makedirs(self.dir)
-            try:
-                data = repo.git("archive", "--format=tar", head)
-            except ledger.LedgerError:
-                raise Unchecked("git archive %s ができない" % head[:12]) from None
+        if os.path.isdir(self.dir):
+            return
+        os.makedirs(self.dir)
+        try:
+            data = _rgit(repo, "archive", "--format=tar", head)
+        except ledger.LedgerError:
+            raise Unchecked("git archive %s ができない" % head[:12]) from None
+        try:
             with tarfile.open(fileobj=io.BytesIO(data)) as t:
-                t.extractall(self.dir, filter="data")
+                for m in t.getmembers():
+                    if not _safe_member(m):
+                        continue
+                    dest = os.path.join(self.dir, *m.name.split("/"))
+                    if m.isdir():
+                        os.makedirs(dest, exist_ok=True)
+                        continue
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    with open(dest, "wb") as f:
+                        f.write(t.extractfile(m).read())
+        except (tarfile.TarError, OSError) as e:
+            raise Unchecked("head %s の版を取り出せない（%s）" % (head[:12], e.__class__.__name__)) from None
 
-    def read(self, rel):
-        path = os.path.join(self.dir, rel)
-        if not os.path.isfile(path):
-            raise ledger.LedgerError("記録の head %s の版に %s が無い" % (self.head[:12], rel))
-        with open(path, "rb") as f:
-            return f.read()
+
+def _show(repo, head, path):
+    try:
+        return _rgit(repo, "show", "%s:%s" % (head, path))
+    except ledger.LedgerError:
+        raise ledger.LedgerError("記録の head %s の版に %s が無い" % (head[:12], path)) from None
 
 
 def _check_head(st, repo, r, doc):
@@ -475,11 +509,11 @@ def _check_head(st, repo, r, doc):
     head = doc["head"]
     what = "seq %d の %s" % (r["seq"], r["kind"])
     try:
-        repo.git("cat-file", "-e", head + "^{commit}")
+        _rgit(repo, "cat-file", "-e", head + "^{commit}")
     except ledger.LedgerError:
         raise ledger.LedgerError("%s の head %s の commit が、このリポジトリに無い" % (what, head)) from None
     try:
-        led = repo.git("show", "%s:%s" % (head, LEDGER_REL))
+        led = _rgit(repo, "show", "%s:%s" % (head, LEDGER_REL))
     except ledger.LedgerError:
         led = None
     if led != ledger.prefix_bytes(st.data, r["seq"] - 1):
@@ -487,45 +521,25 @@ def _check_head(st, repo, r, doc):
                                  "一致しない" % (what, head[:12], r["seq"] - 1))
     for a in doc["ancestors"]:
         try:
-            repo.git("merge-base", "--is-ancestor", a, head)
+            _rgit(repo, "merge-base", "--is-ancestor", a, head)
         except ledger.LedgerError:
             raise ledger.LedgerError("%s の ancestors の %s が、head %s の祖先でない" % (what, a[:12], head[:12])) from None
 
 
-def _order1_target_bytes(repo, tree, tmp, name):
-    """seal-order1.md 1章のバイト列の定義（seal_stats.target_bytes と同じ計算を head の版で）。"""
-    output = name.endswith(" の出力")
-    base = name[:-len(" の出力")] if output else name
-    if ":" in base:
-        short, path = base.split(":", 1)
-        full = ledger.ORDER1_ANCESTORS.get(short)
-        if full is None:
-            raise ledger.LedgerError("対象 %s の commit %s が、決まった祖先の一覧に無い" % (name, short))
-        data = repo.git("show", "%s:%s" % (full, path))
-        if not output:
-            return data
-        d = os.path.join(tmp, "hist-" + full)
-        os.makedirs(d, exist_ok=True)
-        with open(os.path.join(d, os.path.basename(path)), "wb") as f:
-            f.write(data)
-        return _run_script(d, os.path.basename(path))
-    if output:
-        tree.read(base)
-        return _run_script(tree.dir, base)
-    return tree.read(base)
-
-
 def recompute_orders(st, repo, got):
-    """順番1・1b の記録の値を、記録の head の版から計算し直して照らす（T-056。T-055 の監査 中-1、T-048 の軽-1）。
-      - head が、その記録を足す直前の記録を持つ commit であること。ancestors が head の祖先であること。
-      - 順番1：10 件の sha256 を、seal-order1.md 1章のバイト列の定義どおりに計算し直す（ファイルは head の版、
-        「の出力」は head の版を一時フォルダに取り出して流した出力、1cb463a の版の出力は一時フォルダで流した出力）。
-      - 順番1b：files の各 sha256 を head の版と、order1_ref をその seq の行の sha256 と、counting を head の版の
-        counting.py を流した出力（sha256、candidate_ids・criteria_ids・official_candidate・official_status）と照らす。
-    値が違えば LedgerError。計算し直せないとき（Python で流せないなど）は Unchecked。流すのは、この verify を
-    動かしている Python（sys.executable）。返り値: 照らした記録の数。
+    """順番1・1b の記録の値を、記録の head の版から計算し直して照らす（T-056。T-055 の監査 中-1、T-048 の軽-1。
+    差し戻し1回目で、項目ごとに続け、照らさなかった項目を列挙する形に改めた）。
+      - Python の要らない照合（必ず行う）：head が、その記録を足す直前の記録を持つ commit であること、
+        ancestors が head の祖先であること、順番1 の対象のうちファイルのもの（head の版と、1cb463a: などの
+        git show）、順番1b の files、order1_ref。
+      - Python の要る照合：順番1 の「の出力」（head の版を一時フォルダに取り出して流す。1cb463a の版の出力は
+        一時フォルダで流す）、順番1b の counting（head の版の counting.py を流した出力の sha256 と値）。
+    値が違う、または head の版のスクリプトが 0 以外で終わる・出力が読めない、なら LedgerError（止める）。
+    利用者の環境の都合で計算し直せない項目（Python を起動できない、取り出せない）は、止めずに列挙する。
+    流すのは、この verify を動かしている Python（sys.executable）。
+    返り値: (照らした項目の数, 照らさなかった項目の一覧)。
     """
-    n = 0
+    checked, unchecked = 0, []
     with tempfile.TemporaryDirectory() as tmp:
         trees = {}
 
@@ -533,26 +547,69 @@ def recompute_orders(st, repo, got):
             if head not in trees:
                 trees[head] = HeadTree(repo, head, tmp)
             return trees[head]
+
+        def python_item(label, fn):
+            nonlocal checked
+            try:
+                fn()
+                checked += 1
+            except Unchecked as e:
+                unchecked.append("%s（%s）" % (label, e))
         for r in got["order1"]:
             doc = st.file_json(r, ledger.ORDER1_KIND)
             _check_head(st, repo, r, doc)
-            tree = tree_of(doc["head"])
+            checked += 1 + len(doc["ancestors"])
+            head = doc["head"]
             for t in doc["targets"]:
-                v = ledger.sha256_hex(_order1_target_bytes(repo, tree, tmp, t["name"]))
-                if v != t["sha256"]:
-                    raise ledger.LedgerError("seq %d の stats-order1 の対象 %s の sha256 %s が、head %s の版から計算し直した値 %s"
-                                             "と違う" % (r["seq"], t["name"], t["sha256"], doc["head"][:12], v))
-            n += 1
+                name = t["name"]
+                output = name.endswith(" の出力")
+                base = name[:-len(" の出力")] if output else name
+                label = "seq %d の順番1 の対象「%s」" % (r["seq"], name)
+
+                def compare(data, t=t, name=name):
+                    v = ledger.sha256_hex(data)
+                    if v != t["sha256"]:
+                        raise ledger.LedgerError("seq %d の stats-order1 の対象 %s の sha256 %s が、head %s の版から計算し直した"
+                                                 "値 %s と違う" % (r["seq"], name, t["sha256"], head[:12], v))
+                if ":" in base:
+                    short, path = base.split(":", 1)
+                    full = ledger.ORDER1_ANCESTORS.get(short)
+                    if full is None:
+                        raise ledger.LedgerError("対象 %s の commit %s が、決まった祖先の一覧に無い" % (name, short))
+                    data = _show(repo, full, path)
+                    if not output:
+                        compare(data)
+                        checked += 1
+                        continue
+
+                    def run_hist(data=data, full=full, path=path, label=label, compare=compare):
+                        d = os.path.join(tmp, "hist-" + full)
+                        os.makedirs(d, exist_ok=True)
+                        with open(os.path.join(d, os.path.basename(path)), "wb") as f:
+                            f.write(data)
+                        compare(_run_script(d, os.path.basename(path), label))
+                    python_item(label, run_hist)
+                elif output:
+                    _show(repo, head, base)
+
+                    def run_head(base=base, label=label, compare=compare):
+                        compare(_run_script(tree_of(head).dir, base, label))
+                    python_item(label, run_head)
+                else:
+                    compare(_show(repo, head, base))
+                    checked += 1
         for r in got["order1b"]:
             doc = st.file_json(r, ledger.ORDER1B_KIND)
-            _check_head(st, repo, r, doc)
-            tree = tree_of(doc["head"])
             what = "seq %d の stats-order1b" % r["seq"]
+            _check_head(st, repo, r, doc)
+            checked += 1 + len(doc["ancestors"])
+            head = doc["head"]
             for f in doc["files"]:
-                v = ledger.sha256_hex(tree.read(f["path"]))
+                v = ledger.sha256_hex(_show(repo, head, f["path"]))
                 if v != f["sha256"]:
                     raise ledger.LedgerError("%s の files の %s の sha256 %s が、head %s の版の %s と違う"
-                                             % (what, f["path"], f["sha256"], doc["head"][:12], v))
+                                             % (what, f["path"], f["sha256"], head[:12], v))
+                checked += 1
             ref = doc["order1_ref"]
             if ref is not None:
                 o1 = ledger.first_order1(st.records)
@@ -562,25 +619,29 @@ def recompute_orders(st, repo, got):
                                              % (what, ref))
             elif ledger.first_order1([x for x in st.records if x["seq"] < r["seq"]]) is not None:
                 raise ledger.LedgerError("%s の order1_ref が null なのに、それより前に stats-order1 の記録がある" % what)
-            out = _run_script(tree.dir, ledger.COUNTING_SCRIPT)
-            c = doc["counting"]
-            if ledger.sha256_hex(out) != c["output_sha256"]:
-                raise ledger.LedgerError("%s の counting.output_sha256 %s が、head %s の版の counting.py の出力 %s と違う"
-                                         % (what, c["output_sha256"], doc["head"][:12], ledger.sha256_hex(out)))
-            try:
-                d = json.loads(out.decode("utf-8"))
-                got_c = {"candidate_ids": [x["id"] for x in d["candidates"]],
-                         "criteria_ids": list(d["criteria_ids"]),
-                         "official_candidate": d["official_candidate"],
-                         "official_status": d["official_status"]}
-            except (UnicodeDecodeError, ValueError, KeyError, TypeError):
-                raise ledger.LedgerError("%s：head の版の counting.py の出力を読めない" % what) from None
-            for k, v in got_c.items():
-                if c[k] != v:
-                    raise ledger.LedgerError("%s の counting.%s %r が、head %s の版の counting.py の出力の %r と違う"
-                                             % (what, k, c[k], doc["head"][:12], v))
-            n += 1
-    return n
+            checked += 1
+
+            def run_counting(doc=doc, what=what, head=head):
+                label = "%s の counting" % what
+                out = _run_script(tree_of(head).dir, ledger.COUNTING_SCRIPT, label)
+                c = doc["counting"]
+                if ledger.sha256_hex(out) != c["output_sha256"]:
+                    raise ledger.LedgerError("%s の counting.output_sha256 %s が、head %s の版の counting.py の出力 %s と違う"
+                                             % (what, c["output_sha256"], head[:12], ledger.sha256_hex(out)))
+                try:
+                    d = json.loads(out.decode("utf-8"))
+                    got_c = {"candidate_ids": [x["id"] for x in d["candidates"]],
+                             "criteria_ids": list(d["criteria_ids"]),
+                             "official_candidate": d["official_candidate"],
+                             "official_status": d["official_status"]}
+                except (UnicodeDecodeError, ValueError, KeyError, TypeError):
+                    raise ledger.LedgerError("%s：head の版の counting.py の出力を読めない（記録と合わない）" % what) from None
+                for k, v in got_c.items():
+                    if c[k] != v:
+                        raise ledger.LedgerError("%s の counting.%s %r が、head %s の版の counting.py の出力の %r と違う"
+                                                 % (what, k, c[k], head[:12], v))
+            python_item("%s の counting（counting.py の出力）" % what, run_counting)
+    return checked, unchecked
 
 
 def cmd_stats_order(st, a):
@@ -643,16 +704,18 @@ def cmd_stats_order(st, a):
     # T-056：順番1・1b の値を、記録の head の版から計算し直す（--rev auto か <コミット> のとき）
     if got["order1"] or got["order1b"]:
         if getattr(a, "rev", "working") == "working":
-            st.unchecked.append("順番1・1b の値の計算し直し（--rev auto か <コミット> のときだけ行う）")
-            print("照らさなかった：順番1・1b の値の計算し直しは、--rev auto か --rev <コミット> のときだけ行う")
+            # --rev が working でなければ（auto でもコミットでも）計算し直す。計算し直しには、--rev の値ではなく、
+            # 記録の head を使う（T-056 差し戻し1回目 軽-4）
+            st.unchecked.append("順番1・1b の値の計算し直し（--rev working では行わない。--rev auto で照らす）")
+            print("照らさなかった：順番1・1b の値の計算し直しは、--rev working では行わない（--rev auto で照らす）")
         else:
-            try:
-                k = recompute_orders(st, repo, got)
-                print("順番1・1b の値：記録 %d 件の head・ancestors・中身の値を、head の版から計算し直して照らした"
-                      "（流した Python：%s）。どれも記録と一致する。" % (k, sys.version.split()[0]))
-            except Unchecked as e:
-                st.unchecked.append("順番1・1b の値の計算し直し（%s）" % e)
-                print("照らさなかった：順番1・1b の値の計算し直し（%s）" % e)
+            k, missed = recompute_orders(st, repo, got)
+            print("順番1・1b の値：記録 %d 件について、%d 項目を head の版から計算し直して照らした（流した Python：%s）。"
+                  "照らした項目は、どれも記録と一致する。"
+                  % (len(got["order1"]) + len(got["order1b"]), k, sys.version.split()[0]))
+            for m in missed:
+                st.unchecked.append("順番1・1b の値：%s" % m)
+                print("照らさなかった：順番1・1b の値：%s" % m)
     print("区分表の取得（%s）：行のある commit %d 件。どれも、親の sealed/ledger.jsonl に stats-order1 の行がある。"
           "作業ツリーのマニフェストの %d 行の exclusion_rule_seq と sha256 は stats-order1 の記録と一致する。"
           % (ledger.THEMES_MANIFEST, n, rows))

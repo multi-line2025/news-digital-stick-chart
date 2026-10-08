@@ -68,7 +68,9 @@ class CloneCase(unittest.TestCase):
 
 class TestRecomputeReal(CloneCase):
     def test_real_records_pass(self):
-        self.assertEqual(self.run_with(0, lambda d: None), 2)
+        n, missed = self.run_with(0, lambda d: None)
+        self.assertEqual(missed, [])
+        self.assertEqual(n, 25)     # 順番1：head 1・ancestors 4・対象 10、順番1b：head 1・ancestors 3・files 4・order1_ref 1・counting 1
 
     def test_tampered_values_fail(self):
         """監査の再現：中身の値を一つずつ書き換えると、verify の照合が止まる。"""
@@ -105,22 +107,77 @@ class TestRecomputeReal(CloneCase):
                     self.run_with(seq, mutate)
                 self.assertIn(msg, str(cm.exception))
 
+    PYTHON_ITEMS = ("seq 5 の順番1 の対象「src/stats/exclusion.py の出力」（見本）",
+                    "seq 5 の順番1 の対象「src/stats/tagrules.py の出力」（見本）",
+                    "seq 5 の順番1 の対象「1cb463a:src/stats/tagrules.py の出力」（見本）",
+                    "seq 6 の stats-order1b の counting（counting.py の出力）（見本）")
+
     def test_cannot_run_python_is_unchecked(self):
-        """計算し直せないとき（Python で流せない）は止めずに「照らさなかった」（終了コード 0）。"""
-        with mock.patch.object(verify, "_run_script",
-                               side_effect=verify.Unchecked("見本：Python で流せない")):
+        """利用者の環境の都合（Python を起動できない）は止めずに「照らさなかった」（終了コード 0）。
+        照らさなかった項目は、項目ごとに列挙する（T-056 差し戻し1回目 中-2）。"""
+        with mock.patch.object(verify, "_run_script", side_effect=verify.Unchecked("見本")):
+            n, missed = self.run_with(0, lambda d: None)
             code, out, err = tl.run_verify_inproc(self.root, "all", "--rev", "auto")
+        self.assertEqual(missed, list(self.PYTHON_ITEMS))
+        self.assertEqual(n, 21)     # Python の要らない照合は、すべて行った
         self.assertEqual(code, 0, err)
-        self.assertIn("照らさなかった：順番1・1b の値の計算し直し（見本：Python で流せない）", out)
+        for item in self.PYTHON_ITEMS:
+            self.assertIn("照らさなかった：順番1・1b の値：%s" % item, out)
         self.assertIn("ただし、次は照らさなかった", out)
+
+    def test_python_free_checks_continue_when_unchecked(self):
+        """Python で流せなくても、Python の要らない照合（files・head・ancestors・order1_ref・順番1 のファイル）は
+        行い、合わなければ止まる（中-2）。"""
+        s1, s1b = self.o1["seq"], self.o1b["seq"]
+        cases = [
+            (s1b, lambda d: d["files"][0].__setitem__("sha256", "0" * 64), "files の docs/stats/counting.md"),
+            (s1b, lambda d: d["order1_ref"].__setitem__("seq", s1b), "order1_ref"),
+            (s1b, lambda d: d.__setitem__("ancestors", ["1" * 40]), "の祖先でない"),
+            (s1, lambda d: d["targets"][0].__setitem__("sha256", "0" * 64), "の対象 src/stats/exclusion.py の sha256"),
+            (s1, lambda d: d["targets"][9].__setitem__("sha256", "0" * 64), "の対象 2d23cdf:reviews/T-020.md の sha256"),
+        ]
+        with mock.patch.object(verify, "_run_script", side_effect=verify.Unchecked("見本")):
+            for seq, mutate, msg in cases:
+                with self.subTest(msg=msg):
+                    with self.assertRaises(ledger.LedgerError) as cm:
+                        self.run_with(seq, mutate)
+                    self.assertIn(msg, str(cm.exception))
+
+    def test_audit_a56dg_failing_script_is_mismatch(self):
+        """監査の再現（scratchpad/a56dg）：head の版の counting.py が SystemExit(3) で終わる commit を作り、
+        counting の値を偽った記録は、「照らさなかった」ではなく「記録と合わない」で止まる。"""
+        s1b = self.o1b["seq"]
+        real_head = self.st.file_json(self.o1b, ledger.ORDER1B_KIND)["head"]
+        with tempfile.TemporaryDirectory() as d:
+            wt = os.path.join(d, "wt")
+            subprocess.run(["git", "-C", self.root, "worktree", "add", "-q", "--detach", wt, real_head],
+                           check=True, capture_output=True)
+            bad = b"raise SystemExit(3)\n"
+            with open(os.path.join(wt, "src", "stats", "counting.py"), "wb") as f:
+                f.write(bad)
+            subprocess.run(["git", "-C", wt] + list(tl.AUTHOR) + ["commit", "-q", "-am", "偽の版"],
+                           check=True, capture_output=True)
+            fake = subprocess.run(["git", "-C", wt, "rev-parse", "HEAD"], check=True,
+                                  capture_output=True).stdout.decode().strip()
+
+            def mutate(doc):
+                doc["head"] = fake
+                for f in doc["files"]:
+                    if f["path"] == "src/stats/counting.py":
+                        f["sha256"] = ledger.sha256_hex(bad)
+                doc["counting"]["output_sha256"] = "f" * 64
+                doc["counting"]["candidate_ids"] = ["C7"]
+            with self.assertRaises(ledger.LedgerError) as cm:
+                self.run_with(s1b, mutate)
+            self.assertIn("head の版の src/stats/counting.py が終了コード 3 で終わった", str(cm.exception))
 
     def test_cli_rev_auto_recomputes_and_working_does_not(self):
         code, out, err = tl.run_verify_inproc(self.root, "stats-order", "--rev", "auto")
         self.assertEqual(code, 0, err)
-        self.assertIn("順番1・1b の値：記録 2 件の head・ancestors・中身の値を、head の版から計算し直して照らした", out)
+        self.assertIn("順番1・1b の値：記録 2 件について、25 項目を head の版から計算し直して照らした", out)
         code, out, err = tl.run_verify_inproc(self.root, "all")
         self.assertEqual(code, 0, err)
-        self.assertIn("照らさなかった：順番1・1b の値の計算し直しは、--rev auto か --rev <コミット> のときだけ行う", out)
+        self.assertIn("照らさなかった：順番1・1b の値の計算し直しは、--rev working では行わない（--rev auto で照らす）", out)
 
     def test_no_git_is_unchecked(self):
         with tempfile.TemporaryDirectory() as d:
@@ -147,9 +204,11 @@ class TestDocT056(unittest.TestCase):
     def test_statements(self):
         with open(DOC, encoding="utf-8") as f:
             text = f.read()
-        for phrase in ("head の版から計算し直して照らす（T-056", "`--rev auto` か `--rev <コミット>` のとき、順番1・1b の値を",
+        for phrase in ("head の版から計算し直して照らす（T-056", "コミットを渡しても同じで、その値は使わない",
                        "verify を使わずに手で確かめる手順", "GIT_ で始まる環境変数",
-                       "書き込みの遅れの上限の目安"):
+                       "書き込みの遅れの上限の目安", "Python 3.14.2（`.venv/bin/python`）と 3.9.6",
+                       "隔離した環境", "ネットワークを切って流す", "「記録と合わない」として終了コード 1 で止める",
+                       "Python の要らない照合（必ず行う）", "cmp - before.jsonl", "D=$(mktemp -d)"):
             self.assertIn(phrase, text)
 
 

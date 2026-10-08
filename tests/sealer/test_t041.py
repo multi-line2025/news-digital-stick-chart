@@ -67,7 +67,11 @@ class TestGkgManifests(t31.GkgCase):
         self.assertIn("%s：run-start の行 3 行、異なる run_id 2 個" % TRIAL, out)
         self.assertIn("%s：run-start の行 1 行、異なる run_id 1 個" % OFFICIAL, out)
         out = self.verify_ok("all")
-        self.assertNotIn("run-start の行と gkg-run-start の記録の照合（マニフェストが無い）", out)
+        # T-056 差し戻し1回目 軽-5：照らさなかった項目の一覧が、期待どおり（working なので順番1・1b の
+        # 計算し直しだけ。マニフェストの照合は照らした）であることを、行の全体で確かめる
+        last = [l for l in out.splitlines() if l.startswith("ただし、次は照らさなかった")]
+        self.assertEqual(last, ["ただし、次は照らさなかった（終了コード 0 は、照らした検査がすべて通ったことだけを示す）："
+                                "順番1・1b の値の計算し直し（--rev working では行わない。--rev auto で照らす）"])
 
     def test_missing_manifest_without_records_is_reported(self):
         """記録が 0 件でマニフェストも無いときは、今のまま「照らさなかった」（終了コード 0）。"""
