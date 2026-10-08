@@ -189,6 +189,211 @@ class TestRecomputeReal(CloneCase):
         self.assertIn("照らさなかった：git の履歴が無いので、順番1・1b の値を head の版から計算し直していない", out)
 
 
+# 監査の再現（scratchpad/a56r1mk.sh、a56r1_shortto.py）を、.venv と /usr/bin/python3 の両方で確かめる。
+# 子のプロセスで verify.recompute_orders を動かし、記録の中身を書き換えた読み方を渡す（記録の連なりは作り直さない）。
+CHECKER = r"""
+import sys, copy
+root, src, seq, head, files_sha, out_sha, timeout = sys.argv[1:8]
+sys.path.insert(0, src)
+import verify, ledger
+verify.RUN_TIMEOUT_SECONDS = float(timeout)
+st = verify.State(root, None)
+repo = verify.Repo(root)
+orig = st.file_json
+def fj(r, role):
+    d = orig(r, role)
+    if r["seq"] == int(seq):
+        d = copy.deepcopy(d)
+        d["head"] = head
+        for f in d["files"]:
+            if f["path"] == "src/stats/counting.py":
+                f["sha256"] = files_sha
+        d["counting"]["output_sha256"] = out_sha
+    return d
+st.file_json = fj
+got = {"order1": [r for r in st.records if r["kind"] == ledger.ORDER1_KIND],
+       "order1b": [r for r in st.records if r["kind"] == ledger.ORDER1B_KIND]}
+try:
+    n, missed = verify.recompute_orders(st, repo, got)
+    print("OK" if not missed else "UNCHECKED " + " / ".join(missed))
+except verify.Unchecked as e:
+    print("UNCHECKED " + str(e))
+except ledger.LedgerError as e:
+    print("MISMATCH " + str(e))
+"""
+
+
+def pythons():
+    out = [sys.executable]
+    if os.path.exists("/usr/bin/python3"):
+        out.append("/usr/bin/python3")
+    return out
+
+
+class TestForgedHeadsBothPythons(CloneCase):
+    """T-056 再提出1回目 中-A：記録を作る側の commit の中身で起こせることは、「照らさなかった」ではなく
+    「記録と合わない」で止まる（書き出せない名前は飛ばして続け、時間切れは合わない）。"""
+
+    def forge(self, name, counting=None, extra=None):
+        """seq 6 の head（本物）から、counting.py と余分な項目を変えた commit を作る。返り値: (commit, counting.py の sha256)。"""
+        real_head = self.st.file_json(self.o1b, ledger.ORDER1B_KIND)["head"]
+        wt = os.path.join(self.td.name, "wt-" + name)
+        subprocess.run(["git", "-C", self.root, "worktree", "add", "-q", "--detach", wt, real_head],
+                       check=True, capture_output=True)
+        if counting is not None:
+            with open(os.path.join(wt, "src", "stats", "counting.py"), "wb") as f:
+                f.write(counting)
+            subprocess.run(["git", "-C", wt, "add", "src/stats/counting.py"], check=True, capture_output=True)
+        if extra is not None:
+            blob = subprocess.run(["git", "-C", wt, "hash-object", "-w", "--stdin"], input=b"x\n",
+                                  check=True, capture_output=True).stdout.decode().strip()
+            subprocess.run(["git", "-C", wt, "update-index", "--add", "--cacheinfo",
+                            "100644,%s,%s" % (blob, extra)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", wt] + list(tl.AUTHOR) + ["commit", "-q", "-m", "偽の版 " + name],
+                       check=True, capture_output=True)
+        head = subprocess.run(["git", "-C", wt, "rev-parse", "HEAD"], check=True,
+                              capture_output=True).stdout.decode().strip()
+        data = subprocess.run(["git", "-C", self.root, "show", head + ":src/stats/counting.py"],
+                              check=True, capture_output=True).stdout
+        return head, ledger.sha256_hex(data)
+
+    def check(self, head, files_sha, timeout="1800"):
+        out = {}
+        for py in pythons():
+            r = subprocess.run([py, "-B", "-c", CHECKER, self.root, os.path.join(tl.PROJECT, "src", "sealer"),
+                                str(self.o1b["seq"]), head, files_sha, "9" * 64, timeout],
+                               capture_output=True, env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
+            self.assertEqual(r.returncode, 0, (py, r.stderr.decode()[-2000:]))
+            out[py] = r.stdout.decode().strip()
+        return out
+
+    def assert_mismatch(self, out, text=None):
+        for py, line in out.items():
+            self.assertTrue(line.startswith("MISMATCH "), (py, line))
+            if text is not None:
+                self.assertIn(text, line, py)
+
+    def test_long_name(self):
+        """「zz/」＋300 文字の名前（書き出せない）を含む版：飛ばして続け、偽の output_sha256 で止まる。"""
+        head, sha = self.forge("long", extra="zz/" + "a" * 300)
+        self.assert_mismatch(self.check(head, sha), "counting.output_sha256")
+
+    def test_name_colliding_with_src(self):
+        """src/ とぶつかる「Src」（大文字小文字を区別しないファイルシステムで）を含む版も止まる。"""
+        head, sha = self.forge("case", extra="Src")
+        self.assert_mismatch(self.check(head, sha))
+
+    def test_non_utf8_name(self):
+        """UTF-8 でない名前を含む版も止まる。"""
+        head, sha = self.forge("bad", extra=os.fsdecode(b"zz/\xff\xfe"))
+        self.assert_mismatch(self.check(head, sha), "counting.output_sha256")
+
+    def test_timeout_is_mismatch(self):
+        """終わらない counting.py（時間切れ）は「記録と合わない」で止まる（上限は短く差し替えて確かめる）。"""
+        head, sha = self.forge("loop", counting=b"while True:\n    pass\n")
+        self.assert_mismatch(self.check(head, sha, timeout="3"), "上限の中に終わらなかった")
+
+    def test_unforged_head_passes_in_checker(self):
+        real_head = self.st.file_json(self.o1b, ledger.ORDER1B_KIND)["head"]
+        files = {f["path"]: f["sha256"] for f in self.st.file_json(self.o1b, ledger.ORDER1B_KIND)["files"]}
+        out = self.check(real_head, files["src/stats/counting.py"])
+        self.assert_mismatch(out, "counting.output_sha256")     # 偽の output_sha256 だけで止まる
+
+
+class FakeRepo:
+    """git archive の出力を返すだけのリポジトリの代わり（HeadTree の直接の確かめ）。"""
+
+    def __init__(self, tar_bytes):
+        self.tar_bytes = tar_bytes
+
+    def git(self, *args, env=None):
+        return self.tar_bytes
+
+
+def make_tar(entries):
+    """entries: [(TarInfo, 中身のバイト列か None)]。"""
+    import tarfile
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as t:
+        for info, data in entries:
+            if data is not None:
+                info.size = len(data)
+                t.addfile(info, io.BytesIO(data))
+            else:
+                t.addfile(info)
+    return buf.getvalue()
+
+
+class TestSafeExtraction(unittest.TestCase):
+    """T-056 再提出1回目 軽-B：_safe_member と HeadTree の安全の処理を直接確かめる。"""
+
+    def info(self, name, kind="file", linkname=""):
+        import tarfile
+        i = tarfile.TarInfo(name)
+        i.type = {"file": tarfile.REGTYPE, "dir": tarfile.DIRTYPE, "sym": tarfile.SYMTYPE,
+                  "hard": tarfile.LNKTYPE, "chr": tarfile.CHRTYPE, "fifo": tarfile.FIFOTYPE}[kind]
+        i.linkname = linkname
+        return i
+
+    def test_safe_member(self):
+        ok = [self.info("a.py"), self.info("src/stats/x.py"), self.info("src", "dir")]
+        bad = [self.info("/etc/passwd"), self.info("../x"), self.info("a/../../x"), self.info("a\\b"),
+               self.info("l", "sym", "/etc"), self.info("h", "hard", "a.py"), self.info("c", "chr"),
+               self.info("f", "fifo"), self.info("")]
+        for m in ok:
+            self.assertTrue(verify._safe_member(m), m.name)
+        for m in bad:
+            self.assertFalse(verify._safe_member(m), (m.name, m.type))
+
+    def test_head_tree_skips_and_stays_inside(self):
+        entries = [
+            (self.info("src", "dir"), None),
+            (self.info("src/ok.py"), b"print(1)\n"),
+            (self.info("../escape.txt"), b"x"),
+            (self.info("/abs.txt"), b"x"),
+            (self.info("link", "sym", "/etc/passwd"), None),
+            (self.info("hard", "hard", "src/ok.py"), None),
+            (self.info("zz/" + "a" * 300), b"x"),                     # 長すぎる名前
+            (self.info(os.fsdecode(b"zz/\xff\xfe")), b"x"),           # UTF-8 でない名前
+            (self.info("src/ok.py"), b"other\n"),                      # 同じ名前の2つ目（上書きしない）
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            tree = verify.HeadTree(FakeRepo(make_tar(entries)), "a" * 40, d)
+            with open(os.path.join(tree.dir, "src", "ok.py"), "rb") as f:
+                self.assertEqual(f.read(), b"print(1)\n")
+            found = []
+            for root, dirs, files in os.walk(d):
+                found += [os.path.relpath(os.path.join(root, n), d) for n in files]
+            self.assertEqual(found, [os.path.join("tree-" + "a" * 40, "src", "ok.py")])
+            for name in ("../escape.txt", "/abs.txt", "link", "hard", "zz/" + "a" * 300, "src/ok.py"):
+                self.assertIn(name, tree.skipped)
+            self.assertFalse(os.path.exists(os.path.join(os.path.dirname(d), "escape.txt")))
+
+    def test_unreadable_archive_is_mismatch(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(ledger.LedgerError):
+                verify.HeadTree(FakeRepo(b"not a tar archive" * 100), "b" * 40, d)
+
+    def test_git_archive_failure_is_unchecked(self):
+        class NoArchive:
+            def git(self, *args, env=None):
+                raise ledger.LedgerError("git archive が失敗した")
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(verify.Unchecked):
+                verify.HeadTree(NoArchive(), "c" * 40, d)
+
+    def test_timeout_and_launch_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "loop.py"), "w") as f:
+                f.write("while True:\n    pass\n")
+            with mock.patch.object(verify, "RUN_TIMEOUT_SECONDS", 1):
+                with self.assertRaisesRegex(ledger.LedgerError, "上限の中に終わらなかった"):
+                    verify._run_script(d, "loop.py", "見本")
+            with mock.patch.object(verify.sys, "executable", os.path.join(d, "no-python")):
+                with self.assertRaises(verify.Unchecked):
+                    verify._run_script(d, "loop.py", "見本")
+
+
 class TestFixedGitEnv(unittest.TestCase):
     def test_fixed_env(self):
         """T-054 の軽-1：GIT_ で始まる環境変数を除き、決めた2つだけを入れる。"""
@@ -208,7 +413,10 @@ class TestDocT056(unittest.TestCase):
                        "verify を使わずに手で確かめる手順", "GIT_ で始まる環境変数",
                        "書き込みの遅れの上限の目安", "Python 3.14.2（`.venv/bin/python`）と 3.9.6",
                        "隔離した環境", "ネットワークを切って流す", "「記録と合わない」として終了コード 1 で止める",
-                       "Python の要らない照合（必ず行う）", "cmp - before.jsonl", "D=$(mktemp -d)"):
+                       "Python の要らない照合（必ず行う）", "cmp - before.jsonl", "D=$(mktemp -d)",
+                       "記録を作る側の commit の中身で起こせることは、どれも「照らさなかった」にしない",
+                       "記録の head の commit を git が読めない（`git archive` ができない）、の3つに限る",
+                       "export GIT_NO_REPLACE_OBJECTS=1 GIT_GRAFT_FILE=/dev/null/no-graft-file"):
             self.assertIn(phrase, text)
 
 

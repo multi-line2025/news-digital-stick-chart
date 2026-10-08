@@ -437,14 +437,22 @@ def _child_env():
     return env
 
 
+# head の版のスクリプトを流す時間の上限（秒）。超えたら「記録と合わない」（T-056 再提出1回目 中-A）
+RUN_TIMEOUT_SECONDS = 1800
+
+
 def _run_script(cwd, rel, what):
     """sys.executable -B rel（引数なし）を cwd で流した標準出力。
-    Python を起動できなければ Unchecked。0 以外で終われば LedgerError（記録と合わない）。"""
+    Python を起動できなければ Unchecked（利用者の環境の都合）。0 以外で終わる、または時間内に終わらなければ
+    LedgerError（記録と合わない。記録を作る側の commit の中身で起こせることなので）。"""
     try:
         r = subprocess.run([sys.executable, "-B", rel], cwd=cwd, capture_output=True, env=_child_env(),
-                           timeout=1800)
-    except (OSError, subprocess.SubprocessError) as e:
-        raise Unchecked("%s：Python で %s を流せない（%s）" % (what, rel, e.__class__.__name__)) from None
+                           timeout=RUN_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        raise ledger.LedgerError("%s：head の版の %s が %s 秒の上限の中に終わらなかった（記録と合わない）"
+                                 % (what, rel, RUN_TIMEOUT_SECONDS)) from None
+    except OSError as e:
+        raise Unchecked("%s：Python を起動できない（%s）" % (what, e.__class__.__name__)) from None
     if r.returncode != 0:
         raise ledger.LedgerError("%s：head の版の %s が終了コード %d で終わった（記録は、その版で流した出力が"
                                  "あると主張している）" % (what, rel, r.returncode))
@@ -457,23 +465,30 @@ def _rgit(repo, *args):
 
 
 def _safe_member(m):
-    """取り出してよい tar の項目か（通常のファイルとディレクトリだけ。絶対パス・.. を含む名前は不可）。"""
+    """取り出してよい tar の項目か（通常のファイルとディレクトリだけ。symlink・hardlink・デバイスなどは不可。
+    絶対パス・.. を含む名前・バックスラッシュ・NUL を含む名前は不可）。"""
     name = m.name
     if not (m.isfile() or m.isdir()):
         return False
-    if name.startswith("/") or "\\" in name:
+    if not name or name.startswith("/") or "\\" in name or "\x00" in name:
         return False
-    return all(part not in ("..",) for part in name.split("/"))
+    return all(part != ".." for part in name.split("/"))
 
 
 class HeadTree:
     """記録の head の版のファイルを一時フォルダに取り出したもの（git archive）。T-056。
     tarfile の filter 引数（Python 3.12 以降）に頼らず、各項目の名前と種類を確かめて、通常のファイルと
-    ディレクトリだけを自分で書き出す（Python 3.9 でも動く。差し戻し1回目 中-1）。symlink などは書き出さない。"""
+    ディレクトリだけを自分で書き出す（Python 3.9 でも動く。差し戻し1回目 中-1）。symlink などは書き出さない。
+    書き出せない項目（長すぎる名前、ほかの項目とぶつかる名前、手元のファイルシステムで使えない名前など）も、
+    symlink と同じように飛ばして続ける（再提出1回目 中-A）。どれも記録を作る側の commit の中身で起こせる
+    ことなので、版全体を「照らさなかった」にはしない。必要なスクリプトが書き出せなければ、流したときに
+    0 以外で終わり、「記録と合わない」で止まる。git archive ができない（記録の head の commit を git が
+    読めない）ときだけ「照らさなかった」にする。self.skipped に飛ばした項目の名前を残す。"""
 
     def __init__(self, repo, head, tmp):
         self.repo, self.head = repo, head
         self.dir = os.path.join(tmp, "tree-" + head)
+        self.skipped = []
         if os.path.isdir(self.dir):
             return
         os.makedirs(self.dir)
@@ -482,19 +497,29 @@ class HeadTree:
         except ledger.LedgerError:
             raise Unchecked("git archive %s ができない" % head[:12]) from None
         try:
-            with tarfile.open(fileobj=io.BytesIO(data)) as t:
-                for m in t.getmembers():
-                    if not _safe_member(m):
-                        continue
-                    dest = os.path.join(self.dir, *m.name.split("/"))
+            t = tarfile.open(fileobj=io.BytesIO(data))
+            members = t.getmembers()
+        except tarfile.TarError as e:
+            raise ledger.LedgerError("記録の head %s の版の git archive を読めない（%s。記録と合わない）"
+                                     % (head[:12], e.__class__.__name__)) from None
+        with t:
+            for m in members:
+                if not _safe_member(m):
+                    self.skipped.append(m.name)
+                    continue
+                dest = os.path.join(self.dir, *m.name.split("/"))
+                try:
                     if m.isdir():
                         os.makedirs(dest, exist_ok=True)
                         continue
+                    content = t.extractfile(m).read()
                     os.makedirs(os.path.dirname(dest), exist_ok=True)
-                    with open(dest, "wb") as f:
-                        f.write(t.extractfile(m).read())
-        except (tarfile.TarError, OSError) as e:
-            raise Unchecked("head %s の版を取り出せない（%s）" % (head[:12], e.__class__.__name__)) from None
+                    with open(dest, "xb") as f:
+                        f.write(content)
+                except (OSError, ValueError, tarfile.TarError):
+                    # OSError（長すぎる名前・ぶつかる名前など）と ValueError（UnicodeEncodeError を含む。
+                    # 手元で使えない文字の名前）。飛ばして続ける
+                    self.skipped.append(m.name)
 
 
 def _show(repo, head, path):
