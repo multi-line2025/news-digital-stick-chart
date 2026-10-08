@@ -127,7 +127,7 @@ DISKUTIL_TIMEOUT_SECONDS = 60
 # 取得のコードのうち、このファイル以外の4つの sha256。変えたらここも直してコミットする
 # （テストが照合する）。
 PINNED_SHA256 = (
-    (GKG_REL, "94f2deb3dd2edbec3e24f2ac2db596dc2c6818a423f84f1b08c4920c6f08ec0b"),
+    (GKG_REL, "4014be707879d7b243a0c0e160417e4e4207e6bc5b2200bd88ba637625d13014"),
     (FILELIST_REL, "afd7a9dd47bc052a691e1a4cd558b211f4d72cf1ce1f451fa9f3016540cd04a7"),
     (PRIVACY_SCAN_REL, "68d8836d56489ca5df9f2f55e24a2642ebf3aa14afdc2e0120577c7b6c6cb887"),
     (CODEGATE_REL, "d422be41dc59c4be50689a2426453db965be506a9981770ab3eb7557ed078769"),
@@ -417,13 +417,15 @@ def make_start_hook(s, gate, exclusion_rule):
     ある・trial なら official がまだ無い）は、start に任せる。このスクリプトは自分で使い回さない。
     書けなければ（使い回せない場合を含む）例外を出し、gkg.run_gkg は何も書かずに止まる
     （要求を1件も送らない）。
+    T-069：取得の計画（days・files_selected。gkg.py が run-start の行に書く値と同じ）も、試しの run・
+    正式な run のどちらでも start に渡す（封印係の T-068）。
     """
-    def hook(*, mode, run_id, trial_days):
+    def hook(*, mode, run_id, trial_days, days, files_selected):
         rec, _rel, _ots = seal_gkg_run.start(
             s.project, mode, CODE_REL, run_id, gate["filelist_sha256"],
             gate["method_access_seq"], trial_days, exclusion_rule["seq"],
             exclusion_rule["record_sha256"], s.now(), s.ots_cmd, drand_fetch=s.drand_fetch,
-            runner=s.ots_runner)
+            runner=s.ots_runner, days=days, files_selected=files_selected)
         return record_ref(rec)
     return hook
 

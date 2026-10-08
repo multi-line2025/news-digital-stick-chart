@@ -576,6 +576,7 @@ class RunCase(unittest.TestCase):
         os.makedirs(self.trial_store)
         self.check_volume = fake_check_volume
         self.sealed_runs = []                # start_hook に渡された値（封印の記録に書いた run）
+        self.sealed_plans = []               # start_hook に渡された取得の計画（T-069）
         self.fake_records = {}               # 仮の封印の記録 {seq: (行, kind, 中身)}
         p = mock.patch.object(gkg, "sealed_run_record",
                               lambda root, seq: self.fake_records.get(seq))
@@ -612,9 +613,11 @@ class RunCase(unittest.TestCase):
     def manifest_path(self, name=None):
         return os.path.join(self.root, "data", "manifest", name or gkg.MANIFEST_NAME)
 
-    def start_hook(self, *, mode, run_id, trial_days):
-        """封印の記録に gkg-run-start を書く入口の差し替え（本物は acquire_gkg.make_start_hook）。"""
+    def start_hook(self, *, mode, run_id, trial_days, days, files_selected):
+        """封印の記録に gkg-run-start を書く入口の差し替え（本物は acquire_gkg.make_start_hook）。
+        取得の計画（days・files_selected。T-069）は self.sealed_plans に控える。"""
         self.sealed_runs.append((mode, run_id, trial_days))
+        self.sealed_plans.append({"days": days, "files_selected": files_selected})
         seq = 20 + len(self.sealed_runs)
         line = json.dumps({"seq": seq, "kind": "gkg-run-start", "mode": mode, "run_id": run_id},
                           sort_keys=True).encode()
@@ -807,7 +810,7 @@ class TestRun(RunCase):
         m = self.manifest()
         self.assertEqual(gkg.official_run_id(m), RUN_ID)
         self.assertTrue(m[0]["official"])
-        days = gkg.official_day_records(m)
+        days = gkg.day_records_of(m)
         self.assertEqual([d["day"] for d in days], ["2015-03-02", "2015-03-03"])
 
     def test_new_run_refused_even_if_first_did_not_finish(self):
@@ -818,7 +821,7 @@ class TestRun(RunCase):
         with self.assertRaisesRegex(gkg.GkgError, "別の run"):
             self.run_gkg(code_sha256="cd" * 32)
         with self.assertRaisesRegex(gkg.GkgError, "終わっていない"):
-            gkg.official_day_records(self.manifest())
+            gkg.day_records_of(self.manifest())
 
     def test_format_breaker(self):
         for ts in self.zips:
@@ -2284,6 +2287,24 @@ class TestT032(RunCase):
         self.assertEqual(len(self.sealed_runs), 3)
         m0 = self.manifest()[0]
         self.assertEqual(m0["gkg_run_seq"], 23)
+
+    def test_hook_receives_plan_equal_to_run_start_row(self):
+        """T-069：start_hook に、run-start の行に書く days・files_selected と同じ値を、試しの run でも
+        正式な run でも渡す（封印係の T-068 の取得の計画）。再開では呼ばない。"""
+        self.run_once(mode="trial", committed_manifest=None)
+        t0 = self.manifest(gkg.TRIAL_MANIFEST_NAME)[0]
+        with self.assertRaises(gkg.RunStartWritten):
+            self.run_once()
+        m0 = self.manifest()[0]
+        self.run_once()                                   # 再開：もう渡さない
+        self.assertEqual(self.sealed_plans,
+                         [{"days": t0["days"], "files_selected": t0["files_selected"]},
+                          {"days": m0["days"], "files_selected": m0["files_selected"]}])
+        self.assertEqual(t0["days"], len(t0["trial_days"]))
+        self.assertEqual(m0["days"], len(self.DAYS))
+        self.assertEqual(m0["files_selected"], sum(1 for _ in self.zips))
+        done = [e for e in self.manifest() if e["kind"] == "run-complete"][0]
+        self.assertEqual(done["days"], m0["days"])
 
     def test_resume_does_not_write_again(self):
         self.low_after = 2

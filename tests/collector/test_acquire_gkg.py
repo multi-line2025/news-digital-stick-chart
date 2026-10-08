@@ -54,6 +54,7 @@ ag = _load("acquire_gkg", ENTRY)
 ledger = ag.ledger
 stamp = ag.stamp
 seal_method = importlib.import_module("seal_method")
+seal_gkg_result = importlib.import_module("seal_gkg_result")
 gkg = tg.gkg
 
 
@@ -430,6 +431,9 @@ class TestEndToEnd(E2ECase):
                          ledger.sha256_hex(ledger.canonical_line(r)))
         self.assertEqual((d["run_id"], d["code_sha256"], d["exclusion_rule_seq"]),
                          (man[0]["run_id"], man[0]["code_sha256"], man[0]["exclusion_rule_seq"]))
+        # T-069：取得の計画（days・files_selected）が、run-start の行と同じ値で記録に入る
+        self.assertEqual((d["days"], d["files_selected"]), (man[0]["days"], man[0]["files_selected"]))
+        self.assertEqual((d["days"], d["files_selected"]), (len(self.DAYS), len(self.zips)))
         with open(ENTRY, "rb") as f:
             entry_sha = hashlib.sha256(f.read()).hexdigest()
         self.assertEqual(man[0]["code_sha256"], entry_sha)
@@ -635,6 +639,10 @@ class TestSealGkgRun(E2ECase):
         starts = [e for e in tm if e["kind"] == "run-start"]
         self.assertEqual([e["gkg_run_seq"] for e in starts], [r["seq"] for r, _d in runs])
         self.assertEqual([e["run_id"] for e in starts], [d["run_id"] for _r, d in runs])
+        # T-069：試しの run も、取得の計画を run-start の行と同じ値で記録に入れる
+        self.assertEqual([(d["days"], d["files_selected"]) for _r, d in runs],
+                         [(e["days"], e["files_selected"]) for e in starts])
+        self.assertEqual([d["days"] for _r, d in runs], [3, 3])
 
     def test_resume_writes_no_second_record(self):
         self.add_method_access()
@@ -1064,6 +1072,156 @@ class TestProductionPath(unittest.TestCase):
                            env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
         self.assertEqual(r.returncode, 2)
         self.assertEqual(r.stdout, b"")
+
+
+class TestOfficialResultGate(E2ECase):
+    """T-069：正式な run の結果を使う入口（gkg.official_day_records）は、最初に封印係の関門
+    ledger.require_gkg_run_result("official", run_id) を呼ぶ。gkg-run-result の無い run では、
+    マニフェストも日の集計も読まずに止まり、ある run では通る。"""
+
+    def full_official(self):
+        self.add_method_access()
+        out = self.acquire_official(self.gseams())
+        self.commit_manifest("正式な run の結果")
+        return out
+
+    def entry(self):
+        return self.run_with_root(gkg.official_day_records)
+
+    def manifest_rows(self):
+        return gkg.read_jsonl(os.path.join(self.project, "data", "manifest", gkg.MANIFEST_NAME))
+
+    def seal_result(self, run_id):
+        rec, _rel, _o = seal_gkg_result.seal(self.project, "official", run_id, tg.NOW, "ots",
+                                             runner=taf.FakeOts())
+        taf.git(self.project, "add", "-A", "sealed")
+        taf.git(self.project, "commit", "-q", "-m", "gkg-run-result")
+        return rec
+
+    def assert_stops_before_reading(self, pattern):
+        never = mock.Mock(side_effect=AssertionError("関門より前に、マニフェストを読んではいけない"))
+        with mock.patch.object(gkg, "read_bytes_nofollow", never), \
+                mock.patch.object(gkg, "read_jsonl", never), \
+                mock.patch.object(gkg, "day_records_of", never):
+            with self.assertRaises(gkg.GkgError) as cm:
+                self.entry()
+        self.assertRegex(str(cm.exception), pattern)
+        never.assert_not_called()
+        return cm.exception
+
+    def test_stops_without_result_then_passes_with_result(self):
+        out = self.full_official()
+        calls = []
+        real_gate = ledger.require_gkg_run_result
+
+        def gate(mode, run_id):
+            calls.append((mode, run_id))
+            return real_gate(mode, run_id)
+        with mock.patch.object(ledger, "require_gkg_run_result", gate):
+            e = self.assert_stops_before_reading("gkg-run-result の関門を通らない")
+        self.assertIsInstance(e.__cause__, ledger.GkgRunResultRequired)
+        self.assertEqual(calls, [("official", out["run_id"])])
+        self.seal_result(out["run_id"])
+        with mock.patch.object(ledger, "require_gkg_run_result", gate):
+            days = self.entry()
+        self.assertEqual(calls[-1], ("official", out["run_id"]))
+        self.assertEqual(days, gkg.day_records_of(self.manifest_rows()))
+        self.assertEqual(len(days), len(self.DAYS))
+
+    def test_stops_on_rewrite_before_or_after_gate(self):
+        out = self.full_official()
+        self.seal_result(out["run_id"])
+        want = self.entry()
+        path = os.path.join(self.project, "data", "manifest", gkg.MANIFEST_NAME)
+        with open(path, "rb") as f:
+            body = f.read()
+        bad = body.replace(b'"2015-03-02"', b'"2015-03-12"', 1)
+        self.assertNotEqual(bad, body)
+        # 封印した先頭の書き換え：関門が止める（マニフェストを読まない）
+        with open(path, "wb") as f:
+            f.write(bad)
+        self.assert_stops_before_reading("gkg-run-result の関門を通らない")
+        # 関門を通ったあと、読む前に書き換わった場合：読み直したバイト列の sha256 で止まる
+        with open(path, "wb") as f:
+            f.write(body)
+        real_gate = ledger.require_gkg_run_result
+
+        def gate_then_rewrite(mode, run_id):
+            rec = real_gate(mode, run_id)
+            with open(path, "wb") as f:
+                f.write(bad)
+            return rec
+        with mock.patch.object(ledger, "require_gkg_run_result", gate_then_rewrite):
+            with self.assertRaisesRegex(gkg.GkgError, "関門のあとで変わった"):
+                self.entry()
+        with open(path, "wb") as f:
+            f.write(body)
+        self.assertEqual(self.entry(), want)
+
+    def test_stops_without_official_run(self):
+        self.add_method_access()
+        self.acquire(self.gseams(), mode="trial")
+        self.commit_manifest("試しの run")
+        never = mock.Mock(side_effect=AssertionError("関門まで進んではいけない"))
+        with mock.patch.object(ledger, "require_gkg_run_result", never):
+            with self.assertRaisesRegex(gkg.GkgError, "正式な run（official）の gkg-run-start が 0 件"):
+                self.entry()
+        never.assert_not_called()
+
+    def test_entry_takes_no_arguments_and_calls_gate_first(self):
+        self.assertEqual(list(inspect.signature(gkg.official_day_records).parameters), [])
+        src = inspect.getsource(gkg.official_day_records).split('"""', 2)[2]
+        gate_at = src.index("ledger.require_gkg_run_result(\"official\", run_id)")
+        for later in ("read_bytes_nofollow(", "manifest_prefix(", "day_records_of("):
+            self.assertLess(gate_at, src.index(later), later)
+
+
+# --- T-069：封印係が ledger.GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL を True にしたあとも通ること ---------
+
+class _PlanRequired:
+    """ledger.GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL を True に差し替えて、同じテストを流す（T-069）。"""
+
+    def setUp(self):
+        p = mock.patch.object(ledger, "GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL", True)
+        p.start()
+        self.addCleanup(p.stop)
+        super().setUp()
+
+
+class TestPlanRequiredSwitch(E2ECase):
+    """差し替えが封印係の書く側（seal_gkg_run.start）に届いていることの確かめ（対照）。"""
+
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(ledger, "GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL", True)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_same_ledger_module(self):
+        self.assertIs(ag.seal_gkg_run.ledger, ledger)
+
+    def test_official_without_plan_is_refused(self):
+        """計画を渡さない hook（T-069 より前の形）なら、正式な run は gkg-run-start を書けずに止まる。"""
+        self.add_method_access()
+        real = ag.seal_gkg_run.start
+
+        def without_plan(*a, days=None, files_selected=None, **k):
+            return real(*a, **k)
+        with mock.patch.object(ag.seal_gkg_run, "start", without_plan):
+            with self.assertRaises(Exception) as cm:
+                self.acquire(self.gseams())
+        self.assertIn("取得の計画", str(cm.exception))
+        self.assertEqual(self.gtransport.calls, [])
+        self.assertEqual(gkg_run_docs(self.project), [])
+
+
+for _base in (TestEndToEnd, TestEndToEndOnFat32, TestSealGkgRun, TestT045, TestSealedRunCheck,
+              TestOfficialResultGate):
+    _name = _base.__name__ + "PlanRequired"
+    globals()[_name] = type(_name, (_PlanRequired, _base),
+                            {"__doc__": "%s を、GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL = True で流す（T-069）。"
+                                        % _base.__name__})
+del _base, _name
 
 
 if __name__ == "__main__":

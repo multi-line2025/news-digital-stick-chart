@@ -150,7 +150,7 @@
         タスク。前の run のファイルと記録は消さずに残る）。こうするのは、コードを少し変えて
         新しい run を作り、欠けたファイルを取り直す（結果の良い run を選ぶ）余地を無くすため。
       - 手法を作る期間の欠けた日の一覧は、正式な run の記録（マニフェストの day の行と、日の
-        集計の F の行）だけから作る（official_day_records）。
+        集計の F の行）だけから作る（official_day_records。T-069：gkg-run-result の関門を通る）。
     取得の記録（保存先の gkg-<run_id>-fetch-log.jsonl。Git の外。追記のみ）
       置き場所は、日の集計と同じ外付けディスクの同じフォルダとする（T-021。理由は7章）。
       15分ファイル1本につき、結果が決まるたびに1行を追記する。項目：file_time、listed_md5、
@@ -1480,10 +1480,11 @@ def official_run_id(manifest):
     return None
 
 
-def official_day_records(manifest):
-    """正式な run の day の行（日付の順）。欠けた日の一覧は、これと日の集計の F の行から作る。
+def day_records_of(manifest):
+    """正式な run の day の行（日付の順）。マニフェストの行の一覧だけから作る（関門を通らない）。
 
-    正式な run が run-complete まで終わっていなければ GkgError。
+    run の途中の検査とテストのための部品。正式な run の結果を使うコードは、関門を通る
+    official_day_records() を使う（T-069）。正式な run が run-complete まで終わっていなければ GkgError。
     """
     rid = official_run_id(manifest)
     if rid is None:
@@ -1498,6 +1499,62 @@ def official_day_records(manifest):
                 raise GkgError("正式な run に同じ日の day の行が二つある")
             days[e["day"]] = e
     return [days[d] for d in sorted(days)]
+
+
+def official_day_records():
+    """正式な run の結果を使う入口（T-069）。正式な run の day の行（日付の順）を返す。
+
+    欠けた日の一覧は、これと日の集計の F の行から作る。日の集計を統計係に渡すときも、この入口を
+    通った day の行（file_name・sha256）だけを使う。
+      1. run_id は、封印の記録の official の gkg-run-start の記録から取る（マニフェストはまだ読まない）。
+      2. 最初に封印係の関門 ledger.require_gkg_run_result("official", run_id) を呼ぶ。gkg-run-result
+         （マニフェストの時刻証明）が無い・合わなければ、マニフェストも日の集計も読まずに止まる
+         （GkgError。元の GkgRunResultRequired は __cause__ に残す）。
+      3. 読むのは、gkg-run-result が封印したマニフェストの先頭 manifest_lines 行だけ。関門のあとで読み直した
+         バイト列の先頭が、記録の manifest_sha256 と同じであることを確かめる（関門と読み取りのあいだの書き換え）。
+    引数は取らない（プロジェクトは ledger.PROJECT_ROOT。関門と同じ）。
+    """
+    ledger = _load_sibling("themes")._import_ledger()
+    try:
+        root = ledger._gate_root()
+        records = ledger.verify_chain(ledger.read_ledger(os.path.join(root, "sealed", "ledger.jsonl")))
+        starts = [ledger.read_target_json(root, r, ledger.GKG_RUN_KIND)
+                  for r in records if r["kind"] == ledger.GKG_RUN_KIND]
+    except ledger.LedgerError as e:
+        raise GkgError("封印の記録を読めない: %s" % e) from None
+    official = [d for d in starts if isinstance(d, dict) and d.get("mode") == "official"]
+    if len(official) != 1:
+        raise GkgError("封印の記録に、正式な run（official）の gkg-run-start が %d 件ある（1 件のときだけ読む）"
+                       % len(official))
+    run_id = official[0].get("run_id")
+    try:
+        rec = ledger.require_gkg_run_result("official", run_id)
+    except ledger.GkgRunResultRequired as e:
+        raise GkgError("正式な run（%s）の結果は、gkg-run-result の関門を通らないので使わない：%s"
+                       % (run_id, e)) from e
+    rel = ledger.GKG_MANIFESTS["official"]
+    if rel != "/".join(MANIFEST_DIR_PARTS + (MANIFEST_NAME,)):
+        raise GkgError("封印係のマニフェストの場所が、このファイルの場所と違う")
+    try:
+        doc = ledger.read_target_json(root, rec, ledger.GKG_RESULT_KIND)
+        if doc.get("mode") != "official" or doc.get("run_id") != run_id:
+            raise GkgError("gkg-run-result の記録が、この run（official・%s）のものでない" % run_id)
+        prefix = ledger.manifest_prefix(read_bytes_nofollow(os.path.join(root, *rel.split("/"))),
+                                        doc["manifest_lines"], rel)
+    except ledger.LedgerError as e:
+        raise GkgError("封印したマニフェストの先頭を読めない: %s" % e) from None
+    if hashlib.sha256(prefix).hexdigest() != doc["manifest_sha256"]:
+        raise GkgError("マニフェストの先頭が、gkg-run-result の記録の manifest_sha256 と違う（関門のあとで変わった）")
+    rows = []
+    for raw in prefix.splitlines():
+        if raw.strip():
+            try:
+                rows.append(json.loads(raw))
+            except ValueError:
+                raise GkgError("マニフェストに JSON でない行がある") from None
+    if official_run_id(rows) != run_id:
+        raise GkgError("マニフェストの最初の run-start が、封印の記録の正式な run と違う")
+    return day_records_of(rows)
 
 
 def trial_plan(plan):
@@ -1803,8 +1860,9 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
     committed_trial_manifest：HEAD の試しの run のマニフェスト（正式な run だけ。5.1章）。
     exclusion_rule：除外の規則の封印の記録の {"seq", "record_sha256"}（5.3章）。ここでも鎖の上の
       記録と照らす（関門を通らずにこの関数を呼んでも、取得は始まらない）。
-    start_hook(mode=, run_id=, trial_days=)：run の最初の実行で、run-start の行を書く前（要求を
-      送る前）に1回だけ呼ぶ。封印の記録に gkg-run-start を書き、その記録の
+    start_hook(mode=, run_id=, trial_days=, days=, files_selected=)：run の最初の実行で、run-start の
+      行を書く前（要求を送る前）に1回だけ呼ぶ。days・files_selected は取得の計画（run-start の行の
+      days・files_selected と同じ値。T-069）。封印の記録に gkg-run-start を書き、その記録の
       {"seq", "record_sha256"} を返す（5.5章。T-032）。入口のスクリプトが渡す。無ければ止まる。
     """
     if not re.fullmatch(r"[0-9a-f]{64}", code_sha256 or ""):
@@ -1877,7 +1935,8 @@ def run_gkg(*, root, volume, filelist_rows, filelist_sha256, method_access_seq, 
             raise GkgError("run-start の前なのに、取得の記録が既にある（リードに報告）")
         check_exclusion_record(root, exclusion_rule, None)
         run_ref = _seal_run_start(start_hook, mode, run_id,
-                                  sorted(plan) if mode == "trial" else None)
+                                  sorted(plan) if mode == "trial" else None,
+                                  days=len(plan), files_selected=n_files)
         write_volume_mark(paths, run_id, mode)
         size, sha = _log_state(log_path)
         untrusted = []
@@ -1959,13 +2018,17 @@ def check_sealed_run(root, s0, mode, run_id):
                        "（リードに報告）" % (seq, mode, run_id))
 
 
-def _seal_run_start(start_hook, mode, run_id, trial_days):
-    """5.5章（T-032）：封印の記録に gkg-run-start を書く。書けなければ何も書かずに止まる。"""
+def _seal_run_start(start_hook, mode, run_id, trial_days, *, days, files_selected):
+    """5.5章（T-032）：封印の記録に gkg-run-start を書く。書けなければ何も書かずに止まる。
+
+    days・files_selected（T-069）：取得の計画。run-start の行に書く days（len(plan)）と
+    files_selected（n_files）と同じ値を、データを受け取る前に封印の記録に入れる（封印係の T-068）。"""
     if start_hook is None:
         raise GkgError("封印の記録（gkg-run-start）に書く仕組みを受け取っていない（入口のスクリプト"
                        "から実行する）")
     try:
-        ref = start_hook(mode=mode, run_id=run_id, trial_days=trial_days)
+        ref = start_hook(mode=mode, run_id=run_id, trial_days=trial_days, days=days,
+                         files_selected=files_selected)
     except (GkgError, RunInterrupted):
         raise
     except Exception as e:
