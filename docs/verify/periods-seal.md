@@ -1177,9 +1177,10 @@ counting.py は読み込むだけで変えない。そろえられない形は�
 ### 規則
 
 1. テストは、HEAD の本物の `sealed/ledger.jsonl`・`sealed/`・`data/manifest/` の今の状態を前提にしない。
-2. 本物の記録を使うテストは、固定したコミット（テストの中の定数。40 桁の sha）の版を git から取り出して使う。入口は `tests/sealer/fixed_records.py` の `checkout`・`show`・`ls` だけで、既定のコミットは `fixed_records.PINNED_COMMIT`（5ce3943b827ff67f4f7e7db811525946bafdea46。seq 1〜8 と試しの run のマニフェスト5行。`gkg-run-result` はまだ無い）。`checkout` は、そのコミットとその祖先だけを取り込み、参照を `main` の1つだけにする（後の記録の履歴を `git log --all` が見つけないように）。既定では、`sealed/`・`data/`・`reviews/` はそのコミットの版のまま、ほかのファイル（コードと手順書）を HEAD の版にそろえて1つのコミットにする。40 桁でないもの（`HEAD`・枝の名前・短い sha）は拒む。そうでなければ、合成の鎖を使う。
-3. HEAD の本物の記録をそのまま読んでよいのは、「本物の記録で verify が 0 になる」ことを確かめるテストだけである（`tests/sealer/test_t077.py` の `HEAD_READERS`）。今は次の2つ。どちらも、記録の件数・kind・最後の seq に頼らない。
+2. 本物の記録を使うテストは、固定したコミット（テストの中の定数。40 桁の sha）の版を git から取り出して使う。入口は `tests/sealer/fixed_records.py` の `checkout`・`show`・`ls` だけで、既定のコミットは `fixed_records.PINNED_COMMIT`（5ce3943b827ff67f4f7e7db811525946bafdea46。seq 1〜8 と試しの run のマニフェスト5行。`gkg-run-result` はまだ無い）。`checkout` は、そのコミットとその祖先だけを取り込み、参照を `main` の1つだけにする（後の記録の履歴を `git log --all` が見つけないように）。既定（`code="head"`）では、封印係のコードと手順書（`src/sealer`・`tests/sealer`・`docs/verify`）だけを HEAD の版にそろえて1つのコミットにする。ほかのファイル（`src/stats`・`src/collector`・`docs/stats`・`data/`・`sealed/`・`reviews/` など）はそのコミットの版のまま使う。固定した記録が縛るパス（記録の targets と、targets の中身の JSON に書かれたパス。`fixed_records.bound_paths`）は、上の3つのフォルダの中にあっても固定の版のまま残す（T-077 差し戻し1回目 中-1。記録の時点に存在しなかった組み合わせを作らない）。2つ目の固定コミットは `fixed_records.RESULT_COMMIT`（220297a38a7bf32d6319148d2c7abc650467c819。seq 9 の R の `gkg-run-result` まで）で、順番2の関門が開くことを確かめるのに使う。40 桁でないもの（`HEAD`・枝の名前・短い sha）は拒む。HEAD を指す値（`fixed_records._head_sha`）は、このモジュールの外からは使わない。そうでなければ、合成の鎖を使う。
+3. HEAD の本物の記録をそのまま読んでよいのは、「本物の記録で verify が 0 になる」ことを確かめるテストだけである（`tests/sealer/test_t077.py` の `HEAD_READERS`）。今は次の3つ。どれも、記録の件数・kind・最後の seq に頼らない。
    - `test_t077.TestRealHeadVerify.test_verify_all_rev_auto_is_zero`：プロジェクトのルートで `verify.py all --rev auto` が 0。
+   - `test_t077.TestRealHeadVerify.test_recorded_at_not_after_btc_time`：全記録で、`recorded_at` が Bitcoin の確定時刻 + 3 時間より後でない（`post_text.check_recorded_vs_btc`。verify には入っていない照合なので、ここで流す）。違反の一覧が空であることだけを見る。
    - `test_verify_doc.TestDocProcedureHead`：HEAD の clone で、3章の塊がすべて 0 で終わる。
 
 ### 規則を守らせる検査
@@ -1187,10 +1188,17 @@ counting.py は読み込むだけで変えない。そろえられない形は�
 `test_t077.TestRuleScan` は、`tests/sealer` の .py（`fixed_records.py` を除く）を ast で読み、本物の記録に届きうる箇所を数える。数えた箇所が `HEAD_READERS` と件数まで同じでなければ落ちる。数える箇所は次のとおり。
 - 本物のルートの名前（`PROJECT`・`PROJECT_ROOT`）を、`os.path.join(ルート, <src/・tests/・docs/verify/・.venv/・CLAUDE.md の下>)` と、assert で比べるだけの `os.path.realpath`・`abspath` 以外で使う箇所（`git -C ルート`、`git clone ルート`、関数にルートを渡す、別の名前に入れる、など）。
 - 引数を取らない関門（`require_method_access` など）を、`PROJECT_ROOT`・`_load_for_gate` を差し替える `with` の外で呼ぶ箇所。
-- 相対パスの `sealed/`・`data/` を読む箇所、`HERE`・`__file__` から `..` で上る箇所。
+- 相対パスの `sealed/`・`data/` を読む箇所（`./sealed/…` のように `./` の付いたものは正規化してから見る）、`..` を含む相対パス（`"src/../sealed"` など。安全とみなさない）、`HERE`・`__file__` から `..` で上る箇所。
+- `fixed_records` の外から、`_` で始まる名前と `head_sha`・`PROJECT` を使う箇所（`from fixed_records import …` を含む）。
 - src のスクリプトを `--root` を渡さずに動かす箇所（相対パスのスクリプトを cwd を渡して動かすものは除く）。`verify`・`post_text`・`seal_*` の `main` を、`--root` の無い引数の一覧で呼ぶ箇所。
 
-限界：ast で字面を数えるので、名前を経由した間接の参照（引数を変数で組み立てた `main` の呼び出しなど）は数えない。そのため、記録を1件足した写しで全件を流して確かめる（次の節）。
+限界：ast で字面を数えるので、次の形はすり抜ける（T-077 の監査の probe で確かめた形を含む）。今のテストは、どれも使っていない。そのため、記録を1件足した写しで全件を流して確かめる（次の節）。
+- 名前を経由した間接の参照：ルートやパスを別のモジュールの変数・関数の返り値で渡す（`HERE` から作った自前の変数、`os.path.dirname` を重ねてルートを作り直す、など）。引数を変数で組み立てた `main` の呼び出し。
+- `pathlib`（`Path(…) / "sealed"`）で組み立てたパス。
+- `-C` を付けない `git show HEAD:sealed/ledger.jsonl` など、今のフォルダ（テストはプロジェクトのルートで流す）で動く git。
+- `"."`・`os.getcwd()` を root として関数に渡すこと（今のフォルダはプロジェクトのルート）。`os.getcwd()` は、元のフォルダに戻すためにも使うので数えない。
+- 別名の import（`import order2_gate as og` の `og.gate()`、`import fixed_records as fr` の `fr._head_sha()`）と、`getattr(ledger, "require_" + …)` の形の関門の呼び出し。
+- 何も差し替えない `mock.patch`（`mock.patch.object(ledger, "_load_for_gate", wraps=ledger._load_for_gate)` など）の中の関門の呼び出し。`with` の中であれば、差し替えた値が本物のルートかどうかは見ない。
 
 ### 記録が増えても壊れないことの確かめ方
 

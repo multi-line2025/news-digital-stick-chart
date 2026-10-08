@@ -3,7 +3,7 @@
 実行（プロジェクトのルートで）:
     PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/sealer -v
 
-規則（tests/sealer/fixed_records.py の冒頭と、docs/verify/periods-seal.md 13章「テストと本物の記録」に同じ文）:
+規則（tests/sealer/fixed_records.py の冒頭と、docs/verify/periods-seal.md 15章「テストと本物の記録」に同じ文）:
   1. テストは、HEAD の本物の sealed/ledger.jsonl・sealed/・data/manifest/ の今の状態を前提にしない。
   2. 本物の記録を使うテストは、固定したコミット（テストの中の定数。40 桁の sha）の版を git から取り出して使う
      （fixed_records.checkout・fixed_records.show）。そうでなければ、合成の鎖を使う。
@@ -22,6 +22,7 @@ import contextlib
 import io
 import json
 import os
+import posixpath
 import subprocess
 import sys
 import tempfile
@@ -33,6 +34,10 @@ sys.path.insert(0, HERE)
 import fixed_records  # noqa: E402
 import test_ledger as tl  # noqa: E402
 import test_t073 as t73  # noqa: E402
+from unittest import mock  # noqa: E402
+
+import order2_gate  # noqa: E402
+import post_text  # noqa: E402
 
 ledger = tl.ledger
 verify = tl.verify
@@ -47,6 +52,9 @@ HEAD_READERS = {
     ("test_t077.py", "TestRealHeadVerify.test_verify_all_rev_auto_is_zero"): 1,
     # 手順書（periods-seal.md）の塊を、HEAD の clone で第三者の立場で流し、すべて 0 で終わる
     ("test_verify_doc.py", "TestDocProcedureHead.make_clone"): 1,
+    # 本物の作業ツリーの全記録で、recorded_at が Bitcoin の確定時刻 + 3 時間より後でない（post_text の照合。
+    # verify には入っていない）。どの記録にも違反が無いことだけを見る（T-077 差し戻し1回目 中-3）
+    ("test_t077.py", "TestRealHeadVerify.test_recorded_at_not_after_btc_time"): 1,
 }
 
 # 本物のプロジェクトのルートを指す名前（Name か、属性の名前）
@@ -69,6 +77,16 @@ READ_FUNCS = {"open", "io.open", "glob.glob", "os.listdir", "os.scandir", "os.pa
               "os.path.lexists", "read_ledger", "ledger.read_ledger", "tl.ledger.read_ledger"}
 RECORD_REL_PREFIXES = ("sealed", "data/manifest", "data")
 EXCLUDED_FILES = {"fixed_records.py"}
+# fixed_records のうち、外から使ってはいけない名前（HEAD を指す値・本物のルート）。_ で始まる名前もすべて
+FIXED_PRIVATE = {"head_sha", "PROJECT"}
+
+
+def norm_rel(rel):
+    """相対パスを正規化する（"./" と重なった "/" を取る）。".." を含むものは None（安全とみなさない）。"""
+    parts = rel.replace("\\", "/").split("/")
+    if ".." in parts:
+        return None
+    return posixpath.normpath(rel) if rel else rel
 
 
 def dotted(node):
@@ -169,7 +187,18 @@ class _Scanner(ast.NodeVisitor):
     def visit_Name(self, node):
         self.check_p(node)
 
+    def visit_ImportFrom(self, node):
+        if node.module == "fixed_records":
+            for a in node.names:
+                if a.name == "*" or a.name.startswith("_") or a.name in FIXED_PRIVATE:
+                    self.add("fixed_records から %s を取り込む（%s 行）" % (a.name, node.lineno))
+        self.generic_visit(node)
+
     def visit_Attribute(self, node):
+        if isinstance(node.value, ast.Name) and node.value.id == "fixed_records" and \
+                (node.attr.startswith("_") or node.attr in FIXED_PRIVATE):
+            self.add("fixed_records.%s を外から使う（%s 行）" % (node.attr, node.lineno))
+            return
         if is_p(node):
             self.check_p(node)
         else:
@@ -191,8 +220,8 @@ class _Scanner(ast.NodeVisitor):
             if name == "os.path.join":
                 rest = [literal_path(a, self.consts) for a in call.args[1:]]
                 if rest and all(r is not None for r in rest) and not call.keywords:
-                    rel = "/".join(rest)
-                    if any(rel == p.rstrip("/") or rel.startswith(p) for p in SAFE_PREFIXES):
+                    rel = norm_rel("/".join(rest))
+                    if rel is not None and any(rel == p.rstrip("/") or rel.startswith(p) for p in SAFE_PREFIXES):
                         return
             if name in ("os.path.realpath", "os.path.abspath") and len(call.args) == 1:
                 outer, _j = self.nearest_call(i - 1)
@@ -215,7 +244,8 @@ class _Scanner(ast.NodeVisitor):
         # 今のフォルダからの相対のパスで記録を読む（テストはプロジェクトのルートで流す）
         if name in READ_FUNCS and node.args:
             rel = literal_path(node.args[0], self.consts)
-            if rel is not None and rel.split("/")[0] in ("sealed", "data"):
+            n = norm_rel(rel) if rel is not None else None
+            if rel is not None and (n is None or n.split("/")[0] in ("sealed", "data")):
                 self.add("相対パス %s を読む（%s 行）" % (rel, node.lineno))
         # このファイルの場所から .. でプロジェクトへ上る
         if name == "os.path.join" and node.args and any(s == ".." or s.startswith("../") for s in strs):
@@ -309,6 +339,14 @@ class TestRuleScan(unittest.TestCase):
             "..": 'def test_x():\n    open(os.path.join(HERE, "..", "..", "sealed", "ledger.jsonl"))\n',
             "スクリプト": 'def test_x():\n    subprocess.run([sys.executable, os.path.join(SRC, "verify.py"), "all"])\n',
             "realpath を渡す": 'def test_x():\n    f(os.path.realpath(PROJECT))\n',
+            # T-077 差し戻し1回目 中-2 の3つの形
+            "head_sha を渡す": 'def test_x():\n    fixed_records.checkout(d, fixed_records.head_sha())\n',
+            "_head_sha を渡す": 'def test_x():\n    fixed_records.checkout(d, fixed_records._head_sha())\n',
+            "head_sha を取り込む": 'def test_x():\n    from fixed_records import head_sha\n',
+            "src/.. を含むパス": 'def test_x():\n    open(os.path.join(PROJECT, "src", "..", "sealed", "ledger.jsonl"))\n',
+            "src/.. を1つの文字列で": 'def test_x():\n    open(os.path.join(PROJECT, "src/../sealed/ledger.jsonl"))\n',
+            "./sealed": 'def test_x():\n    ledger.read_ledger("./sealed/ledger.jsonl")\n',
+            "相対の ..": 'def test_x():\n    open("../sealed/ledger.jsonl")\n',
             "docs/stats": 'def test_x():\n    open(os.path.join(PROJECT, "docs", "stats", "periods.md"))\n',
         }
         ok = {
@@ -319,6 +357,8 @@ class TestRuleScan(unittest.TestCase):
                               '        ledger.require_method_access()\n',
             "--root の付いたスクリプト": 'def test_x():\n    subprocess.run([sys.executable, VERIFY, "--root", r])\n',
             "名前を定める": 'PROJECT = tl.PROJECT\n',
+            "./src": 'def test_x():\n    open(os.path.join(PROJECT, "./src/sealer/ledger.py"))\n',
+            "固定の入口": 'def test_x():\n    fixed_records.show("sealed/ledger.jsonl", fixed_records.RESULT_COMMIT)\n',
             "cwd の写しのスクリプト": 'def test_x():\n    subprocess.run([py, "-B", "src/sealer/post_text.py"], cwd=c)\n',
             "git の中の .py": 'def test_x():\n    subprocess.run(["git", "-C", wt, "add", "src/stats/counting.py"])\n',
             "仮の場所の ..": 'def test_x():\n    os.path.join(self.sealed, "..", "x")\n',
@@ -399,6 +439,45 @@ class TestRealHeadVerify(unittest.TestCase):
         code, out, err = tl.run_verify_inproc(tl.PROJECT, "all", "--rev", "auto")
         self.assertEqual(code, 0, err[-3000:])
         self.assertIn("すべての検査に通った。", out)
+
+    def test_recorded_at_not_after_btc_time(self):
+        """どの記録の recorded_at も、Bitcoin の確定時刻（確定していれば）+ 3 時間より後でない。記録の件数・
+        どれが確定済みかには頼らない（違反の一覧が空であることだけを見る）。"""
+        st = post_text.verify.State(tl.PROJECT, None)
+        self.assertEqual(post_text.check_recorded_vs_btc(st.records, st.times), [])
+
+
+class TestOrder2GateAtResultCommit(unittest.TestCase):
+    """T-077 差し戻し1回目 4（T-077 の監査 軽-1）：2つ目の固定コミット（fixed_records.RESULT_COMMIT。seq 9 の
+    R の gkg-run-result まで）で、順番2の関門（order2_gate.gate・main、ledger.require_order2_gate）が開き、
+    R（試しの run e15ed53595c70035）の段を返す。"""
+
+    RID = "e15ed53595c70035"
+
+    def test_gate_opens(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        c = fixed_records.checkout(os.path.join(td.name, "c"), fixed_records.RESULT_COMMIT)
+        records = ledger.verify_chain(fixed_records.show("sealed/ledger.jsonl", fixed_records.RESULT_COMMIT))
+        res = [r for r in records if r["kind"] == ledger.GKG_RESULT_KIND]
+        self.assertEqual([r["seq"] for r in res], [9])
+        ref = {"seq": 9, "record_sha256": ledger.sha256_hex(ledger.canonical_line(res[0]))}
+        want = {"trial_result": ref, "input_run": {"mode": "trial", "run_id": self.RID}, "gkg_run_result": ref,
+                "plan": {"action": "stage", "mode": "trial", "run_id": self.RID}}
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(ledger, "PROJECT_ROOT", c):
+            self.assertEqual(ledger.require_gkg_run_result("trial", self.RID), res[0])
+            got = order2_gate.gate()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = order2_gate.main([])
+        self.assertEqual(got, want)
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertEqual(json.loads(out.getvalue()), want)
+        # 1つ目の固定コミット（R の gkg-run-result が無い）では閉じる
+        c0 = fixed_records.checkout(os.path.join(td.name, "c0"))
+        with mock.patch.object(ledger, "PROJECT_ROOT", c0):
+            with self.assertRaisesRegex(ledger.Order2GateClosed, "gkg-run-result の記録が無い"):
+                order2_gate.gate()
 
 
 # ---------------------------------------------------------------- 3. T-074 の軽-2：正式な run の2行目以降の run-start

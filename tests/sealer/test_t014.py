@@ -579,6 +579,19 @@ class TestGateRoot(Case):
         self.assertNotIn(ledger.METHOD_ACCESS_KIND, kinds)
         self.assertNotIn(ledger.THRESHOLD_ACCESS_KIND, kinds)
 
+    def test_present_branch_with_pinned_root(self):
+        """T-077 差し戻し1回目 4（T-077 の監査 軽-2）：method-access のある固定コミット（fixed_records.PINNED_COMMIT。
+        threshold-access は無い）を関門のルートにして、関門が鎖の method-access の記録（seq 7）を返す道と、
+        threshold-access の「鎖に無い」で止まる道を流す。"""
+        with tempfile.TemporaryDirectory() as d:
+            c = fixed_records.checkout(os.path.join(d, "pinned"), code=None)
+            with mock.patch.object(ledger, "PROJECT_ROOT", c):
+                kinds = self.check_gates_read(c)
+                rec = ledger.require_method_access()
+        self.assertIn(ledger.METHOD_ACCESS_KIND, kinds)
+        self.assertNotIn(ledger.THRESHOLD_ACCESS_KIND, kinds)
+        self.assertEqual((rec["seq"], rec["kind"]), (7, ledger.METHOD_ACCESS_KIND))
+
     def test_access_gate_cli_rejects_root(self):
         r = subprocess.run([sys.executable, "-B", os.path.join(tl.SRC, "seal_access.py"), "gate",
                             "--root", self.root], capture_output=True)

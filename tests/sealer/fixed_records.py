@@ -4,15 +4,16 @@ tests/sealer のテストが従う規則（test_t077.TestRuleScan が、ast で�
   1. テストは、プロジェクトの HEAD の sealed/（sealed/ledger.jsonl を含む）・data/manifest/ の今の状態を
      前提にしない。封印の記録が1件増えても、どのテストの結果も変わらないようにする。
   2. 本物の記録を使うテストは、このモジュールの checkout()・show() で、定数に書いたコミット（40 桁の sha。
-     既定は PINNED_COMMIT）の版を git から取り出して使う。そうでなければ、合成の鎖を使う。
+     既定は PINNED_COMMIT。ほかに RESULT_COMMIT）の版を git から取り出して使う。そうでなければ、合成の鎖を使う。
   3. HEAD の本物の記録をそのまま読んでよいのは、「本物の記録で verify が 0 になる」ことを確かめるテスト
      だけ（test_t077.HEAD_READERS の一覧）。そのテストは、記録が増えても壊れない書き方にする。
 
 このモジュールは、プロジェクトのファイルに何も書かない。プロジェクトの git から読むのは、
-定数のコミットの版と、checkout(code="head") のときの HEAD のコミットの版（sealed/・data/・reviews/ を除く
-ファイル。コードと手順書）だけ。
+定数のコミットの版と、checkout(code="head") のときの HEAD のコミットの版（src/sealer・tests/sealer・
+docs/verify のうち、固定した記録が縛らないファイル）だけ。
 """
 
+import json
 import os
 import re
 import shutil
@@ -26,8 +27,15 @@ PROJECT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file
 # まだ無い。T-066・T-068・T-073・T-074 のテストは、この「R の gkg-run-result がまだ無い」状態を前提にする。
 PINNED_COMMIT = "5ce3943b827ff67f4f7e7db811525946bafdea46"
 
-# checkout(code="head") で、HEAD の版にそろえないパス（固定したコミットの版のまま使う。記録とデータ）
-RECORD_PATHS = ("sealed", "data", "reviews")
+# 2つ目の固定コミット（T-076 で seq 9 の gkg-run-result を封印したコミット）。R の gkg-run-result があるので、
+# 順番2の関門（ledger.require_order2_gate・order2_gate.py）が開く状態（T-077 差し戻し1回目 4）。
+RESULT_COMMIT = "220297a38a7bf32d6319148d2c7abc650467c819"
+
+# checkout(code="head") で HEAD の版にそろえるのは、封印係のコードと手順書（テストする側）だけ。ほかのファイル
+# （src/stats・src/collector・docs/stats・data・sealed・reviews など）は固定のコミットの版のまま使う。
+# この中でも、固定した記録が縛るパス（記録の targets と、targets の中身の JSON に書かれたパス）は固定の版のまま
+# （T-077 差し戻し1回目 中-1：記録の時点に存在しなかった組み合わせを作らない）。
+HEAD_PATHS = ("src/sealer", "tests/sealer", "docs/verify")
 
 AUTHOR = ("-c", "user.name=Multi-line", "-c",
           "user.email=197505900+multi-line2025@users.noreply.github.com")
@@ -71,9 +79,44 @@ def overlay_worktree(dest):
     _git(*(list(AUTHOR) + ["commit", "-q", "--allow-empty", "-m", "一時的なコミット（テストの中だけ）"]), cwd=dest)
 
 
-def head_sha():
-    """プロジェクトの HEAD のコミットの sha（checkout(code="head") がコードを写すのに使う）。"""
+def _head_sha():
+    """プロジェクトの HEAD のコミットの sha（checkout(code="head") がコードを写すのに使う）。このモジュールの外
+    からは使わない（HEAD を指す値なので。test_t077.TestRuleScan が数える）。"""
     return _git("rev-parse", "--verify", "-q", "HEAD^{commit}", cwd=PROJECT).decode("ascii").strip()
+
+
+def bound_paths(repo):
+    """repo（取り出した直後。HEAD が固定のコミット）の記録が縛るパスの一覧：記録の targets のパスと、targets の
+    中身の JSON に文字列として書かれたパスのうち、そのコミットにあるファイル（例：stats-order1b の files の
+    src/stats/counting.py）。"""
+    files = set(_git("ls-tree", "-r", "--name-only", "HEAD", cwd=repo).decode("utf-8").splitlines())
+    out = set()
+
+    def walk(x):
+        if isinstance(x, str):
+            if x in files:
+                out.add(x)
+        elif isinstance(x, dict):
+            for k, v in x.items():
+                walk(k)
+                walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+    led = os.path.join(repo, "sealed", "ledger.jsonl")
+    if os.path.exists(led):
+        with open(led, "rb") as f:
+            lines = [l for l in f.read().split(b"\n") if l.strip()]
+        for raw in lines:
+            for t in json.loads(raw)["targets"]:
+                out.add(t["path"])
+                if t["path"].endswith(".json") and t["path"] in files:
+                    with open(os.path.join(repo, t["path"]), "rb") as f:
+                        try:
+                            walk(json.loads(f.read()))
+                        except ValueError:
+                            pass
+    return sorted(out)
 
 
 def checkout(dest, commit=PINNED_COMMIT, code="head"):
@@ -82,9 +125,9 @@ def checkout(dest, commit=PINNED_COMMIT, code="head"):
     commit より後を指す参照は作らない（git log --all が後の記録・マニフェストの履歴を見つけないように。
     T-065 の test_t037 と同じ作り）。参照は refs/heads/main の1つだけ。
       code=None     : commit の版をそのまま取り出す。
-      code="head"   : sealed/・data/・reviews/ は commit の版のまま、それ以外のファイル（コード・手順書）を
-                      プロジェクトの HEAD のコミットの版にそろえ、1つのコミットにする（記録は固定、コードは今の版）。
-                      commit が HEAD の祖先でなければ止める。
+      code="head"   : src/sealer・tests/sealer・docs/verify（封印係のコードと手順書）だけを、プロジェクトの HEAD の
+                      コミットの版にそろえ、1つのコミットにする。ほかのファイルと、固定した記録が縛るパス
+                      （bound_paths）は commit の版のまま。commit が HEAD の祖先でなければ止める。
       code="worktree": "head" のうえで、src/sealer・tests/sealer・docs/verify を作業ツリーの版にして、もう1つ
                       コミットする（SEALER_DOC_TEST_WORKTREE=1 で、コミットの前の版を試すとき）。
     """
@@ -95,7 +138,7 @@ def checkout(dest, commit=PINNED_COMMIT, code="head"):
     want = [commit]
     head = None
     if code is not None:
-        head = head_sha()
+        head = _head_sha()
         want.append(head)
     # protocol v2 でないと、参照でないコミットを取れない（T-068）
     _git("-c", "protocol.version=2", "fetch", "-q", "--no-tags", PROJECT, *want, cwd=dest)
@@ -105,7 +148,7 @@ def checkout(dest, commit=PINNED_COMMIT, code="head"):
         if r.returncode != 0:
             raise RuntimeError("固定したコミット %s が、プロジェクトの HEAD の祖先でない（履歴が書き換えられた？）"
                                % commit)
-        spec = ["."] + [":(exclude)%s" % p for p in RECORD_PATHS]
+        spec = list(HEAD_PATHS) + [":(exclude,literal)%s" % p for p in bound_paths(dest)]
         gone = _git("diff", "--name-only", "--no-renames", "--diff-filter=D", commit, head, "--", *spec,
                     cwd=dest).decode("utf-8").splitlines()
         if gone:
