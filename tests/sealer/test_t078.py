@@ -624,6 +624,15 @@ class TestAllowedAndRuns(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(ledger.order2_runs_record(trial, official), COUNTING.runs_record(trial, official))
 
+    def test_ref_1b_same_as_expected_ref_1b(self):
+        """参照する順番1b の決め方（ledger.order2_ref_1b）は、封印した版の counting.expected_ref_1b と同じ。"""
+        for kinds in (["a", "b", "a", "b", "b"], ["b", "a", "a"], ["a", "a"], ["b"] * 4):
+            recs = [{"seq": i + 1, "kind": ledger.ORDER1B_KIND if k == "b" else "x"} for i, k in enumerate(kinds)]
+            seqs = [r["seq"] for r in recs if r["kind"] == ledger.ORDER1B_KIND]
+            for seq in range(1, len(recs) + 2):
+                got = ledger.order2_ref_1b(recs, seq)
+                self.assertEqual(None if got is None else got["seq"], COUNTING.expected_ref_1b(seq, seqs), (kinds, seq))
+
     def test_exit_codes_and_names(self):
         self.assertEqual(verify.ORDER2_EXIT_STATUS, {v: k for k, v in COUNTING.EXIT_CODES.items()})
         self.assertEqual(ledger.ORDER2_TIMING_KEYS, tuple(sorted(("f_set", "head", "ok", "reason", "ref_1b_seq", "refs",
