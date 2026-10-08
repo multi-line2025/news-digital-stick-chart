@@ -1415,7 +1415,8 @@ def check_order1_doc(record, doc):
 
 def check_order1b_doc(record, doc):
     """stats-order1b の中身を照合する（ledger_head は check_ledger_head）。T-037。
-    差し戻し1回目 中2：files に ORDER1B_REQUIRED_FILES があること、counting に候補と基準の案の識別子・
+    差し戻し1回目 中2：files が ORDER1B_REQUIRED_FILES のちょうど4件であること（T-060 から、外のファイルも
+    不可。重複も不可）、counting に候補と基準の案の識別子・
     正式な数え方（official_status が decided で、候補の中にある）・counting.py の出力の sha256・
     OWNER_DECISION の出どころの 2 行があること、approvals に B (ii) があること。
     再提出1回目：official_candidate が ORDER1B_OFFICIAL_CANDIDATE（C7）と一致すること（中-A）、
@@ -1446,6 +1447,13 @@ def check_order1b_doc(record, doc):
     missing = [p for p in ORDER1B_REQUIRED_FILES if p not in out]
     if missing:
         raise LedgerError("%s の files に、必ず入れるファイル %s が無い" % (what, "、".join(missing)))
+    extra = [p for p in out if p not in ORDER1B_REQUIRED_FILES]
+    if extra:
+        # T-060（T-059 の監査 重大-1）：files は ORDER1B_REQUIRED_FILES のちょうど4件に限る。verify は files の
+        # ファイルだけを流すフォルダに置くので、5つ目以降（標準ライブラリを隠す src/stats/fractions.py など）を
+        # 足せると、counting.py を変えずに出力を変えられる
+        raise LedgerError("%s の files に、決まった %d 件（ORDER1B_REQUIRED_FILES）の外のファイル %s がある"
+                          % (what, len(ORDER1B_REQUIRED_FILES), "、".join(extra)))
     _check_approvals(doc["approvals"], what)
     bii = expected_order1_approvals()[2]
     if bii not in doc["approvals"]:

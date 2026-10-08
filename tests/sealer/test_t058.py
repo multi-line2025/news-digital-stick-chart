@@ -55,6 +55,8 @@ def fj(r, role):
         for f in d.get("files", []):
             if f["path"] in s.get("files", {}):
                 f["sha256"] = s["files"][f["path"]]
+        if "add_files" in s:
+            d["files"] = d["files"] + s["add_files"]                  # T-060：files に足す
         if "output_sha256" in s:
             d["counting"]["output_sha256"] = s["output_sha256"]
     return d

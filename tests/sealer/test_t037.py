@@ -593,9 +593,10 @@ class TestOrder1bRefusals(StatsCase):
         self.refuses(lambda: self.order1b(T0 + 6 * H), "method-access の記録がある")
 
     def test_file_outside_head_refused(self):
+        """T-060 から、files は決まった4件に限るので、HEAD に無い5つ目は、その前に「外のファイル」で止まる。"""
         self.base()
         self.refuses(lambda: self.order1b(files=ORDER1B_FILES + ["docs/stats/none.md"]),
-                     "docs/stats/none.md が無い")
+                     "外のファイル docs/stats/none.md がある")
 
     def test_bii_approval_always_checked(self):
         self.base()

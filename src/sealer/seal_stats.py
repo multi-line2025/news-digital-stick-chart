@@ -18,7 +18,8 @@ kind は二つ（ledger.ORDER1_KIND = "stats-order1"、ledger.ORDER1B_KIND = "st
     rec, rel, ots_path = seal_stats.seal_order1b(project, files, approvals, now, ots_cmd)
 
     files      順番1b の封印の対象のファイルの、ルートからの相対パスの list。ledger.ORDER1B_REQUIRED_FILES
-               （counting.md・counting.py・test_counting.py・seal-order1.md）を必ず含むこと（無ければ止める）。
+               （counting.md・counting.py・test_counting.py・seal-order1.md）のちょうど4件であること（足りない、
+               外のファイルがある、同じパスが2回ある、なら止める。T-060）。
                HEAD に含まれ、作業ツリーと同じであること
     approvals  オーナーの承認の照らし方の list。各要素は {"item": 名前, "commit": 40 桁, "path": パス,
                "lines": [行, ...]}。lines の最後の行が、その commit の版のファイルにちょうど 1 行あり、
@@ -51,7 +52,7 @@ kind は二つ（ledger.ORDER1_KIND = "stats-order1"、ledger.ORDER1B_KIND = "st
   子のプロセスには、PYTHON で始まる環境変数と STATS_AUDIT_LOG を渡さない（軽2）。
 順番1b で確かめること（seal-order1.md 3章 (3)、docs/stats/counting.md 0章 (1)・7章）
   1  method-access が無い。GKG のマニフェストが無いか行が無く、履歴も空
-  2・4・6  files（ORDER1B_REQUIRED_FILES を含む）の各ファイルが HEAD に含まれ、作業ツリーと同じ。
+  2・4・6  files（ORDER1B_REQUIRED_FILES のちょうど4件）の各ファイルが HEAD に含まれ、作業ツリーと同じ。
      sha256 をこのコードで計算する。counting.py を引数なしで実行し、出力の sha256、候補の識別子
      （candidates の id）、基準の案の識別子（criteria_ids）、正式な数え方（official_candidate。
      official_status が "decided" で、候補の中にあること）を記録に入れる
@@ -497,6 +498,13 @@ def seal_order1b(project, files, approvals, now, ots_cmd, runner=subprocess.run)
     if missing:
         raise ledger.LedgerError("files に、必ず入れるファイル %s が無い（ledger.ORDER1B_REQUIRED_FILES）。封印しない"
                                  % "、".join(missing))
+    files = list(files)
+    extra = [f for f in files if f not in ledger.ORDER1B_REQUIRED_FILES]
+    if extra:
+        raise ledger.LedgerError("files に、決まった %d 件（ledger.ORDER1B_REQUIRED_FILES）の外のファイル %s がある。"
+                                 "封印しない（T-060）" % (len(ledger.ORDER1B_REQUIRED_FILES), "、".join(extra)))
+    if len(files) != len(set(files)):
+        raise ledger.LedgerError("files に、同じパスが2回ある。封印しない（T-060）")
     paths = list(dict.fromkeys(files))
     out_files = []
     for rel in paths:

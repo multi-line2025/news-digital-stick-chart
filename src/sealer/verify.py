@@ -425,15 +425,16 @@ def cmd_acquisition(st, _a):
 
 
 class Unchecked(Exception):
-    """利用者の環境の都合で計算し直せない（Python を起動できない。T-059 から、git archive をやめたので取り出しの理由は無い）。止めずに
-    「照らさなかった」と出す。head の版のスクリプトが 0 以外で終わる・出力が読めないのは、これに
+    """利用者の環境の都合で計算し直せない（Python を起動できない）。止めずに「照らさなかった」と出す。
+    （git の履歴が無いときは、計算し直しそのものを行わず、cmd_stats_order がそう表示する。）head の版のスクリプトが 0 以外で終わる・出力が読めないのは、これに
     当たらず、記録と合わないとして止める（T-056 差し戻し1回目 中-2。リードの判断）。"""
 
 
-def _child_env(pycache):
+def _child_env():
     env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON") and k != "STATS_AUDIT_LOG"}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    env["PYTHONPYCACHEPREFIX"] = pycache       # -I では読まれない。読ませないのは -X pycache_prefix で行う
+    # PYTHON で始まる環境変数は渡さない（-I でも無視されるが、渡さないことで、どの版の Python でも同じにする）。
+    # .pyc の置き場は、環境変数（-I では読まれない）ではなく、python_command の -X pycache_prefix で決める（T-060 軽-1）
     return env
 
 
@@ -461,7 +462,7 @@ def _run_script(cwd, rel, what):
     with tempfile.TemporaryDirectory() as pycache:
         try:
             r = subprocess.run(python_command(rel, pycache), cwd=cwd, capture_output=True,
-                               env=_child_env(pycache), timeout=RUN_TIMEOUT_SECONDS)
+                               env=_child_env(), timeout=RUN_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             raise ledger.LedgerError("%s：head の版の %s が %s 秒の上限の中に終わらなかった（記録と合わない）"
                                      % (what, rel, RUN_TIMEOUT_SECONDS)) from None
@@ -660,6 +661,7 @@ def recompute_orders(st, repo, got):
         for r in got["order1b"]:
             doc = st.file_json(r, ledger.ORDER1B_KIND)
             what = "seq %d の stats-order1b" % r["seq"]
+            ledger.check_order1b_doc(r, doc)       # files はちょうど ORDER1B_REQUIRED_FILES の 4 件（T-060）
             _check_head(st, repo, r, doc)
             checked += 1 + len(doc["ancestors"])
             head = doc["head"]
@@ -682,7 +684,12 @@ def recompute_orders(st, repo, got):
 
             def run_counting(doc=doc, what=what, head=head):
                 label = "%s の counting" % what
-                files = [(f["path"], f["sha256"]) for f in doc["files"]]
+                # 流すフォルダに置くのは ORDER1B_REQUIRED_FILES の 4 件だけ（T-060。T-059 の監査 重大-1）
+                shas = {f["path"]: f["sha256"] for f in doc["files"]}
+                if sorted(shas) != sorted(ledger.ORDER1B_REQUIRED_FILES) or len(shas) != len(doc["files"]):
+                    raise ledger.LedgerError("%s の files が、決まった %d 件（ORDER1B_REQUIRED_FILES）とちょうど一致しない"
+                                             % (what, len(ledger.ORDER1B_REQUIRED_FILES)))
+                files = [(p, shas[p]) for p in ledger.ORDER1B_REQUIRED_FILES]
                 out = bound_dir(head, files, "%s（%s の版）" % (what, head[:12])).run(ledger.COUNTING_SCRIPT, label)
                 c = doc["counting"]
                 if ledger.sha256_hex(out) != c["output_sha256"]:
