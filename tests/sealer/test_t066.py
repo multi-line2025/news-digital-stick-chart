@@ -4,8 +4,8 @@
 実行（プロジェクトのルートで）:
     PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/sealer -v
 
-本物のリポジトリ（seq 1〜8 と、コミット済みの試しの run のマニフェスト）を一時フォルダに clone し、その中だけで
-書く・書き換える。ots は偽物（test_writers.FakeOts）。本物の sealed/・data/manifest/ には書かない。ネットワークと
+本物のリポジトリの、固定したコミット（fixed_records.PINNED_COMMIT。seq 1〜8 と、コミット済みの試しの run の
+マニフェスト。T-077 で HEAD から固定に変えた）の版を一時フォルダに取り出し、その中だけで書く・書き換える。ots は偽物（test_writers.FakeOts）。本物の sealed/・data/manifest/ には書かない。ネットワークと
 LACIE SHARE には触れない（日の集計は仮の置き場所に作る）。
 """
 
@@ -23,6 +23,7 @@ sys.path.insert(0, HERE)
 
 import test_ledger as tl  # noqa: E402
 import test_writers as tw  # noqa: E402
+import fixed_records  # noqa: E402
 
 ledger = tl.ledger
 verify = tl.verify
@@ -50,7 +51,9 @@ class Clone(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
         self.c = os.path.join(self.td.name, "clone")
-        subprocess.run(["git", "clone", "-q", tl.PROJECT, self.c], check=True, capture_output=True)
+        # T-077：HEAD ではなく、固定したコミット（fixed_records.PINNED_COMMIT。seq 1〜8 と試しの run の
+        # マニフェスト。gkg-run-result はまだ無い）の記録を取り出す。コードと手順書は HEAD の版
+        fixed_records.checkout(self.c)
         with open(os.path.join(self.c, TRIAL), "rb") as f:
             self.body = f.read()
         if not rows_of(self.body):

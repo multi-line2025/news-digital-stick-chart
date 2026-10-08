@@ -29,6 +29,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import test_ledger as tl  # noqa: E402
+import fixed_records  # noqa: E402
 import test_t014 as t14  # noqa: E402
 import test_writers as tw  # noqa: E402
 from test_ledger import T0, H, run_verify  # noqa: E402
@@ -102,17 +103,15 @@ class TestGateRootFixed(tw.WriterCase):
     def test_patch_reads_fake_project_and_is_restored(self):
         self.seal()
         self.access(T0 + H)
-        before = ledger.PROJECT_ROOT
+        # T-077：元のルートを名前に入れずに、差し替えのあとで元（このリポジトリ）に戻っていることを比べる
         rec = self.threshold_gate()
         self.assertEqual(rec["kind"], ledger.THRESHOLD_ACCESS_KIND)
-        self.assertEqual(ledger.PROJECT_ROOT, before)
-        self.assertEqual(os.path.realpath(before), os.path.realpath(PROJECT))
+        self.assertEqual(os.path.realpath(ledger.PROJECT_ROOT), os.path.realpath(PROJECT))
 
     def test_patch_restored_on_failure(self):
-        before = ledger.PROJECT_ROOT
         with self.assertRaises(ledger.ThresholdAccessRequired):
             self.threshold_gate()
-        self.assertEqual(ledger.PROJECT_ROOT, before)
+        self.assertEqual(os.path.realpath(ledger.PROJECT_ROOT), os.path.realpath(PROJECT))
 
     def test_gate_tests_pass_with_other_tmpdirs(self):
         """TMPDIR を変えて、関門のテストを別のプロセスで実行しても結果が変わらない。
@@ -232,8 +231,11 @@ class TestHorizonEmbargo(t14.Case):
     def test_real_values_within(self):
         """本物の封印の値：candidates の J の最大 56、periods の 1 件目の embargo_days 90。
         どのファイルを使うかは、本物の記録の順番（periods の 1 件目、すべての candidates）で選ぶ
-        （差し戻し1回目の軽4。sealed/ の中のファイルの数には頼らない）。"""
-        root = PROJECT
+        （差し戻し1回目の軽4。sealed/ の中のファイルの数には頼らない）。
+        T-077：HEAD ではなく、固定したコミット（fixed_records.PINNED_COMMIT）の記録を取り出して読む。"""
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        root = fixed_records.checkout(os.path.join(td.name, "c"), code=None)
         records = ledger.verify_chain(ledger.read_ledger(
             os.path.join(root, "sealed", "ledger.jsonl")))
         first = ledger.records_of_kind(records, ledger.PERIODS_KIND)[0][1]

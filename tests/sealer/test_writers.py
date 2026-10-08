@@ -22,6 +22,7 @@ import subprocess
 import sys
 import unittest
 import urllib.error
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -125,12 +126,10 @@ def gate_project(root):
     T-017（T-014 の監査 軽1）。関門は引数を取らないので、テストはこの形でだけ仮のプロジェクトを
     読ませる。抜けるときに必ず元に戻す。TMPDIR には左右されない。
     """
-    old = ledger.PROJECT_ROOT
-    ledger.PROJECT_ROOT = root
-    try:
+    # T-077：元の値を読んで戻す形から、mock.patch.object に変えた（戻すのは mock。本物のルートの名前を
+    # テストの中で読まない形にそろえる。test_t077.TestRuleScan）
+    with mock.patch.object(ledger, "PROJECT_ROOT", root):
         yield
-    finally:
-        ledger.PROJECT_ROOT = old
 
 
 class WriterCase(tl.SealCase):

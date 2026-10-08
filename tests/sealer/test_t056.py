@@ -4,7 +4,8 @@
 実行（プロジェクトのルートで）:
     PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/sealer -v
 
-本物のリポジトリを一時フォルダに clone し、その記録（seq 5 の順番1、seq 6 の順番1b）を使う。
+本物のリポジトリの固定したコミットの版（T-077。fixed_records.checkout）を一時フォルダに取り出し、その記録（seq 5 の
+順番1、seq 6 の順番1b）を使う。
 中身を書き換えた場合は、記録の連なりを作り直さずに、verify の照合の関数（verify.recompute_orders）に、
 書き換えた中身を返す読み方を渡して確かめる（監査の再現と同じ値の書き換え）。本物の sealed/ には書かない。
 ネットワークは使わない。
@@ -22,6 +23,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import test_ledger as tl  # noqa: E402
+import fixed_records  # noqa: E402
 
 ledger = tl.ledger
 verify = tl.verify
@@ -38,7 +40,8 @@ class CloneCase(unittest.TestCase):
     def setUpClass(cls):
         cls.td = tempfile.TemporaryDirectory()        # TMPDIR の下。クラスが終わると片づく
         cls.root = os.path.join(cls.td.name, "clone")
-        subprocess.run(["git", "clone", "-q", tl.PROJECT, cls.root], check=True, capture_output=True)
+        # T-077：HEAD ではなく、固定したコミット（fixed_records.PINNED_COMMIT）の記録を取り出す
+        fixed_records.checkout(cls.root)
         cls.st = verify.State(cls.root, None)
         cls.repo = verify.Repo(cls.root)
         o1, o1b = real_orders(cls.st.records)

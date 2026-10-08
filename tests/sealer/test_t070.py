@@ -20,6 +20,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import test_ledger as tl  # noqa: E402
+import fixed_records  # noqa: E402
 import test_t031 as t31  # noqa: E402
 import test_writers as tw  # noqa: E402
 from test_ledger import T0, H  # noqa: E402
@@ -251,9 +252,14 @@ class TestRealChain(unittest.TestCase):
     privacy_scan.py など）を git の履歴から取り出して、見本の一覧から試しの run の計画を作り直せる（両方の Python）。"""
 
     def test_real_pinned_versions(self):
-        import glob
         from test_t056 import pythons
-        d = json.load(open(glob.glob(os.path.join(tl.PROJECT, "sealed", "gkg-run-start-*.json"))[0], encoding="utf-8"))
+        # T-077：HEAD ではなく、固定したコミット（fixed_records.PINNED_COMMIT）の記録と履歴を取り出して使う
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        root = fixed_records.checkout(os.path.join(td.name, "c"))
+        rels = [p for p in fixed_records.ls("sealed/") if p.startswith("sealed/gkg-run-start-")]
+        self.assertEqual(len(rels), 1)
+        d = json.loads(fixed_records.show(rels[0]))
         body = BODY
         code = r"""
 import json, sys, tempfile
@@ -266,7 +272,7 @@ print(json.dumps({k: len(v) for k, v in sorted(plan.items())}))
 """
         import subprocess
         for py in pythons():
-            r = subprocess.run([py, "-B", "-c", code, os.path.join(tl.PROJECT, "src", "sealer"), tl.PROJECT,
+            r = subprocess.run([py, "-B", "-c", code, os.path.join(tl.PROJECT, "src", "sealer"), root,
                                 json.dumps(d), body.decode("ascii")],
                                capture_output=True, env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
             self.assertEqual(r.returncode, 0, (py, r.stderr.decode()[-2000:]))

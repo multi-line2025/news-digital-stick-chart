@@ -4,7 +4,7 @@ T-070 の残り（浅い clone の扱い、第三者の一覧の作り直しの�
 実行（プロジェクトのルートで）:
     PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/sealer -v
 
-本物のリポジトリの clone（test_t066.Clone）と、仮のプロジェクト（test_t070.RebuildCase）の中だけで書く。ots は偽物
+本物のリポジトリの固定したコミットの版（test_t066.Clone・fixed_records.checkout。T-077）と、仮のプロジェクト（test_t070.RebuildCase）の中だけで書く。ots は偽物
 （test_writers.FakeOts）。本物の sealed/・data/manifest/ には書かない。順番2は実行しない（記録の形の照合と関門だけ）。
 ネットワークと LACIE SHARE には触れない。統計係の src/stats/counting.py は、decide() の段の決め方と関門の
 決め方が同じことを確かめるためだけに読み込む（書かない・変えない）。
@@ -27,6 +27,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import test_ledger as tl  # noqa: E402
+import fixed_records  # noqa: E402
 import test_writers as tw  # noqa: E402
 from test_t066 import Clone, NOW, git  # noqa: E402
 import test_t070 as t70  # noqa: E402
@@ -483,7 +484,8 @@ class TestChainWriterAndVerify(Order2Case):
 class TestGate(Order2Case):
     def run_main(self):
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        with mock.patch.object(ledger, "PROJECT_ROOT", self.c), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = order2_gate.main([])
         return code, out.getvalue(), err.getvalue()
 
@@ -642,7 +644,8 @@ class TestFilelistRebuild(unittest.TestCase):
         with open(self.master, "wb") as f:
             f.write(master_lines())
         self.c = os.path.join(self.tmp, "clone")
-        subprocess.run(["git", "clone", "-q", tl.PROJECT, self.c], check=True, capture_output=True)
+        # T-077：HEAD ではなく、固定したコミットの記録（seq 3 の acquisition-start、seq 4 の result）を取り出す
+        fixed_records.checkout(self.c)
 
     def source(self):
         st = verify.State(self.c, None)
@@ -684,7 +687,7 @@ class TestFilelistRebuild(unittest.TestCase):
 
     def test_shallow_fails(self):
         shallow = os.path.join(self.tmp, "shallow")
-        subprocess.run(["git", "clone", "-q", "--depth", "1", "file://" + tl.PROJECT, shallow], check=True,
+        subprocess.run(["git", "clone", "-q", "--depth", "1", "file://" + self.c, shallow], check=True,
                        capture_output=True)
         code, _out, err = tl.run_verify_inproc(shallow, "filelist-rebuild", "--masterfilelist", self.master)
         self.assertEqual(code, 1)

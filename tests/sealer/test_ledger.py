@@ -45,6 +45,9 @@ import seal_triggers  # noqa: E402
 import stamp  # noqa: E402
 import verify  # noqa: E402
 
+sys.path.insert(0, HERE)
+import fixed_records  # noqa: E402
+
 UTC = datetime.timezone.utc
 T0 = datetime.datetime(2026, 10, 6, 12, 0, 0, tzinfo=UTC)
 H = datetime.timedelta(hours=1)
@@ -319,13 +322,9 @@ class TestChain(LedgerCase):
 class TestOtsFile(unittest.TestCase):
     def test_parse_real_pending_ots(self):
         """封印済みの seq 1 の .ots（Pending）を、外部の部品なしで読める。"""
-        p = os.path.join(PROJECT, "sealed", "ledger.jsonl.seq000001.ots")
-        led = os.path.join(PROJECT, "sealed", "ledger.jsonl")
-        if not os.path.exists(p):
-            self.skipTest("封印済みの .ots が無い")
-        with open(p, "rb") as f:
-            digest, atts = otsfile.parse(f.read())
-        self.assertEqual(digest, ledger.prefix_digest(ledger.read_ledger(led), 1))
+        # T-077：固定したコミットの版を git から読む（作業ツリーの今の状態に頼らない）
+        digest, atts = otsfile.parse(fixed_records.show("sealed/ledger.jsonl.seq000001.ots"))
+        self.assertEqual(digest, ledger.prefix_digest(fixed_records.show("sealed/ledger.jsonl"), 1))
         self.assertTrue(atts)
         self.assertTrue(all(a["type"] == "pending" for a in atts))
 
@@ -487,11 +486,7 @@ class TestCalendars(LedgerCase):
         self.assertEqual(len(ledger.ALLOWED_PENDING_URIS), 4)
 
     def test_real_seq1_pending_uris_are_allowed(self):
-        p = os.path.join(PROJECT, "sealed", "ledger.jsonl.seq000001.ots")
-        if not os.path.exists(p):
-            self.skipTest("封印済みの .ots が無い")
-        with open(p, "rb") as f:
-            _d, atts = otsfile.parse(f.read())
+        _d, atts = otsfile.parse(fixed_records.show("sealed/ledger.jsonl.seq000001.ots"))   # T-077
         self.assertEqual({a["uri"] for a in atts if a["type"] == "pending"},
                          set(ledger.ALLOWED_PENDING_URIS))
 

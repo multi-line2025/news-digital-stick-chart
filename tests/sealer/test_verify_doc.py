@@ -3,10 +3,15 @@
 実行（プロジェクトのルートで）:
     PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/sealer -v
 
-- このリポジトリを一時的な場所に git clone し（手元の複製。ネットワークは使わない）、
+- このリポジトリを一時的な場所に複製し（手元の複製。ネットワークは使わない）、
   複製の中の文書から `<!-- test:offline -->` の付いたコマンドの塊を取り出して、そのまま実行する。
-- 既定では、コミットされた版（HEAD）だけを使う。作業ツリーのファイルは何も重ねない。
-  複製の作業ツリーが HEAD と同じであることも確かめる。
+- T-077：複製は二通り。
+  - TestDocProcedureHead：HEAD の git clone。壊さない複製で塊がすべて 0 で終わることだけを確かめる
+    （「本物の記録で verify が 0」の許可したテスト。test_t077.HEAD_READERS）。
+  - TestDocProcedure：記録（sealed/・data/・reviews/）は固定したコミット（fixed_records.PINNED_COMMIT）の版、
+    コードと手順書は HEAD の版の複製（fixed_records.checkout）。わざと壊すテストはこちらで行う。
+- 既定では、コミットされた版だけを使う。作業ツリーのファイルは何も重ねない。
+  複製の作業ツリーが複製の HEAD と同じであることも確かめる。
 - コミットの前に作業ツリーのコードと手順書を試すときは、環境変数
   SEALER_DOC_TEST_WORKTREE=1 を付ける。このときは、複製の中で src/sealer・tests/sealer・
   docs/verify を作業ツリーのものに置き換えて、複製の中で一時的にコミットしてから試す
@@ -16,7 +21,6 @@
   許可していないカレンダーの Pending・許可リストに無い kind の記録・candidates の出力の
   書き換え・acquisition-start の後の candidates の記録（T-013）・acquisition-result の無いまま
   足した method-access（T-014））では、同じ手順が失敗すること。
-- コミットがまだ無いときは、複製できないので飛ばす（理由を表示する）。
 """
 
 import json
@@ -33,12 +37,12 @@ PROJECT = os.path.dirname(os.path.dirname(HERE))
 DOC_REL = os.path.join("docs", "verify", "periods-seal.md")
 sys.path.insert(0, os.path.join(PROJECT, "src", "sealer"))
 WORKTREE_MODE = os.environ.get("SEALER_DOC_TEST_WORKTREE") == "1"
-OVERLAY = ("src/sealer", "tests/sealer", "docs/verify")
 
 import ledger  # noqa: E402
 
 sys.path.insert(0, HERE)
 import test_ledger as tl  # noqa: E402
+import fixed_records  # noqa: E402
 
 AUTHOR = ("-c", "user.name=Multi-line", "-c",
           "user.email=197505900+multi-line2025@users.noreply.github.com")
@@ -50,28 +54,16 @@ def offline_blocks(root):
         return BLOCK_RE.findall(f.read())
 
 
-def has_head():
-    r = subprocess.run(["git", "-C", PROJECT, "rev-parse", "--verify", "-q", "HEAD"],
-                       capture_output=True)
-    return r.returncode == 0
+class DocCase(unittest.TestCase):
+    """複製を作り、手順書の塊を流す共通の部分。テストは持たない（下の二つのクラスが持つ）。"""
 
+    def make_clone(self):
+        raise NotImplementedError
 
-class TestDocProcedure(unittest.TestCase):
     def setUp(self):
-        if not has_head():
-            self.skipTest("コミットがまだ無いので、複製して手順を試せない")
         self.tmp = tempfile.mkdtemp()
         self.clone = os.path.join(self.tmp, "stick-chart-check")
-        subprocess.run(["git", "clone", "-q", "--no-hardlinks", PROJECT, self.clone],
-                       check=True, capture_output=True)
-        if WORKTREE_MODE:
-            # 複製の中で一時的にコミットする（元のリポジトリには書かない）。
-            for rel in OVERLAY:
-                shutil.rmtree(os.path.join(self.clone, rel), ignore_errors=True)
-                shutil.copytree(os.path.join(PROJECT, rel), os.path.join(self.clone, rel),
-                                ignore=shutil.ignore_patterns("__pycache__"))
-            self.git("add", "-A", "--", *OVERLAY)
-            self.git("commit", "-q", "--allow-empty", "-m", "一時的なコミット（テストの中だけ）")
+        self.make_clone()
         # 複製の作業ツリーが、複製の HEAD と同じであること（作業ツリーのファイルを重ねていない）。
         st = subprocess.run(["git", "-C", self.clone, "status", "--porcelain"],
                             check=True, capture_output=True).stdout
@@ -94,18 +86,8 @@ class TestDocProcedure(unittest.TestCase):
         subprocess.run(["git", "-C", self.clone] + list(AUTHOR) + list(args),
                        check=True, capture_output=True)
 
-    def test_doc_has_offline_blocks(self):
-        self.assertGreaterEqual(len(offline_blocks(self.clone)), 2)
-
-    def test_clone_code_is_committed_version(self):
-        """複製の検証のコードは、複製の HEAD のコミットの中身そのものである。"""
-        for rel in ("src/sealer/verify.py", "src/sealer/ledger.py", DOC_REL):
-            blob = subprocess.run(["git", "-C", self.clone, "show", "HEAD:" + rel],
-                                  check=True, capture_output=True).stdout
-            with open(os.path.join(self.clone, rel), "rb") as f:
-                self.assertEqual(f.read(), blob, rel)
-
-    def test_intact_clone_passes_and_shows_recorded_values(self):
+    def check_intact(self):
+        """壊さない複製で、すべての塊が 0 で終わり、記録の値が出力に現れる。記録の件数・kind には頼らない。"""
         results = self.run_blocks()
         for code, out in results:
             self.assertEqual(code, 0, out)
@@ -132,6 +114,42 @@ class TestDocProcedure(unittest.TestCase):
         # 確かめていないこと（ヘッダが本当の鎖にあること、drand の署名）が出る。
         self.assertIn("ヘッダが、Bitcoin の本当の鎖にあること", out)
         self.assertIn("drand の署名（BLS）は、オフラインでは検証していない", out)
+
+
+class TestDocProcedureHead(DocCase):
+    """許可したテスト（test_t077.HEAD_READERS）：HEAD の本物の記録の複製で、手順書の塊がすべて 0 で終わる。
+    記録が増えても壊れない（記録の件数・kind・最後の seq に頼らない）。"""
+
+    def make_clone(self):
+        subprocess.run(["git", "clone", "-q", "--no-hardlinks", PROJECT, self.clone],
+                       check=True, capture_output=True)
+        if WORKTREE_MODE:
+            fixed_records.overlay_worktree(self.clone)
+
+    def test_intact_clone_passes_and_shows_recorded_values(self):
+        self.check_intact()
+
+
+class TestDocProcedure(DocCase):
+    """T-077：固定したコミット（fixed_records.PINNED_COMMIT）の記録に、HEAD の版（SEALER_DOC_TEST_WORKTREE=1 なら
+    作業ツリーの版）のコードと手順書を重ねた複製で、手順を流し、わざと壊すと失敗することを確かめる。"""
+
+    def make_clone(self):
+        fixed_records.checkout(self.clone, code="worktree" if WORKTREE_MODE else "head")
+
+    def test_doc_has_offline_blocks(self):
+        self.assertGreaterEqual(len(offline_blocks(self.clone)), 2)
+
+    def test_clone_code_is_committed_version(self):
+        """複製の検証のコードは、複製の HEAD のコミットの中身そのものである。"""
+        for rel in ("src/sealer/verify.py", "src/sealer/ledger.py", DOC_REL):
+            blob = subprocess.run(["git", "-C", self.clone, "show", "HEAD:" + rel],
+                                  check=True, capture_output=True).stdout
+            with open(os.path.join(self.clone, rel), "rb") as f:
+                self.assertEqual(f.read(), blob, rel)
+
+    def test_intact_clone_passes_and_shows_recorded_values(self):
+        self.check_intact()
 
     def assertProcedureFails(self):
         codes = [c for c, _out in self.run_blocks()]

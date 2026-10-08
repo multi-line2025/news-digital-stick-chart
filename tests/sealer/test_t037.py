@@ -10,8 +10,8 @@ T-031 の監査の中2・軽1〜軽4。差し戻し1回目（中1〜中5・軽1�
     行を持つ仮の reviews/）を置き、ledger の決まった値（ORDER1_ANCESTORS・ORDER1_TARGET_NAMES・
     ORDER1_APPROVALS・OWNER_CHOICE・OWNER_DECISION）を、テストの中だけ仮の commit に差し替える。
     verify は、差し替えが効くように同じプロセスで動かす（run_verify_inproc）。
-  - TestRealClone：本物のリポジトリを clone し、その HEAD で seal_order1 と seal_order1b（今の
-    counting.md・counting.py）が通ること（決まった値は差し替えない。写しの上に書く）。
+  - TestRealClone：本物のリポジトリの、固定したコミットの版を取り出し（T-077。HEAD には頼らない）、
+    seal_order1 と seal_order1b（counting.md・counting.py）が通ること（決まった値は差し替えない。写しの上に書く）。
 本物の sealed/ には書かない。
 """
 
@@ -31,6 +31,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import test_ledger as tl  # noqa: E402
+import fixed_records  # noqa: E402
 import test_t014 as t14  # noqa: E402
 import test_t017 as t17  # noqa: E402
 import test_writers as tw  # noqa: E402
@@ -720,9 +721,9 @@ class TestRealClone(unittest.TestCase):
       - test_before_order1_at_77d0dd2：順番1 の封印の直前の commit（77d0dd2。本物の記録は seq 1〜4）に
         clone を合わせ、順番1 → 順番1b の流れを通す。commit を固定するので、本物の記録が先へ進んでも
         変わらない。
-      - test_head_with_real_order1：HEAD の clone。T-065 から、状態で分けない。本物の記録には順番1・1b・
-        method-access が封印済みで消えないので、2件目の順番1 と method-access のあとの順番1b が拒まれ、
-        ledger が変わらず、verify stats-order が通ることを毎回確かめる。
+      - test_pinned_with_real_order1：T-077 から、HEAD ではなく固定したコミット（fixed_records.PINNED_COMMIT）の
+        記録（順番1・1b・method-access が封印済み）に、HEAD の版のコードを重ねたもの。2件目の順番1 と
+        method-access のあとの順番1b が拒まれ、ledger が変わらず、verify stats-order が通ることを確かめる。
     T-065：commit を指定した clone は、git init と、その commit だけの fetch で作る（後の参照を持たない）。
     T-068（T-065 の監査 軽微1）：fetch は protocol v2 に頼る（v0 では、参照でない commit を取れない）ので、
     利用者の設定によらないよう -c protocol.version=2 を付ける。
@@ -738,26 +739,27 @@ class TestRealClone(unittest.TestCase):
 
     def clone(self, d, commit=None):
         c = os.path.join(d, "clone")
+        # T-065：commit とその祖先だけを取り込む（clone すると、commit より後の参照（origin/main など）が
+        # 残り、`git log --all` が後の commit のマニフェストの履歴を見つけてしまう。本物の記録・マニフェストが
+        # 伸びても、commit の時点の状態だけで確かめられるようにする）。
+        # T-077：入口を fixed_records.checkout にまとめた（参照は commit を指す main の1つだけ）。commit を渡さない
+        # ときは、HEAD ではなく固定したコミット（fixed_records.PINNED_COMMIT）の記録に、HEAD の版のコードを重ねる
         if commit is None:
-            subprocess.run(["git", "clone", "-q", tl.PROJECT, c], check=True, capture_output=True)
+            fixed_records.checkout(c)
         else:
-            # T-065：commit とその祖先だけを取り込む（clone すると、commit より後の参照（origin/main など）が
-            # 残り、`git log --all` が後の commit のマニフェストの履歴を見つけてしまう。本物の記録・マニフェストが
-            # 伸びても、commit の時点の状態だけで確かめられるようにする）。参照は1つも作らず、HEAD を commit にする
-            subprocess.run(["git", "init", "-q", c], check=True, capture_output=True)
-            subprocess.run(["git", "-c", "protocol.version=2", "-C", c, "fetch", "-q", "--no-tags", tl.PROJECT,
-                            commit], check=True, capture_output=True)
-            subprocess.run(["git", "-C", c, "checkout", "-q", "--detach", commit], check=True, capture_output=True)
-            refs = subprocess.run(["git", "-C", c, "for-each-ref"], check=True, capture_output=True).stdout
-            self.assertEqual(refs, b"")             # commit より後を指す参照は無い
+            fixed_records.checkout(c, commit, code=None)
+            head = subprocess.run(["git", "-C", c, "rev-parse", "HEAD"], check=True, capture_output=True)
+            self.assertEqual(head.stdout.decode().strip(), commit)
+        refs = subprocess.run(["git", "-C", c, "for-each-ref", "--format=%(refname)"], check=True,
+                              capture_output=True).stdout
+        self.assertEqual(refs, b"refs/heads/main\n")    # commit より後を指す参照は無い
         os.makedirs(os.path.join(c, ".venv", "bin"))
         os.symlink(self.sealing_python(), os.path.join(c, ".venv", "bin", "python"))
         return c
 
     def sealing_python(self):
         """順番1 の封印に使った Python と同じ版（major.minor）の Python。無ければ skip（T-068）。"""
-        with open(os.path.join(tl.PROJECT, self.REAL_ORDER1), encoding="utf-8") as f:
-            want = json.load(f)["python"]["version"]                       # 例："Python 3.14.2"
+        want = json.loads(fixed_records.show(self.REAL_ORDER1))["python"]["version"]   # 例："Python 3.14.2"
         want_mm = ".".join(want.split()[1].split(".")[:2])
         for py in (os.path.join(tl.PROJECT, ".venv", "bin", "python"), sys.executable):
             if not os.path.exists(py):
@@ -805,8 +807,8 @@ class TestRealClone(unittest.TestCase):
             # T-052（T-049 の監査 軽-2）：clone で作った順番1 の中身は、本物の seq 5 の中身と同じ。
             # T-056（T-052 の監査 軽-3）：Python の版は機械で違いうるので、python.version を除いて比べ、
             # 版が同じときだけバイト列の一致も求める
-            with open(os.path.join(c, rel), "rb") as f, open(os.path.join(tl.PROJECT, self.REAL_ORDER1), "rb") as g:
-                mine_b, real_b = f.read(), g.read()
+            with open(os.path.join(c, rel), "rb") as f:
+                mine_b, real_b = f.read(), fixed_records.show(self.REAL_ORDER1)
             mine, real = json.loads(mine_b), json.loads(real_b)
             self.assertTrue(mine["python"]["version"].startswith("Python "))
             mv, rv = mine["python"].pop("version"), real["python"].pop("version")
@@ -818,7 +820,7 @@ class TestRealClone(unittest.TestCase):
             code, out, err = tl.run_verify_inproc(c, "stats-order")
             self.assertEqual(code, 0, err)
 
-    def test_head_with_real_order1(self):
+    def test_pinned_with_real_order1(self):
         with tempfile.TemporaryDirectory() as d:
             c = self.clone(d)
             now = datetime.datetime.now(datetime.timezone.utc)

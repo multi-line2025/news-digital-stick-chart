@@ -6,7 +6,7 @@
 ネットワークは使わない（通信の部分は test_t014.FakeHTTPS に差し替える）。本物の sealed/ には書かない。
 """
 
-import glob
+import fnmatch
 import json
 import os
 import re
@@ -18,6 +18,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import test_ledger as tl  # noqa: E402
+import fixed_records  # noqa: E402
 from test_t056 import pythons  # noqa: E402
 
 ledger = tl.ledger
@@ -87,13 +88,17 @@ class TestManualCheckLines(unittest.TestCase):
     def check(self, kind, key, needle, mutate):
         lines = check_line(needle)
         self.assertEqual(len(lines), 1, needle)
-        real = [p for p in glob.glob(os.path.join(tl.PROJECT, "sealed", kind + "-*.json"))]
-        self.assertEqual(len(real), 1)
+        # T-077：HEAD の作業ツリーの sealed/ ではなく、固定したコミット（fixed_records.PINNED_COMMIT）の版を読む
+        rels = [p for p in fixed_records.ls("sealed/") if fnmatch.fnmatch(p, "sealed/%s-*.json" % kind)]
+        self.assertEqual(len(rels), 1)
         import tempfile
-        with open(real[0], encoding="utf-8") as f:
-            doc = json.load(f)
+        raw = fixed_records.show(rels[0])
+        doc = json.loads(raw)
         mutate(doc[key])
         with tempfile.TemporaryDirectory() as d:
+            real = [os.path.join(d, os.path.basename(rels[0]))]
+            with open(real[0], "wb") as f:
+                f.write(raw)
             bad = os.path.join(d, "bad.json")
             with open(bad, "w", encoding="utf-8") as f:
                 json.dump(doc, f)

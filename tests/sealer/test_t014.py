@@ -27,12 +27,14 @@ import unittest
 import urllib.error
 import urllib.request
 import urllib.response
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import test_ledger as tl  # noqa: E402
 import test_writers as tw  # noqa: E402
+import fixed_records  # noqa: E402
 from test_ledger import T0, H, run_verify  # noqa: E402
 
 ledger = tl.ledger
@@ -509,7 +511,11 @@ class TestGateRoot(Case):
         self.assertEqual(os.path.realpath(ledger.PROJECT_ROOT), os.path.realpath(PROJECT))
 
     def test_default_reads_project_not_a_fake_folder(self):
-        """偽の記録で関門が通る仮のプロジェクトがあっても、差し替えない関門は本物を読む。"""
+        """偽の記録で関門が通る仮のプロジェクトがあっても、差し替えない関門は本物を読む。
+
+        T-077：本物の記録の中身（method-access があるか、など）には頼らない。関門が記録を読む入口
+        （ledger._load_for_gate）を、渡されたルートを書き留めて止めるものに差し替え、関門が読もうとした
+        ルートが、仮のプロジェクトではなく、このリポジトリ（ledger.PROJECT_ROOT）であることを確かめる。"""
         self.seal()
         self.step3(T0 + H)
         self.method(T0 + 3 * H)
@@ -517,7 +523,22 @@ class TestGateRoot(Case):
         self.method_gate()
         self.threshold_gate()
         self.assertEqual(os.path.realpath(ledger.PROJECT_ROOT), os.path.realpath(PROJECT))
-        self.check_gates_read(PROJECT)
+
+        class Stop(Exception):
+            pass
+        seen = []
+
+        def load(root):
+            seen.append(root)
+            raise Stop()
+        for gate in (ledger.require_method_access, ledger.require_threshold_access):
+            with mock.patch.object(ledger, "_load_for_gate", load):
+                with self.assertRaises(Stop):
+                    gate()
+        self.assertEqual(len(seen), 2)
+        for root in seen:
+            self.assertEqual(os.path.realpath(root), os.path.realpath(PROJECT))
+            self.assertNotEqual(os.path.realpath(root), os.path.realpath(self.root))
 
     def check_gates_read(self, root):
         """関門が root の記録を読むこと（仮のプロジェクトの記録ではない）。T-065：root の記録の状態
@@ -550,14 +571,9 @@ class TestGateRoot(Case):
         self.access(T0 + 4 * H)
         self.method_gate()
         self.threshold_gate()
-        from unittest import mock
         commit = "77d0dd22d8e397a9b1e53b079a31bb93db765452"
         with tempfile.TemporaryDirectory() as d:
-            c = os.path.join(d, "before-method")
-            subprocess.run(["git", "init", "-q", c], check=True, capture_output=True)
-            subprocess.run(["git", "-c", "protocol.version=2", "-C", c, "fetch", "-q", "--no-tags", PROJECT, commit],
-                           check=True, capture_output=True)
-            subprocess.run(["git", "-C", c, "checkout", "-q", "--detach", commit], check=True, capture_output=True)
+            c = fixed_records.checkout(os.path.join(d, "before-method"), commit, code=None)
             with mock.patch.object(ledger, "PROJECT_ROOT", c):
                 kinds = self.check_gates_read(c)
         self.assertNotIn(ledger.METHOD_ACCESS_KIND, kinds)

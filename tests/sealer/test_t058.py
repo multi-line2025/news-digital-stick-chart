@@ -7,7 +7,8 @@ T-059 で、流すフォルダを記録が縛っているファイルだけに�
 実行（プロジェクトのルートで）:
     PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/sealer -v
 
-本物のリポジトリを一時フォルダに clone し、その記録（seq 5 の順番1、seq 6 の順番1b）の head から、偽る側が
+本物のリポジトリの固定したコミットの版（T-077。test_t056.CloneCase）を一時フォルダに取り出し、その記録（seq 5 の
+順番1、seq 6 の順番1b）の head から、偽る側が
 作れる commit（Src/stats/counting.py などを足したもの）を作る。記録の値は、その偽の commit を流した出力の
 sha256 に合わせて差し替える（監査の再現 scratchpad/a56r3pre3.sh と同じ形。T-056 の版の verify では「一致」の 0
 になったもの）。照合は、.venv の Python と /usr/bin/python3 の両方で、別のプロセスとして流す。

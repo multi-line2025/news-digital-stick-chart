@@ -18,12 +18,14 @@ import datetime
 import os
 import re
 import sys
+import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import test_ledger as tl  # noqa: E402
+import fixed_records  # noqa: E402
 import test_t017 as t17  # noqa: E402
 import test_writers as tw  # noqa: E402
 from test_ledger import T0, H, run_verify  # noqa: E402
@@ -240,8 +242,11 @@ class TestJEquality(JCase):
 
     def test_real_record_passes_new_rules(self):
         """本物の記録：J の最大 56、1 件目の embargo_days 90、periods-triggers 無し。新しい照合に通り、
-        状態は within（T-065：method-access（seq 7）が入ったあとも同じ）。"""
-        root = tl.PROJECT
+        状態は within（T-065：method-access（seq 7）が入ったあとも同じ）。
+        T-077：HEAD ではなく、固定したコミット（fixed_records.PINNED_COMMIT）の記録を取り出して読む。"""
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        root = fixed_records.checkout(os.path.join(td.name, "c"), code=None)
         records = ledger.verify_chain(ledger.read_ledger(os.path.join(root, "sealed",
                                                                       "ledger.jsonl")))
         hz = ledger.check_horizon_embargo(

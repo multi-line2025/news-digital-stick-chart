@@ -39,23 +39,11 @@ import ledger  # noqa: E402
 import otsfile  # noqa: E402
 import post_text  # noqa: E402
 import test_ledger as tl  # noqa: E402
+import fixed_records  # noqa: E402
 
 DOC_REL = os.path.join("docs", "verify", "x-post.md")
 BLOCK_RE = re.compile(r"<!-- test:x-post -->\n```sh\n(.*?)```", re.S)
 WORKTREE_MODE = os.environ.get("SEALER_DOC_TEST_WORKTREE") == "1"
-OVERLAY = ("src/sealer", "tests/sealer", "docs/verify")
-
-
-def has_head():
-    r = subprocess.run(["git", "-C", PROJECT, "rev-parse", "--verify", "-q", "HEAD"],
-                       capture_output=True)
-    return r.returncode == 0
-
-
-def sealed_clean():
-    r = subprocess.run(["git", "-C", PROJECT, "status", "--porcelain", "--untracked-files=all",
-                        "--", "sealed/"], capture_output=True)
-    return r.returncode == 0 and not r.stdout.strip()
 
 
 def claude_citations():
@@ -230,7 +218,7 @@ class TestPrivacy(unittest.TestCase):
 
     def test_local_identifiers_include_user_and_project(self):
         ids = post_text.local_identifiers()
-        self.assertIn(PROJECT, ids)
+        self.assertIn(os.path.abspath(PROJECT), ids)
         self.assertTrue(all(len(i) >= 3 for i in ids))
 
     def test_extra_url_stops(self):
@@ -240,10 +228,12 @@ class TestPrivacy(unittest.TestCase):
         """build の中で検査に当たれば、標準出力に何も出さず、終了コード 1。"""
         bad = post_text.body(SAMPLE_FACTS).replace("seq 1-", "/Users/someone seq 1-")
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(post_text, "head_facts", return_value=SAMPLE_FACTS), \
+        # T-077：記録は読まない（head_facts を差し替える）が、ルートは空の仮の場所を渡す（既定のプロジェクトを指さない）
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(post_text, "head_facts", return_value=SAMPLE_FACTS), \
                 mock.patch.object(post_text, "body", return_value=bad), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = post_text.main([])
+            code = post_text.main(["--root", d])
         self.assertEqual(code, 1)
         self.assertEqual(out.getvalue(), "")
         self.assertIn("止めた", err.getvalue())
@@ -260,24 +250,31 @@ class TestPrivacy(unittest.TestCase):
 # ---------------------------------------------------------------- 本物の記録
 
 
-@unittest.skipUnless(has_head(), "コミットがまだ無い")
 class TestRealLedger(unittest.TestCase):
-    def setUp(self):
-        if not sealed_clean():
-            self.skipTest("sealed/ にコミットしていない変更がある（post_text は止まる）")
+    """本物の記録の投稿文。T-077：HEAD ではなく、固定したコミット（fixed_records.PINNED_COMMIT。seq 1〜8）の記録に
+    HEAD の版のコードと手順書を重ねた複製（fixed_records.checkout）で作る。記録が増えても結果は変わらない。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.td = tempfile.TemporaryDirectory()
+        cls.root = fixed_records.checkout(os.path.join(cls.td.name, "real"))
+        cls.data = fixed_records.show("sealed/ledger.jsonl")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.td.cleanup()
 
     def test_build_from_real_records(self):
-        text, lang, cands, facts = post_text.build(PROJECT)
+        text, lang, cands, facts = post_text.build(self.root)
         m = post_text.TEMPLATE_RE.match(text)
         self.assertIsNotNone(m)
-        data = subprocess.run(["git", "-C", PROJECT, "show", "HEAD:sealed/ledger.jsonl"],
-                              check=True, capture_output=True).stdout
+        data = self.data
         records = ledger.verify_chain(data)
         n = len(records)
         self.assertEqual(int(m.group("seq")), n)
         self.assertEqual(m.group("hash"), ledger.sha256_hex(data))       # 投稿の時点のファイル全体
         self.assertEqual(m.group("hash"), ledger.prefix_digest(data, n))
-        with open(os.path.join(PROJECT, "sealed", ledger.ots_name(n)), "rb") as f:
+        with open(os.path.join(self.root, "sealed", ledger.ots_name(n)), "rb") as f:
             self.assertEqual(otsfile.parse(f.read())[0], m.group("hash"))  # seq N の .ots の対象
         self.assertEqual(m.group("time"), records[-1]["recorded_at"])
         self.assertLessEqual(post_text.weighted_length(text), 280)
@@ -286,39 +283,37 @@ class TestRealLedger(unittest.TestCase):
 
     def test_each_earlier_seq(self):
         """--seq N：前の seq の文（投稿の決まりはすべての記録の投稿を求める）。"""
-        data = subprocess.run(["git", "-C", PROJECT, "show", "HEAD:sealed/ledger.jsonl"],
-                              check=True, capture_output=True).stdout
+        data = self.data
         records = ledger.verify_chain(data)
         for r in records:
-            text, _l, _c, facts = post_text.build(PROJECT, r["seq"])
+            text, _l, _c, facts = post_text.build(self.root, r["seq"])
             m = post_text.TEMPLATE_RE.match(text)
             self.assertEqual(int(m.group("seq")), r["seq"])
             self.assertEqual(m.group("hash"), ledger.prefix_digest(data, r["seq"]))
             self.assertEqual(m.group("time"), r["recorded_at"])
         for bad in (0, len(records) + 1):
             with self.assertRaises(post_text.PostError):
-                post_text.build(PROJECT, bad)
+                post_text.build(self.root, bad)
 
     def test_first_post_follows_rule(self):
         """T-034：最初の投稿（手順書 4.2。ID から 2026-10-07T18:24:30.169Z）を照らす。seq 3・4 は
         決まりの中（約 4.66 時間）、seq 1・2 は決まりの前の例外。アカウントと投稿は手順書から読む。"""
-        account = doc_fixed(PROJECT, "account")
-        posts = post_text.parse_posts(doc_fixed(PROJECT, "first"))
+        account = doc_fixed(self.root, "account")
+        posts = post_text.parse_posts(doc_fixed(self.root, "first"))
         self.assertEqual(len(posts), 1)
         _n, when, seq, h, acc = posts[0]
         self.assertEqual(post_text._iso(when), "2026-10-07T18:24:30.169Z")
         self.assertEqual((seq, acc), (4, account))
-        data = subprocess.run(["git", "-C", PROJECT, "show", "HEAD:sealed/ledger.jsonl"],
-                              check=True, capture_output=True).stdout
+        data = self.data
         self.assertEqual(h, ledger.prefix_digest(data, 4))
         # 手順書の 4.2 の投稿文は、post_text の seq 4 の文と同じ
-        with open(os.path.join(PROJECT, DOC_REL), encoding="utf-8") as f:
+        with open(os.path.join(self.root, DOC_REL), encoding="utf-8") as f:
             doc = f.read()
-        self.assertIn("\n".join("  " + l for l in post_text.build(PROJECT, 4)[0].split("\n")), doc)
+        self.assertIn("\n".join("  " + l for l in post_text.build(self.root, 4)[0].split("\n")), doc)
         out = io.StringIO()
         # T-049：照らす時刻を最初の投稿の時点に固定する。本物の記録が伸びても、それより後の記録は
         # 「保留」（まだ期限の前）になり、この投稿の照合の結果は変わらない
-        bad = post_text.check_posts(PROJECT, posts, account=account,
+        bad = post_text.check_posts(self.root, posts, account=account,
                                     now=ledger.parse_time("2026-10-07T18:25:00Z"), out=out)
         self.assertEqual(bad, [], out.getvalue())
         text = out.getvalue()
@@ -331,18 +326,17 @@ class TestRealLedger(unittest.TestCase):
         # 同じ投稿が 24 時間を超えて遅れていれば、seq 3・4 は合わない（例外は seq 1・2 だけ）
         late = [(1, when + datetime.timedelta(hours=20), 4, h, acc)]
         # T-049：照らす時刻は、遅れた投稿の時点（本物の記録が伸びても、それより後の記録は保留になる）
-        bad = post_text.check_posts(PROJECT, late, account=account, out=io.StringIO(),
+        bad = post_text.check_posts(self.root, late, account=account, out=io.StringIO(),
                                     now=when + datetime.timedelta(hours=20, minutes=1))
         self.assertEqual([b.split(":")[0] for b in bad], ["seq 3", "seq 4"])
 
     def test_second_post_seq5_follows_rule(self):
         """T-049：2 つめの投稿（seq 1-5。ID 2107974118754980205、reviews/T-048.md のオーナーの発言）を、
         最初の投稿と並べて照らす。照らす時刻は 2 つめの投稿の時点に固定する（それより後の記録は保留）。"""
-        data = subprocess.run(["git", "-C", PROJECT, "show", "HEAD:sealed/ledger.jsonl"],
-                              check=True, capture_output=True).stdout
+        data = self.data
         # T-056（T-052 の監査 軽-1）：記録が切り詰められていれば、skip ではなく失敗にする
         self.assertGreaterEqual(len(ledger.verify_chain(data)), 5, "記録に seq 5 が無い（切り詰められた）")
-        account = doc_fixed(PROJECT, "account")
+        account = doc_fixed(self.root, "account")
         # T-052（T-049 の監査 軽-1）：一覧のハッシュは、実際に投稿した値の固定の文字列（reviews/T-048.md）。
         # 記録から計算した値をそのまま入れると、記録が書き換わっても一致してしまうため
         posted5 = "6c44e4cbd5ae6a8f7839141b33dc010f518cd0a3c333acefa7bc4096d4958b1b"
@@ -356,7 +350,7 @@ class TestRealLedger(unittest.TestCase):
         second = posts[1][1]
         self.assertEqual(post_text._iso(second), "2026-10-07T23:19:28.833Z")
         out = io.StringIO()
-        bad = post_text.check_posts(PROJECT, posts, account=account,
+        bad = post_text.check_posts(self.root, posts, account=account,
                                     now=second + datetime.timedelta(minutes=1), out=out)
         self.assertEqual(bad, [], out.getvalue())
         self.assertRegex(out.getvalue(), r"seq 5: 最初に投稿された時刻 2026-10-07T23:19:28\.833Z、遅れ 0\.08 時間"
@@ -364,7 +358,7 @@ class TestRealLedger(unittest.TestCase):
 
     def test_real_recorded_at_before_headers(self):
         """本物の記録では、どの seq の recorded_at も確定時刻 + 3 時間より前。"""
-        st = post_text.verify.State(PROJECT, None)
+        st = post_text.verify.State(self.root, None)
         self.assertEqual(post_text.check_recorded_vs_btc(st.records, st.times), [])
 
     def test_build_stops_when_recorded_after_header(self):
@@ -377,19 +371,19 @@ class TestRealLedger(unittest.TestCase):
             return st
         with mock.patch.object(post_text.verify, "State", side_effect=fake):
             with self.assertRaisesRegex(post_text.PostError, "seq 1: recorded_at"):
-                post_text.build(PROJECT)
+                post_text.build(self.root)
 
     def test_cli_both_pythons(self):
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
         outs = []
         for py in (sys.executable, "python3"):
-            r = subprocess.run([py, "-B", os.path.join(SRC, "post_text.py")], cwd=PROJECT,
+            r = subprocess.run([py, "-B", os.path.join(SRC, "post_text.py"), "--root", self.root], cwd=self.root,
                                capture_output=True, env=env)
             self.assertEqual(r.returncode, 0, r.stderr.decode())
             self.assertIn("合計:", r.stderr.decode())
             outs.append(r.stdout)
         self.assertEqual(outs[0], outs[1])
-        self.assertEqual(outs[0].decode(), post_text.build(PROJECT)[0] + "\n")
+        self.assertEqual(outs[0].decode(), post_text.build(self.root)[0] + "\n")
 
 
 # ---------------------------------------------------------------- 仮の記録（壊したとき）
@@ -458,8 +452,10 @@ class TestSyntheticLedger(tl.LedgerCase):
 
 def doc_fixed(root, tag):
     """手順書の `<!-- x-post:<tag> -->` の直後の塊の中身（1 行）。アカウントと最初の投稿は、手順書に
-    だけ書き、テストはそこから読む（承認は手順書に書くことへのもの）。"""
-    with open(os.path.join(root, DOC_REL), encoding="utf-8") as f:
+    だけ書き、テストはそこから読む（承認は手順書に書くことへのもの）。root が None なら、プロジェクトの作業ツリーの
+    手順書（記録ではない）。"""
+    path = os.path.join(PROJECT, DOC_REL) if root is None else os.path.join(root, DOC_REL)
+    with open(path, encoding="utf-8") as f:
         m = re.search(r"<!-- x-post:%s -->\n```\n(.*?)\n```" % re.escape(tag), f.read(), re.S)
     return m.group(1).strip()
 
@@ -476,9 +472,9 @@ def x_url(account, when):
 
 class TestXId(unittest.TestCase):
     def test_first_post_id_time(self):
-        url = doc_fixed(PROJECT, "first").split()[0]
+        url = doc_fixed(None, "first").split()[0]
         m = post_text.X_URL_RE.match(url)
-        self.assertEqual(m.group(1), doc_fixed(PROJECT, "account"))
+        self.assertEqual(m.group(1), doc_fixed(None, "account"))
         t = post_text.x_id_time(m.group(2))
         self.assertEqual(post_text._iso(t), "2026-10-07T18:24:30.169Z")
         self.assertEqual((int(m.group(2)) >> 22) + 1288834974657, 1791397470169)
@@ -702,7 +698,7 @@ class TestCheckPosts(tl.LedgerCase):
     def test_cli_cannot_change_exception(self):
         for opt in ("--require-every-seq-from", "--delay-exempt-through", "--pre-rule-last-seq"):
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-                post_text.main(["check-posts", "x", opt, "9"])
+                post_text.main(["check-posts", "x", "--root", "/nonexistent-root-for-test", opt, "9"])
 
 
 # ---------------------------------------------------------------- 照らす手順（第三者）
@@ -710,7 +706,6 @@ class TestCheckPosts(tl.LedgerCase):
 SHELLS = [sh for sh in ("bash", "zsh") if shutil.which(sh)]
 
 
-@unittest.skipUnless(has_head(), "コミットがまだ無いので、複製して手順を試せない")
 class TestDocProcedure(unittest.TestCase):
     """手順書の塊をファイルに保存し、-e を付けずに `bash ファイル` と `zsh ファイル` で実行する
     （文書に書いたとおりの使い方。S-1）。"""
@@ -719,15 +714,9 @@ class TestDocProcedure(unittest.TestCase):
         self.assertIn("bash", SHELLS)
         self.tmp = tempfile.mkdtemp()
         self.clone = os.path.join(self.tmp, "stick-chart-x-post")
-        subprocess.run(["git", "clone", "-q", "--no-hardlinks", PROJECT, self.clone],
-                       check=True, capture_output=True)
-        if WORKTREE_MODE:
-            for rel in OVERLAY:
-                shutil.rmtree(os.path.join(self.clone, rel), ignore_errors=True)
-                shutil.copytree(os.path.join(PROJECT, rel), os.path.join(self.clone, rel),
-                                ignore=shutil.ignore_patterns("__pycache__"))
-            self.git("add", "-A", "--", *OVERLAY)
-            self.git("commit", "-q", "--allow-empty", "-m", "一時的なコミット（テストの中だけ）")
+        # T-077：記録は固定したコミット（fixed_records.PINNED_COMMIT）の版、コードと手順書は HEAD の版
+        # （SEALER_DOC_TEST_WORKTREE=1 なら作業ツリーの版）の複製。HEAD の記録の今の状態には頼らない
+        fixed_records.checkout(self.clone, code="worktree" if WORKTREE_MODE else "head")
         # 塊を、複製の中の文書から取り出して、リポジトリの外のファイルに保存する
         with open(os.path.join(self.clone, DOC_REL), encoding="utf-8") as f:
             blocks = BLOCK_RE.findall(f.read())
@@ -824,9 +813,9 @@ class TestDocProcedure(unittest.TestCase):
         self.assertEqual(SHELLS, ["bash", "zsh"])
 
     def test_same_text_as_project(self):
-        if WORKTREE_MODE or not sealed_clean():
-            self.skipTest("作業ツリーの記録が HEAD と同じときだけ比べる")
-        self.assertIn(self.post["POSTED"], post_text.build(PROJECT)[0])
+        """第三者が複製の中で作り直した文（別のプロセス）と、運営側の作り方（同じプロセスの build）が同じ。
+        T-077：比べる先を、HEAD のプロジェクトから、同じ複製に変えた（HEAD の記録の今の状態に頼らない）。"""
+        self.assertIn(self.post["POSTED"], post_text.build(self.clone)[0])
 
     def test_intact_clone_matches(self):
         results = self.run_script(0)

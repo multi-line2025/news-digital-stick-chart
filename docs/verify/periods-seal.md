@@ -546,7 +546,7 @@ git ls-tree -r --name-only <seq 1 を含むコミット> -- data/
 
 ## 8. 検証の手順のテストを、コミットの前に試す
 
-`tests/sealer/test_verify_doc.py` は、既定ではコミットされた版（HEAD）だけを複製して試す。コミットの前に、作業ツリーのコードと手順書を試すときは、次のようにする。テストは複製の中で一時的にコミットしてから試す。元のリポジトリには何も書かない。この結果は、コミットされた版の検証にはならない。
+`tests/sealer/test_verify_doc.py` は、既定ではコミットされた版だけを複製して試す（記録は、壊さずに流す1件だけが HEAD の版で、ほかは固定したコミットの版。15章）。コミットの前に、作業ツリーのコードと手順書を試すときは、次のようにする。テストは複製の中で一時的にコミットしてから試す。元のリポジトリには何も書かない。この結果は、コミットされた版の検証にはならない。
 
 ```sh
 SEALER_DOC_TEST_WORKTREE=1 PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/sealer
@@ -894,8 +894,11 @@ grep -n '"kind":"gkg-run-start"' sealed/ledger.jsonl | cut -d: -f1 || true
       - (c) **日ごとの files_listed を付け替える**（ある日の数を増やし、別の日の数を減らして、合計を `files_selected` にそろえる）。`plan_sha256` があり、計画を作り直せれば、日ごとの数が計画と合わないので止まる（一覧の本体が手元にある場合だけ）。
   - 閉じているのは、`gkg-run-start`（取得の前の記録）が縛る入力の値（コード・一覧・試しの日・計画）と、上の行の照合で見つかる食い違いまでである。
   - 前提：記録の .ots は、run-complete のあと、結果を見る前に作る運用である。結論：run-complete から記録までを短くしても、取得の間の選び直しの余地は残る。長さは、記録の `recorded_at`（申告）と、run-start の `started_at`・run-complete の `completed_at`（申告）の差で読むしかなく、証明ではない。
-- **試しの run にも後から付けられる**：既にコミットされている `data/manifest/gdelt-gkg-trial.jsonl`（run_id e15ed53595c70035）にも、同じコマンドで記録を足せる（記録の時点のマニフェスト全体を縛る）。本物の記録への書き込みはオーナーの承認を得てから行う（T-066 では書いていない）。それまで、verify は「照らさなかった」と出す。
+- **試しの run にも後から付けられる**：既にコミットされている `data/manifest/gdelt-gkg-trial.jsonl`（run_id e15ed53595c70035）にも、同じコマンドで記録を足せる（記録の時点のマニフェスト全体を縛る）。本物の記録への書き込みはオーナーの承認を得てから行う（T-066 では書いていない。オーナーの承認のあと、T-076 で seq 9 として書いた）。記録が無いあいだ、verify は「照らさなかった」と出す。
   - **事後の縛りでしかない（T-068。T-066 の監査 軽-3）**：試しの run の結果は、オーナーが既に見ている（T-063）。そのため、後から付ける `gkg-run-result` が示すのは「記録の時点より後に変えていない」ことだけで、結果を見る前のマニフェストがこれと同じだったことは示せない。
+  - **封印の順番（T-077。T-074 の監査 軽-1）**：R の gkg-run-result は最後の試しの run のあとに封印する。先に封印して試しの run をもう一度すると、順番2はできなくなる。本プロジェクトでは試しの run は seq 8 で終わりとした（reviews/T-074.md）。
+    - 前提：R の `gkg-run-result` を封印したあとは、試しの run のマニフェストの全体が、その記録の縛るバイト列と同じでなければ、順番2の関門が閉じる（14章。あとに行を足すことを許さない）。試しの run をもう一度すると、マニフェストに行が足される。マニフェストは追記のみで、足した行は消せない。
+    - 結論：関門は閉じたままになり、順番2は行えない。
   - 試しのマニフェストは、正式な run の run-start の行の `trial_manifest_sha256`（試しのマニフェストの全体の sha256）でも縛られる。正式な run を始めた時点（収集係の関門が照らす）より後に変えれば、正式な run の再開が止まる。その値は正式な run のマニフェストの行で、時刻証明は正式な run の `gkg-run-result` を通じてしか付かない。R の `gkg-run-result` があれば、verify はこの値を R の縛るバイト列と照らす（T-074。12章の上の `trial_manifest_sha256` の項）。
 - **まとめの「照らさなかった」（T-068。T-066 の監査 中-2）**：verify は、`gkg-run-result` の無い run を、`gkg-run-start` の記録ごとに「照らさなかった：…マニフェストの時刻証明（gkg-run-result の記録が無い。<状態>）」と出す。状態は「run-complete まである」「終わっていない run（run-complete の行が無い）」「マニフェストに行が無い」のどれか。記録ごとに数えるので、マニフェストの run-complete の行を消しても、この数は減らない（T-066 までは、run-complete の行がある run だけを出していた）。
 - **関門の位置（提案）**：日の集計を使うコード（正式な run の結果を集計に使う統計係・収集係のコード）は、最初に `ledger.require_gkg_run_result(mode, run_id)` を呼ぶ。鎖と .ots、マニフェストの照合、その run の `gkg-run-result` の照合に通るときだけ記録を返し、そうでなければ `GkgRunResultRequired` で止まる。正式な run は、この関門を通るまで「完了」と扱わない（例：`gkg.official_day_records` が run-complete に加えてこの関門を求める）。どこから呼ぶかは、リードが収集係・統計係に割り振る。統計係の順番2（counting.py）は封印済みで直せないので、封印係の側で、counting.py を動かす前にこの関門を呼ぶ（T-073。14章）。
@@ -1166,3 +1169,49 @@ counting.py は読み込むだけで変えない。そろえられない形は�
 - (a)・(c) の記録は decide() の出力を持たないので、記録の中の出力とは照らせない。照らすのは、R（と段の run）の時刻証明が鎖の中で前にあることと、マニフェストから計算し直した行き先と食い違わないことまでである。
 - verify の行き先の照合は、記録を最初に含んだコミットのマニフェストを使う。記録とマニフェストの変更を同じコミットに入れると、書く仕組みが見た HEAD の版と違う版で計算することになる（食い違えば止まる）。そのため、記録はマニフェストを変えないコミットに入れる。
 - `counting_output.inputs`（3日のファイルの名前と sha256）と、`gkg-run-result` で縛ったマニフェストの day の行との照合は、順番2を封印するタスクで扱う（T-073 の採点の申し送り）。
+
+## 15. テストと本物の記録（T-077）
+
+封印の記録を足すたびに `tests/sealer` のテストが壊れることが続いた（T-049・T-050・T-052・T-064・T-065・T-076）。原因は、テストが「本物の記録の今の状態」（例：R の `gkg-run-result` がまだ無い）を前提にしていたことである。T-077 で、次の固定の規則にそろえた。
+
+### 規則
+
+1. テストは、HEAD の本物の `sealed/ledger.jsonl`・`sealed/`・`data/manifest/` の今の状態を前提にしない。
+2. 本物の記録を使うテストは、固定したコミット（テストの中の定数。40 桁の sha）の版を git から取り出して使う。入口は `tests/sealer/fixed_records.py` の `checkout`・`show`・`ls` だけで、既定のコミットは `fixed_records.PINNED_COMMIT`（5ce3943b827ff67f4f7e7db811525946bafdea46。seq 1〜8 と試しの run のマニフェスト5行。`gkg-run-result` はまだ無い）。`checkout` は、そのコミットとその祖先だけを取り込み、参照を `main` の1つだけにする（後の記録の履歴を `git log --all` が見つけないように）。既定では、`sealed/`・`data/`・`reviews/` はそのコミットの版のまま、ほかのファイル（コードと手順書）を HEAD の版にそろえて1つのコミットにする。40 桁でないもの（`HEAD`・枝の名前・短い sha）は拒む。そうでなければ、合成の鎖を使う。
+3. HEAD の本物の記録をそのまま読んでよいのは、「本物の記録で verify が 0 になる」ことを確かめるテストだけである（`tests/sealer/test_t077.py` の `HEAD_READERS`）。今は次の2つ。どちらも、記録の件数・kind・最後の seq に頼らない。
+   - `test_t077.TestRealHeadVerify.test_verify_all_rev_auto_is_zero`：プロジェクトのルートで `verify.py all --rev auto` が 0。
+   - `test_verify_doc.TestDocProcedureHead`：HEAD の clone で、3章の塊がすべて 0 で終わる。
+
+### 規則を守らせる検査
+
+`test_t077.TestRuleScan` は、`tests/sealer` の .py（`fixed_records.py` を除く）を ast で読み、本物の記録に届きうる箇所を数える。数えた箇所が `HEAD_READERS` と件数まで同じでなければ落ちる。数える箇所は次のとおり。
+- 本物のルートの名前（`PROJECT`・`PROJECT_ROOT`）を、`os.path.join(ルート, <src/・tests/・docs/verify/・.venv/・CLAUDE.md の下>)` と、assert で比べるだけの `os.path.realpath`・`abspath` 以外で使う箇所（`git -C ルート`、`git clone ルート`、関数にルートを渡す、別の名前に入れる、など）。
+- 引数を取らない関門（`require_method_access` など）を、`PROJECT_ROOT`・`_load_for_gate` を差し替える `with` の外で呼ぶ箇所。
+- 相対パスの `sealed/`・`data/` を読む箇所、`HERE`・`__file__` から `..` で上る箇所。
+- src のスクリプトを `--root` を渡さずに動かす箇所（相対パスのスクリプトを cwd を渡して動かすものは除く）。`verify`・`post_text`・`seal_*` の `main` を、`--root` の無い引数の一覧で呼ぶ箇所。
+
+限界：ast で字面を数えるので、名前を経由した間接の参照（引数を変数で組み立てた `main` の呼び出しなど）は数えない。そのため、記録を1件足した写しで全件を流して確かめる（次の節）。
+
+### 記録が増えても壊れないことの確かめ方
+
+プロジェクトの外で clone し、その中だけで、本物の鎖の後ろに正しい形の記録を1件足してコミットし、`tests/sealer` を流す。下の例は、書く仕組み（`seal_triggers.seal`。照合に通る `periods-triggers`）で1件足し、許可したカレンダーの Pending の形の `.ots` を作る（`.ots` は通信せずに作る仮のもの）。この状態で `verify.py all --rev auto` は 0 で、`tests/sealer` はすべて通る。足した記録の対象のファイルを置かないなど、verify の通らない記録を足したときに落ちてよいのは、許可した2つ（`HEAD_READERS`）だけである。プロジェクトの `sealed/` には書かない。
+
+```sh
+W="$(mktemp -d "${TMPDIR:-/tmp}/x.XXXXXX")"
+git clone -q "<このリポジトリ>" "$W/c" && cd "$W/c"
+PYTHONDONTWRITEBYTECODE=1 python3 -B -c '
+import sys, datetime; sys.path.insert(0, "src/sealer"); sys.path.insert(0, "tests/sealer")
+import ledger, seal_triggers, test_ledger as tl
+now = datetime.datetime(2099, 1, 1, tzinfo=datetime.timezone.utc)
+seal_triggers.seal(".", {"last_read_offset_days": 56, "same_week_years": 3}, now, None)
+p = "sealed/ledger.jsonl"
+data = ledger.read_ledger(p); n = len(ledger.split_lines(data))
+open("sealed/" + ledger.ots_name(n), "xb").write(tl.build_ots(ledger.prefix_bytes(data, n)))
+'
+git add sealed && git -c user.name=Multi-line -c user.email=197505900+multi-line2025@users.noreply.github.com \
+  commit -q -m "合成の記録（clone の中だけ）"
+PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py all --rev auto
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/sealer
+```
+
+`last_read_offset_days` の 56 は、今の candidates の J の最大（T-017・T-027 の決まりで、method-access の後の periods-triggers の J は null か J の最大）。記録が先へ進んで書く仕組みが拒むようになったら、そのときの決まりに合う値にする。

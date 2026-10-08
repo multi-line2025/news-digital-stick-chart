@@ -15,19 +15,19 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import test_ledger as tl  # noqa: E402
+import fixed_records  # noqa: E402
 from test_ledger import AUTHOR, FakeRun, T0, H, run_verify  # noqa: E402
 
 import ledger  # noqa: E402
 import seal_candidates  # noqa: E402
 import stamp  # noqa: E402
-
-PROJECT = tl.PROJECT
 
 FAKE_CANDIDATES = """import json, sys
 doc = {"threshold_multipliers": [2, 3], "horizon_days": [14, 28],
@@ -155,8 +155,10 @@ class TestRecordShape(CandCase):
                 ledger.check_candidates_output(doc)
 
     def test_real_candidates_output_passes_shape_check(self):
-        """本物の src/stats/candidates.py の出力が、出力の形の照合に通る（ネットワーク不要）。"""
-        out = seal_candidates.run_candidates(PROJECT)
+        """本物の src/stats/candidates.py の出力が、出力の形の照合に通る（ネットワーク不要）。
+        T-077：プロジェクトのルートでは動かさず、取り出した写し（コードは HEAD の版）で動かす。"""
+        with tempfile.TemporaryDirectory() as d:
+            out = seal_candidates.run_candidates(fixed_records.checkout(os.path.join(d, "c")))
         ms, hs = ledger.check_candidates_output(json.loads(out.decode("utf-8")))
         self.assertEqual(ms, [2, 3, 4, 6, 8, 12, 16])
         self.assertEqual(hs, [14, 28, 56])
