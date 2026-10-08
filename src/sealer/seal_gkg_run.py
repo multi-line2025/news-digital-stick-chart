@@ -187,12 +187,11 @@ def start(project, mode, code_rel, run_id, filelist_sha256, method_access_seq, t
           runner=subprocess.run, days=None, files_selected=None, plan_sha256=None):
     """gkg-run-start を 1 件追記する（または、同じ run の記録を使い回す。_reuse）。
     days・files_selected（T-068）：取得する日の数とファイルの数（収集係の計画。gkg.py の run-start の行の
-    days・files_selected と同じ値）。データを受け取る前に縛る。ledger.GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL が
-    True なら official では必ず渡す（渡さなければ止まる。収集係が渡すようになる T-069 のあとに True にする）。
-    渡さなければ、計画を持たない古い形で書く。
+    days・files_selected と同じ値）。データを受け取る前に縛る。
     plan_sha256（T-070）：取得する日とファイルの一覧（収集係の select_files の出力。試しの run は trial_plan）の
     正規の形（ledger.gkg_plan_canonical）の sha256。渡すときは days・files_selected も渡す。
-    GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL が True なら、official では 3つとも必ず渡す。
+    正式な run（official）は必ず計画を持つ（T-074。ledger.GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL は True）：
+    3つとも渡さなければ止まり、追記しない。試しの run は、渡さなければ計画を持たない古い形で書く。
     返り値: (記録, 中身のパス, .ots のパス か None)。"""
     project = os.path.abspath(project)
     if (days is None) != (files_selected is None):

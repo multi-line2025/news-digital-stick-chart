@@ -125,8 +125,10 @@ class Repo:
                 return f.read()
         return self.git("show", "%s:%s" % (rev, rel))
 
-    def commit_for_seq(self, data):
-        """{seq: その記録を最初に含んだコミット}。履歴の記録が今の記録の先頭と食い違えば失敗。"""
+    def commit_for_seq(self, data, partial=False):
+        """{seq: その記録を最初に含んだコミット}。履歴の記録が今の記録の先頭と食い違えば失敗。
+        partial が False なら、どのコミットにも無い seq（まだコミットされていない記録）があれば失敗。True なら、
+        その seq を返り値に入れずに返す（T-074。順番2の行き先の照合が「照らさなかった」にするため）。"""
         out = self.git("rev-list", "--reverse", "HEAD", "--", LEDGER_REL).decode().split()
         lines = ledger.split_lines(data)
         found = {}
@@ -142,7 +144,7 @@ class Repo:
             for s in range(1, n + 1):
                 found.setdefault(s, c)
         missing = [s for s in range(1, len(lines) + 1) if s not in found]
-        if missing:
+        if missing and not partial:
             raise ledger.LedgerError("seq %s の記録を含むコミットが無い" % missing)
         return found
 
@@ -754,8 +756,15 @@ def check_order2_plans(st, records):
             print("照らさなかった：%s なので、seq %d の順番2の行き先をマニフェストから計算し直していない" % (why, r["seq"]))
             continue
         if commits is None:
-            commits = repo.commit_for_seq(st.data)
-        c = commits[r["seq"]]
+            commits = repo.commit_for_seq(st.data, partial=True)
+        c = commits.get(r["seq"])
+        if c is None:
+            # T-074（T-073 の監査 軽-3）：記録を最初に含んだコミットが無いので、照らす版が決まらない。失敗にせず
+            # 「照らさなかった」にする（コミットしたあとで流せば照らす）
+            st.unchecked.append("seq %d の順番2の行き先の計算し直し（記録がまだコミットされていない）" % r["seq"])
+            print("照らさなかった：記録がまだコミットされていないので、seq %d の順番2の行き先をマニフェストから計算し直して"
+                  "いない（コミットしたあとで照らす）" % r["seq"])
+            continue
         plan = ledger.check_order2_plan(st.records, r, doc, st.file_json,
                                         _version_or_empty(repo, c, ledger.GKG_MANIFESTS["trial"]),
                                         _version_or_empty(repo, c, ledger.GKG_MANIFESTS["official"]))
@@ -925,12 +934,27 @@ def gkg_manifests_check(st, day_dirs=(), filelists=None):
             print("照らさなかった：seq %d の run（%s・run_id %s）のマニフェストの時刻証明が無い（gkg-run-result の記録が"
                   "無い。%s）" % (r["seq"], d["mode"], d["run_id"], state))
         _check_plan_body(st, r, d, runs_by_key.get(key), filelists)
-        if d["mode"] == "official" and "days" not in d:
-            st.unchecked.append("seq %d の gkg-run-start（official）の取得の計画（days・files_selected が記録に無い）"
-                                % r["seq"])
-            print("照らさなかった：seq %d の gkg-run-start（official）に取得の計画（days・files_selected）が無いので、"
-                  "日とファイルの数を、データを受け取る前の記録と照らしていない" % r["seq"])
+    _check_official_trial_sha(st, manifests, results)
     _check_day_files(st, day_rows, day_dirs)
+
+
+def _check_official_trial_sha(st, manifests, results):
+    """正式な run の run-start の行の trial_manifest_sha256 を、R の gkg-run-result が縛る試しの run のマニフェストと
+    照らす（T-074。ledger.check_official_trial_manifest_sha）。R の gkg-run-result が無ければ「照らさなかった」。"""
+    got = ledger.check_official_trial_manifest_sha(st.file_json, manifests, results)
+    if got is None:
+        return
+    rel = ledger.GKG_MANIFESTS["official"]
+    if not got["checked"]:
+        st.unchecked.append("%s の run-start の行の trial_manifest_sha256（%s）" % (rel, got["reason"]))
+        print("照らさなかった：%sので、%s の run-start の行の trial_manifest_sha256 を、R の gkg-run-result が縛る試しの "
+              "run のマニフェストと照らしていない" % (got["reason"], rel))
+        return
+    print("%s の run-start の行 %d 行の trial_manifest_sha256 は、R（run_id %s）の gkg-run-result（seq %d）が縛る試しの "
+          "run のマニフェスト（先頭 %d 行）の sha256 と同じ%s"
+          % (rel, got["rows"], got["run_id"], got["result_seq"], got["lines"],
+             "" if not got["later"] else "か、R のあとの試しの run の行を含む今の試しのマニフェストの全体の sha256 と同じ"
+                                         "（R のあとにも試しの run がある。この形では、順番2は関門で止まる）"))
 
 
 # 計画を作り直す小さなプログラム（T-070 差し戻し2回目）。-I で流し、取り出した版の gkg.py を読み込んで、
@@ -1130,12 +1154,13 @@ def _check_plan_body(st, r, d, run, filelists):
     """gkg-run-start の plan_sha256 を、封印済みのファイル一覧の本体から作り直した計画と照らし、マニフェストの
     day の行の日付・files_listed・failed_files がその計画と合うことを照らす（T-070 差し戻し2回目）。
     一覧の本体は --filelist で渡したもののうち、sha256 が記録の filelist_sha256 と同じもの。無ければ「照らさなかった」。
-    plan_sha256 の無い official の記録も「照らさなかった」。"""
+    plan_sha256 の無い記録（T-070 より前の形。試しの run だけ。正式な run は check_gkg_run_doc が 16 個の形を求める。
+    T-074）も、何も出さずに抜けず「照らさなかった」と出す。"""
     if ledger.GKG_RUN_PLAN_SHA_KEY not in d:
-        if d["mode"] == "official" and "days" in d:
-            st.unchecked.append("seq %d の gkg-run-start（official）の計画の一覧（plan_sha256 が記録に無い）" % r["seq"])
-            print("照らさなかった：seq %d の gkg-run-start（official）に plan_sha256 が無いので、どの日のどのファイルかを"
-                  "データを受け取る前の記録と照らしていない（数だけを照らした）" % r["seq"])
+        st.unchecked.append("seq %d の gkg-run-start（%s）の計画の一覧（計画の sha256 が無い記録。T-070 より前）"
+                            % (r["seq"], d["mode"]))
+        print("照らさなかった：seq %d の gkg-run-start（%s）は、計画の sha256（plan_sha256）が無い記録（T-070 より前）なので、"
+              "どの日のどのファイルかを、データを受け取る前の記録と照らしていない" % (r["seq"], d["mode"]))
         return
     what = "seq %d の run の計画の作り直し" % r["seq"]
     body = filelists.get(d["filelist_sha256"])

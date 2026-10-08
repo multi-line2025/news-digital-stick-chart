@@ -1,5 +1,5 @@
 """T-070 のテスト：gkg-run-start の計画の一覧の sha256（plan_sha256）と、その本体との照合（T-068 の監査 中-B・
-軽-B）、GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL を True にしたときに plan_sha256 も必須になること。
+軽-B）、GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL が True（T-074）で plan_sha256 も必須になること。
 
 実行（プロジェクトのルートで）:
     PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/sealer -v
@@ -15,7 +15,6 @@ import os
 import sys
 import tempfile
 import unittest
-from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -301,27 +300,24 @@ class TestPlanUnit(unittest.TestCase):
 
 
 class TestRequiredFlag(t31.GkgCase):
-    """GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL を True にすると、official は plan_sha256 まで必須（T-070 の 5）。"""
+    """GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL は True（T-074）で、official は plan_sha256 まで必須（T-070 の 5）。"""
 
     def test_required_includes_sha(self):
+        self.assertTrue(ledger.GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL)          # T-074：True にした
         self.ready()
         self.start_run(T0 + 4 * H)
         self.commit("試し")
         before = self.ledger_bytes()
-        with mock.patch.object(ledger, "GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL", True):
-            with self.assertRaisesRegex(ledger.LedgerError, "plan_sha256"):
-                self.start_run(T0 + 5 * H, mode="official", manifest=False, plan=(2, 5))
-            self.assertEqual(self.ledger_bytes(), before)
-        # False（今）のままなら書ける。そのあと True にすると verify が止める
-        off, _rel, _o = self.start_run(T0 + 5 * H, mode="official", plan=(2, 5))
-        code, out, err = tl.run_verify_inproc(self.root, "gkg-runs")
-        self.assertEqual(code, 0, err)
-        self.assertIn("seq %d の gkg-run-start（official）に plan_sha256 が無い" % off["seq"], out)
-        with mock.patch.object(ledger, "GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL", True):
-            code, _out, err = tl.run_verify_inproc(self.root, "gkg-runs")
+        with self.assertRaisesRegex(ledger.LedgerError, "plan_sha256"):
+            self.start_run(T0 + 5 * H, mode="official", manifest=False, plan=(2, 5), plan_sha256=None)
+        self.assertEqual(self.ledger_bytes(), before)
+        # 書く仕組みを飛ばして足した 15 個の形（plan_sha256 が無い）は、verify が止める
+        g = self.raw_run(T0 + 5 * H, mode="official", drop=("plan_sha256",))
+        self.commit("plan_sha256 の無い正式な run（書く仕組みを飛ばす）")
+        code, _out, err = tl.run_verify_inproc(self.root, "gkg-runs")
         self.assertEqual(code, 1)
+        self.assertIn("seq %d の gkg-run-start（official）に、取得の計画" % g, err)
         self.assertIn("plan_sha256", err)
-        self.assertFalse(ledger.GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL)        # 今回は False のまま
 
     def test_sha_needs_counts(self):
         self.ready()

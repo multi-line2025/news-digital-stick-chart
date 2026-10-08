@@ -12,7 +12,6 @@ import json
 import os
 import sys
 import unittest
-from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -88,7 +87,8 @@ class TestPlan(t31.GkgCase):
         _off, rel, _o = self.start_run(T0 + 5 * H, mode="official", plan=(2115, 203040))
         doc = self.doc_of(rel)
         self.assertEqual((doc["days"], doc["files_selected"]), (2115, 203040))
-        self.assertEqual(tuple(sorted(doc)), ledger.GKG_RUN_DOC_KEYS_PLAN)
+        # T-074：正式な run は plan_sha256 も持つ 16 個の形（start_run が既定で渡す）
+        self.assertEqual(tuple(sorted(doc)), ledger.GKG_RUN_DOC_KEYS_PLAN_SHA)
         self.commit("正式な run")
         out = self.verify_ok("gkg-runs")
         self.assertNotIn("取得の計画", out)
@@ -101,28 +101,45 @@ class TestPlan(t31.GkgCase):
                 f.write(json.dumps(dict(rows[0], **{k: v}), sort_keys=True) + "\n")
             self.verify_fails(("gkg-runs", "all"), "の計画の")
 
-    def test_official_without_plan_is_unchecked_until_t069(self):
+    def test_official_without_plan_stops_verify(self):
+        """T-074：計画の無い official（13 個・15 個の形）は、書く仕組みを飛ばして足しても verify が止める
+        （T-069 までの「照らさなかった」の扱いは外した）。"""
+        self.assertTrue(ledger.GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL)
         self.ready()
         self.start_run(T0 + 4 * H)
-        off, _rel, _o = self.start_run(T0 + 5 * H, mode="official")
-        self.commit("正式な run（計画なし）")
-        code, out, err = tl.run_verify_inproc(self.root, "gkg-runs")
-        self.assertEqual(code, 0, err)
-        self.assertIn("seq %d の gkg-run-start（official）に取得の計画（days・files_selected）が無い" % off["seq"], out)
-        # T-069 のあと（True）は、計画の無い official を verify が止め、書く仕組みも書かない
-        with mock.patch.object(ledger, "GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL", True):
-            code, _out, err = tl.run_verify_inproc(self.root, "gkg-runs")
-            self.assertEqual(code, 1)
-            self.assertIn("取得の計画", err)
+        self.commit("試し")
+        g = self.raw_run(T0 + 5 * H, mode="official", drop=("days", "files_selected", "plan_sha256"))
+        self.commit("計画の無い正式な run（書く仕組みを飛ばす）")
+        self.verify_fails(("gkg-runs", "all"), "seq %d の gkg-run-start（official）に、取得の計画" % g)
 
-    def test_official_without_plan_refused_when_required(self):
+    def test_official_doc_without_plan_rejected(self):
+        """T-074：check_gkg_run_doc は、official の 13 個・15 個の形を「取得の計画が無い」で止める。"""
+        self.ready()
+        self.start_run(T0 + 4 * H)
+        self.start_run(T0 + 5 * H, mode="official")
+        self.commit("正式な run")
+        recs = self.records()
+        off = [r for r in recs if r["kind"] == ledger.GKG_RUN_KIND][-1]
+        doc = ledger.read_target_json(self.root, off, ledger.GKG_RUN_KIND)
+        ledger.check_gkg_run_doc(recs, off, doc, lambda r, role: ledger.read_target_json(self.root, r, role))
+        for name, drop in (("13 個", ("days", "files_selected", "plan_sha256")), ("15 個", ("plan_sha256",))):
+            bad = {k: v for k, v in doc.items() if k not in drop}
+            with self.subTest(form=name):
+                with self.assertRaisesRegex(ledger.LedgerError, "取得の計画"):
+                    ledger.check_gkg_run_doc(recs, off, bad,
+                                             lambda r, role: ledger.read_target_json(self.root, r, role))
+
+    def test_official_without_plan_refused(self):
+        """T-074：書く仕組みは、計画（days・files_selected・plan_sha256）を渡さない official を書かない。"""
+        self.assertTrue(ledger.GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL)
         self.ready()
         self.start_run(T0 + 4 * H)
         self.commit("試し")
         before = self.ledger_bytes()
-        with mock.patch.object(ledger, "GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL", True):
-            with self.assertRaisesRegex(ledger.LedgerError, "取得の計画"):
-                self.start_run(T0 + 5 * H, mode="official", manifest=False)
+        with self.assertRaisesRegex(ledger.LedgerError, "取得の計画"):
+            self.start_run(T0 + 5 * H, mode="official", manifest=False, no_plan=True)
+        with self.assertRaisesRegex(ledger.LedgerError, "取得の計画"):
+            self.start_run(T0 + 5 * H, mode="official", manifest=False, plan=(2, 5), plan_sha256=None)
         self.assertEqual(self.ledger_bytes(), before)
 
     def test_plan_shape_and_reuse(self):

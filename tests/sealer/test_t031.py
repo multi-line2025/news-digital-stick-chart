@@ -37,6 +37,17 @@ DOC = os.path.join(tl.PROJECT, "docs", "verify", "periods-seal.md")
 ROUND = 30_000_000
 KEPT = "e" * 64                       # WriterCase.result の既定の kept_rows_sha256
 TRIAL_DAYS = ["2015-03-02", "2015-03-03", "2015-03-04"]
+# T-074：正式な run は必ず計画を持つ（ledger.GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL が True）。start_run・raw_run の
+# official は、既定でこの計画（days・files_selected）と plan_sha256 を渡す
+OFFICIAL_PLAN = (2, 5)
+OFFICIAL_PLAN_SHA = "f" * 64
+
+
+def official_plan(mode):
+    """seal_gkg_run.start に渡す計画（official だけ。T-074）。"""
+    if mode != "official":
+        return {}
+    return {"days": OFFICIAL_PLAN[0], "files_selected": OFFICIAL_PLAN[1], "plan_sha256": OFFICIAL_PLAN_SHA}
 
 
 class GkgCase(t23.JCase):
@@ -61,8 +72,13 @@ class GkgCase(t23.JCase):
         rec = [r for r in self.records() if r["seq"] == seq][0]
         return seq, hashlib.sha256(ledger.canonical_line(rec)).hexdigest()
 
-    def start_run(self, now, mode="trial", days=TRIAL_DAYS, manifest=True, plan=None, **over):
-        """days は試しの日（trial_days）。plan は取得の計画 (days, files_selected)（T-068）。"""
+    def start_run(self, now, mode="trial", days=TRIAL_DAYS, manifest=True, plan=None, no_plan=False, **over):
+        """days は試しの日（trial_days）。plan は取得の計画 (days, files_selected)（T-068）。
+        T-074：official は、no_plan でなければ、plan が無ければ OFFICIAL_PLAN を使い、plan_sha256 も既定で渡す
+        （over で plan_sha256=None を渡すと、plan_sha256 の無い 15 個の形を試せる）。"""
+        if mode == "official" and not no_plan:
+            plan = plan or OFFICIAL_PLAN
+            over.setdefault("plan_sha256", OFFICIAL_PLAN_SHA)
         ex_seq, ex_sha = self.excl()
         args = dict(mode=mode, code_rel=tw.CODE_REL, run_id=self.code_sha()[:16],
                     filelist_sha256=KEPT, method_access_seq=self.method_rec["seq"],
@@ -116,8 +132,8 @@ class GkgCase(t23.JCase):
             if not os.path.exists(os.path.join(self.root, other)):
                 open(os.path.join(self.root, other), "a").close()
 
-    def raw_run(self, now, doc_over=None, mode="trial"):
-        """gkg-run-start を、書く仕組みを通さずに足す（書く仕組みを飛ばした場合の再現）。"""
+    def raw_run(self, now, doc_over=None, mode="trial", drop=()):
+        """gkg-run-start を、書く仕組みを通さずに足す（書く仕組みを飛ばした場合の再現）。drop のキーは中身から除く。"""
         data = self.ledger_bytes()
         seq = len(self.records()) + 1
         ex_seq, ex_sha = self.excl()
@@ -130,7 +146,11 @@ class GkgCase(t23.JCase):
                "exclusion_rule_seq": ex_seq, "exclusion_rule_record_sha256": ex_sha,
                "drand": tl.drand_doc(ledger.GKG_RUN_KIND, ROUND)["drand"],
                "ledger_head": ledger.expected_ledger_head(data, seq)}
+        if mode == "official":            # T-074：正式な run は必ず計画を持つ
+            doc.update(days=OFFICIAL_PLAN[0], files_selected=OFFICIAL_PLAN[1], plan_sha256=OFFICIAL_PLAN_SHA)
         doc.update(doc_over or {})
+        for k in drop:
+            doc.pop(k, None)
         return self._append_doc(ledger.GKG_RUN_KIND, doc, now)
 
 
@@ -271,7 +291,8 @@ class TestGkgRunStart(GkgCase):
                                            self.method_rec["seq"],
                                            TRIAL_DAYS if mode == "trial" else None,
                                            self.excl()[0], self.excl()[1], T0 + 5 * H, "ots",
-                                           drand_fetch=t23.t17.NoCall(), runner=tw.FakeOts()),
+                                           drand_fetch=t23.t17.NoCall(), runner=tw.FakeOts(),
+                                           **official_plan(mode)),
                 "threshold-access の記録（seq %d）がある" % access["seq"])
         g = self.raw_run(T0 + 5 * H)
         self.verify_fails(("gkg-runs", "all"), "gkg-run-start の記録（seq %d）が、最初の threshold-access の"
@@ -385,7 +406,8 @@ class TestGkgRunStart(GkgCase):
                                            self.method_rec["seq"],
                                            TRIAL_DAYS if mode == "trial" else None,
                                            self.excl()[0], self.excl()[1], T0 + 5 * H, "ots",
-                                           drand_fetch=t23.t17.NoCall(), runner=tw.FakeOts()),
+                                           drand_fetch=t23.t17.NoCall(), runner=tw.FakeOts(),
+                                           **official_plan(mode)),
                 # T-043：同じ run_id の official は使い回しを試み、run-start の行があるので止まる
                 "official" if mode == "trial" else "run-start の行が既にある")
 

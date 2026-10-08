@@ -70,14 +70,23 @@ class TestGkgManifests(t31.GkgCase):
         # T-056 差し戻し1回目 軽-5：照らさなかった項目の一覧が、期待どおり（working なので順番1・1b の
         # 計算し直しだけ。マニフェストの照合は照らした）であることを、行の全体で確かめる
         last = [l for l in out.splitlines() if l.startswith("ただし、次は照らさなかった")]
-        # T-068（T-066 の監査 中-2）：gkg-run-result の無い run は、gkg-run-start の記録ごとに並ぶ。計画の無い
-        # official の記録も並ぶ（T-069 で収集係が計画を渡すまで）
+        # T-068（T-066 の監査 中-2）：gkg-run-result の無い run は、gkg-run-start の記録ごとに並ぶ。
+        # T-074：計画の sha256 の無い試しの run の記録（T-070 より前の形）も並ぶ。正式な run は計画を持つ（本体を
+        # --filelist で渡していないので、作り直しは照らさない）。R の gkg-run-result が無いので、正式な run の
+        # run-start の行の trial_manifest_sha256 も照らさない
         want = ["順番1・1b の値の計算し直し（--rev working では行わない。--rev auto で照らす）"]
         for r, mode in ((t1, "trial"), (t2, "trial"), (off, "official")):
             d = ledger.read_target_json(self.root, r, ledger.GKG_RUN_KIND)
             want.append("%s の run_id %s のマニフェストの時刻証明（gkg-run-result の記録が無い。終わっていない run"
                         "（run-complete の行が無い））" % (ledger.GKG_MANIFESTS[mode], d["run_id"]))
-        want.append("seq %d の gkg-run-start（official）の取得の計画（days・files_selected が記録に無い）" % off["seq"])
+            if mode == "trial":
+                want.append("seq %d の gkg-run-start（trial）の計画の一覧（計画の sha256 が無い記録。T-070 より前）" % r["seq"])
+            else:
+                want.append("seq %d の run の計画（plan_sha256）の作り直し（封印済みのファイル一覧の本体が無い。--filelist で"
+                            "渡したときだけ照らす）" % r["seq"])
+        t1d = ledger.read_target_json(self.root, t1, ledger.GKG_RUN_KIND)
+        want.append("%s の run-start の行の trial_manifest_sha256（R（run_id %s）の gkg-run-result の記録が無い）"
+                    % (OFFICIAL, t1d["run_id"]))
         self.assertEqual(last, ["ただし、次は照らさなかった（終了コード 0 は、照らした検査がすべて通ったことだけを示す）："
                                 + "、".join(want)])
 

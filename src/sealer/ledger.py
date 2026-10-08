@@ -940,10 +940,11 @@ GKG_RUN_DOC_KEYS_PLAN = tuple(sorted(GKG_RUN_DOC_KEYS + GKG_RUN_PLAN_KEYS))
 # 一覧の正規の形は gkg_plan_canonical（収集係の select_files の出力から決まる）
 GKG_RUN_PLAN_SHA_KEY = "plan_sha256"
 GKG_RUN_DOC_KEYS_PLAN_SHA = tuple(sorted(GKG_RUN_DOC_KEYS + GKG_RUN_PLAN_KEYS + (GKG_RUN_PLAN_SHA_KEY,)))
-# 正式な run に計画（days・files_selected・plan_sha256 の 16 個の形。T-070 から plan_sha256 も）を必ず求めるか。収集係の取得のコード（gkg.py の start_hook）が計画を渡すようになるまで
-# （T-069）は False で、計画の無い official の記録は、verify が「照らさなかった」と出す。T-069 のあとに True に
-# する（その変更はコミットとして履歴に残る）。True のとき、計画の無い official は書く仕組みも verify も止める
-GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL = False
+# 正式な run は必ず計画を持つ（T-074）。official の gkg-run-start は、days・files_selected・plan_sha256 を含む
+# 16 個の形（GKG_RUN_DOC_KEYS_PLAN_SHA）でなければならず、それ以外の形は書く仕組み（seal_gkg_run.start）も
+# verify（check_gkg_run_doc）も止める。収集係の取得のコードは、official の start に計画を渡す（T-071）。
+# 計画を持たない古い形（13・15 個）は、試しの run（seq 8 など。追記のみなので書き換えない）にだけ残る
+GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL = True
 GKG_RUN_MODES = ("trial", "official")
 # 試しの run の日数の上限。収集係の src/collector/gkg.py の TRIAL_DAYS（3 日）と揃える（T-031 の中3）。
 TRIAL_DAYS_MAX = 3
@@ -964,7 +965,7 @@ def check_gkg_run_doc(records, record, doc, read_json):
     read_json(記録, role) は、記録の対象のファイルを sha256 を照合して JSON で返す関数。
     次のどれかなら LedgerError。
       - キーが GKG_RUN_DOC_KEYS の 13 個とも、それに GKG_RUN_PLAN_KEYS（days・files_selected）を足した 15 個とも
-        一致しない。GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL が True のとき、official が 15 個の形でない（T-068）。days・files_selected が 1 以上の整数でない。
+        一致しない。official が plan_sha256 を含む 16 個の形でない（T-068、T-070、T-074。GKG_RUN_PLAN_REQUIRED_FOR_OFFICIAL）。days・files_selected が 1 以上の整数でない。
         kind が記録と違う。step が 4 でない。
       - mode が trial・official のどちらでもない。
       - code_path が相対パスの正規の形でない。code_sha256 が 64 桁の16進でない。
@@ -2127,6 +2128,54 @@ def check_trial_manifest_sealed(trial_manifest, result_doc):
             or sha256_hex(trial_manifest) != result_doc.get("manifest_sha256"):
         raise LedgerError("試しの run のマニフェストの全体が、R の gkg-run-result が縛るバイト列（先頭 %r 行）と同じでない"
                           "（封印のあとで行が足されたか、変えられた）" % result_doc.get("manifest_lines"))
+
+
+def check_official_trial_manifest_sha(read_json, manifests, results):
+    """正式な run の run-start の行の trial_manifest_sha256 を、R の gkg-run-result が縛る試しの run のマニフェストと
+    照らす（T-074。T-073 の監査 軽-1）。
+
+    trial_manifest_sha256 は、正式な run を始めた時点の試しの run のマニフェストの全体の sha256（収集係の
+    gkg._trial_info）。順番2の decide() は、これと試しの run のマニフェストの全体を照らし、合わなければ段に進む前に
+    止まる（(b)）。この値を、最初のコミットの前に書き換えれば (b) を固められるので、R の gkg-run-result（時刻証明の
+    付いた、試しの run のマニフェストの先頭 manifest_lines 行の sha256）と照らす。
+    manifests は check_gkg_manifests と同じ形、results は check_gkg_results の返り値（照合済み）。
+      - 正式な run のマニフェストが無い、または run-start の行が無い：照らすものが無い。None を返す。
+      - R が決まらない、または R の gkg-run-result が無い：照らさない。{"checked": False, "reason": …} を返す。
+      - どの run-start の行の trial_manifest_sha256 も、R の gkg-run-result の manifest_sha256 と同じなら通る。
+        ただ一つの例外：R のあとにも試しの run の行がある（試しのマニフェストが R の縛る先頭より長い）ときは、
+        今の試しのマニフェストの全体の sha256 と同じなら通す（R のあとに試しの run をした正直な流れ。この形では、
+        試しのマニフェストの全体が R の縛るバイト列と違うので、順番2の関門も verify の行き先の照合も止まり、
+        (b) は固められない）。
+      - それ以外は LedgerError。
+    返り値: None か {"checked": True, "run_id", "result_seq", "rows", "lines", "later"}。"""
+    body = manifests.get("official")
+    if not body:
+        return None
+    starts = [(i, row) for i, row in manifest_rows(body, GKG_MANIFESTS["official"]) if row.get("kind") == "run-start"]
+    if not starts:
+        return None
+    trial = manifests.get("trial") or b""
+    try:
+        rid = order2_trial_run(trial)
+    except Order2GateClosed as e:
+        return {"checked": False, "reason": "試しの run の最初の run（R）が決まらない（%s）" % e}
+    rres = results.get(("trial", rid))
+    if rres is None:
+        return {"checked": False, "reason": "R（run_id %s）の gkg-run-result の記録が無い" % rid}
+    rdoc = read_json(rres, GKG_RESULT_KIND)
+    bound, lines = rdoc["manifest_sha256"], rdoc["manifest_lines"]
+    whole = sha256_hex(trial)
+    later = trial.count(b"\n") > lines
+    for i, row in starts:
+        want = row.get("trial_manifest_sha256")
+        if want == bound or (later and want == whole):
+            continue
+        raise LedgerError("%s の %d 行目（正式な run の run-start）の trial_manifest_sha256 %r が、R（run_id %s）の "
+                          "gkg-run-result（seq %d）が縛る試しの run のマニフェスト（先頭 %d 行）の sha256 %s と違う"
+                          "（正式な run を始めた時点の試しのマニフェストと合わない。順番2を段に進む前に止める形にできる）"
+                          % (GKG_MANIFESTS["official"], i, want, rid, rres["seq"], lines, bound))
+    return {"checked": True, "run_id": rid, "result_seq": rres["seq"], "rows": len(starts), "lines": lines,
+            "later": later}
 
 
 def _stage_steps(out):
