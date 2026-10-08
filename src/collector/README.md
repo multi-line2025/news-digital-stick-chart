@@ -344,6 +344,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/collector -v
 - T-045：`test_acquire_gkg.py` の `TestT045`（hook が常に `seal_gkg_run.start` を通ること、stamp の失敗のあと `.ots` を作らずに再実行すると要求0件で止まり、`.ots` を作ってやり直すと進むこと、入力が違えば要求0件で止まること、正直な再開、記録を使い回して行の順と記録の seq の順がずれても `trial_run_ids` が記録の seq の順になり封印係の照合が通ること）。
 - T-032 差し戻し1回目：`test_acquire_gkg.py` の `TestSealedRunCheck`（手で書いた run-start の行、seq の欠け、sha256 の食い違い、別の run_id・別の kind の記録を指す行で、再開が要求0件で止まること）、`test_gkg.py` の `TestCheckSealedRun`。
 - T-032：`test_gkg.py` の `TestT032`（start_hook の呼び方、書けなければ要求0件、vocab の分け方、日の集計のファイルのバイト列の検査、T-035 の軽-1）。`test_acquire_gkg.py` の `TestSealGkgRun`（一時の写しの封印の記録に、試しの run 2回で2件、正式な run で1件。書けなければ要求0件）。
+- T-064：プロジェクトの写し（`test_acquire_filelist.pristine_copy`）では、`data/manifest` も手順3より前の形（`.gitkeep` と空の `gdelt-filelist.jsonl` だけ）にし、試しの run（T-063）・正式な run・区分表のマニフェストなど、後から本物に足されたマニフェストを名前によらず外す。本物に試しの run の記録とマニフェストが入ったあと、写しの上のテスト（`test_acquire_gkg.py` の `TestEndToEnd`・`TestSealGkgRun`・`TestSealedRunCheck`・`TestT045`）が「この run_id の取得は完了している」で止まっていたため。`TestPristineCopy` が、写しの形と、後から足されうる記録・`.ots`・中身・マニフェストを外すことを確かめる。`TestProductionPath.test_test_seams_cannot_point_at_real_places` は、一時的なディレクトリの判定を差し替えて確かめ、プロジェクトの置き場所（一時的なディレクトリの下の clone など）に左右されない。`test_gkg.py` の `TestT057.test_make_sealed_project_refuses_inside_project_under_tmp` は、`PROJECT` を一時的なディレクトリの下に差し替えて、仮の封印の記録の道具の「このプロジェクトの中か」の判定を、本物のプロジェクトから流すときも確かめる。
 - テストは、本物の `/Volumes/LACIE SHARE` を使わない。保存先のディスクは一時的なディレクトリで置き換え、マウントの検査だけを差し替える（本物の検査は `TestVolume` と、下の FAT32 のテストで確かめる）。
 
 ### 7.1 FAT32 のイメージの上でのテスト（T-021）

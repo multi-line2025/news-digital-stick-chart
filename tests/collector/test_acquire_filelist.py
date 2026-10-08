@@ -205,6 +205,10 @@ def rollback_to_before_step3(dst):
     写しの中だけで、periods（seq 1）と candidates（seq 2）より後の記録の行・.ots と、残した記録から
     指されない中身のファイル（sealed/<種類>-<sha256>.json。T-057）を外し、ファイル一覧のマニフェストを
     空にする。本物には触れない。
+    T-064：data/manifest も、手順3より前の形（.gitkeep と空のファイル一覧のマニフェストだけ）にする。
+    試しの run（T-063）のマニフェストのように、手順3より後に本物に足されたマニフェスト（GKG の
+    試しの run・正式な run、区分表など）は、名前によらず写しから外す。写しの封印の記録には
+    それらを指す記録が無いので、残すと本物の状態にテストが左右される。
     """
     sealed = os.path.join(dst, "sealed")
     path = os.path.join(sealed, "ledger.jsonl")
@@ -225,7 +229,15 @@ def rollback_to_before_step3(dst):
         content = re.match(r"[a-z0-9][a-z0-9-]*-[0-9a-f]{64}\.json\Z", name)
         if (m and int(m.group(1)) > keep) or (content and "sealed/" + name not in referenced):
             os.remove(os.path.join(sealed, name))
-    open(os.path.join(dst, "data", "manifest", "gdelt-filelist.jsonl"), "wb").close()
+    mdir = os.path.join(dst, "data", "manifest")
+    for name in os.listdir(mdir):
+        if name not in KEEP_IN_MANIFEST_DIR:
+            os.remove(os.path.join(mdir, name))
+    open(os.path.join(mdir, "gdelt-filelist.jsonl"), "wb").close()
+
+
+# 写しの data/manifest に残すもの（手順3より前の形）。ほかは rollback_to_before_step3 が外す（T-064）
+KEEP_IN_MANIFEST_DIR = (".gitkeep", "gdelt-filelist.jsonl")
 
 
 def tearDownModule():
@@ -291,6 +303,67 @@ class CopyCase(unittest.TestCase):
         aside = os.path.join(self.tmp, "aside")
         os.makedirs(aside, exist_ok=True)
         os.rename(os.path.join(self.project, rel), os.path.join(aside, os.path.basename(rel)))
+
+
+class TestPristineCopy(unittest.TestCase):
+    """T-064：写しは、本物の記録・マニフェストに何が足されていても、手順3より前の形になる。
+
+    本物には、試しの run（T-063）で seq 8 の gkg-run-start と試しの run のマニフェストが足され、
+    このあと正式な run の記録とマニフェストも足される。写しがそれらを持ち込むと、写しの上の
+    テスト（test_acquire_gkg など）が本物の状態に左右される。
+    """
+
+    EXPECTED_MANIFEST_DIR = {".gitkeep": b"", "gdelt-filelist.jsonl": b""}
+
+    def assert_before_step3(self, dst):
+        led = os.path.join(dst, "sealed", "ledger.jsonl")
+        recs = ledger.verify_chain(ledger.read_ledger(led))
+        self.assertEqual([r["kind"] for r in recs], ["periods", "candidates"])
+        referenced = {t["path"] for r in recs for t in r["targets"]}
+        for name in os.listdir(os.path.join(dst, "sealed")):
+            m = re.match(r"ledger\.jsonl\.seq(\d{6})(\.bitcoin)?\.ots\Z", name)
+            if m:
+                self.assertLessEqual(int(m.group(1)), 2, name)
+            if re.match(r"[a-z0-9][a-z0-9-]*-[0-9a-f]{64}\.json\Z", name):
+                self.assertIn("sealed/" + name, referenced)
+        mdir = os.path.join(dst, "data", "manifest")
+        got = {}
+        for name in os.listdir(mdir):
+            with open(os.path.join(mdir, name), "rb") as f:
+                got[name] = f.read()
+        self.assertEqual(got, self.EXPECTED_MANIFEST_DIR)
+
+    def test_pristine_copy_is_before_step3(self):
+        self.assert_before_step3(pristine_copy())
+
+    def test_rollback_removes_later_records_and_manifests(self):
+        """本物に後から足されうるもの（記録・.ots・中身・GKG の試しの run と正式な run・区分表の
+        マニフェスト）を仮に作り、写しの戻し方がそれらを名前によらず外すことを確かめる。"""
+        import test_gkg as tg
+        tmp = tempfile.mkdtemp(prefix="acq-rollback-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        dst = os.path.join(tmp, "proj")
+        kinds = ("periods", "candidates", "acquisition-start", "acquisition-result", "stats-order1",
+                 "stats-order1b", "method-access", "gkg-run-start", "gkg-run-start", "gkg-run-start")
+        tg.make_sealed_project(dst, kinds)
+        for seq in (1, 9):
+            with open(os.path.join(dst, "sealed", "ledger.jsonl.seq%06d.bitcoin.ots" % seq), "wb") as f:
+                f.write(b"x")
+        mdir = os.path.join(dst, "data", "manifest")
+        os.makedirs(mdir)
+        for name, body in ((".gitkeep", b""), ("gdelt-filelist.jsonl", b'{"start_seq":3}\n'),
+                           ("gdelt-gkg-trial.jsonl", b'{"row":"run-start"}\n'),
+                           ("gdelt-gkg-method.jsonl", b'{"row":"run-start"}\n'),
+                           ("gdelt-themes.jsonl", b"{}\n"), ("future-name.jsonl", b"{}\n")):
+            with open(os.path.join(mdir, name), "wb") as f:
+                f.write(body)
+        with open(os.path.join(dst, "sealed", "ledger.jsonl"), "rb") as f:
+            first_two = b"".join(f.read().splitlines(keepends=True)[:2])
+        rollback_to_before_step3(dst)
+        self.assert_before_step3(dst)
+        with open(os.path.join(dst, "sealed", "ledger.jsonl"), "rb") as f:
+            self.assertEqual(f.read(), first_two)       # 残す2行は、そのままのバイト列
+        self.assertTrue(os.path.exists(os.path.join(dst, "sealed", "ledger.jsonl.seq000001.bitcoin.ots")))
 
 
 # --- 関門 -------------------------------------------------------------------
@@ -751,24 +824,78 @@ class TestProductionPath(unittest.TestCase):
             s.transport = lambda u, t: None
 
     def test_test_seams_cannot_point_at_real_places(self):
-        tmp = tempfile.mkdtemp(prefix="acq-seam-")
-        self.addCleanup(shutil.rmtree, tmp, True)
+        """差し替えは、本物のプロジェクト・本物のホーム・一時的なディレクトリの外を指せない。
 
-        def seams(**kw):
-            base = dict(project=tmp, home=tmp, transport=None, sleep=None, clock=None,
-                        now=None, log=None, drand_fetch=None, ots_cmd="ots", ots_runner=None)
+        T-064（T-062 の監査 軽微-1）：プロジェクトの置き場所に左右されない形にした。以前は
+        「プロジェクトの親」を一時的なディレクトリの外の例に使っていたので、clone を一時的な
+        ディレクトリの下に置くと、その例が外にならずに失敗した。いまは次の場合ごとに確かめる。
+          - 置き場所によらず一時的なディレクトリの外にある値（本物のホーム、/）
+          - 一時的なディレクトリの判定を、このテストだけの新しいフォルダに差し替えた場合。本物の
+            プロジェクトとその親は、どこに置かれていても、その外になる
+          - 一時的なディレクトリの判定を、本物のプロジェクト（ホーム）の親に差し替えた場合。本物が
+            一時的なディレクトリの下にあっても、等しいかの判定で止まる
+        どの場合も、正しい値の組は関門まで進む（止まったのが差し替えた値のためだと分かる）。
+        """
+        real_home = pwd.getpwuid(os.getuid()).pw_dir
+        real_project = os.path.realpath(PROJECT)
+        never = mock.Mock(side_effect=AssertionError("関門まで進んではいけない"))
+
+        def seams(top, **kw):
+            base = dict(project=os.path.join(top, "p"), home=os.path.join(top, "h"),
+                        transport=None, sleep=None, clock=None, now=None, log=None,
+                        drand_fetch=None, ots_cmd="ots", ots_runner=None)
             base.update(kw)
             return acq._TestSeams(**base)
 
-        never = mock.Mock(side_effect=AssertionError("関門まで進んではいけない"))
+        def refused(bad, pattern=None):
+            with self.assertRaises(ValueError) as cm:
+                acq._acquire(_test=bad)
+            if pattern:
+                self.assertRegex(str(cm.exception), pattern)
+
+        def base_reaches_gate(top):
+            gate = mock.Mock(side_effect=AssertionError("関門"))
+            with mock.patch.object(acq, "check_gate", gate):
+                with self.assertRaisesRegex(AssertionError, "関門"):
+                    acq._acquire(_test=seams(top))
+            gate.assert_called_once()
+
+        tmp = tempfile.mkdtemp(prefix="acq-seam-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        fresh = tempfile.mkdtemp(prefix="acq-seam-tmp-")
+        self.addCleanup(shutil.rmtree, fresh, True)
+        fresh = os.path.realpath(fresh)
+
+        # 置き場所によらず外にある値（一時的なディレクトリの判定は本物のまま）
+        base_reaches_gate(tmp)
         with mock.patch.object(acq, "check_gate", never):
-            for bad in (seams(project=PROJECT), seams(home=pwd.getpwuid(os.getuid()).pw_dir),
-                        seams(project="/"), seams(home=os.path.dirname(PROJECT))):
-                with self.assertRaises(ValueError):
-                    acq._acquire(_test=bad)
+            for bad in (seams(tmp, project=PROJECT), seams(tmp, home=real_home),
+                        seams(tmp, project="/"), seams(tmp, home="/")):
+                refused(bad)
             for bad in (acq._production_seams(), object(), {"project": tmp}):
                 with self.assertRaises(TypeError):
                     acq._acquire(_test=bad)
+
+        # 一時的なディレクトリを、このテストだけの新しいフォルダにした場合
+        with mock.patch.object(acq.tempfile, "gettempdir", lambda: fresh):
+            base_reaches_gate(fresh)
+            with mock.patch.object(acq, "check_gate", never):
+                for bad in (seams(fresh, project=PROJECT), seams(fresh, project=os.path.dirname(real_project)),
+                            seams(fresh, home=PROJECT), seams(fresh, home=os.path.dirname(real_project)),
+                            seams(fresh, project=tmp), seams(fresh, home=tmp)):
+                    refused(bad, "一時的なディレクトリの下でなければならない")
+
+        # 一時的なディレクトリを、本物のプロジェクト・本物のホームの親にした場合（等しいかの判定で止まる）
+        for top, kw, pattern in ((os.path.dirname(real_project), {"project": PROJECT},
+                                  "本物のプロジェクトを指している"),
+                                 (os.path.dirname(os.path.realpath(real_home)), {"home": real_home},
+                                  "本物のホームを指している")):
+            top_tmp = os.path.join(top, "acq-seam-no-such-dir")
+            self.assertFalse(os.path.lexists(top_tmp))
+            with mock.patch.object(acq.tempfile, "gettempdir", lambda t=top: t), \
+                    mock.patch.object(acq, "check_gate", never):
+                refused(seams(top_tmp, **kw), pattern)
+            self.assertFalse(os.path.lexists(top_tmp))
         never.assert_not_called()
 
     def test_script_with_argument_does_nothing(self):

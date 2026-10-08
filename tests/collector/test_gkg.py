@@ -541,6 +541,15 @@ def make_sealed_project(root, kinds):
     return ledger.verify_chain(ledger.read_ledger(path))
 
 
+def dir_names(top):
+    """top の下のフォルダとファイルの名前の一覧（{相対フォルダ: [名前]}）。T-064。"""
+    out = {}
+    for d, ds, fs in os.walk(top):
+        out[os.path.relpath(d, top)] = sorted(ds + fs)
+    out.pop(".", None)
+    return out
+
+
 def fake_check_volume(volume):
     """一時的なディレクトリはマウント先でないので、マウントの検査だけを差し替える（本物は TestVolume）。"""
     st = os.lstat(volume)
@@ -2391,6 +2400,23 @@ class TestT057(RunCase):
         with open(led, "rb") as f:
             self.assertEqual(hashlib.sha256(f.read()).hexdigest(), before)
         self.assertEqual(len(make_sealed_project(os.path.join(self.tmp, "ok"), ("periods",))), 1)
+
+    def test_make_sealed_project_refuses_inside_project_under_tmp(self):
+        """T-064（T-057 の監査 軽-3）：「このプロジェクトの中か」の判定を、本物のプロジェクトから
+        流すときも確かめる。本物が一時的なディレクトリの外にあると、上のテストでは一時的なディレクトリの
+        判定が先に止めるので、この判定まで届かない。ここでは PROJECT を一時的なディレクトリの下の
+        仮のプロジェクトに差し替える（scratchpad の clone から流すときと同じ形）。"""
+        fake = os.path.join(self.tmp, "fake-project")
+        os.makedirs(os.path.join(fake, "sealed"))
+        outside = os.path.join(self.tmp, "fake-project-sibling")   # 名前の先頭が同じだけの隣
+        with mock.patch.object(sys.modules[__name__], "PROJECT", fake):
+            for bad in (fake, os.path.join(fake, "sealed"), os.path.join(fake, "a", "b")):
+                with self.subTest(bad=bad):
+                    with self.assertRaisesRegex(ValueError, "このプロジェクトの中を指している"):
+                        make_sealed_project(bad, ("periods",))
+            self.assertEqual(dir_names(fake), {"sealed": []})
+            # 対照：仮のプロジェクトの外（一時的なディレクトリの下）なら書ける
+            self.assertEqual(len(make_sealed_project(outside, ("periods",))), 1)
 
     def test_trial_row_without_gkg_run_seq_stops_official_start(self):
         self.run_once(mode="trial", committed_manifest=None)
