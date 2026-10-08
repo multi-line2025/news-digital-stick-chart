@@ -875,8 +875,10 @@ def check_order2_git(repo, data, records, rec, doc, base, read_json):
         ある記録、版が無いのに decide() を流したと書く記録を止める）。
       - 時機の条件：計算の前の確かめ（timing_guards・refs/replace/）に当たっていなければ、記録した refs と worktree_heads
         から F の集合と親を計算し直して f_set と照らし（order2_f_set）、git の条件と ledger の条件から ok を計算し直して
-        timing_check.ok と照らす。記録した参照の commit がこのリポジトリに無い（push していない参照など）ときは、F を
-        計算し直さず、照らさなかったことを返す（bundle で照らす。手順書16章）。
+        timing_check.ok と照らす。記録した参照や f_set の commit の一部がこのリポジトリに無い（push していない参照など）
+        ときも飛ばさない（差し戻し1回目 中-1）：手元にある参照から計算した F が記録の f_set に含まれること、手元にある
+        f_set の commit の親とマニフェストの行、手元の commit だけで時機の条件が破れていれば ok が False であることを照らし、
+        残りを照らさなかったことを返す（bundle で照らす。手順書16章）。
     違えば LedgerError。返り値: 照らさなかったことの説明の一覧。"""
     what = "seq %d の %s（順番2）" % (rec["seq"], ledger.ORDER2_KIND)
     head = doc["head"]
@@ -909,20 +911,48 @@ def check_order2_git(repo, data, records, rec, doc, base, read_json):
     if g["graft_file"] or g["shallow"] or any(x["ref"].startswith(ledger.REPLACE_REF_PREFIX) for x in tc["refs"]):
         return notes                       # 計算の前の確かめで止まった記録（ok が False であることは ledger が照らす）
     starts = sorted({x["commit"] for x in tc["refs"]} | set(tc["worktree_heads"]))
-    missing = [c for c in starts if not _git_ok(repo, "cat-file", "-e", c)]
+    present = [c for c in starts if _git_ok(repo, "cat-file", "-e", c)]
+    missing = [c for c in starts if c not in present]
+    recorded = sorted(tc["f_set"], key=lambda x: x["commit"])
+    by_commit = {c["commit"]: c for c in recorded}
+    # T-078 差し戻し1回目 中-1：手元に無い参照があっても、計算し直しを飛ばさない。手元にある参照の commit から辿った F は、
+    # 記録の f_set に（同じ親で）含まれなければならない。参照が全部手元にあれば、ちょうど同じでなければならない
+    f = order2_f_set(repo, present)
     if missing:
-        notes.append("seq %d の順番2の時機の条件の計算し直し（記録した参照・worktree の HEAD のうち %d 件の commit がこの"
-                     "リポジトリに無い。記録の bundle で照らす）" % (rec["seq"], len(missing)))
-        return notes
-    f = order2_f_set(repo, starts)
-    if f != sorted(tc["f_set"], key=lambda x: x["commit"]):
+        for c in f:
+            if by_commit.get(c["commit"]) != c:
+                raise ledger.LedgerError("%s：手元にある参照から計算した F の commit %s が、記録の timing_check.f_set に（同じ親で）"
+                                         "無い" % (what, c["commit"][:12]))
+    elif f != recorded:
         raise ledger.LedgerError("%s の timing_check.f_set が、記録した refs・worktree_heads から計算し直した F の集合と親と違う"
                                  % what)
-    ok_git, _why = order2_git_ok(repo, f, ledger.canonical_line(ref))
+    # 記録の f_set のうち手元にある commit（と、その親がすべて手元にあるもの）は、親が git と同じで、マニフェストに行がある
+    local, partial = [], bool(missing)
+    for c in recorded:
+        if not _git_ok(repo, "cat-file", "-e", c["commit"] + "^{commit}"):
+            partial = True
+            continue
+        actual = _rgit(repo, "rev-parse", c["commit"] + "^@").decode().split()
+        if actual != c["parents"] or not any(_has_rows(repo, c["commit"], p) for p in ORDER2_MANIFEST_PATHS):
+            raise ledger.LedgerError("%s の timing_check.f_set の commit %s の親が git と違うか、その版のマニフェストに行が無い"
+                                     % (what, c["commit"][:12]))
+        if not all(_git_ok(repo, "cat-file", "-e", p + "^{commit}") for p in c["parents"]):
+            partial = True
+            continue
+        local.append(c)
+    ok_git, _why = order2_git_ok(repo, local, ledger.canonical_line(ref))
     want = ok_git and ledger.order2_ledger_timing_ok(records, ref["seq"])
-    if want != tc["ok"]:
-        raise ledger.LedgerError("%s の timing_check.ok %r が、記録した f_set と sealed/ledger.jsonl から計算し直した時機の"
-                                 "条件 %r と違う" % (what, tc["ok"], want))
+    if not partial:
+        if want != tc["ok"]:
+            raise ledger.LedgerError("%s の timing_check.ok %r が、記録した f_set と sealed/ledger.jsonl から計算し直した時機の"
+                                     "条件 %r と違う" % (what, tc["ok"], want))
+        return notes
+    if tc["ok"] and not want:
+        raise ledger.LedgerError("%s の timing_check.ok が True なのに、手元にある f_set の commit で時機の条件が破れている"
+                                 "（%s）" % (what, _why or "順番1b が最初の method-access より後"))
+    notes.append("seq %d の順番2の時機の条件の計算し直しの一部（記録した参照・worktree の HEAD・f_set の commit のうち、この"
+                 "リポジトリに無いものがある。手元にあるものだけで照らし、記録と食い違わなかった。残りは記録の bundle で照らす）"
+                 % rec["seq"])
     return notes
 
 

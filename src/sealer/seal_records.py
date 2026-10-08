@@ -65,6 +65,18 @@ import ledger  # noqa: E402
 import netfetch  # noqa: E402
 import stamp  # noqa: E402
 import verify  # noqa: E402  T-078：順番2の記録の git を使う照合（verify と同じ関数）
+sys.path.append(os.path.join(os.path.dirname(HERE), "collector"))
+import privacy_scan  # noqa: E402  T-078 差し戻し1回目 中-3（収集係の検査器を読むだけ）
+
+
+def check_privacy(rec, doc):
+    """記録の行と中身の全体に、privacy_scan と同じ検査（許可していないメールアドレスの形）をかける（T-078 差し戻し1回目
+    中-3。順番2の記録には参照の名前などが入るため）。当たれば LedgerError（何も書かない）。見つけた文字列は出さない。"""
+    for what, data in (("記録の行", ledger.canonical_line(rec)), ("中身", ledger.canonical_line(doc))):
+        hits = privacy_scan.find_in_bytes(data)
+        if hits:
+            raise ledger.LedgerError("%s の%sに、許可していないメールアドレスの形がある（%d か所。privacy_scan と同じ検査。"
+                                     "参照の名前などを確かめる）。書かない" % (rec["kind"], what, sum(hits.values())))
 
 
 WRITTEN_KINDS = (ledger.THRESHOLD_ACCESS_KIND, ledger.ACQ_START_KIND, ledger.ACQ_RESULT_KIND,
@@ -153,6 +165,7 @@ def check_new(project, data_after, records_after, rec, doc):
     # T-037：順番1・1b の数・中身・位置（method-access より前、gkg-run-start の前に順番1b）
     ledger.check_stats_order(records_after, read)
     if kind == ledger.ORDER2_KIND:
+        check_privacy(rec, doc)
         # T-073 差し戻し2回目 2：HEAD のマニフェストから R と decide() の行き先を計算し直して照らす（verify は、記録を
         # 最初に含んだコミットの版で同じ計算をする）。T-078：ledger_head、counting_output の runs・inputs（check_order2_plan
         # の中）、記録の head が今の HEAD であること、コードの版と時機の条件の計算し直し（verify.check_order2_git。照らさな

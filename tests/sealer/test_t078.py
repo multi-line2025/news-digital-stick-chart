@@ -67,11 +67,14 @@ def no_day_file(mode, name):
     raise COUNTING.CountingError("日の集計を読めない（テストでは置かない）")
 
 
-def day_gz(day, mode="trial"):
-    """合成の日の集計（形式の版3。parse_day に通り、C7 が使える）。gzip の時刻は 0 にして、バイト列を決まったものにする。"""
-    lines = ["#\tgkg-day\t3\t%s\t%s" % (day, mode), "V\t0\tZZ_A", "V\t1\tZZ_B", "D\t1\t10", "D\t2T\t3",
-             "T\t1\t0\t5\t4\t6\t7", "T\t1\t1\t2\t3\t3\t4", "T\t2T\t0\t1\t1\t1\t1",
-             "S\tdocs_without_v1_theme\t2", "S\tdocs_without_v2_theme\t1", "S\tdocs_without_any_theme\t1"]
+def day_gz(day, mode="trial", c7=True):
+    """合成の日の集計（形式の版3。parse_day に通り、c7 が真なら C7 が使える。偽なら T の行が翻訳の組だけで、数える組の
+    C7 の分母が 0 になる）。gzip の時刻は 0 にして、バイト列を決まったものにする。"""
+    lines = ["#\tgkg-day\t3\t%s\t%s" % (day, mode), "V\t0\tZZ_A", "V\t1\tZZ_B", "D\t1\t10", "D\t2T\t3"]
+    if c7:
+        lines += ["T\t1\t0\t5\t4\t6\t7", "T\t1\t1\t2\t3\t3\t4"]
+    lines += ["T\t2T\t0\t1\t1\t1\t1",
+              "S\tdocs_without_v1_theme\t2", "S\tdocs_without_v2_theme\t1", "S\tdocs_without_any_theme\t1"]
     return gzip.compress(("\n".join(lines) + "\n").encode("ascii"), mtime=0)
 
 
@@ -88,6 +91,7 @@ class Synth(t31.GkgCase):
 
     one_b_sha = SEALED_SHA
     put_counting = True
+    c7 = True                      # 偽なら、日の集計で C7 が計算できない（(b) の形）
 
     def add_order1b(self, now, **over):
         over.setdefault("files", [{"path": p, "sha256": self.one_b_sha if p == COUNTING_REL else "f" * 64}
@@ -130,7 +134,7 @@ class Synth(t31.GkgCase):
         base = {k: start[k] for k in ledger.GKG_ROW_BASE}
         rows = []
         for d in COUNTING.TRIAL_DAYS:
-            data = day_gz(d)
+            data = day_gz(d, c7=self.c7)
             name = COUNTING.day_file_name("trial", self.rid, d)
             with open(os.path.join(self.store, name), "wb") as f:
                 f.write(data)
@@ -156,7 +160,9 @@ class Synth(t31.GkgCase):
     def write(self, stores=None):
         stores = stores if stores is not None else {"trial": self.store, "official": None}
         with mock.patch.object(ledger, "PROJECT_ROOT", self.root):
-            return seal_order2.seal(stores, self.bundle_path(), self.tick(), "ots", runner=tw.FakeOts())
+            rec, rel, ots, doc, self.written_commit = seal_order2.seal(stores, self.bundle_path(), self.tick(), "ots",
+                                                                       runner=tw.FakeOts())
+        return rec, rel, ots, doc
 
     def build(self, stores=None):
         """書かずに中身だけを作る（作り物の記録の元）。"""
@@ -418,18 +424,19 @@ class TestStopA(Synth):
 # ---------------------------------------------------------------- 4. (b) decide() が止まる
 
 class TestStopB(Synth):
-    def test_missing_file(self):
+    def test_missing_file_refused(self):
+        """置き場所にファイルが無いときは、decide() を流さず、何も書かずに止まる（差し戻し1回目 中-2。開かずに isfile で
+        確かめる）。空の置き場所でも同じ。"""
         name = COUNTING.day_file_name("trial", self.rid, COUNTING.TRIAL_DAYS[1])
         os.rename(os.path.join(self.store, name), os.path.join(self.tmp, name))
-        rec, _rel, _o, doc = self.write()
-        self.assertEqual((doc["status"], doc["stop_kind"]), ("stopped", "b"))
-        out = doc["counting_output"]
-        self.assertEqual([s["step"] for s in out["steps"]], ["trial", "stop"])
-        self.assertIn("../store-trial/", out["steps"][-1]["reason"])          # 手元の絶対パスを記録に入れない
-        self.assertNotIn(self.tmp, json.dumps(doc, ensure_ascii=False))
-        self.assertNotIn(os.path.realpath(self.tmp), json.dumps(doc, ensure_ascii=False))
-        self.commit("順番2（(b)）")
-        self.verify_zero("all")
+        empty = os.path.join(self.tmp, "empty")
+        os.makedirs(empty)
+        before = self.ledger_bytes()
+        for store in (self.store, empty):
+            with self.subTest(store=store):
+                with self.assertRaisesRegex(ledger.LedgerError, "日の集計 .*が無い"):
+                    self.write({"trial": store, "official": None})
+        self.assertEqual(self.ledger_bytes(), before)
 
     def test_changed_file(self):
         name = COUNTING.day_file_name("trial", self.rid, COUNTING.TRIAL_DAYS[0])
@@ -439,6 +446,20 @@ class TestStopB(Synth):
         self.assertEqual(doc["stop_kind"], "b")
         self.assertIn("sha256 が、マニフェストの day の行と一致しない", doc["counting_output"]["steps"][-1]["reason"])
         self.commit("順番2（(b)）")
+        self.verify_zero("all")
+
+
+class TestStopBC7(Synth):
+    c7 = False
+
+    def test_c7_not_usable(self):
+        rec, _rel, _o, doc = self.write()
+        self.assertEqual((doc["status"], doc["stop_kind"]), ("stopped", "b"))
+        out = doc["counting_output"]
+        self.assertEqual([s["step"] for s in out["steps"]], ["trial", "stop"])
+        self.assertIn("C7 が計算できない", out["steps"][-1]["reason"])
+        self.assertNotIn(self.tmp, json.dumps(doc, ensure_ascii=False))
+        self.assertNotIn(os.path.realpath(self.tmp), json.dumps(doc, ensure_ascii=False))
         self.verify_zero("all")
 
 
@@ -560,28 +581,168 @@ class TestForgeries(Synth):
         self.writer_refuses(doc, "今の HEAD")
 
 
+# ---------------------------------------------------------------- 6b. 差し戻し1回目
+
+class FailingOts(tw.FakeOts):
+    """ots の偽物。--version には答えるが、stamp は失敗する。"""
+
+    def __call__(self, cmd, input=None, capture_output=True, timeout=None):
+        if cmd[1:] == ["--version"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=b"v0.7.2", stderr=b"")
+        return subprocess.CompletedProcess(cmd, 1, stdout=b"", stderr=b"stamp failed (test)")
+
+
+class TestCommitInEntry(Synth):
+    """中-2：入口は、書いた記録・中身・.ots だけをパス指定で add し、続けてコミットする（作成者とコミッタは noreply の1件、
+    追記行なし）。書いたあとにコミットを待つ間を作らない。"""
+
+    def test_written_and_committed(self):
+        before = self.head()
+        rec, rel, ots, doc = self.write()
+        self.assertEqual(self.git("status", "--porcelain"), b"")
+        self.assertEqual(self.head(), self.written_commit)
+        self.assertEqual(self.git("rev-parse", "HEAD^").decode().strip(), before)
+        files = set(self.git("show", "--name-only", "--format=", "HEAD").decode().split())
+        self.assertEqual(files, {"sealed/ledger.jsonl", rel, os.path.relpath(ots, self.root)})
+        who = "%s <%s>" % (seal_order2.AUTHOR_NAME, sorted(seal_order2.privacy_scan.ALLOWED_ADDRESSES)[0])
+        self.assertEqual(self.git("log", "-1", "--format=%an <%ae>|%cn <%ce>").decode().strip(), who + "|" + who)
+        self.assertEqual(self.git("log", "-1", "--format=%B").decode().strip(), seal_order2.COMMIT_MESSAGE)
+        self.verify_zero("all")
+
+    def test_ots_failure_still_commits_record(self):
+        with mock.patch.object(ledger, "PROJECT_ROOT", self.root), \
+                self.assertRaisesRegex(ledger.LedgerError, "コミット [0-9a-f]{12} に入れた"):
+            seal_order2.seal({"trial": self.store, "official": None}, self.bundle_path(), self.tick(), "ots",
+                             runner=FailingOts())
+        self.assertEqual(self.git("status", "--porcelain"), b"")
+        last = self.records()[-1]
+        self.assertEqual(last["kind"], O2)
+        files = set(self.git("show", "--name-only", "--format=", "HEAD").decode().split())
+        self.assertEqual(files, {"sealed/ledger.jsonl", last["targets"][0]["path"]})
+
+
+class TestPrivacyBeforeWrite(Synth):
+    """中-3：参照の名前などが記録に入るので、書く前に、記録の行と中身の全体に privacy_scan と同じ検査をかける。"""
+
+    def test_branch_name_with_address_refused(self):
+        name = "taro" + "@" + "example" + ".org"
+        doc = self.build()                                   # 枝を作る前の正直な中身（下の単体の確かめに使う）
+        self.git("branch", name)
+        before = self.ledger_bytes()
+        with self.assertRaisesRegex(ledger.LedgerError, "許可していないメールアドレスの形がある"):
+            self.write()
+        self.assertEqual(self.ledger_bytes(), before)
+        self.assertEqual(self.git("status", "--porcelain"), b"")
+        # 中身に入れた形も、記録の行に入れた形も止める（書く仕組みの照合）
+        rec = {"seq": 1, "kind": O2, "note": "x", "targets": [], "prev_hash": "0" * 64, "recorded_at": "x"}
+        with self.assertRaisesRegex(ledger.LedgerError, "中身に"):
+            seal_records.check_privacy(rec, dict(doc, python=name))
+        with self.assertRaisesRegex(ledger.LedgerError, "記録の行に"):
+            seal_records.check_privacy(dict(rec, note=name), doc)
+        seal_records.check_privacy(rec, doc)
+
+
+class TestPartialTiming(Synth):
+    """中-1：記録した参照の一部の commit が手元に無くても、(a) の計算し直しを飛ばさない。"""
+
+    BOGUS = {"ref": "refs/heads/zzz-not-here", "commit": "0123456789abcdef0123456789abcdef01234567"}
+
+    def with_bogus(self, tc, **over):
+        refs = sorted(tc["refs"] + [self.BOGUS], key=lambda x: x["ref"])
+        return dict(tc, refs=refs, **over)
+
+    def test_bogus_ref_does_not_hide_violation(self):
+        """監査の test_1：枝の破れのある f_set に、手元に無い参照を1件足し、ok を True にする。止まる。"""
+        honest = self.build()
+        self.side_branch_violation()
+        doc_a = self.build()
+        self.assertEqual(doc_a["stop_kind"], "a")
+        forged = dict(honest, timing_check=self.with_bogus(doc_a["timing_check"], ok=True, reason=None),
+                      bundle=doc_a["bundle"])
+        self.raw_write(forged)
+        self.commit("作り物（手元に無い参照で計算し直しを飛ばす）")
+        self.verify_stops("手元にある f_set の commit で時機の条件が破れている", "all")
+
+    def test_bogus_ref_and_dropped_commit(self):
+        """手元に無い参照を足したうえで、枝の commit を f_set から外す。手元の参照から計算した F に含まれないので止まる。"""
+        honest = self.build()
+        bad = self.side_branch_violation()
+        tc = self.build()["timing_check"]
+        f = [c for c in tc["f_set"] if c["commit"] != bad]
+        forged = dict(honest, timing_check=self.with_bogus(tc, ok=True, reason=None, f_set=f))
+        self.raw_write(forged)
+        self.commit("作り物（手元に無い参照と、f_set から外した commit）")
+        self.verify_stops("手元にある参照から計算した F の commit %s が、記録の timing_check.f_set に" % bad[:12], "all")
+
+    def test_honest_with_missing_ref_is_partially_checked(self):
+        """破れの無い記録に、手元に無い参照が入っているだけなら、手元の分を照らして 0（残りは照らさなかった）。"""
+        doc = self.build()
+        self.raw_write(dict(doc, timing_check=self.with_bogus(doc["timing_check"])))
+        self.commit("手元に無い参照の入った記録（テスト）")
+        out = self.verify_zero("all")
+        self.assertIn("時機の条件の計算し直しの一部", out)
+
+
+class TestLight1(Synth):
+    """軽-1：bundle の list-heads と記録の照合、F の集合と git log --all の照合を外すと落ちる。"""
+
+    def test_bundle_list_heads_must_match(self):
+        self.git("branch", "extra")
+        real = verify.order2_timing_now
+
+        def drop_extra(repo, records, ref):
+            tc, g = real(repo, records, ref)
+            return dict(tc, refs=[r for r in tc["refs"] if r["ref"] != "refs/heads/extra"]), g
+        before = self.ledger_bytes()
+        with mock.patch.object(verify, "order2_timing_now", drop_extra), \
+                self.assertRaisesRegex(ledger.LedgerError, "list-heads が、記録する refs・worktree の HEAD と合わない"):
+            self.write()
+        self.assertEqual(self.ledger_bytes(), before)
+
+    def test_f_set_must_match_log_all(self):
+        real = verify.order2_f_set
+        self.assertGreaterEqual(len(real(verify.Repo(self.root), [self.head()])), 1)
+        before = self.ledger_bytes()
+        with mock.patch.object(verify, "order2_f_set", lambda repo, starts: real(repo, starts)[1:]), \
+                self.assertRaisesRegex(ledger.LedgerError, "F の集合が、git log --all と"):
+            self.write()
+        self.assertEqual(self.ledger_bytes(), before)
+
+
 # ---------------------------------------------------------------- 7. 本物の固定したコミットの clone
 
 class TestRealClone(t73.Order2Case):
     """本物の記録（固定したコミット。seq 1〜8 と試しの run のマニフェスト）に R の gkg-run-result を封印した clone で、
-    空の置き場所（日の集計を置かない）で順番2を書くと (b) になり、verify all --rev auto が 0 で通る。順番1b（seq 6）が縛る
-    counting.py の版は、その記録の head（8e2c29b）の版として見つかる。"""
+    空の置き場所では何も書かずに止まり（差し戻し1回目 中-2）、名前だけ同じで中身の違うファイル（日の集計ではない）を置いた
+    置き場所で順番2を書くと (b) になり、verify all --rev auto が 0 で通る。順番1b（seq 6）が縛る counting.py の版は、その
+    記録の head（8e2c29b）の版として見つかる。"""
 
     def test_b_with_rev_auto_and_doc_block(self):
         self.sealed()
         self.commit("gkg-run-result")
-        store = os.path.join(self.td.name, "empty-store")
+        store = os.path.join(self.td.name, "store")
         os.makedirs(store)
+        before = self.ledger_bytes()
+        with mock.patch.object(ledger, "PROJECT_ROOT", self.c), \
+                self.assertRaisesRegex(ledger.LedgerError, "日の集計 .*が無い"):
+            seal_order2.seal({"trial": store, "official": None}, os.path.join(self.td.name, "a.bundle"), t73.NOW, "ots",
+                             runner=tw.FakeOts())
+        self.assertEqual(self.ledger_bytes(), before)
+        for d in COUNTING.TRIAL_DAYS:
+            with open(os.path.join(store, COUNTING.day_file_name("trial", self.rid, d)), "wb") as f:
+                f.write(b"not the aggregate (test)\n")
         with mock.patch.object(ledger, "PROJECT_ROOT", self.c):
-            rec, _rel, _o, doc = seal_order2.seal({"trial": store, "official": None},
-                                                  os.path.join(self.td.name, "b.bundle"), t73.NOW, "ots",
-                                                  runner=tw.FakeOts())
+            rec, _rel, _o, doc, commit = seal_order2.seal({"trial": store, "official": None},
+                                                          os.path.join(self.td.name, "b.bundle"), t73.NOW, "ots",
+                                                          runner=tw.FakeOts())
+        self.assertIn("sha256 が、マニフェストの day の行と一致しない", doc["counting_output"]["steps"][-1]["reason"])
+        self.assertEqual(subprocess.run(["git", "-C", self.c, "rev-parse", "HEAD"], check=True,
+                                        capture_output=True).stdout.decode().strip(), commit)
         self.assertEqual(rec["seq"], self.res["seq"] + 1)
         self.assertEqual((doc["stop_kind"], doc["ref_1b_seq"]), ("b", 6))
         self.assertEqual(doc["code"]["sha256"], SEALED_SHA)
         self.assertEqual(doc["code"]["commit"], "8e2c29b1afe7a9dc494e298b04b53dbbe115eaab")
         self.assertTrue(doc["timing_check"]["ok"])
-        self.commit("順番2（(b)、テスト）")
         code, out, err = tl.run_verify_inproc(self.c, "all", "--rev", "auto")
         self.assertEqual(code, 0, err)
         self.assertIn("25 項目を head の版から計算し直して照らした", out)
@@ -686,7 +847,9 @@ class TestDocT078(unittest.TestCase):
         for phrase in ("## 16. 順番2の封印（stats-order2。T-078）", "src/sealer/seal_order2.py", "--trial-store",
                        "--bundle-out", "24時間以内", "ref_1b_seq", "timing_check", "timing_guards", "code.found",
                        "counting_output.inputs", "--day-files", "待った試みは記録に残らない", "<!-- test:order2 -->",
-                       "getattr", "git rev-parse HEAD", "load_counting", "bound_paths"):
+                       "getattr", "git rev-parse HEAD", "load_counting", "bound_paths",
+                       "コミットと投稿の前に、手で捨てる形が残る", "順番2と順番3とで揃っていない", "isfile",
+                       "計算し直しを飛ばさない"):
             self.assertIn(phrase, text)
         self.assertNotIn("`stats-order2` は、まだ許可リスト（`ledger.ALLOWED_KINDS`）に入れていない", text)
 

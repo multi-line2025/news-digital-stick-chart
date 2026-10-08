@@ -14,6 +14,8 @@
   1. 関門（order2_gate.gate_with_manifests → ledger.require_order2_gate）。閉じていれば、何も書かずに止まる（待つ形も
      ここで閉じる。手順書14章）。開けば、記録に入れる trial_result・input_run・gkg_run_result と、git の確かめに通った
      HEAD の版のマニフェストのバイト列が決まる。input_run の mode の置き場所が引数に無ければ、何も書かずに止まる。
+     input_run の run の3日のファイルが置き場所にあることを、開かずに isfile で確かめる（無ければ何も書かない。
+     差し戻し1回目 中-2）。
   2. 参照する順番1b の記録：この記録より前の stats-order1b の seq の最大（counting.expected_ref_1b と同じ決め方）。
   3. 時機の条件（(a)）：verify.order2_timing_now（graft・浅い clone・refs/replace/ の確かめ、for-each-ref、worktree の
      一覧、F の集合と親、ledger の条件）。確かめた内容を timing_check と timing_guards に組で入れる。続けて
@@ -26,7 +28,9 @@
      `counting.py apply`）。stopped なら "b"、decided（と pending）なら null。日の集計を開くのは、この decide() だけ。
   6. HEAD と作業ツリーがはじめと同じことを確かめ直し、seal_records.write_doc_record で書く（書く前の照合：
      ledger.check_order2_run・check_order2_doc・check_order2_plan と verify.check_order2_git。どれかに通らなければ
-     何も書かない）。そのあと、その seq の .ots を作る。
+     何も書かない。記録の行と中身に privacy_scan と同じ検査もかける。差し戻し1回目 中-3）。そのあと、その seq の .ots を作る。
+  7. 書いた記録・中身・.ots だけをパス指定で add し、続けてコミットする（作成者とコミッタは noreply の1件、追記行なし。
+     差し戻し1回目 中-2）。結果は、コミットのあとで画面に出す。
 
 (a)・(b)・(c) と決まった記録は、どれも書く。待つ（decide() が pending）は、関門が開いたあとでは起きない（関門は R の
 gkg-run-result を求め、gkg-run-result は R の run-complete を求めるので、decide() は試しの run の段に進む）。そのため、
@@ -48,9 +52,15 @@ sys.path.insert(0, HERE)
 
 import ledger  # noqa: E402
 import order2_gate  # noqa: E402
+sys.path.append(os.path.join(os.path.dirname(HERE), "collector"))
+import privacy_scan  # noqa: E402  （収集係の検査器を読むだけ。書き換えない。T-078 差し戻し1回目 中-3・コミットの作成者）
 import seal_records  # noqa: E402
 import stamp  # noqa: E402
 import verify  # noqa: E402
+
+# コミットの作成者とコミッタ（CLAUDE.md「作成者と個人情報」）。アドレスは privacy_scan の許可の一覧の1件から取る
+AUTHOR_NAME = "Multi-line"
+COMMIT_MESSAGE = "順番2の試みの記録（stats-order2。src/sealer/seal_order2.py が書いてコミットした）"
 
 BUNDLE_REASON = ("書いた時点では公開していない。公開は、手順書16章の公開の前の検査（個人情報と、置けるデータの制限）に"
                  "通ったときだけ、このバイト列のまま行う")
@@ -85,6 +95,43 @@ def check_stores(stores, run):
         raise ledger.LedgerError("decide() が %s の run（run_id %s）の段に進む形なのに、その置き場所が引数に無い"
                                  "（--%s-store）。書かない" % (run["mode"], run["run_id"], run["mode"]))
     return out
+
+
+def check_day_files_present(stores, run):
+    """decide() の前に、input_run の run の3日のファイル（gkg-<mode>-<run_id>-day-<YYYYMMDD>.tsv.gz）が置き場所にあることを、
+    開かずに os.path.isfile で確かめる（T-078 差し戻し1回目 中-2）。無ければ何も書かずに止まる。空の置き場所や違う置き場所を
+    渡して (b) を作ることを、これで止める（ファイルの中身が違う・壊れているときは、decide() が (b) で止まる）。"""
+    if run is None:
+        return
+    missing = []
+    for d in ledger.ORDER2_TRIAL_DAYS:
+        name = "gkg-%s-%s-day-%s.tsv.gz" % (run["mode"], run["run_id"], d.replace("-", ""))
+        if not os.path.isfile(os.path.join(stores[run["mode"]], name)):
+            missing.append(name)
+    if missing:
+        raise ledger.LedgerError("%s の置き場所に、日の集計 %s が無い。置き場所を確かめる。書かない"
+                                 % (run["mode"], "、".join(missing)))
+
+
+def author_args():
+    allowed = sorted(privacy_scan.ALLOWED_ADDRESSES)
+    if len(allowed) != 1:
+        raise ledger.LedgerError("作成者のアドレスが1件に決まらない。コミットしない")
+    return ["-c", "user.name=" + AUTHOR_NAME, "-c", "user.email=" + allowed[0]]
+
+
+def commit_record(repo, root, rec, ots_path):
+    """書いた記録・中身・.ots（あれば）だけを、パスを指定して add し、続けてコミットする（作成者とコミッタは noreply の1件、
+    追記行なし）。T-078 差し戻し1回目 中-2：書いたあとにコミットを待つ間を作らない。返り値: コミットの 40 桁。"""
+    paths = ["sealed/ledger.jsonl"] + [t["path"] for t in rec["targets"]]
+    if ots_path is not None:
+        paths.append(os.path.relpath(ots_path, root).replace(os.sep, "/"))
+    _git(repo, "add", "--", *paths)
+    staged = set(_git(repo, "diff", "--cached", "--name-only").decode("utf-8").split())
+    if staged != set(paths):
+        raise ledger.LedgerError("コミットに入るファイル（%s）が、書いたものと違う。コミットしない" % "、".join(sorted(staged)))
+    _git(repo, *(author_args() + ["commit", "-q", "-m", COMMIT_MESSAGE]))
+    return _git(repo, "rev-parse", "HEAD").decode().strip()
 
 
 def _outside(root, path):
@@ -132,6 +179,7 @@ def build_doc(root, data, records, stores, bundle_out):
     got, trial, official = order2_gate.gate_with_manifests()              # 1. 関門
     run = got["input_run"]
     stores = check_stores(stores, run)
+    check_day_files_present(stores, run)
     seq = len(records) + 1
     ref = ledger.order2_ref_1b(records, seq)                                # 2. 参照する順番1b
     if ref is None:
@@ -179,18 +227,29 @@ def build_doc(root, data, records, stores, bundle_out):
 
 
 def seal(stores, bundle_out, now, ots_cmd, runner=subprocess.run):
-    """順番2の試みを 1 件追記する。stores は {"trial": パスか None, "official": パスか None}。
-    返り値: (記録, 中身のパス, .ots のパス か None, 中身)。"""
+    """順番2の試みを 1 件追記し、続けてコミットする。stores は {"trial": パスか None, "official": パスか None}。
+    返り値: (記録, 中身のパス, .ots のパス か None, 中身, コミット)。
+    .ots を作れなかったとき（記録は鎖に残る）も、記録と中身をコミットしてから止まる（コミットを待つ間を作らない）。"""
     root = ledger.check_sealed_inside(ledger.PROJECT_ROOT)
+    repo = verify.Repo(root)
     data, records = seal_records.load_checked(root, ots_cmd, runner=runner)
     doc = build_doc(root, data, records, stores, bundle_out)
     n = sum(1 for r in records if r["kind"] == ledger.ORDER2_KIND) + 1
     note = ("統計係の順番2の試み（docs/stats/counting.md 4章、docs/stats/seal-order1.md 3章 (2)）。stats-order2 の %d 件目。"
             "status %s、stop_kind %s。参照する順番1b は seq %d。採用の区切りには使わない。"
             % (n, doc["status"], doc["stop_kind"] or "null", doc["ref_1b_seq"]))
-    rec, rel, ots_path = seal_records.write_doc_record(root, ledger.ORDER2_KIND, doc, data, note, now, ots_cmd,
-                                                       runner=runner)
-    return rec, rel, ots_path, doc
+    try:
+        rec, rel, ots_path = seal_records.write_doc_record(root, ledger.ORDER2_KIND, doc, data, note, now, ots_cmd,
+                                                           runner=runner)
+    except ledger.LedgerError as e:
+        after = ledger.verify_chain(ledger.read_ledger(os.path.join(root, "sealed", "ledger.jsonl")))
+        if len(after) > len(records):          # 追記したあと（.ots の段）で止まった：記録と中身だけをコミットする
+            c = commit_record(repo, root, after[-1], None)
+            raise ledger.LedgerError("%s（記録 seq %d と中身はコミット %s に入れた。stamp.py stamp --seq %d で .ots を作って"
+                                     "コミットする）" % (e, after[-1]["seq"], c[:12], after[-1]["seq"])) from None
+        raise
+    commit = commit_record(repo, root, rec, ots_path)
+    return rec, rel, ots_path, doc, commit
 
 
 def main(argv=None):
@@ -202,7 +261,8 @@ def main(argv=None):
     a = p.parse_args(argv)
     now = datetime.datetime.now(datetime.timezone.utc)
     try:
-        rec, rel, ots_path, doc = seal({"trial": a.trial_store, "official": a.official_store}, a.bundle_out, now, a.ots)
+        rec, rel, ots_path, doc, commit = seal({"trial": a.trial_store, "official": a.official_store}, a.bundle_out, now,
+                                               a.ots)
     except ledger.LedgerError as e:
         print("失敗（順番2の記録は書いていない）: %s" % e, file=sys.stderr)
         return 1
@@ -212,6 +272,7 @@ def main(argv=None):
           % (doc["status"], doc["stop_kind"] or "null", doc["ref_1b_seq"], "満たす" if doc["timing_check"]["ok"] else
              "満たさない", "履歴にある" if doc["code"]["found"] else "履歴に無い"))
     print("bundle: sha256 %s（公開していない）" % doc["bundle"]["sha256"])
+    print("コミット: %s（記録・中身・.ots。結果は、このコミットのあとで表示している）" % commit)
     if ots_path is not None:
         print("時刻証明: %s" % os.path.relpath(ots_path, ledger.PROJECT_ROOT))
     return 0

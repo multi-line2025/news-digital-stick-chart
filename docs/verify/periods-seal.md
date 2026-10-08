@@ -1254,12 +1254,14 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_order2.py \
 
 - ルートは、このファイルの場所から決まる（`order2_gate.py` と同じ。引数では変えられない）。
 - `--official-store` は、`decide()` が正式な run の段に進む形のときだけ要る。今の記録（R が完了していて、その `gkg-run-result` が seq 9 にある）では、段は試しの run なので要らない。
-- 終了コード：書いたら 0。何も書かずに止まったら 1（理由を標準エラーに書く）。引数の誤りは 2。
+- 終了コード：書いてコミットしたら 0。何も書かずに止まったら 1（理由を標準エラーに書く）。引数の誤りは 2。
+- 結果（status・stop_kind など）は、コミットのあとで画面に出す（T-078 差し戻し1回目 中-2）。
 
 1回の実行は、次の順で進む。途中で止まったら、それより後のことはしない。
 
 0. 鎖とすべての `.ots` を検証する。作業ツリーがきれい（`git status --porcelain` が空）で、HEAD を40桁で決める。
 1. **関門**（`order2_gate.gate_with_manifests` → `ledger.require_order2_gate`。14章の手順1と同じ）。閉じていれば何も書かない。開けば、`trial_result`・`input_run`・`gkg_run_result` と、git の確かめに通った HEAD の版のマニフェストのバイト列が決まる。`input_run` の mode の置き場所が引数に無ければ、何も書かない。
+   - 続けて、`input_run` の run の3日のファイル（`gkg-<mode>-<run_id>-day-<YYYYMMDD>.tsv.gz`）が置き場所にあることを、開かずに `os.path.isfile` で確かめる。1つでも無ければ何も書かない（T-078 差し戻し1回目 中-2。空の置き場所や違う置き場所を渡して (b) を作れないようにする。中身が違う・壊れているときは、`decide()` が (b) で止まる）。
 2. **参照する順番1b の記録**：この記録より前の `stats-order1b` の seq の最大（`ledger.order2_ref_1b`。`counting.expected_ref_1b` と同じ決め方。seal-order1.md 103行）。
 3. **時機の条件 (a)**（`verify.order2_timing_now`。seal-order1.md 3章 (2) の108〜121行）：
    - 本体の worktree で動かす（`--git-dir` と `--git-common-dir` が同じ。counting.md 4章 (3) の F を数える範囲）。
@@ -1273,7 +1275,8 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_order2.py \
 5. **行き先**：(a) を満たさなければ `stop_kind` は `"a"`。満たし、版が履歴に無ければ `"c"`。どちらでもなければ、見つかった版の `counting.py` だけを置いた空のフォルダ（`_BoundDir` と同じ形）で、`-I`・`-B`・空の `pycache_prefix` の Python で `counting.py apply` を流す（`verify.run_order2_decide`）。`stopped` なら `"b"`、`decided` なら null。
    - 日の集計を開くのは、この `decide()` だけである。入口のプロセスは置き場所のファイルを開かない。
    - 置き場所は、一時のフォルダの決まった名前のリンク（`store-trial`・`store-official`）を通し、`../store-trial` の形で渡す。`decide()` の止まった理由の文に置き場所のパスが入るので、手元の絶対パス（利用者の名前やボリュームの名前）を記録に入れないためである。
-6. HEAD と作業ツリーがはじめと同じことを確かめ直し、書く（`seal_records.write_doc_record`。書く前の照合に通らなければ何も書かない）。そのあと、その seq の `.ots` を作る。
+6. HEAD と作業ツリーがはじめと同じことを確かめ直し、書く（`seal_records.write_doc_record`。書く前の照合に通らなければ何も書かない）。書く前の照合には、記録の行と中身の全体に `privacy_scan` と同じ検査（許可していないメールアドレスの形）をかけることも入る（T-078 差し戻し1回目 中-3。参照の名前などが記録に入るため。当たれば何も書かない）。そのあと、その seq の `.ots` を作る。
+7. 続けて、書いた記録・中身・`.ots` だけをパス指定で add し、コミットする（作成者とコミッタは CLAUDE.md「作成者と個人情報」の1件、追記行なし。T-078 差し戻し1回目 中-2）。`.ots` が作れなかったときも、記録と中身をコミットしてから止まる。
 
 順番の決め方（前提 → 結論）：
 - 前提1：seal-order1.md 172行と14章の手順2は、(a) と (c) を `decide()` の前に確かめ、(a)・(c) の記録は `decide()` の出力を持たないと決めている。
@@ -1303,7 +1306,7 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_order2.py \
 - 形（`ledger.check_order2_run` と `ledger.check_order2_doc`。`check_stats_order` から呼ぶ）：キーの集まり、`status` と `stop_kind` と `counting_output.status` の対応、`ref_1b_seq` の決め方、`timing_check` の形、計算の前の確かめか `refs/replace/` か ledger の条件に当たるなら `ok` が false、`ok` が false ⇔ `stop_kind` が `"a"`、`code` の形と、`"c"` なら `found` が false・null と `"b"` なら true、`bundle` の形、`counting_output` のキー・正式な数え方（順番1b の記録の `C7`・`decided`）・`steps` の形・`inputs`・`results`（基準の案の識別子。どれも `official: false`）・`coverage` の形。
 - 行き先と出力（`ledger.check_order2_plan`）：14章の照合に加えて、`counting_output.runs` がマニフェストから計算し直したものと同じこと、決まった記録の `counting_output.inputs` が、`input_run` の run の `gkg-run-result` が縛るマニフェストの day の行（3日のファイルの名前と sha256）と同じこと。
 - git（`verify.check_order2_git`）：`head` の版の記録、`head` の版の二つのマニフェストの sha256 が `manifest_sha256` と同じ、`head` が記録を最初に含んだコミット（書く仕組みでは今の HEAD）の祖先、コードの版を探し直した結果が `code.found`・`code.commit` と同じ（(c) を書いたのに版が履歴にある記録は、ここで止まる）、記録した `refs`・`worktree_heads` から F の集合と親を計算し直して `f_set` と同じ、それと ledger から計算し直した (a) の結果が `timing_check.ok` と同じ。
-  - 記録した参照の commit がリポジトリに無い（push していない参照など）ときは、F を計算し直さず「照らさなかった」と出す。そのときは bundle で照らす（下の「第三者の確かめ方」）。
+  - 記録した参照や `f_set` の commit の一部がリポジトリに無い（push していない参照など）ときも、計算し直しを飛ばさない（T-078 差し戻し1回目 中-1）。手元にある参照から計算した F が記録の `f_set` に（同じ親で）含まれること、手元にある `f_set` の commit の親とマニフェストの行が git と同じこと、手元の commit だけで時機の条件が破れていれば `ok` が false であることを照らす。照らせない残りは「照らさなかった」と出し、bundle で照らす（下の「第三者の確かめ方」）。
 - `decide()` の流し直し（`verify.py stats-order --day-files <置き場所>`、`all --day-files`）：決まった記録の3日のファイルが置き場所にそろっていれば、封印した版の `decide()` を同じ形で流し直し、出力が `counting_output` と同じことを確かめる。置き場所を渡さないときは「照らさなかった」と出す。基準の結果（`results`）と欄の手厚さ（`coverage`）の値は、日の集計が無いと照らせないためである。
 
 テストは `tests/sealer/test_t078.py` にある。
@@ -1311,6 +1314,7 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_order2.py \
 - 作り物の記録（`TestForgeries`）：`stop_kind` を偽る、`counting_output` を偽る（`runs`・正式な数え方・基準の結果）、`inputs` を偽る、履歴に版があるのに (c) を書く、(a) の内容（`ok`・`f_set`・親）を偽る。どれも、書く仕組みは何も書かず、照合を飛ばして足すと verify が止める（基準の結果だけを偽ったものは `--day-files` を渡したときに止まる）。
 - 本物の記録の固定したコミットの clone（`TestRealClone`）：R の `gkg-run-result` を封印し、空の置き場所で書くと (b) になり、`verify.py all --rev auto` が 0 で、順番1・1b の 25 項目の照合も通る。下の塊も流す。
 - `TestM6PendingCloses`・`TestM3PlanShaRow`（T-077 の監査 軽-4）。
+- 差し戻し1回目：`TestPartialTiming`（手元に無い参照を足しても、(a) の計算し直しを飛ばさない）、`TestStopB.test_missing_file_refused`（置き場所にファイルが無ければ何も書かない）、`TestCommitInEntry`（書いてすぐコミットする。`.ots` が作れないときも記録はコミットする）、`TestPrivacyBeforeWrite`（参照の名前にメールアドレスの形があれば書かない）、`TestLight1`（bundle の list-heads と、F の集合と `--all` の照合）。
 
 ### 書く前に確かめること（運営の手順）
 
@@ -1319,20 +1323,18 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_order2.py \
 3. 置き場所の3日のファイルを、自分で開いて中身を見ない。日の集計を開くのは、この入口が流す `decide()` だけにする。ファイルの名前（`gkg-trial-e15ed53595c70035-day-YYYYMMDD.tsv.gz`）が置き場所にあることは、`ls` で確かめてよい。
 4. `--bundle-out` は、プロジェクトと Git の外の、まだ無いファイルのパスにする（入口が確かめる）。
 5. ots が使えること（書いたあとに `.ots` を作る）。
-6. 1回だけ行う。結果を見てからもう一度書いても、順番3が参照する記録は変わらない（待つを除いて seq が最も小さい記録。counting.md 4章 (3) の5）。2件目以降の記録も消えず、公開される。
+6. 1回だけ行う。入口がコミットまで行ったあとは、結果を見てからもう一度書いても、順番3が参照する記録は変わらない（待つを除いて seq が最も小さい記録。counting.md 4章 (3) の5）。2件目以降の記録も消えず、公開される。ただし、push・時刻証明の確定・投稿より前に、手でコミットを捨てる形は残る（下の限界）。
 
 ### コミットと .ots
 
-書いたあと、記録・中身・`.ots` だけをコミットする（マニフェストを変えないコミットにする。14章）。
+記録・中身・`.ots` のコミットは、入口が書いたすぐあとに行う（手順7。マニフェストを変えないコミット。14章）。そのあと、次を流す。
 
 ```sh
-git add sealed/ledger.jsonl sealed/stats-order2-<sha256>.json sealed/ledger.jsonl.seq<6桁>.ots
-git commit -m "順番2（stats-order2）の記録"      # 作成者とコミッタは CLAUDE.md「作成者と個人情報」の1件（git -c で付ける）
 PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py all --rev auto
 PYTHONDONTWRITEBYTECODE=1 python3 -B src/collector/privacy_scan.py --all-history
 ```
 
-- `.ots` が作れなかったときは、記録は鎖に残る。`stamp.py stamp --seq N` で作ってから進める（7章）。Bitcoin の確定は、ほかの記録と同じく5章の手順で upgrade する。
+- `.ots` が作れなかったときは、記録と中身だけがコミットされ、入口は 1 で止まる。`stamp.py stamp --seq N` で `.ots` を作り、パスを指定してコミットしてから進める（7章）。Bitcoin の確定は、ほかの記録と同じく5章の手順で upgrade する。
 - push の前に `privacy_scan.py` を通す（CLAUDE.md「公開前の検査」）。
 
 ### 24時間以内の投稿
@@ -1344,7 +1346,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B src/collector/privacy_scan.py --all-history
 - **(a)**：記録して公開する。順番3は封印できない（counting.md 4章 (3) の4）。扱い（新しい版の順番1b、限界を付けた公開など）はオーナーが決める（seal-order1.md 141行）。リードに報告する。
 - **(b)**：止まった記録が順番2の記録になる。正式な数え方 C7 は変わらない。参考の基準の結果と欄の手厚さは、順番5で手法を作る期間の全体について出す（counting.md 4章 (3)）。置き場所を直して書き直しても、順番3が参照するのは seq の小さい (b) の記録である。
 - **(c)**：順番1b の記録が縛る `counting.py` の版が、履歴に無いときだけ書ける。そのとき、順番1b の記録そのものも `verify.py all --rev auto` の計算し直しで止まる（記録の `head` の版が無いため）。リードに報告する。
-- **何も書かずに止まったとき**（関門が閉じた、作業ツリーがきれいでない、置き場所の引数が無い、bundle の list-heads が合わない、F の集合が `--all` と合わない、封印した版の `counting.py` の出力が JSON でない、など）：記録は残らない。原因を直してから、もう一度流す。どの条件も日の集計の値には依らない（`decide()` の出力が JSON でないのは、封印した版のコードが同じ入力で同じように終わる場合で、流し直しても同じになる）。
+- **何も書かずに止まったとき**（関門が閉じた、作業ツリーがきれいでない、置き場所の引数が無い、置き場所に3日のファイルが無い、記録に許可していないメールアドレスの形がある（参照の名前などを直す）、bundle の list-heads が合わない、F の集合が `--all` と合わない、封印した版の `counting.py` の出力が JSON でない、など）：記録は残らない。原因を直してから、もう一度流す。どの条件も日の集計の値には依らない（`decide()` の出力が JSON でないのは、封印した版のコードが同じ入力で同じように終わる場合で、流し直しても同じになる）。
 
 ### 第三者の確かめ方
 
@@ -1378,6 +1380,12 @@ git -C "$W/c" log --all --name-only --format= | sort -u
 ### 限界
 
 - **待った試みは記録に残らない。** 関門は R の `gkg-run-result` を求め、`gkg-run-result` は R の `run-complete` を求める（12章）。R に `run-complete` があれば `decide()` は試しの run の段に進むので、関門が開いたあとに待つは起きない（`TestPending` が監査の組み合わせで確かめた）。R の封印の前の試みは、関門で閉じて記録されない。seal-order1.md 187行と counting.md 4章 (2) の「待つを含めて毎回記録する」提案は、今の関門のもとでは満たせない（14章の「この決め方と固定の規則から、次のことが従う」）。順番3の参照先の選び方は待つを数えないので、参照先は変わらない。
+- **コミットと投稿の前に、手で捨てる形が残る**（T-078 差し戻し1回目 中-2）。
+  - 前提1：入口は、書いた記録をすぐにコミットし、結果をコミットのあとで画面に出す。
+  - 前提2：コミットは手元の履歴にあるだけで、push・その seq の時刻証明の Bitcoin での確定・投稿（24時間以内）より前なら、運営は `git reset` などで手元の履歴から消せる。消したあとで別の置き場所を渡せば、同じ seq に別の記録を書ける（3日のファイルは isfile で確かめるので、空の置き場所では書けないが、中身を壊したファイルを置けば (b) を書ける）。
+  - 前提3：その seq の `.ots` は、記録の先頭 N 行のハッシュを公開のカレンダーに送っているので、捨てた記録のハッシュはカレンダーに残る。ただし、第三者はそのハッシュを知らないので、カレンダーだけからは捨てたことを見つけられない。
+  - 結論：コミットのあと push・投稿までのあいだは、結果（中身）を見てから記録を捨てて書き直すことを、記録からは防げない。防げるのは、投稿（鎖の先頭のハッシュと時刻）か push のあとである。この窓を短くするため、書いたら速やかに push し、24時間以内に投稿する（CLAUDE.md の決まり）。中身を見るのは push と投稿のあとにする。
+- **bundle が合わないときの扱いが、順番2と順番3とで揃っていない**（T-078 差し戻し1回目 軽-2）。順番2では、bundle の list-heads が記録する参照と合わなければ、入口は何も書かずに止まる（記録の status は decided・stopped・pending の三つで、「時機の条件を確かめられなかった」に当たる値が無いため）。順番3では、seal-order1.md 178行のとおり、止まったことを試みの記録として残す（破れとしては数えない）。そのため、順番2の bundle が合わなかった試みは、記録に残らず、回数も第三者には分からない。合わない原因は、確かめてから bundle を作るまでに参照が変わったことで、日の集計の値には依らない。
 - **記録した参照が全部かは、記録だけでは分からない。** 運営は、試みの前に参照（ブランチなど）を消せる。記録から分かるのは、記録した `refs` から計算した F だけである。bundle の list-heads は書いた時点の参照と照らしてあるので、公開された bundle があれば、記録の `refs` が bundle の参照と同じことを第三者が確かめられる。bundle が公開されなければ確かめられない（counting.md 8章 (a)(d)）。
 - `timing_guards`（graft のファイル・浅い clone）は、書いた時点の申告である。true のときは (a) になる向きにしか働かない（運営が graft のファイルを置けば (a) を起こせる。counting.md 4章 (3) の「止める手段そのものは無くせない」）。
 - 運営は、(a)（枝を作る、graft のファイルを置く）と (b)（置き場所のファイルを消す・壊す）を、わざと起こせる。どちらも記録に残り、正式な数え方 C7 は変わらない（counting.md 4章 (3)・(4)）。
