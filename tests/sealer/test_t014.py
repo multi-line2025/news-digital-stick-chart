@@ -519,15 +519,22 @@ class TestGateRoot(Case):
         self.assertEqual(os.path.realpath(ledger.PROJECT_ROOT), os.path.realpath(PROJECT))
         real = ledger.verify_chain(ledger.read_ledger(
             os.path.join(PROJECT, "sealed", "ledger.jsonl")))
-        kinds = {r["kind"] for r in real}
-        if ledger.METHOD_ACCESS_KIND not in kinds:
-            with self.assertRaisesRegex(ledger.MethodAccessRequired,
-                                        "method-access の記録が鎖に無い"):
-                ledger.require_method_access()
-        if ledger.THRESHOLD_ACCESS_KIND not in kinds:
-            with self.assertRaisesRegex(ledger.ThresholdAccessRequired,
-                                        "threshold-access の記録が鎖に無い"):
-                ledger.require_threshold_access()
+        # T-065：本物の記録の状態（method-access・threshold-access があるか）によらず確かめる。
+        # 無ければ止まり、あれば本物の鎖の記録を返す（仮のプロジェクトの記録ではない）
+        for kind, gate, err, text in (
+                (ledger.METHOD_ACCESS_KIND, ledger.require_method_access, ledger.MethodAccessRequired,
+                 "method-access の記録が鎖に無い"),
+                (ledger.THRESHOLD_ACCESS_KIND, ledger.require_threshold_access, ledger.ThresholdAccessRequired,
+                 "threshold-access の記録が鎖に無い")):
+            mine = [r for r in real if r["kind"] == kind]
+            if not mine:
+                with self.assertRaisesRegex(err, text):
+                    gate()
+            else:
+                got = gate()
+                got = got[0] if isinstance(got, tuple) else got
+                self.assertIn(got, real, kind)              # 本物の鎖の記録
+                self.assertEqual(got["kind"], kind)
 
     def test_access_gate_cli_rejects_root(self):
         r = subprocess.run([sys.executable, "-B", os.path.join(tl.SRC, "seal_access.py"), "gate",

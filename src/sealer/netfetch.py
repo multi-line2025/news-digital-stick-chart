@@ -83,6 +83,10 @@ class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
         raise RedirectRefused("リダイレクト（%d）にはついていかない: %s → %s"
                               % (code, req.full_url, newurl))
 
+    # T-065：Python 3.9・3.10 の HTTPRedirectHandler には 308 の扱いが無く（3.11 で入った）、308 の応答が
+    # HTTPError になって再試行されていた。308 も 301・302 と同じ道（redirect_request）に通し、1回で止める
+    http_error_308 = urllib.request.HTTPRedirectHandler.http_error_302
+
 
 def build_no_redirect_opener(*handlers):
     """リダイレクトを拒む opener。handlers はテストで通信の部分を差し替えるときだけ渡す。"""

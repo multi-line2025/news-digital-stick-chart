@@ -723,9 +723,18 @@ class TestRealClone(unittest.TestCase):
 
     def clone(self, d, commit=None):
         c = os.path.join(d, "clone")
-        subprocess.run(["git", "clone", "-q", tl.PROJECT, c], check=True, capture_output=True)
-        if commit is not None:
-            subprocess.run(["git", "-C", c, "checkout", "-q", commit], check=True, capture_output=True)
+        if commit is None:
+            subprocess.run(["git", "clone", "-q", tl.PROJECT, c], check=True, capture_output=True)
+        else:
+            # T-065：commit とその祖先だけを取り込む（clone すると、commit より後の参照（origin/main など）が
+            # 残り、`git log --all` が後の commit のマニフェストの履歴を見つけてしまう。本物の記録・マニフェストが
+            # 伸びても、commit の時点の状態だけで確かめられるようにする）。参照は1つも作らず、HEAD を commit にする
+            subprocess.run(["git", "init", "-q", c], check=True, capture_output=True)
+            subprocess.run(["git", "-C", c, "fetch", "-q", "--no-tags", tl.PROJECT, commit], check=True,
+                           capture_output=True)
+            subprocess.run(["git", "-C", c, "checkout", "-q", "--detach", commit], check=True, capture_output=True)
+            refs = subprocess.run(["git", "-C", c, "for-each-ref"], check=True, capture_output=True).stdout
+            self.assertEqual(refs, b"")             # commit より後を指す参照は無い
         os.makedirs(os.path.join(c, ".venv", "bin"))
         os.symlink(os.path.realpath(os.path.join(tl.PROJECT, ".venv", "bin", "python"))
                    if os.path.exists(os.path.join(tl.PROJECT, ".venv", "bin", "python")) else sys.executable,
@@ -755,6 +764,10 @@ class TestRealClone(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             c = self.clone(d, self.BEFORE_ORDER1)
             self.assertEqual(len(self.records(c)), 4)
+            head = subprocess.run(["git", "-C", c, "rev-parse", "HEAD"], check=True, capture_output=True)
+            self.assertEqual(head.stdout.decode().strip(), self.BEFORE_ORDER1)
+            self.assertEqual(subprocess.run(["git", "-C", c, "rev-parse", "--is-shallow-repository"], check=True,
+                                            capture_output=True).stdout.strip(), b"false")
             self.assertIsNone(ledger.first_order1(self.records(c)))
             now = datetime.datetime.now(datetime.timezone.utc)
             rec, rel, _o = seal_stats.seal_order1(c, now, "ots", runner=tw.FakeOts())
@@ -782,16 +795,18 @@ class TestRealClone(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             c = self.clone(d)
             now = datetime.datetime.now(datetime.timezone.utc)
+            # T-065：本物の記録には順番1（seq 5）・順番1b（seq 6）・method-access（seq 7）が封印済みで、追記のみ
+            # なので消えない。状態で分けずに、どれも書けないことを確かめる（2 件目の順番1、method-access の
+            # 後の順番1b）。順番1 → 順番1b の流れは test_before_order1_at_77d0dd2 が固定の commit で確かめる
             o1 = ledger.first_order1(self.records(c))
-            if o1 is None:
-                o1, _rel, _o = seal_stats.seal_order1(c, now, "ots", runner=tw.FakeOts())
-                self.commit(c, "順番1")
-            else:
-                # 本物の順番1 があれば、2 件目は書けない（順番1 は 1 件だけ）
-                with self.assertRaisesRegex(ledger.LedgerError, "stats-order1 の記録が既にある"):
-                    seal_stats.seal_order1(c, now, "ots", runner=tw.FakeOts())
-            if not any(r["kind"] == ledger.METHOD_ACCESS_KIND for r in self.records(c)):
-                self.seal_1b_and_check(c, now, o1["seq"])
+            self.assertIsNotNone(o1)
+            self.assertTrue(any(r["kind"] == ledger.METHOD_ACCESS_KIND for r in self.records(c)))
+            before = open(os.path.join(c, "sealed", "ledger.jsonl"), "rb").read()
+            with self.assertRaisesRegex(ledger.LedgerError, "stats-order1 の記録が既にある"):
+                seal_stats.seal_order1(c, now, "ots", runner=tw.FakeOts())
+            with self.assertRaisesRegex(ledger.LedgerError, "method-access の記録がある"):
+                seal_stats.seal_order1b(c, ORDER1B_FILES, [], now, "ots", runner=tw.FakeOts())
+            self.assertEqual(open(os.path.join(c, "sealed", "ledger.jsonl"), "rb").read(), before)
             code, out, err = tl.run_verify_inproc(c, "stats-order")
             self.assertEqual(code, 0, err)
             self.assertIn("除外の規則の kind（stats-order1）の記録：seq %d（1 件だけ）" % o1["seq"], out)

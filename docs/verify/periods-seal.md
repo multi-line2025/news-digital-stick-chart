@@ -1,4 +1,4 @@
-# 期間の区切りと候補の封印を検証する手順（T-005、T-007、T-008、T-009、T-013、T-014、T-017、T-023、T-027、T-031、T-037、T-041、T-043、T-049、T-056、T-058、T-059、T-060）
+# 期間の区切りと候補の封印を検証する手順（T-005、T-007、T-008、T-009、T-013、T-014、T-017、T-023、T-027、T-031、T-037、T-041、T-043、T-049、T-056、T-058、T-059、T-060、T-065）
 
 この文書は、第三者が次のことを自分で確かめるための手順である。
 
@@ -957,7 +957,9 @@ grep -n '"kind":"stats-order1' sealed/ledger.jsonl | cut -d: -f1 || true
   for p in docs/stats/counting.md src/stats/counting.py tests/stats/test_counting.py docs/stats/seal-order1.md; do mkdir -p "$D/$(dirname "$p")" && git show "${H}:$p" > "$D/$p" && shasum -a 256 "$D/$p"; done   # 各 sha256 が files と同じこと
   (cd "$D" && find . -type f | sort)                                            # 書いた4つだけがあること
   (cd "$D" && "$PY" -I -B -X pycache_prefix="$C" -c "$R" src/stats/counting.py | shasum -a 256)    # counting.output_sha256
-  # 順番1（stats-order1）のとき：別の空のフォルダに、targets のファイル（「の出力」でないもの）のうち head の版の5つを書いて流す
+  # 順番1（stats-order1）のとき：targets の名前が決まった10件と一致することを先に確かめる（T-065。ok と出ること）。
+  # そのうえで、別の空のフォルダに、targets のファイル（「の出力」でないもの）のうち head の版の5つを書いて流す
+  "$PY" -B -c 'import json, sys; d = json.load(open(sys.argv[1])); n = [t["name"] for t in d["targets"]]; print("ok" if sorted(n) == sorted(["src/stats/exclusion.py", "src/stats/exclusion.py の出力", "tests/stats/test_exclusion.py", "src/stats/tagrules.py", "src/stats/tagrules.py の出力", "tests/stats/test_tagrules.py", "docs/stats/tags-naive.md", "1cb463a:src/stats/tagrules.py", "1cb463a:src/stats/tagrules.py の出力", "2d23cdf:reviews/T-020.md"]) else n)' sealed/stats-order1-<…>.json
   D=$(mktemp -d "${TMPDIR:-/tmp}/verify.XXXXXX")
   for p in src/stats/exclusion.py tests/stats/test_exclusion.py src/stats/tagrules.py tests/stats/test_tagrules.py docs/stats/tags-naive.md; do mkdir -p "$D/$(dirname "$p")" && git show "${H}:$p" > "$D/$p" && shasum -a 256 "$D/$p"; done   # 各 sha256 が targets と同じこと
   (cd "$D" && find . -type f | sort)                                            # 書いた5つだけがあること
@@ -968,7 +970,7 @@ grep -n '"kind":"stats-order1' sealed/ledger.jsonl | cut -d: -f1 || true
   (cd "$E" && "$PY" -I -B -X pycache_prefix="$C" -c "$R" src/stats/tagrules.py | shasum -a 256)    # 「1cb463a:src/stats/tagrules.py の出力」
   sed -n 5p sealed/ledger.jsonl | tr -d '\n' | shasum -a 256                      # order1_ref.record_sha256（seq 5 の行）
   ```
-  `R` は verify の `RUNNER` と同じで、`-I` が外すスクリプトのフォルダだけを戻す（`tagrules.py` が同じフォルダの `exclusion.py` を読むため）。1cb463a の版は、seal-order1.md 1章では `tagrules.py` として書く形だが、`src/stats/tagrules.py` として書いても出力は同じ（verify はこちらの形）。ファイルの名前は、記録の `files`・`targets` に並んだものを、そのまま一つずつ書く（シェルの変数に並べて分けると、zsh では分かれないため）。
+  `R` は verify の `RUNNER` と同じで、`-I` が外すスクリプトのフォルダだけを戻す（`tagrules.py` が同じフォルダの `exclusion.py` を読むため）。1cb463a の版は、seal-order1.md 1章では `tagrules.py` として書く形だが、`src/stats/tagrules.py` として書いても出力は同じ（verify はこちらの形）。書き出すファイルの名前は、決まった一覧（順番1b は `ledger.ORDER1B_REQUIRED_FILES` の4件、順番1 は `ledger.ORDER1_TARGET_NAMES` のうちファイルそのものの名前）として手順の `for` の行に固定で書いてある（シェルの変数に並べて分けると、zsh では分かれないため）。記録の `files`・`targets` がその一覧とちょうど一致することは、書き出す前の確認の行（`ok` と出ること）で確かめる（T-065。T-060 の軽-1）。確認の行は、`tests/sealer/test_t065.py` が本物の記録で `ok` を出し、1件足した中身では `ok` を出さないことを、両方の Python で確かめている。
 - 記録の10件の sha256 を作業ツリーで計算し直して照らす手順は、docs/stats/seal-order1.md 3章 (1) のとおり（`shasum -a 256 <ファイル>`、`git show <commit>:<path> | shasum -a 256`、`PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/stats/exclusion.py | shasum -a 256` など）。順番1b の `counting.output_sha256` は `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/stats/counting.py | shasum -a 256` と照らす。
 
 ### 順番2 への申し送り（統計係の T-036 の監査の軽-4）

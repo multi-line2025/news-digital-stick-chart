@@ -93,5 +93,13 @@ class TestDocT060(unittest.TestCase):
             self.assertIn(phrase, text)
 
 
+    def test_check_line_outputs_ok(self):
+        """T-065（T-060 の軽-2）：語句だけでなく、手の手順の files の確認の行を本物の記録に流して ok が出ること、
+        5件にした中身では ok が出ないことを、両方の Python で確かめる（test_t065 の道具を使う）。"""
+        import test_t065
+        t = test_t065.TestManualCheckLines("test_order1b_files")
+        t.test_order1b_files()
+
+
 if __name__ == "__main__":
     unittest.main()

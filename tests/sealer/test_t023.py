@@ -239,8 +239,8 @@ class TestJEquality(JCase):
             "その後に書ける J（last_read_offset_days）は、candidates の J の最大 28 だけ")
 
     def test_real_record_passes_new_rules(self):
-        """本物の記録：J の最大 56、1 件目の embargo_days 90、periods-triggers 無し、
-        method-access 無し。新しい照合に通り、状態は within。"""
+        """本物の記録：J の最大 56、1 件目の embargo_days 90、periods-triggers 無し。新しい照合に通り、
+        状態は within（T-065：method-access（seq 7）が入ったあとも同じ）。"""
         root = tl.PROJECT
         records = ledger.verify_chain(ledger.read_ledger(os.path.join(root, "sealed",
                                                                       "ledger.jsonl")))
