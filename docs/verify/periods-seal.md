@@ -1,4 +1,4 @@
-# 期間の区切りと候補の封印を検証する手順（T-005、T-007、T-008、T-009、T-013、T-014、T-017、T-023、T-027、T-031、T-037、T-041、T-043、T-049、T-056、T-058、T-059、T-060、T-065）
+# 期間の区切りと候補の封印を検証する手順（T-005、T-007、T-008、T-009、T-013、T-014、T-017、T-023、T-027、T-031、T-037、T-041、T-043、T-049、T-056、T-058、T-059、T-060、T-065、T-066）
 
 この文書は、第三者が次のことを自分で確かめるための手順である。
 
@@ -34,7 +34,7 @@
 |---|---|
 | `seq` | 通し番号。1 から始まり、行の順に 1 ずつ増える |
 | `prev_hash` | 直前の行のバイト列（末尾の改行を含めない）の sha256。1 行目は 0 が 64 個 |
-| `kind` | 種類。下の表の10だけ（許可リスト）。それ以外の `kind` があれば、鎖の検証（`chain`）で失敗になる |
+| `kind` | 種類。下の表の11だけ（許可リスト。T-066 で `gkg-run-result` を加えた）。それ以外の `kind` があれば、鎖の検証（`chain`）で失敗になる |
 | `targets` | 対象のファイル。各要素は `path`（ルートからの相対パス）、`role`、`sha256` |
 | `recorded_at` | 記録した日時（UTC）。記録した機械の時計による申告で、証明ではない |
 | `note` | 注記 |
@@ -49,6 +49,7 @@
 | `candidates` | 閾値と判定期間の候補（docs/stats/candidates.md。形式は 9章。T-013） | doc / code / test / import / output | `src/sealer/seal_candidates.py` |
 | `method-access` | 試運転の手順4（手法を作る期間の区画のデータそのもの）に初めて触れる直前の記録。前に `candidates` と `acquisition-result` が要る（形式は 10章。T-014） | method-access | `src/sealer/seal_method.py` |
 | `gkg-run-start` | GKG の取得の run（試しの run・正式な run）の開始の記録。最初の `method-access` より後（形式は 12章。T-031） | gkg-run-start | `src/sealer/seal_gkg_run.py` の `start` |
+| `gkg-run-result` | GKG の取得の run が終わったあと（run-complete のあと）に、そのマニフェストの先頭の行の sha256 を縛る記録。マニフェストの時刻証明（形式は 12章。T-066） | gkg-run-result | `src/sealer/seal_gkg_result.py` の `seal` |
 | `stats-order1` | 統計係の順番1（除外の規則と入れる規則）の封印。除外の規則の kind（形式は 13章。T-037） | stats-order1 | `src/sealer/seal_stats.py` の `seal_order1` |
 | `stats-order1b` | 統計係の順番1b（数え方の候補と基準の案）の封印（形式は 13章。T-037） | stats-order1b | `src/sealer/seal_stats.py` の `seal_order1b` |
 
@@ -736,7 +737,7 @@ grep -n '"kind":"candidates"\|"kind":"acquisition-result"' sealed/ledger.jsonl |
 ### 手順4の記録と関門の限界（T-013 の監査 軽1）
 
 - **関門を飛ばしたかどうかは、記録からは検出できない。** `require_method_access()` を呼ばずに手法を作る期間のデータに触れるコードを書くことも、`method-access` を足す前にデータに触れることもできる。記録に残るのは「`method-access` を追記した」ことだけで、「それより前に触れなかった」ことは示せない。関門は、正直な運用で手順を飛ばす誤りを防ぐためのもので、証明ではない。
-- **関門を呼んだコードが、手順4のコードかどうかは確かめない。** `method-access` の中身には、取得のコードのパスや sha256 は入れていない。何を取得したかを時刻証明で示す手段は、今は限られている。マニフェスト（`data/manifest/`）には、OpenTimestamps の時刻証明は付いていない（Git の履歴に入っているだけで、コミットの日時は申告である）。封印の記録の時刻証明に含まれているのは、手順3の `acquisition-result` の中身の `kept_rows_sha256`（取得したファイル一覧の本体の sha256。記録の対象の sha256 を通じて、その seq の `.ots` の対象に入る）だけである。手順4で取得するデータには、まだ何も時刻証明が無い。
+- **関門を呼んだコードが、手順4のコードかどうかは確かめない。** `method-access` の中身には、取得のコードのパスや sha256 は入れていない。何を取得したかを時刻証明で示す手段は、今は限られている。マニフェスト（`data/manifest/`）には、T-066 までは OpenTimestamps の時刻証明が付いていなかった（Git の履歴に入っているだけで、コミットの日時は申告である）。T-066 から、run が終わったあとに `gkg-run-result` の記録でマニフェストの先頭の行を縛れる（12章の「マニフェストの時刻証明」）。封印の記録の時刻証明に含まれているのは、手順3の `acquisition-result` の中身の `kept_rows_sha256`（取得したファイル一覧の本体の sha256。記録の対象の sha256 を通じて、その seq の `.ots` の対象に入る）だけである。手順4で取得するデータには、まだ何も時刻証明が無い。
 - **手順4のデータの中身は、この記録では示せない。** 生データは Git の外に置く決まりで、記録が示すのは手順4を始めた記録の位置と、drand の回の公開時刻より後に作られたこと（drand の署名（BLS）を確かめた場合に限る）までである。手法を作る期間の区画の外（2020-12-15 以降）のデータに触れなかったことも、この記録では示せない。
 - **`method-access` が無くても、それより後の記録は失敗にならない。** 検証が求めるのは「`method-access` があるなら、その前に `candidates` と `acquisition-result` がある」ことだけで、`threshold-access` の前に `method-access` があることは求めない。
 - **`method-access` は二つ以上足せる。** 関門が使うのは最初の記録で、何件あるかは記録の長さから数えられる。
@@ -832,6 +833,33 @@ grep -n '"kind":"gkg-run-start"' sealed/ledger.jsonl | cut -d: -f1 || true
   - この並べ方は、収集係が T-045 で決めた並べ方と同じである（src/collector/README.md 6.5.5 の3。第三者の照らし方3 も同じ）。
   - 使い回しのために、マニフェストの run-start の行の順と記録の seq の順がずれることがある。たとえば、記録だけ書いて止まった run A のあとに別の run B を行い、A に戻して記録を使い回すと、行の順は B・A、seq の順は A・B になる。照合は seq の順で比べるので、この流れでも通る（T-046。テスト `tests/sealer/test_t041.py` の `test_trial_run_ids_follow_seq_order_after_reuse`）。
   - `trial_manifest_sha256` は、この照合では照らさない。収集係の関門が、正式な run の開始と再開のたびに照らす。
+- **run-start の行の入力の値（T-066。T-063 の採点 中-1）**：run-start の行の `mode`・`run_id`・`code_path`・`code_sha256`・`filelist_sha256`・`method_access_seq`・`exclusion_rule_seq`・`exclusion_rule_record_sha256` が、指している `gkg-run-start` の中身と同じであること。試しの run は `trial` が true で `trial_days` が中身と同じ、正式な run は `trial_days` を持たないこと。区画（`block_start`・`block_end`）が、`method_access_seq` の `method-access` の区画と同じであること。`days`・`files_selected` が 0 以上の整数で、試しの run の `days` は `trial_days` の数以下（`ledger.check_gkg_manifest_rows`）。T-065 までは `gkg_run_seq`・`gkg_run_record_sha256`・`mode`・`run_id` だけを照らしていて、ほかの値を書き換えても検証は 0 のままだった。
+- **ほかの行（T-066）**：どの行も、kind が `run-start`・`run-resume`・`run-stop`・`day`・`run-complete` のどれかで、その run_id の最初の行が run-start、共通の欄（`code_path`・`code_sha256`・`filelist_sha256`・`method_access_seq`・`mode`・`official`）がその run-start と同じ。
+  - day の行：`day` が日付で、その run の区画の中（試しの run は `trial_days`、正式な run は `method-access` の区画）、同じ run の中で日付が重ならない、`file_name` が `gkg-<mode>-<run_id>-day-<YYYYMMDD>.tsv.gz`、`sha256` が 64 桁、`files_ok` + `files_failed` = `files_listed`、`failed_files` の数 = `files_failed`。
+  - run-complete の行：run ごとに多くて1行で、その run の最後の行。`days` が day の行の数と run-start の `days` に等しく、`files_ok`・`files_failed` が day の行の合計に等しく、day の行の `files_listed` の合計が run-start の `files_selected` に等しい。
+  - run-complete が無い run は、取得の途中か止まっている run として通し、そう表示する。
+- **日の集計の sha256（T-066）**：day の行の `sha256`（と run-complete の取得の記録の `fetch_log_sha256`・`fetch_log_size`）は、`--day-files <置き場所>` を渡したときだけ、その置き場所のファイルと照らす（違えば失敗、置き場所に無いものは「照らさなかった」）。渡さなければ「照らさなかった」と出す。第三者は日の集計を持たない（Git の外に置く決まり）ので、日の集計は、下の `gkg-run-result` で縛ったマニフェストの day の行の sha256 を通じて縛られる。
+  ```sh
+  PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py gkg-runs --day-files "/Volumes/LACIE SHARE/news-stick-data/gkg-trial"
+  ```
+
+### マニフェストの時刻証明（gkg-run-result。T-066）
+
+決定事項「Git にはマニフェストだけを入れ、マニフェストに時刻証明を付ける」のための記録である（T-063 の採点 中-1）。採用の区切りには使わない。
+
+- **書く仕組み**：`src/sealer/seal_gkg_result.py seal --mode <trial|official> --run-id <16桁>`。run-complete の行まで書いたマニフェストをコミットしたあとに、1つの run に1回だけ実行する（ots の通信を使う。drand は使わない）。
+  ```sh
+  PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_gkg_result.py seal --mode trial --run-id <run_id>
+  ```
+- **中身**（11個のキー）：`kind`、`mode`・`run_id`、`gkg_run_seq`・`gkg_run_record_sha256`（その run の `gkg-run-start`）、`manifest_path`、`manifest_lines`（書いた時点のマニフェストの行の数）、`manifest_sha256`（その先頭 `manifest_lines` 行のバイト列の sha256）、`run_complete_line_sha256`（その run の run-complete の行の sha256）、`manifest_commit`（書いた時点の HEAD。マニフェストはこの版と同じ）、`ledger_head`。
+- **書く前に確かめること**（どれかが合わなければ何も書かない）：鎖と .ots、その mode・run_id の `gkg-run-start` がちょうど1件、同じ run の `gkg-run-result` がまだ無い、マニフェストが HEAD の版と同じ（コミットしていない行が無い）で改行で終わる、マニフェストが上の照合に通る、その run の run-complete の行がある。
+- **verify が照らすこと**（`ledger.check_gkg_result_doc`・`ledger.check_gkg_results`。`gkg-runs` と `all`）：中身の形、`ledger_head`、指す `gkg-run-start`（seq・行の sha256・mode・run_id）、同じ run の記録は1件だけ、作業ツリーのマニフェストの先頭 `manifest_lines` 行の sha256 が `manifest_sha256` と同じ（マニフェストは追記のみなので、後ろに行が増えても先頭は変わらない）、その中に run-complete の行があって sha256 が同じ。git の履歴があれば、`manifest_commit` の版のマニフェストの先頭も同じ。run-complete まである run に `gkg-run-result` が無ければ「照らさなかった：…マニフェストの時刻証明（gkg-run-result の記録が無い）」と出す（終了コードは 0 のまま）。
+- **書く時機と、守れること・守れないこと**：この記録は、データを受け取ったあと（run-complete のあと）に書く。そのため次のことが言える（前提 → 結論）。
+  - 前提：day の行に日の集計の sha256 が入っていて、記録がマニフェストの先頭の行の sha256 を縛る。結論：記録の .ots の確定時刻より後に、マニフェストも日の集計も差し替えられない（差し替えれば verify が止まる。日の集計は `--day-files` で照らせる）。
+  - 前提：記録を書くのは取得が終わったあとで、取得から記録までの間は何も縛っていない。結論：その間に、マニフェストと日の集計を選び直す余地（たとえば、別の内容で取り直した日の集計と day の行に入れ替える）は、この記録では閉じられない。閉じているのは、`gkg-run-start`（取得の前の記録）が縛る入力の値（コード・一覧・試しの日）と、上の行の照合で見つかる食い違いまでである。
+  - 前提：記録の .ots は、run-complete のあと、結果を見る前に作る運用である。結論：この間を短くするほど選び直しの余地は小さくなるが、長さは記録の `recorded_at`（申告）と run-complete の `completed_at`（申告）の差で読むしかなく、証明ではない。
+- **試しの run にも後から付けられる**：既にコミットされている `data/manifest/gdelt-gkg-trial.jsonl`（run_id e15ed53595c70035）にも、同じコマンドで記録を足せる（記録の時点のマニフェスト全体を縛る）。本物の記録への書き込みはオーナーの承認を得てから行う（T-066 では書いていない）。それまで、verify は「照らさなかった」と出す。
+- **関門の位置（提案）**：日の集計を使うコード（正式な run の結果を集計に使う統計係・収集係のコード）は、最初に `ledger.require_gkg_run_result(mode, run_id)` を呼ぶ。鎖と .ots、マニフェストの照合、その run の `gkg-run-result` の照合に通るときだけ記録を返し、そうでなければ `GkgRunResultRequired` で止まる。正式な run は、この関門を通るまで「完了」と扱わない（例：`gkg.official_day_records` が run-complete に加えてこの関門を求める）。どこから呼ぶかは、リードが収集係・統計係に割り振る。
 - **照らす時機（T-043。T-041 の監査 軽-3）**：試しの run のマニフェストは、run が終わってからコミットされる（src/collector/README.md 6.4）。封印の記録（`gkg-run-start`）は run の前に書かれ、ハッシュは24時間以内に投稿されるので、記録だけ先に公開された間は、マニフェストの行が無いか件数が合わず、この照合は失敗することがある。第三者は、マニフェストのコミットのあとで照らす。
 - 限界：コミットと、記録のハッシュの公開（X への投稿）の前に、記録の末尾の行と中身のファイルとマニフェストの行をまとめて戻すことは見つけられない。戻したあとの記録とマニフェストは、互いにつじつまが合うからである。7章の「別の系列が無かったこと」と同じ限界で、記録の先頭のハッシュを公開した時点より前の部分だけが固まる。末尾の行と中身とマニフェストの行をまとめて戻すことを見つけるには、投稿したハッシュと照らす（docs/verify/x-post.md）。
 
@@ -841,7 +869,7 @@ grep -n '"kind":"gkg-run-start"' sealed/ledger.jsonl | cut -d: -f1 || true
 - **記録に無い run。** `gkg-run-start` を書かずに GKG に要求を送ることは、記録からは検出できない（10章の関門の限界と同じ）。数えられるのは、記録に残した run だけである。マニフェストに run-start の行を書いた run は、上の「収集係のマニフェストとの照合」で、記録が無ければ見つかる（T-041）。マニフェストにも書かなかった run は見つからない。
 - **threshold-access の後の取得の続き（T-037。T-031 の監査 軽4）。** `gkg-run-start` は run の最初の実行で書き、再開では書かない。そのため、`threshold-access` より前に始めた run を、`threshold-access` の後に再開して続けること（正式な run の2回目の実行を含む）は、この記録からは検出できない。照らせるのは、収集係のマニフェスト（run-resume・day の行の時刻と commit）だけである。
 - **試しの run の日。** `trial_days` は、収集係の `TRIAL_DAYS`（2015-03-02・03・04 の3日）とちょうど同じでなければならない（`ledger.TRIAL_DAYS`。T-037。T-031 の監査 軽1）。値は `ledger.py` に写してあり、テスト（`tests/sealer/test_t037.py` の `TestTrialDaysMatchCollector`）が `src/collector/gkg.py` と同じことを確かめる。
-- **run を始めたあとの経過。** 記録が示すのは、run の開始が drand の回の公開時刻より後（drand の署名を確かめた場合に限る）で、その seq の `.ots` の確定時刻＋2時間より前（ヘッダが本当の鎖にある場合に限る）だったことまでである。run の結果は、収集係のマニフェスト（src/collector/README.md）で扱う。
+- **run を始めたあとの経過。** 記録が示すのは、run の開始が drand の回の公開時刻より後（drand の署名を確かめた場合に限る）で、その seq の `.ots` の確定時刻＋2時間より前（ヘッダが本当の鎖にある場合に限る）だったことまでである。run の結果は、収集係のマニフェスト（src/collector/README.md）で扱い、`gkg-run-result` の記録で、そのマニフェストに時刻証明を付ける（上の「マニフェストの時刻証明」。T-066）。
 
 ## 13. 統計係の順番1・順番1b の封印（stats-order1・stats-order1b。T-037）
 

@@ -680,8 +680,10 @@ class TestDocT017(unittest.TestCase):
 
     def test_manifest_statement_is_factual(self):
         self.assertNotIn("マニフェスト（`data/manifest/`）と、その時刻証明で確かめる", self.text)
-        self.assertIn("マニフェスト（`data/manifest/`）には、OpenTimestamps の時刻証明は付いていない",
+        # T-066：gkg-run-result でマニフェストに時刻証明を付けられるようになったので、文言を今の形に直した
+        self.assertIn("マニフェスト（`data/manifest/`）には、T-066 までは OpenTimestamps の時刻証明が付いていなかった",
                       self.text)
+        self.assertIn("`gkg-run-result` の記録でマニフェストの先頭の行を縛れる", self.text)
         self.assertIn("`kept_rows_sha256`", self.text)
 
     def test_j_statement(self):

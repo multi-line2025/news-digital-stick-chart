@@ -235,10 +235,19 @@ class TestOrder1Flow(StatsCase):
         # T-043：記録があるのにマニフェストが無ければ verify が止まるので、収集係と同じく行を書く
         os.makedirs(os.path.join(self.root, "data", "manifest"), exist_ok=True)
         with open(os.path.join(self.root, ledger.GKG_MANIFESTS["trial"]), "w", encoding="utf-8") as f:
-            f.write(json.dumps({"kind": "run-start", "mode": "trial", "run_id": self.gkg_sha()[:16],
-                                "gkg_run_seq": g["seq"],
-                                "gkg_run_record_sha256": hashlib.sha256(ledger.canonical_line(g)).hexdigest()})
-                    + "\n")
+            # T-066：verify が run-start の行の入力の値を gkg-run-start の中身と照らすので、収集係と同じ欄を書く
+            gdoc = ledger.read_target_json(self.root, g, ledger.GKG_RUN_KIND)
+            mdoc = ledger.read_target_json(self.root, m, ledger.METHOD_ACCESS_KIND)
+            row = {"kind": "run-start", "mode": "trial", "run_id": self.gkg_sha()[:16],
+                   "gkg_run_seq": g["seq"],
+                   "gkg_run_record_sha256": hashlib.sha256(ledger.canonical_line(g)).hexdigest(),
+                   "official": False, "trial": True, "trial_days": gdoc["trial_days"],
+                   "block_start": mdoc["block_start"], "block_end": mdoc["block_end"],
+                   "days": len(gdoc["trial_days"]), "files_selected": 0}
+            for k in ("code_path", "code_sha256", "filelist_sha256", "method_access_seq", "exclusion_rule_seq",
+                      "exclusion_rule_record_sha256"):
+                row[k] = gdoc[k]
+            f.write(json.dumps(row) + "\n")
         open(os.path.join(self.root, ledger.GKG_MANIFESTS["official"]), "w").close()
         self.commit("試しの run")
         out = self.verify_ok("all", "--rev", "auto")
@@ -832,7 +841,7 @@ class TestDocT037(unittest.TestCase):
     def test_statements(self):
         for phrase in ("## 13. 統計係の順番1・順番1b の封印（stats-order1・stats-order1b。T-037）",
                        "二つの kind にした理由", "収集係への申し送り", "`seal_stats.seal_order1`",
-                       "下の表の10だけ", "threshold-access の後の取得の続き",
+                       "下の表の11だけ", "threshold-access の後の取得の続き",
                        "区分表の取得は ledger に記録を書かない", "stats-order1 は1件だけ",
                        "待つ記録は kind ではなく status で区別する", "`ledger.ORDER1_TARGET_NAMES`",
                        "対象だけを置いた写し", "この照合の根拠と限界", "暗号的に言える",

@@ -563,7 +563,7 @@ class TestDocStatements(unittest.TestCase):
             self.assertIn(phrase, self.text)
 
     def test_kind_count_is_seven(self):
-        self.assertIn("下の表の10だけ", self.text)   # T-031・T-037 で kind を加えた
+        self.assertIn("下の表の11だけ", self.text)   # T-031・T-037・T-066 で kind を加えた
         self.assertIn("| `method-access` |", self.text)
 
 

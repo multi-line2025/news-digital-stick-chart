@@ -295,7 +295,8 @@ class TestChain(LedgerCase):
                          {"periods", "periods-triggers", "threshold-access",
                           "acquisition-start", "acquisition-result", "candidates",
                           "method-access", "gkg-run-start",     # T-031：gkg-run-start を加えた
-                          "stats-order1", "stats-order1b"})      # T-037：順番1・順番1b
+                          "stats-order1", "stats-order1b",       # T-037：順番1・順番1b
+                          "gkg-run-result"})                     # T-066：マニフェストの時刻証明
         self.assertNotIn("acquisition", ledger.ALLOWED_KINDS)
         self.add(n=1)
         for i, k in enumerate(ledger.ALLOWED_KINDS):

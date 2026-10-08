@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""threshold-access・acquisition-start・acquisition-result・method-access・gkg-run-start を書く共通の手順。
+"""threshold-access・acquisition-start・acquisition-result・method-access・gkg-run-start・gkg-run-result を書く共通の手順。
 T-009、T-014。
 
 使うのは seal_access.py、seal_acquisition.py、seal_method.py、seal_gkg_run.py（T-031）。中身の形と照合は
@@ -32,6 +32,9 @@ check_acquisition_pairs と同じ。
          通る、順番1・1b は最初の method-access より前、gkg-run-start の前に順番1b）。
          method-access の前に順番1 は求めない（収集係のテストを直すタスクのあと）。区分表の取得は
          ledger に書かれないので、その前後は verify.py stats-order が git の履歴で照らす
+       - gkg-run-result（T-066）：ledger_head、中身の 11 個のキー、指す gkg-run-start、マニフェストの先頭の
+         manifest_lines 行の sha256 と run-complete の行（ledger.check_gkg_result_doc・check_gkg_results）、
+         マニフェストの行の照合（ledger.check_gkg_manifests）
        - acquisition-result：start_seq・kept_rows_sha256 の形、start が実在し、result が後にあり、
          一つの start に result が一つだけであること
      どれかが通らなければ、何も書かずに止める。
@@ -62,7 +65,7 @@ import stamp  # noqa: E402
 
 WRITTEN_KINDS = (ledger.THRESHOLD_ACCESS_KIND, ledger.ACQ_START_KIND, ledger.ACQ_RESULT_KIND,
                  ledger.METHOD_ACCESS_KIND, ledger.GKG_RUN_KIND, ledger.ORDER1_KIND,
-                 ledger.ORDER1B_KIND)
+                 ledger.ORDER1B_KIND, ledger.GKG_RESULT_KIND)
 
 
 def _paths(project):
@@ -133,6 +136,19 @@ def check_new(project, data_after, records_after, rec, doc):
     read = _reader(project, rec, doc)
     # T-037：順番1・1b の数・中身・位置（method-access より前、gkg-run-start の前に順番1b）
     ledger.check_stats_order(records_after, read)
+    if kind == ledger.GKG_RESULT_KIND:
+        # T-066：中身の形・ledger_head・指す gkg-run-start、マニフェストの先頭と run-complete の行
+        ledger.check_gkg_result_doc(records_after, rec, doc, read, data_after)
+        manifests = {}
+        for mode, rel in ledger.GKG_MANIFESTS.items():
+            path = os.path.join(project, rel)
+            manifests[mode] = None
+            if os.path.isfile(path) and not os.path.islink(path):
+                with open(path, "rb") as f:
+                    manifests[mode] = f.read()
+        ledger.check_gkg_manifests(records_after, read, manifests)
+        ledger.check_gkg_results(records_after, read, manifests)
+        return
     if kind in (ledger.ORDER1_KIND, ledger.ORDER1B_KIND):
         ledger.check_ledger_head(data_after, rec, doc)
         (ledger.check_order1_doc if kind == ledger.ORDER1_KIND else ledger.check_order1b_doc)(rec, doc)

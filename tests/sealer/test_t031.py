@@ -81,6 +81,17 @@ class GkgCase(t23.JCase):
         row = {"kind": "run-start", "mode": doc["mode"], "run_id": doc["run_id"],
                "gkg_run_seq": rec["seq"],
                "gkg_run_record_sha256": hashlib.sha256(ledger.canonical_line(rec)).hexdigest()}
+        # T-066：verify が run-start の行の入力の値を gkg-run-start の中身と照らすので、収集係と同じ欄を書く
+        ma = [r for r in self.records() if r["seq"] == doc["method_access_seq"]][0]
+        mdoc = ledger.read_target_json(self.root, ma, ledger.METHOD_ACCESS_KIND)
+        for k in ("code_path", "code_sha256", "filelist_sha256", "method_access_seq", "exclusion_rule_seq",
+                  "exclusion_rule_record_sha256"):
+            row[k] = doc[k]
+        row.update(official=doc["mode"] == "official", block_start=mdoc["block_start"],
+                   block_end=mdoc["block_end"], files_selected=0,
+                   days=len(doc["trial_days"]) if doc["trial_days"] else 0)
+        if doc["mode"] == "trial":
+            row.update(trial=True, trial_days=doc["trial_days"])
         if doc["mode"] == "official":
             row["trial_run_ids"] = [ledger.read_target_json(self.root, r, ledger.GKG_RUN_KIND)["run_id"]
                                     for r in self.records() if r["kind"] == ledger.GKG_RUN_KIND
@@ -587,7 +598,7 @@ class TestDocT031(unittest.TestCase):
             self.text = f.read()
 
     def test_kind_table_and_chapter(self):
-        self.assertIn("下の表の10だけ", self.text)   # T-037
+        self.assertIn("下の表の11だけ", self.text)   # T-037・T-066
         self.assertIn("| `gkg-run-start` |", self.text)
         self.assertIn("## 12. GKG の取得の run の開始（gkg-run-start。T-031）", self.text)
         for k in ledger.GKG_RUN_DOC_KEYS:

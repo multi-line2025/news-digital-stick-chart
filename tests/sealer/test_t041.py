@@ -60,8 +60,8 @@ class TestGkgManifests(t31.GkgCase):
         self.change_code()
         t2, _r, _o = self.start_run(T0 + 5 * H)
         off, _r, _o = self.start_run(T0 + 6 * H, mode="official")
-        self.write_manifest(TRIAL, [self.row(t1), {"kind": "day", "run_id": "x"}, self.row(t1),
-                                    self.row(t2)])
+        # T-066：どの run にも属さない day の行は、verify が止める（行の照合）ので、ここでは置かない
+        self.write_manifest(TRIAL, [self.row(t1), self.row(t1), self.row(t2)])
         self.write_manifest(OFFICIAL, [self.row(off)])
         out = self.verify_ok("gkg-runs")
         self.assertIn("%s：run-start の行 3 行、異なる run_id 2 個" % TRIAL, out)

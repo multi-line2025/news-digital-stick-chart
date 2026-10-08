@@ -7,7 +7,7 @@
 1 行の形（キーはこの 6 つだけ。ほかのキーがあれば検証で失敗にする）
     seq          通し番号。1 から始まり、行の順に 1 ずつ増える。
     prev_hash    直前の行のバイト列（末尾の改行を含めない）の sha256。1 行目は 0 が 64 個。
-    kind         種類。許可リスト（ALLOWED_KINDS）の 10 だけ。それ以外は検証で失敗にする。
+    kind         種類。許可リスト（ALLOWED_KINDS）の 11 だけ（T-066 で gkg-run-result を加えた）。それ以外は検証で失敗にする。
                  gkg-run-start（GKG の取得の run の開始。T-031）、stats-order1・stats-order1b
                  （統計係の順番1・順番1b の事前の封印。T-037）を加えた。
                  periods / periods-triggers / threshold-access / acquisition-start /
@@ -147,9 +147,10 @@ METHOD_ACCESS_KIND = "method-access"
 GKG_RUN_KIND = "gkg-run-start"      # T-031：GKG の取得の run（試し・正式）の開始
 ORDER1_KIND = "stats-order1"        # T-037：統計係の順番1（除外の規則と入れる規則）。除外の規則の kind
 ORDER1B_KIND = "stats-order1b"      # T-037：統計係の順番1b（数え方の候補と基準の案）
+GKG_RESULT_KIND = "gkg-run-result"  # T-066：GKG の取得の run が終わったあとの、マニフェストの封印
 ALLOWED_KINDS = (PERIODS_KIND, TRIGGERS_KIND, THRESHOLD_ACCESS_KIND, ACQ_START_KIND,
                  ACQ_RESULT_KIND, CANDIDATES_KIND, METHOD_ACCESS_KIND, GKG_RUN_KIND,
-                 ORDER1_KIND, ORDER1B_KIND)
+                 ORDER1_KIND, ORDER1B_KIND, GKG_RESULT_KIND)
 
 # stamp で使う公開カレンダー（ots の既定と同じ 4 つ）と、その集約先が返す Pending の宛先
 # （実体のカレンダー）。stamp.py はこの左側に送る。.ots の Pending の宛先は右側に限る。
@@ -1151,12 +1152,261 @@ def check_gkg_manifests(records, read_json, manifests):
                 if row.get("trial_run_ids") != want:
                     raise LedgerError("%s の %d 行目の trial_run_ids %r が、official の記録（seq %d）より前の trial の"
                                       "記録の run_id の一覧 %r と違う" % (path, i, row.get("trial_run_ids"), seq, want))
+        # T-066：run-start の行の入力の値と gkg-run-start の中身、ほかの行（day・run-complete など）の照合
+        check_gkg_manifest_rows(records, read_json, mode, body)
         recs = [r for r in records if r["kind"] == GKG_RUN_KIND
                 and read_json(r, GKG_RUN_KIND).get("mode") == mode]
         if len(ids) != len(recs):
             raise LedgerError("%s の run-start の異なる run_id の数 %d が、mode %s の gkg-run-start の記録の件数 %d と"
                               "違う" % (path, len(ids), mode, len(recs)))
         out[mode] = (len(ids), n)
+    return out
+
+
+# ---- T-066：マニフェストの行の照合（run-start の入力の値、day、run-complete）と、gkg-run-result
+
+# マニフェストの行の kind（収集係の src/collector/gkg.py が書くもの）
+GKG_ROW_KINDS = ("run-start", "run-resume", "run-stop", "day", "run-complete")
+# どの行にも入っていて、同じ run_id の最初の run-start と同じでなければならない欄（gkg.py の base）
+GKG_ROW_BASE = ("code_path", "code_sha256", "filelist_sha256", "method_access_seq", "mode", "official")
+# run-start の行と gkg-run-start の中身で、同じでなければならない入力の値
+GKG_START_INPUTS = ("mode", "run_id", "code_path", "code_sha256", "filelist_sha256", "method_access_seq",
+                    "exclusion_rule_seq", "exclusion_rule_record_sha256")
+_DAY_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}\Z")
+
+
+def _nonneg_int(v):
+    return type(v) is int and v >= 0
+
+
+def manifest_rows(body, path):
+    """マニフェストのバイト列を [(行番号, dict)] にする。空行は飛ばす。JSON でない・dict でない行は LedgerError。"""
+    out = []
+    for i, raw in enumerate(body.split(b"\n"), 1):
+        if not raw.strip():
+            continue
+        try:
+            row = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            raise LedgerError("%s の %d 行目が JSON として読めない" % (path, i)) from None
+        if not isinstance(row, dict):
+            raise LedgerError("%s の %d 行目が JSON のオブジェクトでない" % (path, i))
+        out.append((i, row))
+    return out
+
+
+def check_gkg_manifest_rows(records, read_json, mode, body):
+    """マニフェスト（mode の1つ）の行を、封印の記録と照らす（T-066。T-063 の採点 中-1）。
+
+    run-start の行：指している gkg-run-start の中身と、入力の値（GKG_START_INPUTS と、trial なら trial_days）が
+      同じ。official は False/True が mode と合う。区画（block_start・block_end）が method_access_seq の
+      method-access の区画と同じ。days・files_selected が 0 以上の整数で、trial なら days は trial_days の数以下。
+    どの行も：kind が GKG_ROW_KINDS のどれか。run_id の最初の行が run-start。GKG_ROW_BASE の欄が、その run_id の
+      最初の run-start と同じ。
+    day の行：day が日付で、その run の区画（trial は trial_days、official は method-access の区画）の中。同じ run の
+      中で日付が重ならない。file_name が gkg-<mode>-<run_id>-day-<YYYYMMDD>.tsv.gz。sha256 が 64 桁。
+      files_ok + files_failed = files_listed、failed_files の数 = files_failed。
+    run-complete の行：run ごとに多くて1行で、その run の最後の行。days が day の行の数と、run-start の days と
+      同じ。files_ok・files_failed が day の行の合計と同じ。day の行の files_listed の合計が run-start の
+      files_selected と同じ。
+    返り値: {run_id: {"start": 最初の run-start, "days": [day の行], "complete": run-complete の行か None,
+                      "complete_lineno": その行の番号か None}}（run_id の出てきた順）。
+    """
+    path = GKG_MANIFESTS[mode]
+    by_seq = {r["seq"]: r for r in records}
+    runs = {}
+    for i, row in manifest_rows(body, path):
+        kind, rid = row.get("kind"), row.get("run_id")
+        where = "%s の %d 行目（%s）" % (path, i, kind)
+        if kind not in GKG_ROW_KINDS:
+            raise LedgerError("%s の %d 行目の kind %r が、マニフェストの行の種類（%s）でない"
+                              % (path, i, kind, "・".join(GKG_ROW_KINDS)))
+        if row.get("mode") != mode:
+            raise LedgerError("%s の mode %r が、マニフェストの mode %s と違う" % (where, row.get("mode"), mode))
+        run = runs.get(rid)
+        if run is None:
+            if kind != "run-start":
+                raise LedgerError("%s：run_id %r の最初の行が run-start でない" % (where, rid))
+            seq = row.get("gkg_run_seq")
+            rec = by_seq.get(seq) if type(seq) is int else None
+            if rec is None or rec["kind"] != GKG_RUN_KIND:
+                raise LedgerError("%s の gkg_run_seq %r の記録が、gkg-run-start でない（または無い）" % (where, seq))
+            doc = read_json(rec, GKG_RUN_KIND)
+            run = runs[rid] = {"start": row, "doc": doc, "days": [], "seen": set(), "complete": None,
+                               "complete_lineno": None}
+        if run["complete"] is not None:
+            raise LedgerError("%s：run_id %s の run-complete（%d 行目）より後に、同じ run の行がある"
+                              % (where, rid, run["complete_lineno"]))
+        first = run["start"]
+        for k in GKG_ROW_BASE:
+            if row.get(k) != first.get(k):
+                raise LedgerError("%s の %s %r が、同じ run の最初の run-start の %r と違う"
+                                  % (where, k, row.get(k), first.get(k)))
+        if row.get("official") is not (mode == "official"):
+            raise LedgerError("%s の official が mode %s と合わない" % (where, mode))
+        doc = run["doc"]
+        if kind == "run-start":
+            for k in GKG_START_INPUTS:
+                if row.get(k) != doc.get(k):
+                    raise LedgerError("%s の %s %r が、gkg-run-start（seq %s）の中身の %r と違う"
+                                      % (where, k, row.get(k), row.get("gkg_run_seq"), doc.get(k)))
+            if mode == "trial":
+                if row.get("trial") is not True or row.get("trial_days") != doc.get("trial_days"):
+                    raise LedgerError("%s の trial・trial_days が、gkg-run-start の中身の trial_days %r と合わない"
+                                      % (where, doc.get("trial_days")))
+            elif "trial_days" in row or row.get("trial") is True:
+                raise LedgerError("%s：正式な run の run-start に trial・trial_days がある" % where)
+            ma = by_seq.get(doc.get("method_access_seq"))
+            if ma is None or ma["kind"] != METHOD_ACCESS_KIND:
+                raise LedgerError("%s の method_access_seq の記録が method-access でない" % where)
+            mdoc = read_json(ma, METHOD_ACCESS_KIND)
+            if (row.get("block_start"), row.get("block_end")) != (mdoc.get("block_start"), mdoc.get("block_end")):
+                raise LedgerError("%s の区画 %s〜%s が、method-access（seq %d）の区画 %s〜%s と違う"
+                                  % (where, row.get("block_start"), row.get("block_end"), ma["seq"],
+                                     mdoc.get("block_start"), mdoc.get("block_end")))
+            if not _nonneg_int(row.get("days")) or not _nonneg_int(row.get("files_selected")):
+                raise LedgerError("%s の days・files_selected が 0 以上の整数でない" % where)
+            if mode == "trial" and row["days"] > len(doc.get("trial_days") or []):
+                raise LedgerError("%s の days %d が、trial_days の数より多い" % (where, row["days"]))
+            if row is not first:
+                for k in ("days", "files_selected", "block_start", "block_end", "trial_days", "gkg_run_seq",
+                          "gkg_run_record_sha256"):
+                    if row.get(k) != first.get(k):
+                        raise LedgerError("%s の %s が、同じ run の最初の run-start と違う" % (where, k))
+            run["lo_hi"] = (mdoc.get("block_start"), mdoc.get("block_end"))
+        elif kind == "day":
+            day = row.get("day")
+            if not isinstance(day, str) or not _DAY_RE.match(day):
+                raise LedgerError("%s の day %r が日付の形でない" % (where, day))
+            if mode == "trial":
+                if day not in (doc.get("trial_days") or []):
+                    raise LedgerError("%s の day %s が、試しの run の日（%s）の外" % (where, day,
+                                      "、".join(doc.get("trial_days") or [])))
+            else:
+                lo, hi = run["lo_hi"]
+                if not (isinstance(lo, str) and isinstance(hi, str) and lo <= day <= hi):
+                    raise LedgerError("%s の day %s が、区画 %s〜%s の外" % (where, day, lo, hi))
+            if day in run["seen"]:
+                raise LedgerError("%s：run_id %s に、day %s の行が2つある" % (where, rid, day))
+            run["seen"].add(day)
+            want = "gkg-%s-%s-day-%s.tsv.gz" % (mode, rid, day.replace("-", ""))
+            if row.get("file_name") != want:
+                raise LedgerError("%s の file_name %r が、決まった名前 %s でない" % (where, row.get("file_name"), want))
+            _check_hex(row.get("sha256"), HEX64, where + " の sha256")
+            ok, bad, listed = row.get("files_ok"), row.get("files_failed"), row.get("files_listed")
+            if not (_nonneg_int(ok) and _nonneg_int(bad) and _nonneg_int(listed)) or ok + bad != listed:
+                raise LedgerError("%s の files_ok %r + files_failed %r が files_listed %r と合わない"
+                                  % (where, ok, bad, listed))
+            if not isinstance(row.get("failed_files"), list) or len(row["failed_files"]) != bad:
+                raise LedgerError("%s の failed_files の数が files_failed と合わない" % where)
+            run["days"].append(row)
+        elif kind == "run-complete":
+            days = run["days"]
+            tot = {"days": len(days), "files_ok": sum(d["files_ok"] for d in days),
+                   "files_failed": sum(d["files_failed"] for d in days)}
+            for k, v in tot.items():
+                if row.get(k) != v:
+                    raise LedgerError("%s の %s %r が、day の行から数えた %d と違う" % (where, k, row.get(k), v))
+            if first.get("days") != len(days):
+                raise LedgerError("%s：day の行の数 %d が、run-start の days %r と違う" % (where, len(days),
+                                                                                   first.get("days")))
+            listed = sum(d["files_listed"] for d in days)
+            if first.get("files_selected") != listed:
+                raise LedgerError("%s：day の行の files_listed の合計 %d が、run-start の files_selected %r と違う"
+                                  % (where, listed, first.get("files_selected")))
+            _check_hex(row.get("fetch_log_sha256"), HEX64, where + " の fetch_log_sha256")
+            run["complete"], run["complete_lineno"] = row, i
+    for run in runs.values():
+        del run["seen"], run["doc"]
+        run.pop("lo_hi", None)
+    return runs
+
+
+GKG_RESULT_DOC_KEYS = ("gkg_run_record_sha256", "gkg_run_seq", "kind", "ledger_head", "manifest_commit",
+                       "manifest_lines", "manifest_path", "manifest_sha256", "mode", "run_complete_line_sha256",
+                       "run_id")
+
+
+def manifest_prefix(body, n, path):
+    """マニフェストの先頭 n 行（各行の改行を含む）のバイト列。取れなければ LedgerError。"""
+    lines = body.split(b"\n")
+    if not body.endswith(b"\n") or type(n) is not int or not 1 <= n <= len(lines) - 1:
+        raise LedgerError("%s の先頭 %r 行を取れない（行の数 %d。最後は改行で終わること）"
+                          % (path, n, body.count(b"\n")))
+    return b"".join(line + b"\n" for line in lines[:n])
+
+
+def check_gkg_result_doc(records, record, doc, read_json, data=None):
+    """gkg-run-result の中身の形と、指している gkg-run-start との対応（T-066）。マニフェストとの照合は
+    check_gkg_results。data（記録のバイト列）を渡せば ledger_head も照らす。"""
+    what = "seq %d の gkg-run-result" % record["seq"]
+    if not isinstance(doc, dict) or tuple(sorted(doc)) != GKG_RESULT_DOC_KEYS:
+        raise LedgerError("%s の中身のキーが、決まった %d 個と一致しない" % (what, len(GKG_RESULT_DOC_KEYS)))
+    if doc["kind"] != GKG_RESULT_KIND:
+        raise LedgerError("%s の中身の kind が違う" % what)
+    if data is not None:
+        check_ledger_head(data, record, doc)
+    seq = doc["gkg_run_seq"]
+    by_seq = {r["seq"]: r for r in records}
+    rec = by_seq.get(seq) if type(seq) is int else None
+    if rec is None or rec["kind"] != GKG_RUN_KIND or seq >= record["seq"]:
+        raise LedgerError("%s の gkg_run_seq %r が、それより前の gkg-run-start の記録でない" % (what, seq))
+    if sha256_hex(canonical_line(rec)) != doc["gkg_run_record_sha256"]:
+        raise LedgerError("%s の gkg_run_record_sha256 が、seq %d の行と一致しない" % (what, seq))
+    run = read_json(rec, GKG_RUN_KIND)
+    if (doc["mode"], doc["run_id"]) != (run.get("mode"), run.get("run_id")):
+        raise LedgerError("%s の mode・run_id が、seq %d の gkg-run-start と違う" % (what, seq))
+    if doc["manifest_path"] != GKG_MANIFESTS.get(doc["mode"]):
+        raise LedgerError("%s の manifest_path が、mode %s のマニフェストでない" % (what, doc["mode"]))
+    if type(doc["manifest_lines"]) is not int or doc["manifest_lines"] < 1:
+        raise LedgerError("%s の manifest_lines が正の整数でない" % what)
+    _check_hex(doc["manifest_sha256"], HEX64, what + " の manifest_sha256")
+    _check_hex(doc["run_complete_line_sha256"], HEX64, what + " の run_complete_line_sha256")
+    _check_hex(doc["manifest_commit"], HEX40, what + " の manifest_commit")
+    return doc
+
+
+def check_gkg_results(records, read_json, manifests):
+    """gkg-run-result の記録を照らす（T-066）。manifests は check_gkg_manifests と同じ形。
+      - 中身が check_gkg_result_doc に通る。同じ gkg_run_seq の gkg-run-result は1件だけ。
+      - マニフェストの先頭 manifest_lines 行の sha256 が manifest_sha256 と同じ（マニフェストは追記のみなので、
+        後の行が増えても先頭は変わらない）。
+      - その先頭の行の中に、run_id の run-complete の行があり、その行（改行を除く）の sha256 が
+        run_complete_line_sha256 と同じ。
+    返り値: {(mode, run_id): 記録}。"""
+    out = {}
+    for r in records:
+        if r["kind"] != GKG_RESULT_KIND:
+            continue
+        doc = check_gkg_result_doc(records, r, read_json(r, GKG_RESULT_KIND), read_json)
+        key = (doc["mode"], doc["run_id"])
+        if key in out:
+            raise LedgerError("mode %s・run_id %s の gkg-run-result が2件ある（seq %d、%d）"
+                              % (key[0], key[1], out[key]["seq"], r["seq"]))
+        body = manifests.get(doc["mode"])
+        if body is None:
+            raise LedgerError("seq %d の gkg-run-result があるのに、%s が無い" % (r["seq"], doc["manifest_path"]))
+        try:
+            prefix = manifest_prefix(body, doc["manifest_lines"], doc["manifest_path"])
+        except LedgerError as e:
+            raise LedgerError("seq %d の gkg-run-result の manifest_lines：%s（マニフェストが封印のあとで短くなった）"
+                              % (r["seq"], e)) from None
+        if sha256_hex(prefix) != doc["manifest_sha256"]:
+            raise LedgerError("seq %d の gkg-run-result の manifest_sha256 が、%s の先頭 %d 行の sha256 と違う"
+                              "（マニフェストが封印のあとで書き換えられた）" % (r["seq"], doc["manifest_path"],
+                                                                         doc["manifest_lines"]))
+        found = None
+        for line in prefix.split(b"\n")[:-1]:
+            try:
+                row = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                continue
+            if isinstance(row, dict) and row.get("kind") == "run-complete" and row.get("run_id") == doc["run_id"]:
+                found = line
+        if found is None or sha256_hex(found) != doc["run_complete_line_sha256"]:
+            raise LedgerError("seq %d の gkg-run-result が指す run-complete の行が、%s の先頭 %d 行の中に無いか、"
+                              "sha256 が違う" % (r["seq"], doc["manifest_path"], doc["manifest_lines"]))
+        out[key] = r
     return out
 
 
@@ -2133,6 +2383,49 @@ class ThresholdAccessRequired(LedgerError):
 class MethodAccessRequired(LedgerError):
     """method-access の記録が鎖に無い（または検証に通らない）ので、先に進まない。T-014。"""
 
+
+
+class GkgRunResultRequired(LedgerError):
+    """GKG の取得の run の結果のマニフェストが、gkg-run-result の記録で縛られていない。T-066。"""
+
+
+def require_gkg_run_result(mode, run_id):
+    """GKG の取得の run の結果（日の集計）を使うコードが、最初に呼ぶ関門（T-066 で提案。どこから呼ぶかは
+    リードが収集係・統計係に割り振る）。
+
+    引数は mode と run_id だけ（root は PROJECT_ROOT に固定）。鎖とすべての .ots が検証に通り、マニフェストが
+    照合（check_gkg_manifests）に通り、mode・run_id の gkg-run-result の記録があってマニフェストの先頭と
+    run-complete の行が記録と同じ（check_gkg_results）ときだけ、その記録を返す。そうでなければ
+    GkgRunResultRequired で止める。正式な run は、この関門を通るまで「完了」と扱わない。
+    """
+    try:
+        root = _gate_root()
+        data, records = _load_for_gate(root)
+        read = lambda r, role: read_target_json(root, r, role)  # noqa: E731
+        manifests = {}
+        for m, rel in GKG_MANIFESTS.items():
+            path = os.path.join(root, rel)
+            manifests[m] = None
+            if os.path.lexists(path):
+                if os.path.islink(path) or not os.path.isfile(path):
+                    raise LedgerError("%s が通常のファイルでない" % rel)
+                with open(path, "rb") as f:
+                    manifests[m] = f.read()
+        check_gkg_runs(records, read)
+        check_gkg_manifests(records, read, manifests)
+        for r in records:
+            if r["kind"] == GKG_RESULT_KIND:
+                check_gkg_result_doc(records, r, read(r, GKG_RESULT_KIND), read, data)
+        got = check_gkg_results(records, read, manifests)
+        rec = got.get((mode, run_id))
+        if rec is None:
+            raise LedgerError("mode %s・run_id %s の gkg-run-result の記録が無い。src/sealer/seal_gkg_result.py で"
+                              "マニフェストを封印してから使う" % (mode, run_id))
+    except GkgRunResultRequired:
+        raise
+    except LedgerError as e:
+        raise GkgRunResultRequired("関門：%s" % e) from None
+    return rec
 
 def _gate_root():
     """関門が読むルート。PROJECT_ROOT（このファイルの場所から決まる）だけで、引数は無い。

@@ -806,9 +806,11 @@ def cmd_method(st, _a):
     print(ledger.DRAND_NOT_VERIFIED)
 
 
-def gkg_manifests_check(st):
-    """gkg-run-start の記録と、収集係のマニフェストの run-start の行の照合（T-041）。マニフェストが
-    無い mode は照らさず、そう表示して all の最後にも出す。"""
+def gkg_manifests_check(st, day_dirs=()):
+    """gkg-run-start の記録と、収集係のマニフェストの照合（T-041、T-066）。マニフェストが無い mode は照らさず、
+    そう表示して all の最後にも出す。T-066：run-start の行の入力の値・day の行・run-complete の行の照合
+    （ledger.check_gkg_manifest_rows）、gkg-run-result（マニフェストの時刻証明）の照合、日の集計の sha256 の照合
+    （day_dirs を渡したときだけ）。"""
     manifests = {}
     for mode, rel in ledger.GKG_MANIFESTS.items():
         path = os.path.join(st.root, rel)
@@ -820,20 +822,103 @@ def gkg_manifests_check(st):
             with open(path, "rb") as f:
                 manifests[mode] = f.read()
     got = ledger.check_gkg_manifests(st.records, st.file_json, manifests)
+    results = ledger.check_gkg_results(st.records, st.file_json, manifests)
+    day_rows = []
     for mode, res in got.items():
         rel = ledger.GKG_MANIFESTS[mode]
         if res is None:
             st.unchecked.append("%s の run-start の行と gkg-run-start の記録の照合（マニフェストが無い）" % rel)
             print("照らさなかった：%s が無いので、run-start の行と gkg-run-start の記録の照合をしていない" % rel)
-        else:
-            print("%s：run-start の行 %d 行、異なる run_id %d 個。どの行も、kind・mode・run_id の合う gkg-run-start の"
-                  "記録を指し、異なる run_id の数は %s の記録の件数と同じ" % (rel, res[1], res[0], mode))
+            continue
+        print("%s：run-start の行 %d 行、異なる run_id %d 個。どの行も、kind・mode・run_id の合う gkg-run-start の"
+              "記録を指し、異なる run_id の数は %s の記録の件数と同じ" % (rel, res[1], res[0], mode))
+        runs = ledger.check_gkg_manifest_rows(st.records, st.file_json, mode, manifests[mode])
+        for rid, run in runs.items():
+            c = run["complete"]
+            print("  run_id %s：run-start の入力の値（code_sha256・trial_days・method_access_seq・filelist_sha256・"
+                  "除外の規則の記録・mode・run_id）は gkg-run-start（seq %d）の中身と同じ。day の行 %d 行（日付は区画の"
+                  "中で重ならない）。%s" % (rid, run["start"]["gkg_run_seq"], len(run["days"]),
+                                          "run-complete（%d 行目）の数は day の行の合計と合う" % run["complete_lineno"]
+                                          if c else "run-complete はまだ無い（取得の途中か、止まっている）"))
+            day_rows += [(mode, d) for d in run["days"]]
+            if c is not None:
+                day_rows.append((mode, {"file_name": c.get("fetch_log_file"), "sha256": c.get("fetch_log_sha256"),
+                                        "size": c.get("fetch_log_size"), "log": True}))
+                r = results.get((mode, rid))
+                if r is None:
+                    st.unchecked.append("%s の run_id %s のマニフェストの時刻証明（gkg-run-result の記録が無い）" % (rel, rid))
+                    print("  照らさなかった：run_id %s は run-complete まであるが、gkg-run-result の記録が無い（マニフェストの"
+                          "時刻証明が無い）" % rid)
+                else:
+                    doc = st.file_json(r, ledger.GKG_RESULT_KIND)
+                    print("  run_id %s：gkg-run-result（seq %d）の manifest_sha256 は %s の先頭 %d 行と同じで、"
+                          "run-complete の行を含む" % (rid, r["seq"], rel, doc["manifest_lines"]))
+                    _check_result_commit(st, r, doc)
+    _check_day_files(st, day_rows, day_dirs)
 
 
-def cmd_gkg_runs(st, _a):
-    """GKG の取得の run の開始（kind が gkg-run-start）の照合と一覧。T-031、T-041。"""
+def _check_result_commit(st, r, doc):
+    """gkg-run-result の manifest_commit の版のマニフェストの先頭が、記録と同じ（git の履歴があるとき）。"""
+    repo = Repo(st.root)
+    try:
+        repo.git("rev-parse", "--git-dir")
+    except (ledger.LedgerError, OSError):
+        st.unchecked.append("seq %d の gkg-run-result の manifest_commit の照合（git の履歴が無い）" % r["seq"])
+        print("  照らさなかった：git の履歴が無いので、seq %d の manifest_commit の版は照らしていない" % r["seq"])
+        return
+    try:
+        body = _rgit(repo, "show", "%s:%s" % (doc["manifest_commit"], doc["manifest_path"]))
+    except ledger.LedgerError:
+        raise ledger.LedgerError("seq %d の gkg-run-result の manifest_commit %s の版に %s が無い"
+                                 % (r["seq"], doc["manifest_commit"][:12], doc["manifest_path"])) from None
+    if ledger.sha256_hex(ledger.manifest_prefix(body, doc["manifest_lines"], doc["manifest_path"])) \
+            != doc["manifest_sha256"]:
+        raise ledger.LedgerError("seq %d の gkg-run-result の manifest_sha256 が、manifest_commit %s の版の先頭 %d 行と違う"
+                                 % (r["seq"], doc["manifest_commit"][:12], doc["manifest_lines"]))
+    print("  manifest_commit %s の版のマニフェストの先頭 %d 行も同じ" % (doc["manifest_commit"][:12], doc["manifest_lines"]))
+
+
+def _check_day_files(st, rows, day_dirs):
+    """日の集計（と取得の記録）の sha256 を、渡された置き場所のファイルと照らす（T-066）。置き場所を渡さないとき、
+    またはファイルが無いときは「照らさなかった」。違えば止める。"""
+    if not rows:
+        return
+    if not day_dirs:
+        st.unchecked.append("日の集計の sha256（--day-files で置き場所を渡したときだけ照らす）")
+        print("照らさなかった：日の集計と取得の記録の sha256（%d 件）は、--day-files で置き場所を渡したときだけ照らす"
+              % len(rows))
+        return
+    seen, missing = 0, []
+    for mode, row in rows:
+        name = row.get("file_name")
+        found = None
+        for d in day_dirs:
+            p = os.path.join(d, name) if isinstance(name, str) and "/" not in name else None
+            if p and os.path.isfile(p) and not os.path.islink(p):
+                found = p
+                break
+        if found is None:
+            missing.append(str(name))
+            continue
+        with open(found, "rb") as f:
+            data = f.read()
+        if ledger.sha256_hex(data) != row.get("sha256") or ("size" in row and len(data) != row["size"]):
+            raise ledger.LedgerError("%s の sha256（または大きさ）が、%s のマニフェストの行と違う" % (name, mode))
+        seen += 1
+    print("日の集計と取得の記録：%d 件を、置き場所のファイルの sha256 と照らし、どれもマニフェストと同じ" % seen)
+    if missing:
+        st.unchecked.append("日の集計と取得の記録のうち、置き場所に無い %d 件（%s）" % (len(missing), "、".join(missing)))
+        print("照らさなかった：置き場所に無い %d 件（%s）" % (len(missing), "、".join(missing)))
+
+
+def cmd_gkg_runs(st, a):
+    """GKG の取得の run の開始（kind が gkg-run-start）の照合と一覧。T-031、T-041。T-066：マニフェストの行と
+    gkg-run-result の照合。"""
     runs = ledger.check_gkg_runs(st.records, st.file_json)
-    gkg_manifests_check(st)
+    for r in st.records:
+        if r["kind"] == ledger.GKG_RESULT_KIND:
+            ledger.check_gkg_result_doc(st.records, r, st.file_json(r, ledger.GKG_RESULT_KIND), st.file_json, st.data)
+    gkg_manifests_check(st, [os.path.abspath(d) for d in getattr(a, "day_files", None) or []])
     if not runs:
         print("gkg-run-start の記録：なし")
         return
@@ -852,8 +937,8 @@ def cmd_gkg_runs(st, _a):
                  d["filelist_sha256"], d["method_access_seq"], d["exclusion_rule_seq"]))
         _print_drand(r, t, state, own)
     print("順序：どの gkg-run-start も最初の method-access より後。official は %s。trial は official "
-          "より前だけ。除外の規則の記録の kind は、まだ照合しない（kind が決まっていない）。"
-          % ("1 件" if officials else "まだ無い"))
+          "より前だけ。除外の規則の記録（exclusion_rule_seq）は、kind が stats-order1 の最初の記録で、その行の "
+          "sha256 と同じ（T-037。T-066 で文言を今の形に直した）。" % ("1 件" if officials else "まだ無い"))
     print(ledger.DRAND_NOT_VERIFIED)
 
 
@@ -942,7 +1027,7 @@ def cmd_candidates(st, _a):
 def cmd_adopted(st, _a):
     print("採用の規則：最初の threshold-access の記録より seq が小さい記録のうち、その種類の最後の"
           "もの。acquisition-start・acquisition-result・method-access・gkg-run-start・stats-order1・"
-          "stats-order1b は区切りに使わない。時刻（Bitcoin の確定"
+          "stats-order1b は区切りに使わない（gkg-run-result も使わない。T-066）。時刻（Bitcoin の確定"
           "時刻、drand の回の公開時刻）と Pending かどうかは使わない。")
     print("candidates は、これに加えて、すべての記録が最初の acquisition-start より前に"
           "なければならない（candidates の検査。後ろにあれば検証は失敗する）。")
@@ -1007,6 +1092,9 @@ def main(argv=None):
         parsers[name] = s
     for name in ("targets", "all", "stats-order"):
         parsers[name].add_argument("--rev", default="working")
+    for name in ("gkg-runs", "all"):
+        # T-066：日の集計（と取得の記録）の置き場所。渡したときだけ sha256 を照らす（第三者はディスクを持たない）
+        parsers[name].add_argument("--day-files", action="append", default=[])
     a = p.parse_args(argv)
     fn = {"chain": cmd_chain, "anchors": cmd_anchors, "targets": cmd_targets,
           "access": cmd_access, "acquisition": cmd_acquisition, "method": cmd_method,
