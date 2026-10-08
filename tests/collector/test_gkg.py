@@ -511,11 +511,16 @@ def make_sealed_project(root, kinds):
 
     中身は仮のファイル（照合の関門は、鎖と .ots だけを見る）。.ots はテストの差し替えの ots で作る。
     本物の sealed/ には書かない。返り値: 記録の一覧。T-050。
-    root が一時的なディレクトリの下でなければ（本物のプロジェクトを含む）、何も書かずに止まる
-    （T-057。T-050 の監査 軽-3）。
+    root が一時的なディレクトリの下でないか、このプロジェクト（tests の親）の中を指していれば、
+    何も書かずに止まる（T-057。T-050 の監査 軽-3。acquire_gkg._checked_test_seams と同じ考え方）。
     """
     if not _under_tmp(root):
         raise ValueError("make_sealed_project の書き込み先が、一時的なディレクトリの下でない")
+    proj, real = os.path.realpath(PROJECT), os.path.realpath(root)
+    if os.path.commonpath([proj, real]) == proj:
+        # プロジェクトが一時的なディレクトリの下にあるとき（scratchpad の clone など）も、本物の記録を守る
+        raise ValueError("make_sealed_project の書き込み先が、一時的なディレクトリの下でない"
+                         "（このプロジェクトの中を指している）")
     if HERE not in sys.path:
         sys.path.insert(0, HERE)
     import test_acquire_filelist as taf
