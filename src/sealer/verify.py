@@ -878,47 +878,94 @@ def gkg_manifests_check(st, day_dirs=()):
 
 
 def plan_file_name(mode, run_id):
-    """計画の本体（ledger.gkg_plan_canonical のバイト列）のファイルの名前（T-070）。収集係が日の集計と同じ置き場所に
-    書く（T-071）。"""
+    """計画の本体（ledger.gkg_plan_canonical のバイト列）のファイルの名前（T-070）。"""
     return "gkg-%s-%s-plan.json" % (mode, run_id)
 
 
+def plan_rel(mode, run_id):
+    """計画の本体の Git の中の置き場所（T-070 差し戻し1回目 中-1）。収集係が run-start より前にコミットする（T-071）。"""
+    return "data/manifest/" + plan_file_name(mode, run_id)
+
+
+def _plan_from_git(st, r, rel):
+    """計画の本体を、記録の版の Git から読む。返り値: (バイト列か None, 読んだ場所の説明か None, git があるか)。
+    記録を最初に含んだコミットがあればその版、まだコミットされていなければ HEAD の版から読む。git の履歴が無ければ
+    作業ツリーから読む。"""
+    repo = Repo(st.root)
+    try:
+        repo.git("rev-parse", "--git-dir")
+    except (ledger.LedgerError, OSError):
+        path = os.path.join(st.root, rel)
+        if os.path.isfile(path) and not os.path.islink(path):
+            with open(path, "rb") as f:
+                return f.read(), "作業ツリー（git の履歴が無い）", False
+        return None, None, False
+    if not hasattr(st, "_seq_commits"):
+        try:
+            st._seq_commits = repo.commit_for_seq(st.data)
+        except ledger.LedgerError:
+            st._seq_commits = {}
+    rev = st._seq_commits.get(r["seq"], "HEAD")
+    try:
+        body = _rgit(repo, "show", "%s:%s" % (rev, rel))
+    except ledger.LedgerError:
+        return None, None, True
+    path = os.path.join(st.root, rel)
+    if os.path.lexists(path):
+        with open(path, "rb") as f:
+            if os.path.islink(path) or f.read() != body:
+                raise ledger.LedgerError("%s の作業ツリーの中身が、Git（%s）の版と違う" % (rel, rev[:12]))
+    return body, "Git の %s の版" % rev[:12], True
+
+
 def _check_plan_body(st, r, d, run, day_dirs):
-    """gkg-run-start の plan_sha256 と、計画の本体（--day-files の置き場所の gkg-<mode>-<run_id>-plan.json）を照らし、
-    本体があれば、マニフェストの day の行の日付・files_listed・failed_files がその一覧と合うことを照らす（T-070）。
-    本体が無ければ「照らさなかった」。plan_sha256 の無い official の記録も「照らさなかった」。"""
+    """gkg-run-start の plan_sha256 と、計画の本体を照らし、マニフェストの day の行の日付・files_listed・failed_files が
+    その一覧と合うことを照らす（T-070）。本体は Git の data/manifest/gkg-<mode>-<run_id>-plan.json（記録の版）から
+    読む（差し戻し1回目 中-1）。Git に無ければ、official は止め、trial は --day-files の置き場所を探し、そこにも無ければ
+    「照らさなかった」。plan_sha256 の無い official の記録も「照らさなかった」。"""
     if ledger.GKG_RUN_PLAN_SHA_KEY not in d:
         if d["mode"] == "official" and "days" in d:
             st.unchecked.append("seq %d の gkg-run-start（official）の計画の一覧（plan_sha256 が記録に無い）" % r["seq"])
             print("照らさなかった：seq %d の gkg-run-start（official）に plan_sha256 が無いので、どの日のどのファイルかを"
                   "データを受け取る前の記録と照らしていない（数だけを照らした）" % r["seq"])
         return
-    name = plan_file_name(d["mode"], d["run_id"])
-    found = None
-    for dd in day_dirs:
-        p = os.path.join(dd, name)
-        if os.path.isfile(p) and not os.path.islink(p):
-            found = p
-            break
-    if found is None:
-        st.unchecked.append("seq %d の run の計画の本体（%s。--day-files の置き場所に無い）との照合" % (r["seq"], name))
-        print("照らさなかった：seq %d の run の計画の本体 %s が、--day-files の置き場所に無い（plan_sha256 は記録にある）"
-              % (r["seq"], name))
+    rel = plan_rel(d["mode"], d["run_id"])
+    data, where, _git = _plan_from_git(st, r, rel)
+    if data is None:
+        if d["mode"] == "official":
+            raise ledger.LedgerError("seq %d の gkg-run-start（official）に plan_sha256 があるのに、Git に計画の本体 %s が"
+                                     "無い（収集係が run-start より前にコミットする決まり）" % (r["seq"], rel))
+        name = plan_file_name(d["mode"], d["run_id"])
+        for dd in day_dirs:
+            p = os.path.join(dd, name)
+            if os.path.isfile(p) and not os.path.islink(p):
+                with open(p, "rb") as f:
+                    data = f.read()
+                where = "--day-files の置き場所"
+                break
+    if data is None:
+        st.unchecked.append("seq %d の run の計画の本体（%s。Git にも --day-files の置き場所にも無い）との照合"
+                            % (r["seq"], rel))
+        print("照らさなかった：seq %d の run の計画の本体 %s が、Git にも --day-files の置き場所にも無い（plan_sha256 は"
+              "記録にある）" % (r["seq"], rel))
         return
-    with open(found, "rb") as f:
-        data = f.read()
     if ledger.sha256_hex(data) != d[ledger.GKG_RUN_PLAN_SHA_KEY]:
-        raise ledger.LedgerError("%s の sha256 が、seq %d の gkg-run-start の plan_sha256 と違う" % (name, r["seq"]))
+        raise ledger.LedgerError("%s（%s）の sha256 が、seq %d の gkg-run-start の plan_sha256 と違う" % (rel, where, r["seq"]))
     plan = ledger.parse_gkg_plan(data)
     if (len(plan), sum(len(v) for v in plan.values())) != (d["days"], d["files_selected"]):
         raise ledger.LedgerError("%s の日の数・ファイルの数が、seq %d の gkg-run-start の days・files_selected と違う"
-                                 % (name, r["seq"]))
+                                 % (rel, r["seq"]))
     if d["mode"] == "trial" and sorted(plan) != list(d["trial_days"]):
-        raise ledger.LedgerError("%s の日が、seq %d の trial_days と違う" % (name, r["seq"]))
-    if run is not None:
-        ledger.check_plan_rows(plan, run, "%s（seq %d の run）" % (ledger.GKG_MANIFESTS[d["mode"]], r["seq"]))
-    print("seq %d の run：計画の本体 %s の sha256 は plan_sha256 と同じで、day の行の日付・files_listed・failed_files は"
-          "その一覧と合う" % (r["seq"], name))
+        raise ledger.LedgerError("%s の日が、seq %d の trial_days と違う" % (rel, r["seq"]))
+    if run is None:
+        # 差し戻し1回目 軽-4：マニフェストに行が無いので、day の行との照合は行っていない
+        st.unchecked.append("seq %d の run の day の行と計画の本体の照合（マニフェストに行が無い）" % r["seq"])
+        print("seq %d の run：計画の本体 %s（%s）の sha256 は plan_sha256 と同じで、日の数・ファイルの数も記録と同じ。"
+              "照らさなかった：マニフェストに行が無いので、day の行との照合はしていない" % (r["seq"], rel, where))
+        return
+    ledger.check_plan_rows(plan, run, "%s（seq %d の run）" % (ledger.GKG_MANIFESTS[d["mode"]], r["seq"]))
+    print("seq %d の run：計画の本体 %s（%s）の sha256 は plan_sha256 と同じで、day の行の日付・files_listed・"
+          "failed_files はその一覧と合う" % (r["seq"], rel, where))
 
 
 def _check_result_commit(st, r, doc):

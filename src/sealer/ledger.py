@@ -1233,7 +1233,8 @@ def check_gkg_manifest_rows(records, read_json, mode, body):
 
     run-start の行：指している gkg-run-start の中身と、入力の値（GKG_START_INPUTS と、trial なら trial_days）が
       同じ。official は False/True が mode と合う。区画（block_start・block_end）が method_access_seq の
-      method-access の区画と同じ。days・files_selected が 0 以上の整数で、trial なら days は trial_days の数以下。
+      method-access の区画と同じ。days・files_selected が 0 以上の整数で、trial なら days は trial_days の数と同じ
+      （T-070）。
     どの行も：kind が GKG_ROW_KINDS のどれか。run_id の最初の行が run-start。GKG_ROW_BASE の欄が、その run_id の
       最初の run-start と同じ。
     day の行：day が日付で、その run の区画（trial は trial_days、official は method-access の区画）の中。同じ run の
@@ -1302,6 +1303,10 @@ def check_gkg_manifest_rows(records, read_json, mode, body):
             if mode == "trial" and row["days"] != len(doc.get("trial_days") or []):
                 # T-070（T-068 の監査 軽-B）：決まった試しの日のうち1日を後から抜けないよう、ちょうど同じ
                 raise LedgerError("%s の days %d が、trial_days の数と同じでない" % (where, row["days"]))
+            if GKG_RUN_PLAN_SHA_KEY not in doc and GKG_RUN_PLAN_SHA_KEY in row:
+                # T-070 差し戻し1回目 軽-3：記録に無い plan_sha256 を行にだけ書くことはできない
+                raise LedgerError("%s に %s があるが、gkg-run-start（seq %s）の中身には無い"
+                                  % (where, GKG_RUN_PLAN_SHA_KEY, row.get("gkg_run_seq")))
             if GKG_RUN_PLAN_SHA_KEY in doc and row.get(GKG_RUN_PLAN_SHA_KEY) != doc[GKG_RUN_PLAN_SHA_KEY]:
                 raise LedgerError("%s の %s %r が、gkg-run-start（seq %s）の計画の %s と違う"
                                   % (where, GKG_RUN_PLAN_SHA_KEY, row.get(GKG_RUN_PLAN_SHA_KEY), row.get("gkg_run_seq"),
@@ -1373,18 +1378,29 @@ def check_gkg_manifest_rows(records, read_json, mode, body):
 
 # ---- T-070：計画の一覧（取得する日とファイル）の正規の形
 
+def _plan_bytes(plan):
+    out = []
+    for day in sorted(plan):
+        files = sorted(plan[day], key=lambda e: e["file_time"])
+        out.append([day, [[e["file_time"], e["size"], e["md5"]] for e in files]])
+    return json.dumps(out, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+
+
 def gkg_plan_canonical(plan):
     """収集係の select_files（試しの run は trial_plan）の出力 {日付: [entry, ...]} の正規の形のバイト列。
 
     [[日付, [[file_time, size, md5], ...]], ...] を、日付の順・各日は file_time の順に並べ、
     json.dumps(..., separators=(",", ":"), ensure_ascii=True) で書いた ASCII のバイト列（末尾の改行なし）。
     entry の ambiguous は入れない（ファイル一覧から決まる付記で、取得するファイルを決めるのは file_time・size・md5）。
-    plan_sha256 は、このバイト列の sha256。"""
-    out = []
-    for day in sorted(plan):
-        files = sorted(plan[day], key=lambda e: e["file_time"])
-        out.append([day, [[e["file_time"], e["size"], e["md5"]] for e in files]])
-    return json.dumps(out, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    plan_sha256 は、このバイト列の sha256。
+    作ったバイト列を parse_gkg_plan で読み直し、型（日付・14桁の file_time・整数の size・32桁の md5）と、file_time の
+    重複が無いことを確かめる（T-070 差し戻し1回目 軽-2）。合わなければ LedgerError。"""
+    try:
+        data = _plan_bytes(plan)
+    except (KeyError, TypeError, AttributeError, ValueError):
+        raise LedgerError("計画が、select_files の出力の形（{日付: [entry, ...]}）でない") from None
+    parse_gkg_plan(data)
+    return data
 
 
 def gkg_plan_sha256(plan):
@@ -1396,7 +1412,7 @@ def parse_gkg_plan(data):
     （読み直して同じバイト列になることまで確かめる）。"""
     try:
         raw = json.loads(data.decode("ascii"))
-        plan = {}
+        plan, seen = {}, set()
         for day, files in raw:
             if not isinstance(day, str) or not _DAY_RE.match(day) or day in plan or not isinstance(files, list):
                 raise ValueError
@@ -1405,10 +1421,14 @@ def parse_gkg_plan(data):
                 if not (isinstance(ft, str) and re.fullmatch(r"\d{14}", ft) and type(size) is int and size >= 0
                         and isinstance(md5, str) and re.fullmatch(r"[0-9a-f]{32}", md5)):
                     raise ValueError
+                if ft in seen:
+                    # T-070 差し戻し1回目 軽-3：同じ日の中でも、ほかの日とも、file_time は重ならない
+                    raise LedgerError("計画の本体に、file_time %s が2回ある" % ft)
+                seen.add(ft)
                 plan[day].append({"file_time": ft, "size": size, "md5": md5})
     except (UnicodeDecodeError, ValueError, TypeError):
         raise LedgerError("計画の本体が、決まった形（gkg_plan_canonical）でない") from None
-    if gkg_plan_canonical(plan) != data:
+    if _plan_bytes(plan) != data:
         raise LedgerError("計画の本体が、正規の形（gkg_plan_canonical）のバイト列でない")
     return plan
 
