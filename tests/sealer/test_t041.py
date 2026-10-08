@@ -262,7 +262,9 @@ class TestDocT049(unittest.TestCase):
         for phrase in ("`verify.py all`（と `stats-order`）は、順番1 の10件の sha256 を計算し直さない",
                        "docs/stats/seal-order1.md 3章 (1) の手順で、自分で計算し直して行う",
                        "記録の行の `recorded_at` は、封印を始めた時刻である",
-                       "ledger に書いた時刻は `recorded_at` より後になる"):
+                       "ledger に書いた時刻は `recorded_at` より後になる",
+                       "ledger に書いた時刻そのものは記録に残らないので、第三者は確かめられない",
+                       "記録の seq の順に並べた一覧と同じでなければならない"):
             self.assertIn(phrase, text)
 
 
@@ -275,7 +277,7 @@ class TestDocT043(unittest.TestCase):
         for phrase in ("使い回し（T-043。T-041 の監査 中-1）", "stamp.py stamp --seq N",
                        "結果を見てから run や入力を選び直す道にはならない", "`make_start_hook`",
                        "記録が0件でマニフェストも無い mode は照らさず", "通常のファイルでない",
-                       "`trial_run_ids` が、`official` の記録より前の `trial` の記録の run_id の一覧",
+                       "`trial_run_ids` は、`official` の記録より前の `trial` の記録の run_id を",
                        "第三者は、マニフェストのコミットのあとで照らす",
                        "最初の method-access の前に `stats-order1b` の記録も要る",
                        "関門で照らすのは T-046 から", "収集係が T-045 で決めた並べ方",

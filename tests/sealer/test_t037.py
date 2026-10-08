@@ -717,6 +717,8 @@ class TestRealClone(unittest.TestCase):
     """
 
     BEFORE_ORDER1 = "77d0dd22d8e397a9b1e53b079a31bb93db765452"
+    # 本物の順番1 の中身（T-048 で封印した seq 5）
+    REAL_ORDER1 = "sealed/stats-order1-517c8ff368e182eab59e0ddab5e38ccb46a8e36033a94e90e597debcce93fc8a.json"
 
     def clone(self, d, commit=None):
         c = os.path.join(d, "clone")
@@ -759,6 +761,9 @@ class TestRealClone(unittest.TestCase):
                 doc = json.load(f)
             self.assertEqual(sorted(t["name"] for t in doc["targets"]), sorted(ledger.ORDER1_TARGET_NAMES))
             self.assertEqual(doc["head"], self.BEFORE_ORDER1)
+            # T-052（T-049 の監査 軽-2）：clone で作った順番1 の中身は、本物の seq 5 の中身と同じバイト列
+            with open(os.path.join(c, rel), "rb") as f, open(os.path.join(tl.PROJECT, self.REAL_ORDER1), "rb") as g:
+                self.assertEqual(f.read(), g.read())
             self.commit(c, "順番1")
             self.seal_1b_and_check(c, now, rec["seq"])
             code, out, err = tl.run_verify_inproc(c, "stats-order")

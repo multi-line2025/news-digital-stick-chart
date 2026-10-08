@@ -828,7 +828,10 @@ grep -n '"kind":"gkg-run-start"' sealed/ledger.jsonl | cut -d: -f1 || true
 - 試しの run の数え方は「**異なる run_id の数**」である。マニフェストの run-start の行の異なる run_id の数が、その mode の `gkg-run-start` の記録の件数と同じであること。同じ run_id の run-start の行が2行以上あるのは、正直なやり直しとして通す（同じ run の記録を指す）。
 - 記録を書かずに行った試しの run は、run-start の行が記録を指せないか、数が合わないので見つかる。
 - マニフェストが無い mode で、その mode の `gkg-run-start` の記録が1件以上あれば失敗にする（記録だけあって run-start の行が無い。T-043。T-041 の監査 軽-1）。記録が0件でマニフェストも無い mode は照らさず、「照らさなかった」と表示し、`all` の最後の行にも出す（13章の区分表と同じ形。終了コードは 0 のまま）。マニフェストが通常のファイルでない（symlink やディレクトリ）ときは失敗にする。
-- 正式な run の run-start の行の `trial_run_ids` が、`official` の記録より前の `trial` の記録の run_id の一覧（seq の順）と同じであること。並べ方は、収集係が T-045 で決めた並べ方（`gkg-run-start`（trial）の記録の seq の順。src/collector/README.md 6.5.5 の3）と同じである。使い回しのために、マニフェストの run-start の行の順と記録の seq の順がずれる流れ（記録だけ書いて止まった run A → 別の run B → A に戻して使い回す）でも、seq の順で比べるので通る（テスト `tests/sealer/test_t041.py` の `test_trial_run_ids_follow_seq_order_after_reuse`。T-046）（T-043。T-041 の監査 軽-2。src/collector/README.md 6.5.5 の第三者の照らし方3）。`trial_manifest_sha256` は、この照合では照らさない（収集係の関門が正式な run の開始と再開のたびに照らす）。
+- 正式な run の run-start の行の `trial_run_ids` は、`official` の記録より前の `trial` の記録の run_id を、記録の seq の順に並べた一覧と同じでなければならない（T-043。T-041 の監査 軽-2）。
+  - この並べ方は、収集係が T-045 で決めた並べ方と同じである（src/collector/README.md 6.5.5 の3。第三者の照らし方3 も同じ）。
+  - 使い回しのために、マニフェストの run-start の行の順と記録の seq の順がずれることがある。たとえば、記録だけ書いて止まった run A のあとに別の run B を行い、A に戻して記録を使い回すと、行の順は B・A、seq の順は A・B になる。照合は seq の順で比べるので、この流れでも通る（T-046。テスト `tests/sealer/test_t041.py` の `test_trial_run_ids_follow_seq_order_after_reuse`）。
+  - `trial_manifest_sha256` は、この照合では照らさない。収集係の関門が、正式な run の開始と再開のたびに照らす。
 - **照らす時機（T-043。T-041 の監査 軽-3）**：試しの run のマニフェストは、run が終わってからコミットされる（src/collector/README.md 6.4）。封印の記録（`gkg-run-start`）は run の前に書かれ、ハッシュは24時間以内に投稿されるので、記録だけ先に公開された間は、マニフェストの行が無いか件数が合わず、この照合は失敗することがある。第三者は、マニフェストのコミットのあとで照らす。
 - 限界：コミットと、記録のハッシュの公開（X への投稿）の前に、記録の末尾の行と中身のファイルとマニフェストの行をまとめて戻すことは見つけられない。戻したあとの記録とマニフェストは、互いにつじつまが合うからである。7章の「別の系列が無かったこと」と同じ限界で、記録の先頭のハッシュを公開した時点より前の部分だけが固まる。末尾の行と中身とマニフェストの行をまとめて戻すことを見つけるには、投稿したハッシュと照らす（docs/verify/x-post.md）。
 
@@ -866,7 +869,7 @@ grep -n '"kind":"gkg-run-start"' sealed/ledger.jsonl | cut -d: -f1 || true
 - `owner_choice`：2d23cdf の版の reviews/T-020.md の見出しと三行（`{"source", "heading", "lines"}`。`ledger.OWNER_CHOICE`）。
 - `checks`：`worktree_clean`・`not_shallow`・`method_access_absent`・`themes_manifest_absent`・`gkg_manifests_absent`（どれも true）、`optional_choice_status`（"decided"）、`acquisition_starts`（照らした acquisition-start の一覧）、`stats_tests`（"OK (N tests)"）、`targets_only_copy`（`{"tests": "OK (N tests)", "files": [写しに置いた5件]}`。下の項目10）。
 - `ledger_head`：この行を足す前の記録の先頭 seq 行の sha256。
-- **記録の行の `recorded_at` は、封印を始めた時刻である**（T-049。T-048 の監査 軽-2）。`seal_stats.seal_order1`・`seal_order1b` は、始めた時点の時計の時刻を `recorded_at` に入れ、そのあとで関門の確認、10件の計算、`tests/stats`、対象だけの写しのテストを行ってから、ledger に書く。そのため、ledger に書いた時刻は `recorded_at` より後になる（T-048 の seq 5 では約27秒）。どちらも記録した機械の時計による申告で、証明ではない（1章）。書いた時刻の上限は、その seq の `.ots` の確定時刻で決まる。
+- **記録の行の `recorded_at` は、封印を始めた時刻である**（T-049。T-048 の監査 軽-2）。`seal_stats.seal_order1`・`seal_order1b` は、始めた時点の時計の時刻を `recorded_at` に入れ、そのあとで関門の確認、10件の計算、`tests/stats`、対象だけの写しのテストを行ってから、ledger に書く。そのため、ledger に書いた時刻は `recorded_at` より後になる。ledger に書いた時刻そのものは記録に残らないので、第三者は確かめられない。目安として、T-048 の監査は seq 5 について、`recorded_at` 23:14:39Z、OpenTimestamps のカレンダーが受け取った時刻 23:15:06〜07Z、コミット 23:15:26Z（どれも 2026-10-07、UTC）を観測した（reviews/T-048.md）。差は約27秒だが、カレンダーの時刻は .ots の Pending からは読めず、確かめられる値ではない。どちらも記録した機械の時計による申告で、証明ではない（1章）。書いた時刻の上限は、その seq の `.ots` の確定時刻で決まる。
 
 `stats-order1b` の中身（キーはこの11個だけ：`ancestors`・`approvals`・`checks`・`counting`・`files`・`head`・`kind`・`ledger_head`・`order1_ref`・`owner_approval`・`python`）：
 - `files`：封印の対象のファイルのパスと sha256（`[{"path", "sha256"}]`）。`ledger.ORDER1B_REQUIRED_FILES`（`docs/stats/counting.md`・`src/stats/counting.py`・`tests/stats/test_counting.py`・`docs/stats/seal-order1.md`）を必ず含む（T-037 の差し戻し1回目 中2）。

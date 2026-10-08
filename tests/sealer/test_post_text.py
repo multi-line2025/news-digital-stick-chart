@@ -343,9 +343,15 @@ class TestRealLedger(unittest.TestCase):
         if len(ledger.verify_chain(data)) < 5:
             self.skipTest("記録に seq 5 が無い")
         account = doc_fixed(PROJECT, "account")
+        # T-052（T-049 の監査 軽-1）：一覧のハッシュは、実際に投稿した値の固定の文字列（reviews/T-048.md）。
+        # 記録から計算した値をそのまま入れると、記録が書き換わっても一致してしまうため
+        posted5 = "6c44e4cbd5ae6a8f7839141b33dc010f518cd0a3c333acefa7bc4096d4958b1b"
+        posted4 = "186d3c6db7447d80a13566ec134db6b0e27cad738e518e80bf48559f6d811cdb"
+        self.assertEqual(ledger.prefix_digest(data, 5), posted5)
+        self.assertEqual(ledger.prefix_digest(data, 4), posted4)
         listing = "\n".join([
-            "https://x.com/%s/status/2107899885177704739 4 %s" % (account, ledger.prefix_digest(data, 4)),
-            "https://x.com/%s/status/2107974118754980205 5 %s" % (account, ledger.prefix_digest(data, 5))])
+            "https://x.com/%s/status/2107899885177704739 4 %s" % (account, posted4),
+            "https://x.com/%s/status/2107974118754980205 5 %s" % (account, posted5)])
         posts = post_text.parse_posts(listing)
         second = posts[1][1]
         self.assertEqual(post_text._iso(second), "2026-10-07T23:19:28.833Z")
@@ -780,6 +786,25 @@ class TestDocProcedure(unittest.TestCase):
     def ledger_path(self):
         return os.path.join(self.clone, "sealed", "ledger.jsonl")
 
+    # 順番1 の封印の直前の commit（本物の記録は seq 1〜4）。T-052：本物の記録の件数に頼らずに、
+    # 「記録が 4 件のとき」の手順を試すため、複製の sealed/ をこの commit の状態にそろえる
+    FOUR_RECORDS = "77d0dd22d8e397a9b1e53b079a31bb93db765452"
+
+    def use_sealed_at(self, commit):
+        """複製の sealed/ を commit の版にそろえてコミットする（複製の中だけ）。その commit に無い
+        sealed/ のファイルは、消さずに複製の外（self.tmp の下）へ移す。投稿文を作り直す。"""
+        self.git("checkout", "-q", commit, "--", "sealed")
+        keep = set(subprocess.run(["git", "-C", self.clone, "ls-tree", "--name-only", commit, "sealed/"],
+                                  check=True, capture_output=True).stdout.decode().split())
+        aside = os.path.join(self.tmp, "aside")
+        os.makedirs(aside, exist_ok=True)
+        for name in os.listdir(os.path.join(self.clone, "sealed")):
+            if "sealed/" + name not in keep:
+                os.rename(os.path.join(self.clone, "sealed", name), os.path.join(aside, name))
+        self.git("add", "-A", "sealed")
+        self.git("commit", "-q", "--allow-empty", "-m", "sealed/ を %s の版に（テストの中だけ）" % commit[:7])
+        self.post = self.make_post()
+
     def append_fake_record(self, when):
         """仮の seq 5 を足し、許可したカレンダーの Pending の .ots を作ってコミットする（複製の中だけ）。"""
         data = ledger.read_ledger(self.ledger_path())
@@ -863,8 +888,10 @@ class TestDocProcedure(unittest.TestCase):
         self.assertStopsAt(4)
 
     def test_other_height_stops_at_5(self):
-        if self.post["BTC"] == "pending":
-            self.skipTest("投稿に高さが無い")
+        """T-052：高さのある seq 4（Bitcoin で確定済み）の投稿に固定する（最新の seq の確定の状態に頼らない）。"""
+        self.post = self.make_post(4)
+        self.assertNotEqual(self.post["BTC"], "pending")
+        self.assertMatches()
         self.assertStopsAt(5, BTC="1")
 
     # ---- 投稿の一覧と投稿の決まり（4章）
@@ -893,9 +920,10 @@ class TestDocProcedure(unittest.TestCase):
         return doc_fixed(self.clone, "first")
 
     def test_list_first_post_ok(self):
-        """最初の投稿（手順書 4.2）は、決まりを守っている（seq 3・4 は約 4.66 時間）。"""
-        if int(self.post["SEQ"]) != 4:
-            self.skipTest("記録が 4 件のときの最初の投稿を試す")
+        """最初の投稿（手順書 4.2）は、決まりを守っている（seq 3・4 は約 4.66 時間）。
+        T-052：記録が 4 件の状態（77d0dd2 の sealed/）に固定して試す。"""
+        self.use_sealed_at(self.FOUR_RECORDS)
+        self.assertEqual(self.post["SEQ"], "4")
         for sh, code, out in self.run_list([self.first_line()]):
             self.assertEqual(code, 0, "%s: %s" % (sh, out))
             self.assertIn("投稿の決まりを守っている", out, sh)
@@ -923,8 +951,9 @@ class TestDocProcedure(unittest.TestCase):
             self.assertIn("合わない:", out, sh)
 
     def test_list_seq5_rule(self):
-        if int(self.post["SEQ"]) != 4:
-            self.skipTest("記録が 4 件のときに仮の seq 5 を足して試す")
+        """T-052：記録が 4 件の状態（77d0dd2 の sealed/）に固定し、仮の seq 5 を足して試す。"""
+        self.use_sealed_at(self.FOUR_RECORDS)
+        self.assertEqual(self.post["SEQ"], "4")
         acc = doc_fixed(self.clone, "account")
         rec5 = ledger.parse_time("2026-10-07T14:00:00Z")
         n = self.append_fake_record(rec5)
