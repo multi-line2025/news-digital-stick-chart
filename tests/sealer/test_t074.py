@@ -191,7 +191,7 @@ class TestN11N12(t73.Order2Case):
         gkg-run-result と同じ中身の別の記録（mode・run_id は R）を指すと止まる。"""
         n = self.res["seq"]
         dup = {"seq": n + 1, "kind": ledger.GKG_RESULT_KIND, "targets": [], "note": "R の結果の写し（テスト）"}
-        o2 = {"seq": n + 2, "kind": O2}
+        o2 = t73.o2_stub(n + 2)
         doc = self.doc(gkg_ref={"seq": dup["seq"], "record_sha256": line_sha(dup)})
         extra = {dup["seq"]: self.read(self.res, ledger.GKG_RESULT_KIND)}
         with self.assertRaisesRegex(ledger.LedgerError, "input_run が試しの run なのに、R（trial_result）と違う"):

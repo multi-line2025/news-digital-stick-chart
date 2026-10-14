@@ -1,4 +1,4 @@
-# 期間の区切りと候補の封印を検証する手順（T-005、T-007、T-008、T-009、T-013、T-014、T-017、T-023、T-027、T-031、T-037、T-041、T-043、T-049、T-056、T-058、T-059、T-060、T-065、T-066、T-068、T-070、T-073、T-074、T-077、T-078）
+# 期間の区切りと候補の封印を検証する手順（T-005、T-007、T-008、T-009、T-013、T-014、T-017、T-023、T-027、T-031、T-037、T-041、T-043、T-049、T-056、T-058、T-059、T-060、T-065、T-066、T-068、T-070、T-073、T-074、T-077、T-078、T-083、T-090）
 
 この文書は、第三者が次のことを自分で確かめるための手順である。
 
@@ -12,6 +12,7 @@
 8. GKG の取得の run（試しの run・正式な run）の開始の記録（`gkg-run-start`）と、試しの run の回数（12章。T-031）
 9. 統計係の順番1・順番1b の事前の封印（`stats-order1`・`stats-order1b`）と、その位置（13章。T-037）
 10. 統計係の順番2の試み（`stats-order2`）の記録と、その照合（14章・16章。T-073・T-078）
+11. 統計係の順番3の試み（`stats-order3-attempt`）と順番3の記録（`stats-order3`）、その照合（17章。T-090）
 
 封印したことは、現時点では公開していない（オーナーの決定）。公開するかどうかは、試運転のあとでオーナーが判断する。オーナーは、封印のハッシュを公開する前に手順3（ファイル一覧の取得）へ進むと決めた（案B。reviews/T-013.md の末尾）。そのため、別の系列が無いことは示せない（7章の「示せないこと」）。
 
@@ -35,7 +36,7 @@
 |---|---|
 | `seq` | 通し番号。1 から始まり、行の順に 1 ずつ増える |
 | `prev_hash` | 直前の行のバイト列（末尾の改行を含めない）の sha256。1 行目は 0 が 64 個 |
-| `kind` | 種類。下の表の12だけ（許可リスト。T-066 で `gkg-run-result`、T-078 で `stats-order2` を加えた）。それ以外の `kind` があれば、鎖の検証（`chain`）で失敗になる |
+| `kind` | 種類。下の表の14だけ（許可リスト。T-066 で `gkg-run-result`、T-078 で `stats-order2`、T-090 で `stats-order3-attempt`・`stats-order3` を加えた）。それ以外の `kind` があれば、鎖の検証（`chain`）で失敗になる |
 | `targets` | 対象のファイル。各要素は `path`（ルートからの相対パス）、`role`、`sha256` |
 | `recorded_at` | 記録した日時（UTC）。記録した機械の時計による申告で、証明ではない |
 | `note` | 注記 |
@@ -54,6 +55,8 @@
 | `stats-order1` | 統計係の順番1（除外の規則と入れる規則）の封印。除外の規則の kind（形式は 13章。T-037） | stats-order1 | `src/sealer/seal_stats.py` の `seal_order1` |
 | `stats-order1b` | 統計係の順番1b（数え方の候補と基準の案）の封印（形式は 13章。T-037） | stats-order1b | `src/sealer/seal_stats.py` の `seal_order1b` |
 | `stats-order2` | 統計係の順番2の試み（決まった・止まった (a)(b)(c)。待つは status で区別する）。R の `gkg-run-result` より後（形式は 14章・16章。T-073・T-078） | stats-order2 | `src/sealer/seal_order2.py` の `seal` |
+| `stats-order3-attempt` | 統計係の順番3の試み。関門のコードを動かすたびに、通っても止まっても1件（通った・止まった・関門の結果を出さずに止まったは、中身の `gate` と `halt` で区別する。形は 17章。T-090） | stats-order3-attempt | `src/sealer/seal_order3.py` の `seal` |
+| `stats-order3` | 統計係の順番3（数え方とのつながり）。関門を通った試みのすぐあとに、一つの順番1b に1件だけ（形は 17章。T-090） | stats-order3 | `src/sealer/seal_order3.py` の `seal` |
 
 - T-007 の案にあった `acquisition` は、二つ（`acquisition-start` と `acquisition-result`）に分けたので、許可リストに無い。今の記録にも無い。
 - 許可リストに限る理由：決めていない名前の `kind` を受け付けると、正式な取得や閾値の期間への接触を別の名前で記録して、規則の区切りから外せてしまうため。
@@ -554,15 +557,17 @@ git ls-tree -r --name-only <seq 1 を含むコミット> -- data/
 SEALER_DOC_TEST_WORKTREE=1 PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/sealer
 ```
 
-### テストを流す Python と TMPDIR（T-083）
+### テストを流す Python と TMPDIR（T-083。T-090 で直した）
 
-- テストは、プロジェクトの `.venv/bin/python`（3.14）で流す。`python3 -m venv .venv` で用意する。
+- テストは、プロジェクトの `.venv/bin/python` で流す。`.venv` は Python 3.14 で作る（順番1 の封印に使った Python と同じ版。記録の `python.version` は `Python 3.14.2`）。macOS の `python3`（`/usr/bin/python3`）は 3.9 なので、`.venv` を作るのには使わない。
   ```sh
+  python3.14 -m venv .venv
   PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m unittest discover -s tests/sealer
   PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m unittest discover -s tests/stats
   PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m unittest discover -s tests/collector
   ```
-- macOS の `/usr/bin/python3`（3.9）で `tests/stats`・`tests/collector` を流すと、一部が落ちる（`tests/stats` の test_t019 の2件、`tests/collector` の test_filelist の `TestChildGuard`・`TestPostCutoffInvisible` など）。版の違いによる既知の環境の差で、記録や検証の誤りではない（T-076 の監査の軽-1）。`tests/sealer` は、`/usr/bin/python3 -B` でも全件通る。
+- `tests/sealer` は、`/usr/bin/python3 -B`（3.9）でも流せる。ただし `tests/sealer/test_t037.py` の2件（`test_before_order1_at_77d0dd2` と `test_pinned_with_real_order1`）は、順番1 の封印に使った版（3.14）の Python が要る。プロジェクトの `.venv/bin/python` が 3.14 ならそれを使って流れるが、`.venv` の無い写し（clone など）を `/usr/bin/python3` で流すと、この2件は skip になる（`OK (skipped=2)`。落ちたのではない）。skip が出たら、`.venv` を 3.14 で作ってから流し直す。
+- macOS の `/usr/bin/python3` で `tests/stats`・`tests/collector` を流すと、一部が落ちる（`tests/stats` の test_t019 の2件、`tests/collector` の test_filelist の `TestChildGuard`・`TestPostCutoffInvisible` など）。版の違いによる既知の環境の差で、記録や検証の誤りではない（T-076 の監査の軽-1）。この二つは `.venv/bin/python` で流す。
 - `TMPDIR` がシンボリックリンクを含む場所（macOS の既定の `/var/folders/…`。`/var` は `/private/var` へのリンク）でも、`tests/sealer` は全件通る。テストの中で、仮のプロジェクトのルートと書く仕組みが返すパスを比べるときは、両方の実体（`realpath`）で比べる（`tests/sealer/test_t078.py` の `rel_to`。T-083。T-082 の監査の軽-4）。
 
 ## 9. 閾値と判定期間の候補（candidates）の検証（T-013）
@@ -1190,7 +1195,7 @@ counting.py は読み込むだけで変えない。そろえられない形は�
 ### 規則
 
 1. テストは、HEAD の本物の `sealed/ledger.jsonl`・`sealed/`・`data/manifest/` の今の状態を前提にしない。
-2. 本物の記録を使うテストは、固定したコミット（テストの中の定数。40 桁の sha）の版を git から取り出して使う。入口は `tests/sealer/fixed_records.py` の `checkout`・`show`・`ls` だけで、既定のコミットは `fixed_records.PINNED_COMMIT`（5ce3943b827ff67f4f7e7db811525946bafdea46。seq 1〜8 と試しの run のマニフェスト5行。`gkg-run-result` はまだ無い）。`checkout` は、そのコミットとその祖先だけを取り込み、参照を `main` の1つだけにする（後の記録の履歴を `git log --all` が見つけないように）。既定（`code="head"`）では、封印係のコードと手順書（`src/sealer`・`tests/sealer`・`docs/verify`）だけを HEAD の版にそろえて1つのコミットにする。ほかのファイル（`src/stats`・`src/collector`・`docs/stats`・`data/`・`sealed/`・`reviews/` など）はそのコミットの版のまま使う。固定した記録が縛るパス（記録の targets と、targets の中身の JSON に書かれたパス。`fixed_records.bound_paths`）は、上の3つのフォルダの中にあっても固定の版のまま残す（T-077 差し戻し1回目 中-1。記録の時点に存在しなかった組み合わせを作らない）。2つ目の固定コミットは `fixed_records.RESULT_COMMIT`（220297a38a7bf32d6319148d2c7abc650467c819。seq 9 の R の `gkg-run-result` まで）で、順番2の関門が開くことを確かめるのに使う。40 桁でないもの（`HEAD`・枝の名前・短い sha）は拒む。HEAD を指す値（`fixed_records._head_sha`）は、このモジュールの外からは使わない。そうでなければ、合成の鎖を使う。
+2. 本物の記録を使うテストは、固定したコミット（テストの中の定数。40 桁の sha）の版を git から取り出して使う。入口は `tests/sealer/fixed_records.py` の `checkout`・`show`・`ls` だけで、既定のコミットは `fixed_records.PINNED_COMMIT`（5ce3943b827ff67f4f7e7db811525946bafdea46。seq 1〜8 と試しの run のマニフェスト5行。`gkg-run-result` はまだ無い）。`checkout` は、そのコミットとその祖先だけを取り込み、参照を `main` の1つだけにする（後の記録の履歴を `git log --all` が見つけないように）。既定（`code="head"`）では、封印係のコードと手順書（`src/sealer`・`tests/sealer`・`docs/verify`）だけを HEAD の版にそろえて1つのコミットにする。ほかのファイル（`src/stats`・`src/collector`・`docs/stats`・`data/`・`sealed/`・`reviews/` など）はそのコミットの版のまま使う。固定した記録が縛るパス（記録の targets と、targets の中身の JSON に書かれたパス。`fixed_records.bound_paths`）は、上の3つのフォルダの中にあっても固定の版のまま残す（T-077 差し戻し1回目 中-1。記録の時点に存在しなかった組み合わせを作らない）。2つ目の固定コミットは `fixed_records.RESULT_COMMIT`（220297a38a7bf32d6319148d2c7abc650467c819。seq 9 の R の `gkg-run-result` まで）で、順番2の関門が開くことを確かめるのに使う。3つ目の固定コミットは `fixed_records.ORDER2_COMMIT`（e92e7840a0167b962fd1334baece35d379f918e7。seq 10 の順番2の記録まで）で、順番3の試みと記録を確かめるのに使う（T-090。17章）。40 桁でないもの（`HEAD`・枝の名前・短い sha）は拒む。HEAD を指す値（`fixed_records._head_sha`）は、このモジュールの外からは使わない。そうでなければ、合成の鎖を使う。
 3. HEAD の本物の記録をそのまま読んでよいのは、「本物の記録で verify が 0 になる」ことを確かめるテストだけである（`tests/sealer/test_t077.py` の `HEAD_READERS`）。今は次の3つ。どれも、記録の件数・kind・最後の seq に頼らない。
    - `test_t077.TestRealHeadVerify.test_verify_all_rev_auto_is_zero`：プロジェクトのルートで `verify.py all --rev auto` が 0。
    - `test_t077.TestRealHeadVerify.test_recorded_at_not_after_btc_time`：全記録で、`recorded_at` が Bitcoin の確定時刻 + 3 時間より後でない（`post_text.check_recorded_vs_btc`。verify には入っていない照合なので、ここで流す）。違反の一覧が空であることだけを見る。
@@ -1425,3 +1430,160 @@ git -C "$W/c" log --all --name-only --format= | sort -u
 - `python` は、書いた Python の版の申告である。
 - 置き場所がプロジェクトの中にあるかは、入口では確かめない（日の集計は Git の外に置く決まり。CLAUDE.md「データの保存」）。
 - この入口を通さずに、手で `counting.py` を動かせば、結果を見られる（14章の限界と同じ）。手で git を打って時機の条件を先に確かめることも防げない（counting.md 8章 (d)）。
+
+## 17. 順番3の封印（stats-order3-attempt・stats-order3。T-090）
+
+順番3は、数え方とのつながりを封印する段である。データは使わない。決まりは、順番1b で封印した次の文書とコードにある（変えない）。
+- docs/stats/counting.md 4章 (3)（235〜249行）：順番3の関門と、参照するもの。
+- docs/stats/seal-order1.md 101行（順番3の記録に入れる参照）、172〜185行（封印係への申し送り）。
+- docs/stats/tags-naive.md 368行（順番3の中身：順番1の記録と順番2の記録への参照と、その数え方で K を何と読むか）。
+- 関門の規則のコード：`counting.order3_gate()`（順番1b の記録 seq 6 が sha256 で縛る版。`6f25985b…`）。
+
+T-090 で、次を足した。
+- 二つの kind（許可リストに入れた）。`stats-order3-attempt` は試みの記録で、関門のコードを動かすたびに、通っても止まっても1件書く（待つ・通った・止まったを kind で分けない。seal-order1.md 172・174行）。`stats-order3` は順番3の記録で、関門を通った試みのすぐあとに1件だけ書く。
+- 書く入口 `src/sealer/seal_order3.py`。
+- 照合（`ledger.check_order3_records`、`verify.check_order3_git`、`verify.recompute_order3_gate`）。書く仕組みと verify が同じ関数を使う。
+
+### 書く入口と、1回の実行の順
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_order3.py \
+  --bundle-out <プロジェクトと Git の外の、まだ無いファイルのパス>
+```
+
+- ルートは、このファイルの場所から決まる（`seal_order2.py` と同じ。引数では変えられない）。
+- 終了コード：書いてコミットしたら 0（関門で止まった試みも、記録してコミットしたら 0）。何も書かずに止まったら 1（「失敗（順番3の試みの記録は書いていない）」）。書いたあとで止まったら 1（「止まった（順番3の試みの記録は書いた）」）。引数の誤りは 2。
+- 結果は、コミットのあとで画面に出す（seal-order1.md 185行「関門の結果を画面に出す前に、試みの記録を ledger に追記する」）。記録を書かずに関門の結果だけを確かめる引数（乾式の実行など）は作らない。
+
+1回の実行は、次の順で進む。
+
+0. 鎖とすべての `.ots` を検証する。作業ツリーがきれいで、HEAD を40桁で決める。
+1. 書く前の確かめ（どれも関門の結果に依らない。止まれば何も書かない）：
+   - 参照する順番1b の記録（今の記録の `stats-order1b` の seq の最大）に対する `stats-order3` が、まだ無いこと（一つの順番1b に1件だけ）。
+   - 統計係の文書 `docs/stats/seal-order3.md`（`ledger.ORDER3_READING_DOC`。その数え方で K を何と読むか。tags-naive.md 1章 (2)・368行）が HEAD にコミットしてあり、作業ツリーと同じで、空でないこと。
+2. **時機の条件を、順番3の時点で確かめ直す**（`verify.order2_timing_now`。16章の手順3と同じ計算：本体の worktree、`GIT_` の環境変数の固定、`refs/replace/`・graft のファイル・浅い clone の確かめ、`git for-each-ref` の全行、各 worktree の HEAD、F の集合と親、ledger の条件）。順番2の記録の `timing_check` は使わない。順番1b の記録が無ければ、F を数えず `ok` は false（counting.md 249行）。
+3. `git bundle create <--bundle-out> --all` を作り、`git bundle list-heads` が記録する refs と worktree の HEAD と合うかを見る（seal-order1.md 177・178行）。合わなければ、関門を流さずに `halt`（`cause` は `"bundle"`）の試みを記録する（破れとしては数えない）。
+4. 参照する順番1b の記録が縛る `src/stats/counting.py` の sha256 の版を、git の履歴から探す（`verify.find_order2_code`。作業ツリーと HEAD の版は使わない）。無ければ、関門を流さずに `halt`（`cause` は `"code"`）の試みを記録する。
+5. 見つかった版の `counting.py` だけを置いた空のフォルダで、`-I`・`-B`・空の `pycache_prefix` の Python で、`attempt_from_record` と `order3_gate()` を流す（`verify.run_order3_gate`）。入力は記録だけから決まる（`ledger.order3_gate_inputs`）：
+   - `order1b_seqs`：この試みより前の `stats-order1b` の seq のすべて。
+   - `order2_records`：この試みより前の `stats-order2` の記録ごとの `seq`・`status`・`stop_kind`・`ref_1b_seq`。
+   - `timing_check`：手順2で確かめた内容。
+   - `order3_attempts`：この試みより前の `stats-order3-attempt` のうち `gate` が null でないものの、`counting.attempt_from_record(seq, gate)`（`gate` の部分だけを渡す。seal-order1.md 175・176行）。
+   - `order3_gate()` が ValueError で止めた（つじつまの合わない入力）ときは、何も書かない。今の照合を通った記録からは起きない。
+6. HEAD と作業ツリーがはじめと同じことを確かめ直し、試みの記録を書く（書く前の照合に通らなければ何も書かない）。`.ots` を作り、記録・中身・`.ots` だけをパス指定で index に入れてコミットする（16章の手順7と同じ固定のしかた。本文は `seal_order3.ATTEMPT_MESSAGE`）。
+7. `gate.may_seal` が true のときだけ、続けて順番3の記録を書き、`.ots` を作り、同じしかたでコミットする（本文は `seal_order3.ORDER3_MESSAGE`）。
+
+### 記録の中身
+
+`stats-order3-attempt`（`ledger.ORDER3_ATTEMPT_KEYS`）：
+
+| キー | 中身 |
+|---|---|
+| `kind`・`ledger_head`・`head` | いつもの形。`head` は書いた時点の HEAD（40桁）で、その版の `sealed/ledger.jsonl` はこの記録を足す直前の記録と同じ |
+| `ref_1b` | 参照する順番1b の記録の `{seq, record_sha256}`（この記録より前の `stats-order1b` の seq の最大と、その行の sha256）。無ければ null |
+| `timing_check` | 手順2で確かめた内容（`counting.check_timing_check` の7つのキー）。`ref_1b` が null なら `ref_1b_seq` は null・`ok` は false・`f_set` は空 |
+| `timing_guards` | `graft_file`・`shallow`（16章と同じ） |
+| `bundle` | `sha256`・`published`（書いた時点では false）・`reason` |
+| `code` | `path`（`src/stats/counting.py`）・`sha256`（順番1b の記録の値。順番1b が無ければ null）・`found`・`commit`。関門を流した版 |
+| `gate` | `order3_gate()` の `record`（キーはちょうど5個：`may_seal`・`reason`・`ref_1b_seq`・`chosen_order2_seq`・`timing_check`）か null |
+| `halt` | null か `{cause, reason}`。`gate` と `halt` は、ちょうど一方が null |
+| `python` | 関門を流した Python の版（申告） |
+
+`stats-order3`（`ledger.ORDER3_DOC_KEYS`）：
+
+| キー | 中身 |
+|---|---|
+| `kind`・`ledger_head`・`head` | いつもの形 |
+| `attempt` | 通った試みの記録の `{seq, record_sha256}`。seq はこの記録の一つ前 |
+| `ref_1b` | その試みの `ref_1b` と同じ |
+| `ref_order1` | 順番1（`stats-order1`）の記録の `{seq, record_sha256}`（tags-naive.md 368行） |
+| `ref_order2` | 試みが選んだ順番2の記録（`gate.chosen_order2_seq`）の `{seq, record_sha256}`（seal-order1.md 101行） |
+| `counting` | 参照する順番1b の記録の `official_candidate`・`official_status`（正式な数え方。変えない） |
+| `reading` | `{path: docs/stats/seal-order3.md, sha256}`：その数え方で K を何と読むかを書いた統計係の文書の、`head` の版の sha256 |
+
+入れる規則の定数と式（K・存在の条件・A の式）は、順番3の記録に入れない（足さない・変えない。tags-naive.md 368行）。どちらの kind も、`targets` はちょうど1つで、`role` が kind、`path` が `sealed/<kind>-<sha256>.json` である。
+
+### 決まりとの対応
+
+| 決まり | この仕組みでの扱い |
+|---|---|
+| counting.md 4章 (3) の 1（参照する順番1b は seq が最も大きいもの） | `ref_1b` と `order1b_seqs`。関門は封印した版が決める。照合は `ledger.order2_ref_1b` で同じ決め方 |
+| 2（数える順番2はその1b を参照したものだけ） | 封印した版の `order3_gate()` の中で決まる。入力の順番2の記録は、記録だけから作る |
+| 3（時機の条件を順番3の時点で確かめ直し、組で渡す） | 手順2。`timing_check` を `gate` に写す。照合は16章と同じ計算し直し（`verify.check_timing_git`。部分照合を含む） |
+| 3b（破れの記録は恒久に止める） | 前の試みの `gate` を `attempt_from_record` で渡す（手順5）。照合でも同じ入力で計算し直す |
+| 4（(a) の記録が一つでもあれば止める） | 封印した版の `order3_gate()` の中で決まる |
+| つじつまの合わない入力は ValueError | 何も書かない（手順5） |
+| 5（待つを除き seq が最も小さい順番2。0件なら止める） | 封印した版の `order3_gate()`。0件の止まりも試みとして記録する |
+| 6（試みを毎回記録して公開） | `stats-order3-attempt`。通っても止まっても書き、結果はコミットのあとで出す |
+| 249行（1b が無いときは ref_1b_seq が null、ok は false） | `ref_1b`・`timing_check.ref_1b_seq` が null、`ok` は false。封印した版が決まらないので `halt`（code） |
+| seal-order1.md 172・174行（kind で分けない。中身は record と同じ項目） | `gate` に `order3_gate()` の `record` をそのまま入れる |
+| 175・176行（`{"gate", "bundle"}` に分け、`gate` だけを渡す） | `gate` と `bundle` を別のキーにした。ほかに `kind`・`ledger_head`・`head`・`ref_1b`・`timing_check`（`gate` が null の試みでも確かめた内容を残すため）・`timing_guards`・`code`・`halt`・`python` を足した。前の試みは `gate` だけを渡す |
+| 177行（for-each-ref と worktree の一覧を記録したあとで `bundle create --all`。一時の参照は付けない） | 手順2のあとに手順3 |
+| 178行（list-heads が合わなければ、関門の結果を出さずに止まり、試みとして残す。破れとしては数えない） | `halt`（bundle）。`gate` が null なので、前の試みとして渡さない |
+| 179〜184行（bundle を公開する前の検査） | 16章の「bundle を公開する前の検査」と同じ |
+| 185行（試みの意味、書く順、乾式の実行を作らない） | 入口を一回動かすことが試み。手順6のコミットのあとで結果を出す |
+| seal-order1.md 101行・tags-naive.md 368行（順番1・順番2の記録への参照と、K の読み方） | `stats-order3` の `ref_order1`・`ref_order2`・`ref_1b`・`reading` |
+
+### 照合（書く仕組みと verify が同じ関数を使う）
+
+- 形（`ledger.check_order3_records`。`check_stats_order` から呼ぶので、どの記録を書くときにも流れる）：
+  - `targets` の数と形、キーの集まり、`ref_1b` の決め方、`timing_check` の形と、`head`・`ref_1b_seq` との対応。計算の前の確かめか `refs/replace/` か ledger の条件に当たれば `ok` は false。
+  - `code` の形と `sha256`、`bundle` の形、`gate` と `halt` のちょうど一方。`halt` が code なら `code.found` は false。`gate` があれば `code.found` は true。
+  - `gate` のキーが5個で、`timing_check` が記録の `timing_check` と同じ。通ったなら `reason` は null、`ok` は true、`chosen_order2_seq` は参照する1b に対するこの記録より前の `stats-order2`。
+  - `stats-order3` は、一つ前の記録が通った試みで、参照が試みと合う。一つの順番1b に1件だけ。そのあとに同じ順番1b への試みは無い。
+- git（`verify.check_order3_git`）：`head` の版の記録、`head` が記録を最初に含んだコミット（書く仕組みでは今の HEAD）の祖先、コードの版を探し直した結果が `code` と同じ、時機の条件の計算し直し（16章と同じ。手元に無い参照があっても飛ばさない）。`stats-order3` は、`head` の版の `docs/stats/seal-order3.md` の sha256 が `reading.sha256` と同じ。
+- 関門の計算し直し（`verify.recompute_order3_gate`）：記録だけから入力を作り、封印した版の `order3_gate()` を流し直して、`gate` とちょうど同じことを確かめる。`gate` が null の試みは流さない。
+- git の履歴が無い写しと浅い clone では、git を使う照合と関門の計算し直しを「照らさなかった」と出す。形の照合は行う。
+
+テストは `tests/sealer/test_t090.py` にある。
+- 通った場合（`TestPass`）、止まった場合（`TestStops`：0件、順番3の時点の確かめ直しで (a)、恒久の停止、順番2の (a) の記録、bundle の halt。`TestHaltCode`、`TestNo1b`）、書く前に止まる場合（`TestBeforeAttempt`）を、書く → コミット → `verify.py all` で確かめる。
+- 版の固定（`TestPinnedVersion`）：HEAD の `counting.py` を、理由の文と恒久の停止を変えた版にしてコミットしても、書く仕組みと verify は封印した版で流す。
+- 作り物（`TestForgeries`）：恒久に止まる形で通ったことにする、F から破れの commit を外して `ok` を true にする、選ぶ順番2の記録を変える、`ref_1b` を偽る、版があるのに halt（code）にする、通っていない試みのあとに順番3の記録を足す、`reading`・`ref_order2` を偽る、順番3の記録のあとに試みを足す。どれも、書く仕組みは何も書かず、照合を飛ばして足すと verify が止める。
+- `targets` の数と形（`TestTargets`）：`stats-order2`・`stats-order3-attempt`・`stats-order3` のどれも、`targets` が2つの記録は、書く仕組みの照合（`check_new`）も verify も止める（T-083 の監査の軽-2）。
+- 浅い clone と git の履歴の無い写し（`TestUnchecked`）、書いたあとでコミットが失敗したときの `--commit-written`（`TestCommitWritten`）。
+- 本物の記録の固定したコミット（`fixed_records.ORDER2_COMMIT`。seq 1〜10）の clone（`TestRealClone`）：統計係の文書の代わりにテストの仮の文書を置いて書くと、試み（seq 11）は通り、順番3の記録（seq 12）が順番2の seq 10 を参照し、`verify.py all --rev auto` が 0。下の第三者の塊もこの clone で 0 で終わり、作り物を足すと止まる。
+
+### 書く前に確かめること（運営の手順）
+
+1. `verify.py all --rev auto` が 0 で、順番2の記録がある。
+2. 統計係の `docs/stats/seal-order3.md`（K の読み方）がコミットしてある。この文書が無いと、入口は試みを書かずに止まる。
+3. 作業ツリーがきれいで、本体の worktree で動かす。
+4. `--bundle-out` は、プロジェクトと Git の外の、まだ無いファイルのパスにする。
+5. ots が使えること。
+6. 1回だけ行う。止まった試みも記録に残り、公開される。
+
+書いたあとは、16章と同じく `verify.py all --rev auto` と `privacy_scan.py --all-history` を流し、push し、24時間以内に投稿する（投稿に入れるのはハッシュと時刻だけ）。
+
+### 止まった場合の扱い
+
+- **関門で止まった（`gate.may_seal` が false）**：試みの記録は書いてコミットしてある。理由ごとに次のとおり。
+  - 順番2の記録が無い（0件）：リードに報告する（counting.md 4章 (3) の 5）。順番2を書いたあとで、もう一度流せる。
+  - (a)（順番3の時点の時機の条件の破れ、前の試みの破れの記録、順番2の (a) の記録）：恒久に止まる。扱いはオーナーが決める（seal-order1.md 141行・counting.md 247行）。リードに報告する。
+- **関門の結果を出さずに止まった（`halt`）**：試みの記録は書いてコミットしてある。bundle は、参照を変えずにもう一度流す。code は、順番1b の記録そのものも `verify.py all --rev auto` で止まる状態なので、リードに報告する。
+- **何も書かずに止まった**（作業ツリーがきれいでない、順番3の記録がもうある、`docs/stats/seal-order3.md` が無い、本体の worktree でない、F の集合が `--all` と合わない、bundle のパスの誤り、`order3_gate()` が入力を受け付けない、記録に許可していないメールアドレスの形がある、など）：記録は残らない。原因を直してから流す。どれも関門の結果に依らない。
+- **書いたあとで止まった**：16章と同じ。`.ots` が作れなかったときは `stamp.py stamp --seq N`。コミットが失敗したときは、消さずに、原因を直してから `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_order3.py --commit-written` でコミットする（最後の記録が `stats-order3-attempt` か `stats-order3` で、作業ツリーの変更がその記録・中身・`.ots` だけのとき。コミットの前の照合は16章の `check_written` と同じ）。
+  - 試みは通ってコミットしたが、順番3の記録を書く段で止まったとき：入口は「順番3の記録は書いていない」と出す。原因を直してから、もう一度流す。新しい試みとして記録され、通れば、その試みのすぐあとに順番3の記録を書く。通った試みのあとに順番3の記録が無いことは、記録に残る。
+
+### 第三者の確かめ方
+
+<!-- test:order3 -->
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py all --rev auto
+PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py stats-order | grep -F '（順番3の試み）'
+```
+
+- 1行目が 0 で終わり、2行目に順番3の試みの記録ごとの行が出る。`TestRealClone` が、この塊を本物の記録の固定したコミットの clone（順番3の試みと記録を足したもの）で流して 0 で終わること、作り物の記録を足すと止まることを確かめている。
+- 関門の計算し直しは、verify を動かしている Python で、封印した版の `counting.py` を流す。git の履歴（`--depth` を付けない clone）が要る。
+- 封印した版を手で確かめるには、記録の `code.sha256` と、16章の「コードの版を手で確かめる」のループの出力を比べる。
+- bundle を照らす（公開されたとき）：16章と同じ。
+
+### 限界
+
+- **bundle が合わない試みは、破れとして数えない**（seal-order1.md 178行の決まりどおり）。
+  - 前提1：`halt`（bundle）の試みは `gate` が null で、前の試みとして `order3_gate()` に渡さない。
+  - 前提2：bundle が合わないのは、`for-each-ref` を読んでから bundle を作るまでに参照が変わったときである。運営は、そのあいだに参照を変えて、わざと起こせる。
+  - 結論：時機の条件が破れている参照の状態で試み、同時に参照を変えて bundle を合わなくすれば、その試みは破れとして数えられない。そのあとで破れの参照を消して試みれば通る。ただし、その試みの記録には、確かめた `timing_check`（`ok` が false と、破れの commit を含む F の集合）が残り、verify は「破れとしては数えない」と注意を出す。記録からは見つけられるが、関門は止めない。止めるには決まり（178行）を変える必要があり、封印係の範囲の外である。
+- **K の読み方の文書の中身は照らさない。** 照らすのは、`docs/stats/seal-order3.md` の `head` の版の sha256 だけである。この文書は、まだ無い（統計係が作る）。文書の名前は、封印係がこの仕組みで決めた（統計係とリードの確認が要る）。
+- 順番1b の記録が無いときは、封印した版が決まらないので、`order3_gate()` を流さずに `halt`（code）を記録する。counting.md 249行の「1b が無いときの試み」の `record` は作られない。この試みは前の試みとして渡さないので、あとで封印された順番1b を止めない（249行と同じ結果）。
+- 順番4・5より前であること（tags-naive.md 368行）は、順番4・5の kind がまだ無いので照らさない。
+- 16章の限界のうち、コミットと投稿の前に手で捨てる形、記録した参照が全部かは記録だけでは分からないこと、`timing_guards` と `python` が申告であること、手で `counting.py` を動かせば関門の結果を先に知れること（counting.md 8章 (d)）は、順番3にも当てはまる。

@@ -24,7 +24,9 @@
                                                        （git の履歴：マニフェストに行が入った commit の親に順番1）。
                                                        順番2（stats-order2。T-073・T-078）の記録の形・行き先・inputs・
                                                        時機の条件・コードの版。--day-files で決まった記録の decide() を
-                                                       流し直す（手順書16章）
+                                                       流し直す（手順書16章）。順番3の試みと順番3の記録
+                                                       （stats-order3-attempt・stats-order3。T-090）の形・時機の条件・
+                                                       コードの版と、封印した版の order3_gate() の計算し直し（手順書17章）
     python3 -B src/sealer/verify.py gkg-runs           GKG の取得の run の開始（gkg-run-start。T-031）の
                                                        ledger_head・drand・中身・順序。試しの run の回数と、
                                                        各 run の run_id・code_sha256・日を並べる
@@ -792,7 +794,7 @@ def _main_worktree(repo):
     return os.path.realpath(gd) == os.path.realpath(cd)
 
 
-def order2_timing_now(repo, records, ref):
+def order2_timing_now(repo, records, ref, label="順番2"):
     """書く仕組みが、今のリポジトリで、参照する順番1b の記録 ref の時機の条件（(a)）を確かめる（seal-order1.md 3章 (2)。
     119・120行の graft・浅い clone・GIT_ の環境変数の固定、counting.md 4章 (3) の F を数える範囲）。
       1. 計算の前の確かめ（固定した環境で）：refs/replace/ の参照、--git-common-dir の下の info/grafts、浅い clone。
@@ -803,8 +805,8 @@ def order2_timing_now(repo, records, ref):
     返り値: (timing_check, timing_guards)。計算できない（本体の worktree でない、参照が無い、3 の集合が違う、git が
     失敗する）なら LedgerError（何も書かない。時機の条件の結果ではない）。"""
     if not _main_worktree(repo):
-        raise ledger.LedgerError("本体の worktree（clone した最初の作業ツリー）でない。順番2は本体の worktree で行う"
-                                 "（counting.md 4章 (3)。F を数える範囲を git log --all とそろえるため）。書かない")
+        raise ledger.LedgerError("本体の worktree（clone した最初の作業ツリー）でない。%sは本体の worktree で行う"
+                                 "（counting.md 4章 (3)。F を数える範囲を git log --all とそろえるため）。書かない" % label)
     replace = _rgit(repo, "for-each-ref", "--format=%(refname)", ledger.REPLACE_REF_PREFIX).decode("utf-8").split()
     common = _rgit(repo, "rev-parse", "--path-format=absolute", "--git-common-dir").decode().strip()
     graft = os.path.lexists(os.path.join(common, "info", "grafts"))
@@ -906,7 +908,15 @@ def check_order2_git(repo, data, records, rec, doc, base, read_json):
                                      % (what, ledger.COUNTING_SCRIPT, commit[:12]))
         raise ledger.LedgerError("%s の code（found %r・commit %r）が、git の履歴から探し直した結果（%r）と違う"
                                  % (what, code["found"], code["commit"], commit))
-    tc, g = doc["timing_check"], doc["timing_guards"]
+    return check_timing_git(repo, records, ref, doc["timing_check"], doc["timing_guards"], what, rec["seq"], "順番2")
+
+
+def check_timing_git(repo, records, ref, tc, g, what, seq, label):
+    """時機の条件の記録（timing_check・timing_guards）を git から計算し直して照らす（T-078 の check_order2_git から、T-090 で
+    順番3と共通にするために分けた。中身は変えていない）。ref は参照する順番1b の記録、label は「順番2」か「順番3」。
+    計算の前の確かめに当たっていなければ、記録した refs と worktree_heads から F の集合と親を計算し直して f_set と照らし、
+    git の条件と ledger の条件から ok を計算し直して timing_check.ok と照らす。手元に無い参照・commit があるときは部分照合
+    （check_order2_git の注記）。違えば LedgerError。返り値: 照らさなかったことの説明の一覧。"""
     notes = []
     if g["graft_file"] or g["shallow"] or any(x["ref"].startswith(ledger.REPLACE_REF_PREFIX) for x in tc["refs"]):
         return notes                       # 計算の前の確かめで止まった記録（ok が False であることは ledger が照らす）
@@ -950,9 +960,9 @@ def check_order2_git(repo, data, records, rec, doc, base, read_json):
     if tc["ok"] and not want:
         raise ledger.LedgerError("%s の timing_check.ok が True なのに、手元にある f_set の commit で時機の条件が破れている"
                                  "（%s）" % (what, _why or "順番1b が最初の method-access より後"))
-    notes.append("seq %d の順番2の時機の条件の計算し直しの一部（記録した参照・worktree の HEAD・f_set の commit のうち、この"
+    notes.append("seq %d の%sの時機の条件の計算し直しの一部（記録した参照・worktree の HEAD・f_set の commit のうち、この"
                  "リポジトリに無いものがある。手元にあるものだけで照らし、記録と食い違わなかった。残りは記録の bundle で照らす）"
-                 % rec["seq"])
+                 % (seq, label))
     return notes
 
 
@@ -1084,6 +1094,189 @@ def check_order2_plans(st, records, day_dirs=()):
                 print("照らさなかった：seq %d の順番2の decide() の流し直し（%s）" % (r["seq"], done))
 
 
+# ---- T-090：順番3（数え方とのつながり）の試みの記録と順番3の記録の、git を使う照合と、封印した版の order3_gate() の流し方
+
+# 封印した版の counting.py を読み込み、attempt_from_record と order3_gate を流す小さなプログラム（-I・-B・空の pycache_prefix。
+# 流すフォルダには counting.py だけを置く。_BoundDir）。入力は JSON のファイル（ledger.order3_gate_inputs の形）。
+# order3_gate() が ValueError で止めたとき（つじつまの合わない入力）は {"ok": false, "error": …} を出す
+ORDER3_GATE_RUNNER = r"""
+import importlib.util, json, os, sys
+root, src = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("counting_sealed", os.path.join(root, "src", "stats", "counting.py"))
+c = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(c)
+with open(src, "rb") as f:
+    d = json.loads(f.read().decode("utf-8"))
+try:
+    atts = [c.attempt_from_record(a["seq"], a["gate"]) for a in d["attempts"]]
+    g = c.order3_gate(d["order1b_seqs"], d["order2_records"], d["timing_check"], atts)
+    out = {"ok": True, "record": g["record"]}
+except ValueError as e:
+    out = {"ok": False, "error": str(e)}
+sys.stdout.buffer.write(json.dumps(out, ensure_ascii=True, sort_keys=True).encode("ascii"))
+"""
+
+
+def run_order3_gate(code, code_sha, inputs, tmp, what):
+    """封印した版の counting.py（code。sha256 が code_sha）の order3_gate() を、そのファイルだけを置いた空のフォルダで、
+    -I・-B・空の pycache_prefix の Python で流す（ORDER3_GATE_RUNNER）。inputs は ledger.order3_gate_inputs の形。
+    返り値: order3_gate() の record（ledger に書く gate の部分。キーは5個）。
+    order3_gate() が ValueError で止めた（つじつまの合わない入力）、出力が読めない、0 以外で終わる、なら LedgerError。
+    Python を起動できなければ Unchecked。"""
+    tmp = tempfile.mkdtemp(prefix="order3-gate-", dir=tmp)
+    bound = _BoundDir(None, None, [(ledger.COUNTING_SCRIPT, code_sha)], tmp, what, blobs={ledger.COUNTING_SCRIPT: code})
+    fd, path = tempfile.mkstemp(prefix="order3-inputs-", dir=tmp)
+    with os.fdopen(fd, "wb") as f:
+        f.write(json.dumps(inputs, ensure_ascii=True, sort_keys=True).encode("ascii"))
+    out = _run_script(bound.dir, ledger.COUNTING_SCRIPT, what, code=ORDER3_GATE_RUNNER, args=(bound.dir, path))
+    try:
+        d = json.loads(out.decode("ascii"))
+        ok = d["ok"]
+    except (UnicodeDecodeError, ValueError, KeyError, TypeError):
+        raise ledger.LedgerError("%s：封印した版の order3_gate() の出力を読めない" % what) from None
+    if ok is not True:
+        raise ledger.LedgerError("%s：封印した版の order3_gate() が、つじつまの合わない入力として止めた（%s）"
+                                 % (what, d.get("error")))
+    return d["record"]
+
+
+def _check_record_head(repo, data, rec, head, base, what):
+    """head の commit があり、その版の sealed/ledger.jsonl がこの記録を足す直前の記録（先頭 seq−1 行）と同じで、head が
+    base の祖先（か同じ）であること。"""
+    if not _git_ok(repo, "cat-file", "-e", head + "^{commit}"):
+        raise ledger.LedgerError("%s の head %s の commit が、このリポジトリに無い" % (what, head[:12]))
+    if _version_or_empty(repo, head, LEDGER_REL) != ledger.prefix_bytes(data, rec["seq"] - 1):
+        raise ledger.LedgerError("%s の head %s の版の sealed/ledger.jsonl が、この記録を足す直前の記録（先頭 %d 行）と"
+                                 "一致しない" % (what, head[:12], rec["seq"] - 1))
+    if base != head and not _git_ok(repo, "merge-base", "--is-ancestor", head, base):
+        raise ledger.LedgerError("%s の head %s が、%s の祖先でない" % (what, head[:12], base[:12]))
+
+
+def check_order3_git(repo, data, records, rec, doc, base, read_json):
+    """順番3の試みの記録・順番3の記録の、git を使う照合（T-090）。書く仕組み（seal_records.check_new。base は HEAD）と
+    verify（base は記録を最初に含んだコミット）が呼ぶ。
+      - どちらも：head の commit があり、その版の記録がこの記録を足す直前の記録と同じで、head が base の祖先。
+      - 試み：コードの版（find_order2_code を head で計算し直し、code.found・code.commit と同じ）。時機の条件の計算し直し
+        （check_timing_git。順番2と同じ関数。部分照合を含む）。順番1b の記録が無い試みは、F を数えない（ledger が
+        ok は false・f_set は空を照らす）。
+      - 順番3の記録：reading の sha256 が、head の版の ORDER3_READING_DOC のバイト列の sha256 と同じ。
+    違えば LedgerError。返り値: 照らさなかったことの説明の一覧。"""
+    if rec["kind"] == ledger.ORDER3_KIND:
+        what = "seq %d の %s（順番3）" % (rec["seq"], ledger.ORDER3_KIND)
+        _check_record_head(repo, data, rec, doc["head"], base, what)
+        rel = ledger.ORDER3_READING_DOC
+        if not _git_ok(repo, "cat-file", "-e", "%s:%s" % (doc["head"], rel)):
+            raise ledger.LedgerError("%s の head %s の版に %s が無い" % (what, doc["head"][:12], rel))
+        if ledger.sha256_hex(_rgit(repo, "show", "%s:%s" % (doc["head"], rel))) != doc["reading"]["sha256"]:
+            raise ledger.LedgerError("%s の reading.sha256 が、head %s の版の %s の sha256 と違う" % (what, doc["head"][:12], rel))
+        return []
+    what = "seq %d の %s（順番3の試み）" % (rec["seq"], ledger.ORDER3_ATTEMPT_KIND)
+    head = doc["head"]
+    _check_record_head(repo, data, rec, head, base, what)
+    ref = ledger.order2_ref_1b(records, rec["seq"])
+    commit = None
+    if ref is not None:
+        commit, _code = find_order2_code(repo, head, read_json(ref, ledger.ORDER1B_KIND))
+    code = doc["code"]
+    if (commit is not None) != code["found"] or commit != code["commit"]:
+        raise ledger.LedgerError("%s の code（found %r・commit %r）が、git の履歴から探し直した結果（%r）と違う"
+                                 % (what, code["found"], code["commit"], commit))
+    if ref is None:
+        return []
+    return check_timing_git(repo, records, ref, doc["timing_check"], doc["timing_guards"], what, rec["seq"], "順番3")
+
+
+def recompute_order3_gate(repo, records, rec, doc, read_json, tmp):
+    """試みの記録の gate を、封印した版の order3_gate() で計算し直して照らす（T-090）。入力は記録だけから決まる
+    （ledger.order3_gate_inputs。前の試みは gate の部分だけを counting.attempt_from_record に渡す）。版は、参照する順番1b の
+    記録が縛る sha256 の counting.py を、記録の head から辿れる git の履歴から探したもの（find_order2_code。作業ツリーの版は
+    使わない）。gate が null（halt）の記録は流さない（None を返す）。違えば LedgerError。返り値: 計算した record か None。"""
+    if doc["gate"] is None:
+        return None
+    what = "seq %d の順番3の試みの関門の計算し直し" % rec["seq"]
+    ref = ledger.order2_ref_1b(records, rec["seq"])
+    d1b = read_json(ref, ledger.ORDER1B_KIND)
+    commit, code = find_order2_code(repo, doc["head"], d1b)
+    if commit is None:
+        raise ledger.LedgerError("%s：参照する順番1b の記録が縛る %s の版が、git の履歴に無い" % (what, ledger.COUNTING_SCRIPT))
+    inputs = ledger.order3_gate_inputs(records, rec["seq"], doc["timing_check"], read_json)
+    got = run_order3_gate(code, doc["code"]["sha256"], inputs, tmp, what)
+    if got != doc["gate"]:
+        raise ledger.LedgerError("seq %d の順番3の試みの gate が、封印した版の order3_gate() を記録から計算し直した結果と違う"
+                                 "（計算し直した may_seal %r、reason %r、chosen_order2_seq %r）"
+                                 % (rec["seq"], got.get("may_seal"), got.get("reason"), got.get("chosen_order2_seq")))
+    return got
+
+
+def check_order3_entries(st, attempts, order3):
+    """順番3の試みの記録と順番3の記録ごとに、ledger_head を照らし、行を出す。git の履歴があれば、記録を最初に含んだ
+    コミットを base にして check_order3_git と recompute_order3_gate で計算し直す。git の履歴が無いとき・浅い clone の
+    とき・まだコミットされていないときは「照らさなかった」（T-090）。食い違えば LedgerError。"""
+    repo = Repo(st.root)
+    why = None
+    try:
+        repo.git("rev-parse", "--git-dir")
+    except (ledger.LedgerError, OSError):
+        why = "git の履歴が無い"
+    if why is None and not _not_shallow(repo):
+        why = "浅い clone"
+    commits = None
+    for r in sorted(attempts + order3, key=lambda x: x["seq"]):
+        doc = st.file_json(r, r["kind"])
+        ledger.check_ledger_head(st.data, r, doc)
+        if r["kind"] == ledger.ORDER3_ATTEMPT_KIND:
+            g, h = doc["gate"], doc["halt"]
+            if g is not None:
+                res = "通った（順番2の記録 seq %d を参照）" % g["chosen_order2_seq"] if g["may_seal"] else \
+                    "止まった（%s）" % g["reason"]
+            else:
+                res = "関門の結果を出さずに止まった（%s：%s）" % (h["cause"], h["reason"])
+            print("  %s seq %d（順番3の試み）: %s、参照する順番1b は %s、時機の条件 %s、コードの版 %s"
+                  % (r["kind"], r["seq"], res, "無し" if doc["ref_1b"] is None else "seq %d" % doc["ref_1b"]["seq"],
+                     "満たす" if doc["timing_check"]["ok"] else "満たさない（%s）" % doc["timing_check"]["reason"],
+                     "履歴にある" if doc["code"]["found"] else "履歴に無い"))
+            if g is None and not doc["timing_check"]["ok"] and doc["ref_1b"] is not None:
+                print("    注意：この試みは関門の結果を出していないので、時機の条件の破れとしては数えない（seal-order1.md 178行）。"
+                      "記録の timing_check.ok は false")
+        else:
+            print("  %s seq %d（順番3）: 試み seq %d、順番1b seq %d、順番2 seq %d、順番1 %s、正式な数え方 %s（%s）、%s の sha256 %s"
+                  % (r["kind"], r["seq"], doc["attempt"]["seq"], doc["ref_1b"]["seq"], doc["ref_order2"]["seq"],
+                     "無し" if doc["ref_order1"] is None else "seq %d" % doc["ref_order1"]["seq"],
+                     doc["counting"]["official_candidate"], doc["counting"]["official_status"], doc["reading"]["path"],
+                     doc["reading"]["sha256"]))
+        if why is not None:
+            st.unchecked.append("seq %d の順番3の記録の git からの計算し直し（%s）" % (r["seq"], why))
+            print("照らさなかった：%s なので、seq %d の時機の条件・コードの版・関門を git から計算し直していない" % (why, r["seq"]))
+            continue
+        if commits is None:
+            commits = repo.commit_for_seq(st.data, partial=True)
+        c = commits.get(r["seq"])
+        if c is None:
+            st.unchecked.append("seq %d の順番3の記録の git からの計算し直し（記録がまだコミットされていない）" % r["seq"])
+            print("照らさなかった：記録がまだコミットされていないので、seq %d を git から計算し直していない" % r["seq"])
+            continue
+        notes = check_order3_git(repo, st.data, st.records, r, doc, c, st.file_json)
+        for n in notes:
+            st.unchecked.append(n)
+            print("照らさなかった：%s" % n)
+        if r["kind"] == ledger.ORDER3_KIND:
+            print("    head %s の版の記録と %s を git から照らした。記録と同じ" % (doc["head"][:12], doc["reading"]["path"]))
+            continue
+        print("    head %s の版の記録、コードの版、時機の条件（F の集合 %d 件と親、ok %s）を git から計算し直した。記録と同じ"
+              % (doc["head"][:12], len(doc["timing_check"]["f_set"]), doc["timing_check"]["ok"]))
+        if doc["gate"] is None:
+            continue
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                recompute_order3_gate(repo, st.records, r, doc, st.file_json, tmp)
+        except Unchecked as e:
+            st.unchecked.append("seq %d の順番3の関門の計算し直し（%s）" % (r["seq"], e))
+            print("照らさなかった：seq %d の順番3の関門の計算し直し（%s）" % (r["seq"], e))
+            continue
+        print("    封印した版の order3_gate()（%s の sha256 %s…）を記録から計算し直した結果は、記録の gate と同じ（流した Python：%s）"
+              % (ledger.COUNTING_SCRIPT, doc["code"]["sha256"][:12], sys.version.split()[0]))
+
+
 def cmd_stats_order(st, a):
     """統計係の順番1・順番1b の記録の照合と一覧。T-037（差し戻し1回目で改めた）、T-056。"""
     got = ledger.check_stats_order(st.records, st.file_json)
@@ -1116,6 +1309,8 @@ def cmd_stats_order(st, a):
             print("      %s  %s" % (files[path], path))
     if got["order2"]:
         check_order2_plans(st, got["order2"], getattr(a, "day_files", None) or ())
+    if got["order3_attempt"] or got["order3"]:
+        check_order3_entries(st, got["order3_attempt"], got["order3"])          # T-090
     o1 = ledger.first_order1(st.records)
     print("除外の規則の kind（%s）の記録：%s（1 件だけ）。順番1・1b は最初の method-access より前、"
           "最初の gkg-run-start の前に順番1b。" % (ledger.ORDER1_KIND, "無し" if o1 is None else "seq %d" % o1["seq"]))

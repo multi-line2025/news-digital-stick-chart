@@ -31,6 +31,10 @@ PINNED_COMMIT = "5ce3943b827ff67f4f7e7db811525946bafdea46"
 # 順番2の関門（ledger.require_order2_gate・order2_gate.py）が開く状態（T-077 差し戻し1回目 4）。
 RESULT_COMMIT = "220297a38a7bf32d6319148d2c7abc650467c819"
 
+# 3つ目の固定コミット（T-090）。順番2の試みの記録（seq 10。決まった記録で、参照する順番1b は seq 6）をコミットしたもの。
+# 順番3の試みと順番3の記録を、本物の記録の clone に足して確かめるのに使う（tests/sealer/test_t090.py の TestRealClone）。
+ORDER2_COMMIT = "e92e7840a0167b962fd1334baece35d379f918e7"
+
 # checkout(code="head") で HEAD の版にそろえるのは、封印係のコードと手順書（テストする側）だけ。ほかのファイル
 # （src/stats・src/collector・docs/stats・data・sealed・reviews など）は固定のコミットの版のまま使う。
 # この中でも、固定した記録が縛るパス（記録の targets と、targets の中身の JSON に書かれたパス）は固定の版のまま

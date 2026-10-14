@@ -199,6 +199,13 @@ class TestBlankLines(unittest.TestCase):
 
 # ---- 鎖の照合（check_stats_order → check_order2_run）と、行き先の照合（check_order2_plan）
 
+def o2_stub(seq):
+    """照合の単体テストで使う順番2の記録の形（seq・kind と、書く仕組みが作る形の targets がちょうど1つ。T-090：
+    ledger.check_order2_run が targets の数と形を照らすようになった）。"""
+    return {"seq": seq, "kind": O2, "targets": [{"path": "sealed/%s-%s.json" % (O2, "0" * 64), "role": O2,
+                                                 "sha256": "0" * 64}]}
+
+
 class Order2Case(Clone):
     def output(self, official=b""):
         """本物の試しの run のマニフェストに decide() を当てはめた出力（日の集計は置かないので (b) で止まる）。"""
@@ -207,7 +214,7 @@ class Order2Case(Clone):
     def sealed(self):
         self.res, _rel, _ots = self.seal_result()
         self.recs = self.records()
-        self.o2 = {"seq": self.res["seq"] + 1, "kind": O2}
+        self.o2 = o2_stub(self.res["seq"] + 1)
 
     def doc(self, stop_kind="b", output=None, input_run="R", gkg_ref="R", trial_ref=None):
         """順番2の中身。T-073 の4つのキーと counting_output に、T-078 のキー（ledger_head・head・status・参照する順番1b・
@@ -298,7 +305,7 @@ class TestChainUnit(Order2Case):
     def test_result_after_order2_stops(self):
         """順序の照合：R の gkg-run-result が順番2の記録より後にあれば止まる（中身が正しくても）。"""
         before = [r for r in self.recs if r["seq"] < self.res["seq"]]
-        o2 = {"seq": self.res["seq"], "kind": O2}
+        o2 = o2_stub(self.res["seq"])
         late = dict(self.res, seq=self.res["seq"] + 1)
         ref = {"seq": late["seq"], "record_sha256": line_sha(late)}
         doc = self.doc(trial_ref=ref, gkg_ref=ref)
@@ -330,7 +337,7 @@ class TestChainUnit(Order2Case):
         extra = {n + 1: dict(sdoc, mode="official", run_id="f" * 16, trial_days=None),
                  n + 2: dict(rdoc, mode="official", run_id="f" * 16, manifest_path=ledger.GKG_MANIFESTS["official"],
                              gkg_run_seq=n + 1, gkg_run_record_sha256=line_sha(fstart))}
-        o2 = {"seq": n + 3, "kind": O2}
+        o2 = o2_stub(n + 3)
         out = dict(self.output(), steps=[{"step": "official", "reason": "trial_not_complete"}, {"step": "stop"}],
                    runs={"trial": {"run_id": self.rid}, "official": {"run_id": OF}})
         doc = self.doc(output=out, input_run={"mode": "official", "run_id": OF},

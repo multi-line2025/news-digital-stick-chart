@@ -934,7 +934,7 @@ class TestAllowedAndRuns(unittest.TestCase):
     def test_allowed(self):
         self.assertIn(O2, ledger.ALLOWED_KINDS)
         self.assertIn(O2, seal_records.WRITTEN_KINDS)
-        self.assertEqual(len(ledger.ALLOWED_KINDS), 12)
+        self.assertEqual(len(ledger.ALLOWED_KINDS), 14)          # T-090 で順番3の二つを加えた
 
     def test_runs_record_same_as_sealed(self):
         """ledger.order2_runs_record は、封印した版の counting.runs_record と同じ（監査の組み合わせ 231 通り）。"""

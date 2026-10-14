@@ -35,6 +35,9 @@ check_acquisition_pairs と同じ。
        - stats-order2（T-073・T-078）：ledger_head、形（ledger.check_order2_run・check_order2_doc。check_stats_order の
          中）、HEAD のマニフェストからの行き先と runs・inputs（ledger.check_order2_plan）、head が今の HEAD、コードの版と
          時機の条件の計算し直し（verify.check_order2_git）。書く入口は seal_order2.py
+       - stats-order3-attempt・stats-order3（T-090）：ledger_head、形（ledger.check_order3_records。check_stats_order の中）、
+         head が今の HEAD、git からの計算し直し（verify.check_order3_git）、試みの gate を封印した版の order3_gate() で計算し
+         直した結果と同じこと（verify.recompute_order3_gate）、privacy_scan と同じ検査。書く入口は seal_order3.py
        - gkg-run-result（T-066）：ledger_head、中身の 11 個のキー、指す gkg-run-start、マニフェストの先頭の
          manifest_lines 行の sha256 と run-complete の行（ledger.check_gkg_result_doc・check_gkg_results）、
          マニフェストの行の照合（ledger.check_gkg_manifests）
@@ -57,6 +60,7 @@ check_acquisition_pairs と同じ。
 import os
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -103,7 +107,8 @@ def check_privacy(rec, doc):
 
 WRITTEN_KINDS = (ledger.THRESHOLD_ACCESS_KIND, ledger.ACQ_START_KIND, ledger.ACQ_RESULT_KIND,
                  ledger.METHOD_ACCESS_KIND, ledger.GKG_RUN_KIND, ledger.ORDER1_KIND,
-                 ledger.ORDER1B_KIND, ledger.GKG_RESULT_KIND, ledger.ORDER2_KIND)
+                 ledger.ORDER1B_KIND, ledger.GKG_RESULT_KIND, ledger.ORDER2_KIND,
+                 ledger.ORDER3_ATTEMPT_KIND, ledger.ORDER3_KIND)
 
 
 def _paths(project):
@@ -203,6 +208,26 @@ def check_new(project, data_after, records_after, rec, doc):
         notes = verify.check_order2_git(repo, data_after, records_after, rec, doc, head, read)
         if notes:
             raise ledger.LedgerError("順番2の記録の照合で、照らせないものがある（%s）。書かない" % "、".join(notes))
+        return
+    if kind in ledger.ORDER3_KINDS:
+        # T-090：順番3の試みと順番3の記録。形（ledger.check_order3_records。check_stats_order の中）に加えて、privacy_scan と
+        # 同じ検査、ledger_head、head が今の HEAD、git からの計算し直し（verify.check_order3_git。照らさなかったことが一つでも
+        # あれば書かない）、試みの gate を封印した版の order3_gate() で計算し直した結果と同じこと（verify.recompute_order3_gate）
+        check_privacy(rec, doc)
+        ledger.check_ledger_head(data_after, rec, doc)
+        repo = verify.Repo(project)
+        head = verify._rgit(repo, "rev-parse", "--verify", "HEAD^{commit}").decode().strip()
+        if doc["head"] != head:
+            raise ledger.LedgerError("%s の記録の head %s が、今の HEAD %s と違う。書かない" % (kind, doc["head"][:12], head[:12]))
+        notes = verify.check_order3_git(repo, data_after, records_after, rec, doc, head, read)
+        if notes:
+            raise ledger.LedgerError("%s の記録の照合で、照らせないものがある（%s）。書かない" % (kind, "、".join(notes)))
+        if kind == ledger.ORDER3_ATTEMPT_KIND:
+            with tempfile.TemporaryDirectory() as tmp:
+                try:
+                    verify.recompute_order3_gate(repo, records_after, rec, doc, read, tmp)
+                except verify.Unchecked as e:
+                    raise ledger.LedgerError("順番3の関門を計算し直せない（%s）。書かない" % e) from None
         return
     if kind == ledger.GKG_RESULT_KIND:
         # T-066：中身の形・ledger_head・指す gkg-run-start、マニフェストの先頭と run-complete の行

@@ -7,7 +7,8 @@
 1 行の形（キーはこの 6 つだけ。ほかのキーがあれば検証で失敗にする）
     seq          通し番号。1 から始まり、行の順に 1 ずつ増える。
     prev_hash    直前の行のバイト列（末尾の改行を含めない）の sha256。1 行目は 0 が 64 個。
-    kind         種類。許可リスト（ALLOWED_KINDS）の 12 だけ（T-066 で gkg-run-result、T-078 で stats-order2 を加えた）。
+    kind         種類。許可リスト（ALLOWED_KINDS）の 14 だけ（T-066 で gkg-run-result、T-078 で stats-order2、T-090 で
+                 stats-order3-attempt・stats-order3 を加えた）。
                  それ以外は検証で失敗にする。
                  gkg-run-start（GKG の取得の run の開始。T-031）、stats-order1・stats-order1b
                  （統計係の順番1・順番1b の事前の封印。T-037）を加えた。
@@ -150,9 +151,15 @@ ORDER1_KIND = "stats-order1"        # T-037：統計係の順番1（除外の規
 ORDER1B_KIND = "stats-order1b"      # T-037：統計係の順番1b（数え方の候補と基準の案）
 GKG_RESULT_KIND = "gkg-run-result"  # T-066：GKG の取得の run が終わったあとの、マニフェストの封印
 ORDER2_KIND = "stats-order2"        # T-073 で名前を決め、T-078 で許可リストに入れた：統計係の順番2の試み
+# T-090：統計係の順番3（数え方とのつながり。docs/stats/counting.md 4章 (3)、seal-order1.md 101・172〜185行）。
+# 試み（通った・止まったを kind で分けず、中身の gate.may_seal と halt で区別する。seal-order1.md 174行）と、
+# 通った試みのすぐあとに書く順番3の記録（tags-naive.md 368行の「数え方とのつながり」）の二つ
+ORDER3_ATTEMPT_KIND = "stats-order3-attempt"
+ORDER3_KIND = "stats-order3"
 ALLOWED_KINDS = (PERIODS_KIND, TRIGGERS_KIND, THRESHOLD_ACCESS_KIND, ACQ_START_KIND,
                  ACQ_RESULT_KIND, CANDIDATES_KIND, METHOD_ACCESS_KIND, GKG_RUN_KIND,
-                 ORDER1_KIND, ORDER1B_KIND, GKG_RESULT_KIND, ORDER2_KIND)
+                 ORDER1_KIND, ORDER1B_KIND, GKG_RESULT_KIND, ORDER2_KIND,
+                 ORDER3_ATTEMPT_KIND, ORDER3_KIND)
 
 # stamp で使う公開カレンダー（ots の既定と同じ 4 つ）と、その集約先が返す Pending の宛先
 # （実体のカレンダー）。stamp.py はこの左側に送る。.ots の Pending の宛先は右側に限る。
@@ -1952,7 +1959,8 @@ def check_stats_order(records, read_json):
         doc = read_json(r, ORDER2_KIND)
         check_order2_run(records, r, doc, read_json)
         check_order2_doc(records, r, doc, read_json)          # T-078
-    return {"order1": o1, "order1b": o1b, "order2": o2}
+    o3 = check_order3_records(records, read_json)              # T-090
+    return {"order1": o1, "order1b": o1b, "order2": o2, "order3_attempt": o3["attempt"], "order3": o3["order3"]}
 
 
 # ---- T-073：順番2の前の関門と、順番2の記録の照合
@@ -2205,6 +2213,8 @@ def _ref_result(records, record, ref, mode, run_id, what, name, read_json):
 
 def check_order2_run(records, record, doc, read_json):
     """順番2の記録（kind が ORDER2_KIND）の形と、指す gkg-run-result の位置を照らす（T-073）。
+      - targets がちょうど1つで、role が stats-order2、path が sealed/stats-order2-<sha256>.json（check_single_target。
+        T-090。T-083 の監査 軽-2）。
       - stop_kind・trial_result・input_run・gkg_run_result がある。stop_kind は null か a・b・c。
       - trial_result：**鎖の中でこの記録より前の**、mode が trial の gkg-run-result（R であることは
         check_order2_plan がマニフェストで照らす）。
@@ -2216,6 +2226,7 @@ def check_order2_run(records, record, doc, read_json):
         同じ。input_run が null なら、stopped で段の記録が無い。
     満たさなければ LedgerError。返り値: {"trial_result": (記録, 中身), "input_result": (記録, 中身) か None}。"""
     what = "seq %d の %s（順番2）" % (record["seq"], ORDER2_KIND)
+    check_single_target(record, what)          # T-090（T-083 の監査 軽-2）：書く仕組みも verify も
     if not isinstance(doc, dict) or any(k not in doc for k in ORDER2_RUN_KEYS):
         raise LedgerError("%s の中身に、決まったキー（%s）が無い" % (what, "・".join(ORDER2_RUN_KEYS)))
     sk = doc["stop_kind"]
@@ -2626,6 +2637,269 @@ def check_order2_doc(records, record, doc, read_json):
     if out is not None:
         _check_order2_output(out, d1b, what)
     return ref
+
+# ---- T-090：順番3（数え方とのつながり）の試みの記録と、順番3の記録
+#
+# 決まり：docs/stats/counting.md 4章 (3)（235〜249行）、docs/stats/seal-order1.md 101・172〜185行、
+# docs/stats/tags-naive.md 368行。関門の規則は、順番1b で封印した版の counting.order3_gate()（封印係は、その版を git の履歴
+# から sha256 で取り出して流す。src/sealer/seal_order3.py・verify.recompute_order3_gate）。手順は docs/verify/periods-seal.md
+# 17章。
+#
+# 試みの記録（kind stats-order3-attempt。通っても止まっても、関門のコードを動かすたびに1件。seal-order1.md 174・185行）：
+#   kind・ledger_head・head   いつもの形。head は書いた時点の HEAD（40桁）
+#   ref_1b                   参照する順番1b の記録 {seq, record_sha256}（この記録より前の stats-order1b の seq の最大。
+#                            counting.md 4章 (3) の 1）。無ければ null
+#   timing_check             順番3の時点で確かめ直した時機の条件（counting.check_timing_check の7つのキー）。ref_1b が null
+#                            なら ref_1b_seq は null・ok は false・f_set は []
+#   timing_guards            {graft_file, shallow}（計算の前の確かめ。順番2と同じ）
+#   bundle                   {sha256, published: false, reason}（seal-order1.md 177行）
+#   code                     {path: src/stats/counting.py, sha256: 順番1b の記録が縛る値か null, found, commit}：関門を流す
+#                            封印した版。作業ツリーの版は使わない
+#   gate                     order3_gate() の record（キーはちょうど5個。seal-order1.md 176行）か null
+#   halt                     null か {cause, reason}：関門の結果を出さずに止まった試み。cause は "bundle"（bundle の
+#                            list-heads が記録する参照と合わない。seal-order1.md 178行。破れとしては数えない）か "code"
+#                            （封印した版の counting.py が履歴に無い、または順番1b の記録が無い）。gate と halt は、
+#                            ちょうど一方が null
+#   python                   関門を流した Python の版（申告）
+# 順番3の記録（kind stats-order3。通った試みのすぐあと（seq が試みの次）に1件）：
+#   kind・ledger_head・head
+#   attempt                  通った試みの記録 {seq, record_sha256}（seq はこの記録の一つ前）
+#   ref_1b                   その試みと同じ {seq, record_sha256}
+#   ref_order1               順番1（stats-order1）の記録 {seq, record_sha256}（tags-naive.md 368行。無ければ null）
+#   ref_order2               試みが選んだ順番2の記録 {seq, record_sha256}（seal-order1.md 101行）
+#   counting                 {official_candidate, official_status}：参照する順番1b の記録の値（正式な数え方。変えない）
+#   reading                  {path: ORDER3_READING_DOC, sha256}：その数え方で K を何と読むか（tags-naive.md 1章 (2)・
+#                            368行）を書いた統計係の文書。head の版のバイト列の sha256
+# 一つの順番1b に、順番3の記録は1件だけ。順番3の記録のあとに、同じ順番1b への試みは書かない。
+# どちらの kind も、targets はちょうど1つで、role が kind、path が sealed/<kind>-<sha256>.json（check_single_target）。
+
+ORDER3_READING_DOC = "docs/stats/seal-order3.md"
+ORDER3_ATTEMPT_KEYS = ("bundle", "code", "gate", "halt", "head", "kind", "ledger_head", "python", "ref_1b",
+                       "timing_check", "timing_guards")
+ORDER3_GATE_KEYS = ("chosen_order2_seq", "may_seal", "reason", "ref_1b_seq", "timing_check")
+ORDER3_HALT_CAUSES = ("bundle", "code")
+ORDER3_DOC_KEYS = ("attempt", "counting", "head", "kind", "ledger_head", "reading", "ref_1b", "ref_order1",
+                   "ref_order2")
+ORDER3_KINDS = (ORDER3_ATTEMPT_KIND, ORDER3_KIND)
+
+
+def check_single_target(record, what):
+    """targets がちょうど1つで、role が記録の kind、path が sealed/<kind>-<その sha256>.json であること（T-090。T-083 の
+    監査 軽-2。書く仕組み（seal_records.write_doc_record）が作る形）。stats-order2・stats-order3-attempt・stats-order3 に
+    使う。違えば LedgerError。"""
+    t = record["targets"]
+    if len(t) != 1:
+        raise LedgerError("%s の targets がちょうど1つでない（%d 個）" % (what, len(t)))
+    if t[0]["role"] != record["kind"] or t[0]["path"] != "sealed/%s-%s.json" % (record["kind"], t[0]["sha256"]):
+        raise LedgerError("%s の targets の role・path が、決まった形（role は %s、path は sealed/%s-<sha256>.json）でない"
+                          % (what, record["kind"], record["kind"]))
+
+
+def record_ref(rec):
+    """記録への参照 {seq, record_sha256}（行の sha256）。rec が None なら None。"""
+    return None if rec is None else {"seq": rec["seq"], "record_sha256": sha256_hex(canonical_line(rec))}
+
+
+def check_order3_timing_shape(tc, what):
+    """順番3の timing_check の形（counting.check_timing_check と同じ規則）。ref_1b_seq が null のときは、ok は false で
+    f_set は空（順番1b の記録が無いので F を数えない）。"""
+    if isinstance(tc, dict) and tc.get("ref_1b_seq") is None and set(tc) == set(ORDER2_TIMING_KEYS):
+        if tc["ok"] is not False or tc["f_set"] != []:
+            raise LedgerError("%s の timing_check：順番1b の記録が無い（ref_1b_seq が null）のに、ok が false でないか、"
+                              "f_set が空でない" % what)
+        check_order2_timing_shape(dict(tc, ref_1b_seq=0), what)
+        return
+    check_order2_timing_shape(tc, what)
+
+
+def _check_code_field(code, d1b, what):
+    if not isinstance(code, dict) or tuple(sorted(code)) != ORDER2_CODE_KEYS or code["path"] != COUNTING_SCRIPT \
+            or not isinstance(code["found"], bool) or (code["commit"] is None) == code["found"] \
+            or (code["commit"] is not None and not (isinstance(code["commit"], str) and HEX40.match(code["commit"]))):
+        raise LedgerError("%s の code が {path: %s, sha256, found, commit} の形でない" % (what, COUNTING_SCRIPT))
+    want = None if d1b is None else {f["path"]: f["sha256"] for f in d1b["files"]}.get(COUNTING_SCRIPT)
+    if code["sha256"] != want:
+        raise LedgerError("%s の code.sha256 %r が、参照する順番1b の記録が縛る %s の sha256 %r と違う"
+                          % (what, code["sha256"], COUNTING_SCRIPT, want))
+    if d1b is None and code["found"]:
+        raise LedgerError("%s：順番1b の記録が無いのに code.found が true" % what)
+
+
+def order2_inputs_for_order3(records, seq, read_json):
+    """seq の順番3の試みが order3_gate() に渡す order2_records：seq より前の stats-order2 の記録ごとの
+    {seq, status, stop_kind, ref_1b_seq}（counting.select_order2_record の形に ref_1b_seq を足したもの）。"""
+    out = []
+    for r in records:
+        if r["kind"] == ORDER2_KIND and r["seq"] < seq:
+            d = read_json(r, ORDER2_KIND)
+            out.append({"seq": r["seq"], "status": d["status"], "stop_kind": d["stop_kind"],
+                        "ref_1b_seq": d["ref_1b_seq"]})
+    return out
+
+
+def order3_gate_inputs(records, seq, timing_check, read_json):
+    """seq の順番3の試みが、封印した版の order3_gate() に渡す入力（counting.md 4章 (3)、seal-order1.md 175・176行）。
+      order1b_seqs    seq より前の stats-order1b の seq（すべて）
+      order2_records  order2_inputs_for_order3
+      timing_check    この試みで確かめた内容
+      attempts        seq より前の stats-order3-attempt のうち gate が null でないものの {seq, gate}。流す側で、
+                      counting.attempt_from_record(seq, gate) にして order3_attempts にする（gate の部分だけを渡す）。
+                      halt の試み（関門の結果を出していない）は渡さない（seal-order1.md 178行：破れとしては数えない）
+    記録だけから決まる（運営が選べない）。"""
+    attempts = []
+    for r in records:
+        if r["kind"] == ORDER3_ATTEMPT_KIND and r["seq"] < seq:
+            g = read_json(r, ORDER3_ATTEMPT_KIND)["gate"]
+            if g is not None:
+                attempts.append({"seq": r["seq"], "gate": g})
+    return {"order1b_seqs": [r["seq"] for r in records if r["kind"] == ORDER1B_KIND and r["seq"] < seq],
+            "order2_records": order2_inputs_for_order3(records, seq, read_json),
+            "timing_check": timing_check, "attempts": attempts}
+
+
+def check_order3_attempt_doc(records, record, doc, read_json):
+    """順番3の試みの記録の、git を使わない照合（書く仕組みも verify も。check_stats_order から）。
+      - targets・キー・kind・head・ref_1b（この記録より前の stats-order1b の seq の最大と、その行の sha256）。
+      - timing_check の形（check_order3_timing_shape）。ref_1b_seq・head が記録と同じで、head が worktree_heads にある。
+        timing_guards のどれか、refs/replace/ の参照、ledger の条件（順番1b が最初の method-access より前）に当たれば
+        ok は false。
+      - code（_check_code_field）、bundle（順番2と同じ形）、python。
+      - gate と halt のちょうど一方が null。halt の cause が code なら code.found は false。gate があれば code.found は true
+        で、gate はキーがちょうど5個、timing_check がこの記録の timing_check と同じ、ref_1b_seq が同じ、may_seal と
+        reason・chosen_order2_seq の対応、通ったなら timing_check.ok が true で、chosen_order2_seq は ref_1b を参照する
+        この記録より前の stats-order2 の seq。
+    gate の値そのもの（関門の規則に従っているか）は、封印した版の order3_gate() を流し直して照らす（verify.recompute_order3_gate。
+    git の履歴が要る）。違えば LedgerError。返り値: 参照する順番1b の記録（無ければ None）。"""
+    what = "seq %d の %s（順番3の試み）" % (record["seq"], ORDER3_ATTEMPT_KIND)
+    check_single_target(record, what)
+    _check_doc_kind(record, doc)
+    if set(doc) != set(ORDER3_ATTEMPT_KEYS):
+        raise LedgerError("%s の中身のキーが、決まったもの（%s）と一致しない" % (what, "、".join(ORDER3_ATTEMPT_KEYS)))
+    _check_hex(doc["head"], HEX40, what + " の head")
+    ref = order2_ref_1b(records, record["seq"])
+    if doc["ref_1b"] != record_ref(ref):
+        raise LedgerError("%s の ref_1b %r が、この記録より前の stats-order1b の seq の最大（%s）とその行の sha256 と違う"
+                          % (what, doc["ref_1b"], "無し" if ref is None else "seq %d" % ref["seq"]))
+    tc = doc["timing_check"]
+    check_order3_timing_shape(tc, what)
+    if tc["ref_1b_seq"] != (None if ref is None else ref["seq"]) or tc["head"] != doc["head"] \
+            or doc["head"] not in tc["worktree_heads"]:
+        raise LedgerError("%s の timing_check の ref_1b_seq・head が記録と違うか、head が worktree_heads に無い" % what)
+    g = doc["timing_guards"]
+    if not isinstance(g, dict) or tuple(sorted(g)) != ORDER2_GUARD_KEYS or not all(isinstance(v, bool) for v in g.values()):
+        raise LedgerError("%s の timing_guards が {graft_file, shallow}（どちらも True か False）でない" % what)
+    blocked = g["graft_file"] or g["shallow"] or any(r["ref"].startswith(REPLACE_REF_PREFIX) for r in tc["refs"])
+    if tc["ok"] and (blocked or not order2_ledger_timing_ok(records, ref["seq"])):
+        raise LedgerError("%s の timing_check.ok が True なのに、graft のファイル・浅い clone・refs/replace/ の参照、または"
+                          "順番1b が最初の method-access より後、のどれかに当たる" % what)
+    d1b = None if ref is None else read_json(ref, ORDER1B_KIND)
+    code = doc["code"]
+    _check_code_field(code, d1b, what)
+    b = doc["bundle"]
+    if not isinstance(b, dict) or tuple(sorted(b)) != ORDER2_BUNDLE_KEYS or b["published"] is not False \
+            or not isinstance(b["reason"], str) or not b["reason"]:
+        raise LedgerError("%s の bundle が {sha256, published: false, reason} でない" % what)
+    _check_hex(b["sha256"], HEX64, what + " の bundle.sha256")
+    if not isinstance(doc["python"], str) or not doc["python"]:
+        raise LedgerError("%s の python が文字列でない" % what)
+    gate, halt = doc["gate"], doc["halt"]
+    if (gate is None) == (halt is None):
+        raise LedgerError("%s の gate と halt は、ちょうど一方が null" % what)
+    if halt is not None:
+        if not isinstance(halt, dict) or sorted(halt) != ["cause", "reason"] or halt["cause"] not in ORDER3_HALT_CAUSES \
+                or not isinstance(halt["reason"], str) or not halt["reason"]:
+            raise LedgerError("%s の halt が {cause: bundle か code, reason} でない" % what)
+        if halt["cause"] == "code" and code["found"]:
+            raise LedgerError("%s の halt の cause が code なのに、code.found が true（封印した版が履歴にあれば、関門を流せる）"
+                              % what)
+        return ref
+    if not code["found"]:
+        raise LedgerError("%s は関門の結果（gate）を持つのに、code.found が false（封印した版が無ければ関門は流せない）" % what)
+    if not isinstance(gate, dict) or tuple(sorted(gate)) != ORDER3_GATE_KEYS:
+        raise LedgerError("%s の gate のキーが、order3_gate() の record の5個（%s）でない" % (what, "、".join(ORDER3_GATE_KEYS)))
+    if gate["timing_check"] != tc or gate["ref_1b_seq"] != tc["ref_1b_seq"]:
+        raise LedgerError("%s の gate の timing_check・ref_1b_seq が、この記録の timing_check と違う" % what)
+    if not isinstance(gate["may_seal"], bool):
+        raise LedgerError("%s の gate.may_seal が True か False でない" % what)
+    if gate["may_seal"]:
+        o2 = {r["seq"]: r for r in records if r["kind"] == ORDER2_KIND and r["seq"] < record["seq"]}
+        c = gate["chosen_order2_seq"]
+        if gate["reason"] is not None or not tc["ok"] or type(c) is not int or c not in o2 \
+                or read_json(o2[c], ORDER2_KIND).get("ref_1b_seq") != tc["ref_1b_seq"]:
+            raise LedgerError("%s の gate は通った（may_seal が true）のに、reason が null でないか、時機の条件が満たされて"
+                              "いないか、chosen_order2_seq が参照する順番1b に対するこの記録より前の stats-order2 の seq でない"
+                              % what)
+    elif not isinstance(gate["reason"], str) or not gate["reason"] or gate["chosen_order2_seq"] is not None:
+        raise LedgerError("%s の gate は止まった（may_seal が false）のに、reason が無いか、chosen_order2_seq が null でない"
+                          % what)
+    return ref
+
+
+def check_order3_doc(records, record, doc, read_json):
+    """順番3の記録（stats-order3）の照合（書く仕組みも verify も。check_stats_order から）。
+      - targets・キー・kind・head。
+      - attempt が一つ前の記録（stats-order3-attempt）で、その gate が通っている（may_seal が true）。
+      - ref_1b がその試みの ref_1b と同じ。ref_order2 が試みの chosen_order2_seq の記録。ref_order1 が stats-order1 の記録
+        （無ければ null）。counting が順番1b の記録の official_candidate・official_status と同じ。reading の path が
+        ORDER3_READING_DOC で sha256 が64桁（値は git で head の版と照らす。verify.check_order3_git）。
+    違えば LedgerError。"""
+    what = "seq %d の %s（順番3）" % (record["seq"], ORDER3_KIND)
+    check_single_target(record, what)
+    _check_doc_kind(record, doc)
+    if set(doc) != set(ORDER3_DOC_KEYS):
+        raise LedgerError("%s の中身のキーが、決まったもの（%s）と一致しない" % (what, "、".join(ORDER3_DOC_KEYS)))
+    _check_hex(doc["head"], HEX40, what + " の head")
+    by = {r["seq"]: r for r in records}
+    att = by.get(record["seq"] - 1)
+    if att is None or att["kind"] != ORDER3_ATTEMPT_KIND or doc["attempt"] != record_ref(att):
+        raise LedgerError("%s の attempt が、一つ前の記録（stats-order3-attempt）の seq と行の sha256 でない" % what)
+    adoc = read_json(att, ORDER3_ATTEMPT_KIND)
+    gate = adoc.get("gate") if isinstance(adoc, dict) else None
+    if not isinstance(gate, dict) or gate.get("may_seal") is not True:
+        raise LedgerError("%s：一つ前の試みの記録（seq %d）は、関門を通っていない。順番3の記録は、通った試みのすぐあとに"
+                          "だけ書く" % (what, att["seq"]))
+    if doc["ref_1b"] != adoc["ref_1b"] or doc["ref_1b"] is None:
+        raise LedgerError("%s の ref_1b が、試みの記録の ref_1b と違う" % what)
+    o2 = by.get(gate["chosen_order2_seq"])
+    if doc["ref_order2"] != record_ref(o2):
+        raise LedgerError("%s の ref_order2 が、試みが選んだ順番2の記録（seq %r）の seq と行の sha256 でない"
+                          % (what, gate["chosen_order2_seq"]))
+    o1 = first_order1([r for r in records if r["seq"] < record["seq"]])
+    if doc["ref_order1"] != record_ref(o1):
+        raise LedgerError("%s の ref_order1 が、stats-order1 の記録の seq と行の sha256 でない" % what)
+    c = read_json(by[doc["ref_1b"]["seq"]], ORDER1B_KIND)["counting"]
+    if doc["counting"] != {"official_candidate": c["official_candidate"], "official_status": c["official_status"]}:
+        raise LedgerError("%s の counting が、参照する順番1b の記録の official_candidate・official_status と違う" % what)
+    rd = doc["reading"]
+    if not isinstance(rd, dict) or sorted(rd) != ["path", "sha256"] or rd["path"] != ORDER3_READING_DOC:
+        raise LedgerError("%s の reading が {path: %s, sha256} でない" % (what, ORDER3_READING_DOC))
+    _check_hex(rd["sha256"], HEX64, what + " の reading.sha256")
+
+
+def check_order3_records(records, read_json):
+    """順番3の試みの記録と順番3の記録を、すべて照らす（check_stats_order から）。加えて：
+      - 一つの順番1b に、順番3の記録は1件だけ。
+      - 順番3の記録のあとに、同じ順番1b を参照する試みの記録は無い（書く仕組みは、そのとき試みを書かない）。
+    返り値: {"attempt": [記録], "order3": [記録]}。"""
+    att = [r for r in records if r["kind"] == ORDER3_ATTEMPT_KIND]
+    o3 = [r for r in records if r["kind"] == ORDER3_KIND]
+    for r in att:
+        check_order3_attempt_doc(records, r, read_json(r, ORDER3_ATTEMPT_KIND), read_json)
+    sealed_at = {}
+    for r in o3:
+        doc = read_json(r, ORDER3_KIND)
+        check_order3_doc(records, r, doc, read_json)
+        ref = doc["ref_1b"]["seq"]
+        if ref in sealed_at:
+            raise LedgerError("順番1b（seq %d）に対する順番3の記録が2件ある（seq %d と %d）。1件だけ"
+                              % (ref, sealed_at[ref], r["seq"]))
+        sealed_at[ref] = r["seq"]
+    for r in att:
+        ref = read_json(r, ORDER3_ATTEMPT_KIND)["ref_1b"]
+        if ref is not None and ref["seq"] in sealed_at and r["seq"] > sealed_at[ref["seq"]]:
+            raise LedgerError("seq %d の順番3の試みは、同じ順番1b（seq %d）の順番3の記録（seq %d）のあとにある"
+                              % (r["seq"], ref["seq"], sealed_at[ref["seq"]]))
+    return {"attempt": att, "order3": o3}
 
 
 def themes_manifest_commits(git):

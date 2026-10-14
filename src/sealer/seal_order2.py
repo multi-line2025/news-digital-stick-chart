@@ -165,12 +165,13 @@ def check_committed_bytes(root, commit, paths):
                                  "このコミットを push しない。リードに報告する" % (commit, "、".join(bad)))
 
 
-def commit_record(repo, root, rec, ots_path):
+def commit_record(repo, root, rec, ots_path, message=COMMIT_MESSAGE):
     """書いた記録・中身・.ots（あれば）だけを、パスを指定して index に入れ、続けてコミットする。T-078 差し戻し1回目 中-2・
     差し戻し2回目 中-A：global・system の設定を読まず、作成者とコミッタを -c で固定し、フック（core.hooksPath と --no-verify）と
     署名を止める。T-081：index にはディスクのバイト列をそのまま入れ（stage_raw。filter・attributes を効かせない）、コミットの
     あとに、各ファイルのコミットしたバイト列がディスクと同じことを確かめる（check_committed_bytes）。コミットのあとに、
     作成者・コミッタ・本文・入ったファイルも確かめ、決めた値と違えば止める。
+    message はコミットの本文（決まった1行。T-090 で順番3の入口も使うので引数にした。既定は順番2の文）。
     返り値: コミットの 40 桁。失敗すれば LedgerError（呼ぶ側が「記録は書いた、コミットしていない」と知らせる）。"""
     paths = ["sealed/ledger.jsonl"] + [t["path"] for t in rec["targets"]]
     if ots_path is not None:
@@ -180,12 +181,12 @@ def commit_record(repo, root, rec, ots_path):
     if staged != set(paths):
         raise ledger.LedgerError("コミットに入るファイル（%s）が、書いたもの（%s）と違う。コミットしない"
                                  % ("、".join(sorted(staged)), "、".join(paths)))
-    _cgit(root, "commit", "-q", "--no-verify", "--cleanup=verbatim", "-m", COMMIT_MESSAGE)
+    _cgit(root, "commit", "-q", "--no-verify", "--cleanup=verbatim", "-m", message)
     commit = _cgit(root, "rev-parse", "HEAD").decode().strip()
     got = _cgit(root, "log", "-1", "--format=%an%x00%ae%x00%cn%x00%ce%x00%B", commit).decode("utf-8").split("\x00")
     who = [AUTHOR_NAME, AUTHOR_EMAIL, AUTHOR_NAME, AUTHOR_EMAIL]
     files = set(_cgit(root, "show", "--name-only", "--format=", commit).decode("utf-8").split())
-    if got[:4] != who or got[4].rstrip("\n") != COMMIT_MESSAGE or files != set(paths):
+    if got[:4] != who or got[4].rstrip("\n") != message or files != set(paths):
         raise ledger.LedgerError("コミット %s の作成者・コミッタ・本文・ファイルが、決めた値と違う（作成者とコミッタは %s、本文は"
                                  "決まった1行で追記行なし、ファイルは書いたものだけ）。このコミットを push しない。リードに報告する"
                                  % (commit, AUTHOR_NAME))
@@ -193,7 +194,7 @@ def commit_record(repo, root, rec, ots_path):
     return commit
 
 
-def check_written(root, repo, data, rec):
+def check_written(root, repo, data, rec, kinds=(ledger.ORDER2_KIND,)):
     """--commit-written でコミットする前に、書いた記録と中身を照らす（T-081。T-078 軽-2）。どれかに通らなければ
     LedgerError（コミットしない）。
       - .ots：最後の seq の .ots があれば、すべての seq の .ots を記録の先頭 N 行と照らす（ledger.check_anchors。
@@ -201,7 +202,8 @@ def check_written(root, repo, data, rec):
       - 鎖：HEAD の版の sealed/ledger.jsonl が、今の記録から最後の1行を除いたものとバイト列で同じ（コミットしていないのは
         最後の1件だけ）。
       - 中身：targets がちょうど1つで、そのファイルの sha256 が記録の値と同じ（ledger.read_target_json）。中身の kind、
-        ledger_head、head が今の HEAD、順番1・1b・2 の形（ledger.check_stats_order）、privacy_scan と同じ検査。"""
+        ledger_head、head が今の HEAD、順番1・1b・2 の形（ledger.check_stats_order）、privacy_scan と同じ検査。
+    kinds：最後の記録の kind として受け付けるもの（T-090 で順番3の入口も使うので引数にした。既定は stats-order2 だけ）。"""
     sealed = os.path.join(root, "sealed")
     lines = ledger.split_lines(data)
     prefix = b"".join(x + b"\n" for x in lines[:-1])
@@ -217,9 +219,11 @@ def check_written(root, repo, data, rec):
                                  "（コミットしていない記録が最後の1件だけでない）。コミットしない" % rec["seq"])
     if len(rec["targets"]) != 1:
         raise ledger.LedgerError("seq %d の targets がちょうど1つでない。コミットしない" % rec["seq"])
-    doc = ledger.read_target_json(root, rec, ledger.ORDER2_KIND)
-    if not isinstance(doc, dict) or doc.get("kind") != ledger.ORDER2_KIND:
-        raise ledger.LedgerError("seq %d の中身の kind が stats-order2 でない。コミットしない" % rec["seq"])
+    if rec["kind"] not in kinds:
+        raise ledger.LedgerError("seq %d の kind が %s でない。コミットしない" % (rec["seq"], "・".join(kinds)))
+    doc = ledger.read_target_json(root, rec, rec["kind"])
+    if not isinstance(doc, dict) or doc.get("kind") != rec["kind"]:
+        raise ledger.LedgerError("seq %d の中身の kind が %s でない。コミットしない" % (rec["seq"], rec["kind"]))
     ledger.check_ledger_head(data, rec, doc)
     if doc.get("head") != head:
         raise ledger.LedgerError("seq %d の中身の head が、今の HEAD と違う。コミットしない" % rec["seq"])
@@ -227,16 +231,19 @@ def check_written(root, repo, data, rec):
     seal_records.check_privacy(rec, doc)
 
 
-def commit_written(root):
+def commit_written(root, kinds=(ledger.ORDER2_KIND,), messages=None):
     """書いたがコミットしていない順番2の記録を、入口と同じ固定のしかたでコミットする（--commit-written。差し戻し2回目
     中-B）。最後の記録が stats-order2 で、作業ツリーの変更がその記録・中身・.ots（あれば）だけのときに限る。
-    T-081：コミットの前に、記録と中身を照らす（check_written）。"""
+    T-081：コミットの前に、記録と中身を照らす（check_written）。
+    T-090：順番3の入口（seal_order3.py --commit-written）も使う。kinds は最後の記録の kind として受け付けるもの、messages は
+    kind ごとのコミットの本文（既定は stats-order2 と COMMIT_MESSAGE）。"""
+    messages = messages or {ledger.ORDER2_KIND: COMMIT_MESSAGE}
     repo = verify.Repo(root)
     ledger.check_sealed_inside(root)
     data = ledger.read_ledger(os.path.join(root, "sealed", "ledger.jsonl"))
     rec = ledger.verify_chain(data)[-1]
-    if rec["kind"] != ledger.ORDER2_KIND:
-        raise ledger.LedgerError("最後の記録が stats-order2 でない。コミットしない")
+    if rec["kind"] not in kinds:
+        raise ledger.LedgerError("最後の記録が %s でない。コミットしない" % "・".join(kinds))
     ots = os.path.join(root, "sealed", ledger.ots_name(rec["seq"]))
     ots = ots if os.path.isfile(ots) else None
     paths = {"sealed/ledger.jsonl"} | {t["path"] for t in rec["targets"]}
@@ -246,10 +253,10 @@ def commit_written(root):
     for line in _git(repo, "status", "--porcelain", "--untracked-files=all").decode("utf-8").splitlines():
         changed.add(line[3:])
     if not changed or not changed <= paths:
-        raise ledger.LedgerError("作業ツリーの変更（%s）が、最後の stats-order2 の記録・中身・.ots だけでない。コミットしない"
-                                 % "、".join(sorted(changed)))
-    check_written(root, repo, data, rec)
-    return commit_record(repo, root, rec, ots)
+        raise ledger.LedgerError("作業ツリーの変更（%s）が、最後の %s の記録・中身・.ots だけでない。コミットしない"
+                                 % ("、".join(sorted(changed)), rec["kind"]))
+    check_written(root, repo, data, rec, kinds)
+    return commit_record(repo, root, rec, ots, messages[rec["kind"]])
 
 
 def _outside(root, path):

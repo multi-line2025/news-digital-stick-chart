@@ -47,9 +47,14 @@ class Case(t81.CommitWrittenCase):
         targets = [dict(t) for t in rec["targets"]]
         if doc is not None:
             raw = ledger.canonical_line(doc) + b"\n"
-            with open(os.path.join(self.root, targets[0]["path"]), "wb") as f:
+            # T-090：中身のファイルの名前も、書く仕組みと同じ sealed/<kind>-<sha256>.json にそろえる（名前を変える。消さない）。
+            # ledger.check_order2_run が targets の path の形を照らすようになったため（T-083 の監査 軽-2）
+            sha = ledger.sha256_hex(raw)
+            new_rel = "sealed/%s-%s.json" % (rec["kind"], sha)
+            os.rename(os.path.join(self.root, targets[0]["path"]), os.path.join(self.root, new_rel))
+            with open(os.path.join(self.root, new_rel), "wb") as f:
                 f.write(raw)
-            targets[0]["sha256"] = ledger.sha256_hex(raw)
+            targets[0].update(path=new_rel, sha256=sha)
         new = dict(rec, targets=targets)
         new.update(over)
         lines = ledger.split_lines(self.ledger_bytes())
