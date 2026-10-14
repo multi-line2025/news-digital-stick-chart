@@ -3228,6 +3228,100 @@ def check_order4_records(records, read_json):
     return o4
 
 
+# ---- T-095 差し戻し1回目 中-1：一覧を、封印済みのコードと封印済みのマニフェストだけで照らす
+#
+# 一覧を作るコード（missing_days.py とその中で読む gkg.py など）は、記録の head の版で、前もって縛られていない。そこで、
+# 一覧の値を、運営が流すコードに頼らずに照らす。
+#   (1) 72本の条件（日の集計は使わない。誰でも照らせる）：gkg-run-result（正式な run）が縛るマニフェストの先頭の day の行の
+#       files_ok に、candidates の記録（seq 2）が縛る candidates.py の day_is_missing(files_ok, 1) を当てる。その結果が、一覧の
+#       below_min_files と全日で同じ。欠けた日の files_ok・files_listed が day の行と同じ。一部が欠けた日の数も、day の行と
+#       一覧から決まる。
+#   (2) C7 の分母（日の集計を持つ者だけ。verify の --store）：順番1b の記録（seq 6）が縛る counting.py で、各日の日の集計
+#       （day の行の sha256 と照らしてから開く）の C7 の分母を数え直し、一覧の c7_denominator_by_day と全日で同じ。欠けた日の
+#       集まりが、封印済みの day_is_missing(files_ok, 分母) と同じ。
+# 計算は封印係の側（verify.check_order4_rules・recount_order4）で、封印済みの版のファイルだけを置いたフォルダで流す。ここには、
+# その入力を作る部分と、結果の照らし方を置く。
+ORDER4_RULE_VOLUME = 1        # (1) で day_is_missing に渡す報道量（0 でない値。72本の条件だけを取り出すため）
+
+
+def order4_sealed_code(refs, read_json):
+    """封印済みの版のファイルの {パス: sha256}（記録の値だけから決める。記録の code.imports は使わない）：candidates.py と
+    periods.py は candidates の1件目（role code・import）、counting.py は順番1b の中身の files。"""
+    o1b = {f["path"]: f["sha256"] for f in read_json(refs["order1b"], ORDER1B_KIND)["files"]}
+    out = {"src/stats/candidates.py": _target_sha(refs["candidates"], "code", "src/stats/candidates.py"),
+           "src/stats/periods.py": _target_sha(refs["candidates"], "import", "src/stats/periods.py"),
+           COUNTING_SCRIPT: o1b.get(COUNTING_SCRIPT)}
+    if any(v is None for v in out.values()):
+        raise LedgerError("封印済みの版（candidates.py・periods.py・counting.py）の sha256 が、記録から決まらない")
+    return out
+
+
+def order4_day_rows(body, gkg_doc, block_days):
+    """gkg-run-result の記録の中身 gkg_doc が縛るマニフェスト（body はファイル全体）の先頭 manifest_lines 行から、正式な
+    run の day の行を {日: 行} で返す。先頭の sha256 が manifest_sha256 と同じで、run_id の day の行が区画のすべての日に
+    ちょうど1つずつあり、files_ok・files_listed・file_name・sha256 の形が正しいこと。違えば LedgerError。"""
+    prefix = manifest_prefix(body, gkg_doc["manifest_lines"], gkg_doc["manifest_path"])
+    if sha256_hex(prefix) != gkg_doc["manifest_sha256"]:
+        raise LedgerError("%s の先頭 %d 行の sha256 が、gkg-run-result の記録の manifest_sha256 と違う"
+                          % (gkg_doc["manifest_path"], gkg_doc["manifest_lines"]))
+    rows = {}
+    for raw in prefix.split(b"\n"):
+        if not raw.strip():
+            continue
+        try:
+            r = json.loads(raw)
+        except ValueError:
+            raise LedgerError("%s に JSON でない行がある" % gkg_doc["manifest_path"]) from None
+        if not isinstance(r, dict) or r.get("kind") != "day" or r.get("run_id") != gkg_doc["run_id"]:
+            continue
+        d = r.get("day")
+        if r.get("mode") != "official" or not isinstance(d, str) or d in rows:
+            raise LedgerError("正式な run の day の行の mode が official でないか、同じ日（%r）が二つある" % (d,))
+        if not (_nonneg(r.get("files_ok")) and _nonneg(r.get("files_listed")) and r["files_ok"] <= r["files_listed"]) \
+                or not isinstance(r.get("file_name"), str) or os.path.basename(r["file_name"]) != r["file_name"] \
+                or r["file_name"] in ("", ".", "..") or not (isinstance(r.get("sha256"), str) and HEX64.match(r["sha256"])):
+            raise LedgerError("正式な run の day の行（%s）の files_ok・files_listed・file_name・sha256 の形が違う" % d)
+        rows[d] = r
+    if sorted(rows) != list(block_days):
+        raise LedgerError("正式な run の day の行の日が、区画のすべての日とちょうど同じでない（%d 行、区画は %d 日）"
+                          % (len(rows), len(block_days)))
+    return rows
+
+
+def check_order4_rule_results(lst, rows, below, slots, what):
+    """(1) の照らし方。below：{日: 封印済みの day_is_missing(files_ok, ORDER4_RULE_VOLUME)}、slots：封印済みの
+    SLOTS_PER_DAY。違えば LedgerError。"""
+    miss = {m["day"]: m for m in lst["missing_days"]}
+    bad = [d for d in sorted(rows) if below[d] != (d in miss and miss[d]["below_min_files"] is True)]
+    if bad:
+        raise LedgerError("%s の list の below_min_files が、封印済みの candidates.py の day_is_missing をマニフェストの files_ok に"
+                          "当てた結果と違う（%d 日。最初は %s）" % (what, len(bad), bad[0]))
+    bad = [d for d in sorted(miss) if (miss[d]["files_ok"], miss[d]["files_listed"])
+           != (rows[d]["files_ok"], rows[d]["files_listed"])]
+    if bad:
+        raise LedgerError("%s の list の欠けた日の files_ok・files_listed が、マニフェストの day の行と違う（最初は %s）"
+                          % (what, bad[0]))
+    partial = sum(1 for d in rows if d not in miss and rows[d]["files_ok"] < slots)
+    if lst["partial_days_count"] != partial:
+        raise LedgerError("%s の list.partial_days_count %r が、マニフェストの day の行と一覧から決まる数 %d と違う"
+                          % (what, lst["partial_days_count"], partial))
+
+
+def check_order4_recount(lst, denoms, missing, what):
+    """(2) の照らし方。denoms：{日: 封印済みの counting.py で数え直した C7 の分母}、missing：{日: 封印済みの
+    day_is_missing(files_ok, 分母)}。違えば LedgerError。"""
+    by_day = lst["c7_denominator_by_day"]
+    bad = [d for d in sorted(denoms) if by_day.get(d) != denoms[d]]
+    if bad or sorted(denoms) != sorted(by_day):
+        raise LedgerError("%s の list の C7 の分母が、封印済みの counting.py で日の集計から数え直した値と違う（%d 日。最初は %s）"
+                          % (what, len(bad), bad[0] if bad else "日の集まり"))
+    want = sorted(d for d, v in missing.items() if v)
+    got = [m["day"] for m in lst["missing_days"]]
+    if got != want:
+        raise LedgerError("%s の list の欠けた日が、封印済みの day_is_missing を数え直した分母に当てた結果と違う（一覧 %d 日、"
+                          "数え直し %d 日）" % (what, len(got), len(want)))
+
+
 def order4_ref(records, seq, read_json):
     """seq の記録（順番5）が参照に入れる順番4の記録の {seq, record_sha256, list_sha256}（missing-days-method.md 6章、
     reviews/T-085.md のリードの判断 2）。seq より前に順番4の記録がちょうど1件なければ LedgerError。"""

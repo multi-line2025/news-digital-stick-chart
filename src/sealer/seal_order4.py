@@ -24,8 +24,10 @@ data/manifest/ の下のすべて。ledger.ORDER4_TREE_PREFIXES）を git から
      - 置き場所がフォルダである（中のファイルは開かない）。
   2. 固定した版の一覧のコードを流す（60〜100分。verify.run_order4）。0 以外で終われば止まる（何も書かない）。
   3. 出力が決まった形の JSON であること（verify.parse_order4_output）。HEAD と作業ツリーがはじめと同じこと。
-  4. 記録を書き（書く前の照合：seal_records.check_new。ledger.check_order4_records・verify.check_order4_git・privacy_scan と
-     同じ検査）、.ots を作り、記録・中身・.ots だけをパス指定で index に入れてコミットする（seal_order2.commit_record と同じ
+  4. 記録を書き（書く前の照合：seal_records.check_new。ledger.check_order4_records・verify.check_order4_git・
+     verify.check_order4_rules（72本の条件を、封印済みの candidates.py とマニフェストで照らす）・privacy_scan と同じ検査）。
+     中身のファイルは、記録に追記したあとで書く（追記の前で止まっても、一覧の入ったファイルを作業ツリーに残さない）。
+     .ots を作り、記録・中身・.ots だけをパス指定で index に入れてコミットする（seal_order2.commit_record と同じ
      固定のしかた。本文は ORDER4_MESSAGE）。
   5. 結果は、コミットのあとで画面に出す。書いたあとで止まったときは Order4Written で知らせ、「書いていない」とは表示しない。
 
@@ -122,12 +124,16 @@ def seal(store, now, ots_cmd, runner=subprocess.run):
             % (lst["label"], doc["list_sha256"], doc["refs"]["gkg_run_result"]["seq"], doc["refs"]["order3"]["seq"]))
     try:
         rec, rel, ots_path = seal_records.write_doc_record(root, ledger.ORDER4_KIND, doc, data, note, now, ots_cmd,
-                                                           runner=runner)
+                                                           runner=runner, content_after_append=True)
     except ledger.LedgerError as e:
         after = ledger.verify_chain(ledger.read_ledger(os.path.join(root, "sealed", "ledger.jsonl")))
         if len(after) <= len(records):
             raise                              # 追記の前で止まった：何も書いていない
         last = after[-1]
+        if not os.path.isfile(os.path.join(root, last["targets"][0]["path"])):
+            raise Order4Written("記録 seq %d を追記したが、中身を書けなかった（%s）。コミットしていない。消さずに、リードに報告する"
+                                "（中身は、同じ HEAD と記録で入口の build_doc を流し直せば同じバイト列になる。記録の targets の sha256 と"
+                                "照らせる）" % (last["seq"], e)) from None
         try:
             c = seal_order2.commit_record(repo, root, last, None, ORDER4_MESSAGE)
         except ledger.LedgerError as e2:
