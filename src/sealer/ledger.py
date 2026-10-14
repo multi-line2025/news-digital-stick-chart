@@ -7,8 +7,8 @@
 1 行の形（キーはこの 6 つだけ。ほかのキーがあれば検証で失敗にする）
     seq          通し番号。1 から始まり、行の順に 1 ずつ増える。
     prev_hash    直前の行のバイト列（末尾の改行を含めない）の sha256。1 行目は 0 が 64 個。
-    kind         種類。許可リスト（ALLOWED_KINDS）の 14 だけ（T-066 で gkg-run-result、T-078 で stats-order2、T-090 で
-                 stats-order3-attempt・stats-order3 を加えた）。
+    kind         種類。許可リスト（ALLOWED_KINDS）の 15 だけ（T-066 で gkg-run-result、T-078 で stats-order2、T-090 で
+                 stats-order3-attempt・stats-order3、T-095 で stats-order4 を加えた）。
                  それ以外は検証で失敗にする。
                  gkg-run-start（GKG の取得の run の開始。T-031）、stats-order1・stats-order1b
                  （統計係の順番1・順番1b の事前の封印。T-037）を加えた。
@@ -156,10 +156,12 @@ ORDER2_KIND = "stats-order2"        # T-073 で名前を決め、T-078 で許可
 # 通った試みのすぐあとに書く順番3の記録（tags-naive.md 368行の「数え方とのつながり」）の二つ
 ORDER3_ATTEMPT_KIND = "stats-order3-attempt"
 ORDER3_KIND = "stats-order3"
+# T-095：統計係の順番4（手法を作る期間の区画の、欠けた日の一覧。docs/stats/missing-days-method.md）。1件だけ
+ORDER4_KIND = "stats-order4"
 ALLOWED_KINDS = (PERIODS_KIND, TRIGGERS_KIND, THRESHOLD_ACCESS_KIND, ACQ_START_KIND,
                  ACQ_RESULT_KIND, CANDIDATES_KIND, METHOD_ACCESS_KIND, GKG_RUN_KIND,
                  ORDER1_KIND, ORDER1B_KIND, GKG_RESULT_KIND, ORDER2_KIND,
-                 ORDER3_ATTEMPT_KIND, ORDER3_KIND)
+                 ORDER3_ATTEMPT_KIND, ORDER3_KIND, ORDER4_KIND)
 
 # stamp で使う公開カレンダー（ots の既定と同じ 4 つ）と、その集約先が返す Pending の宛先
 # （実体のカレンダー）。stamp.py はこの左側に送る。.ots の Pending の宛先は右側に限る。
@@ -1960,7 +1962,9 @@ def check_stats_order(records, read_json):
         check_order2_run(records, r, doc, read_json)
         check_order2_doc(records, r, doc, read_json)          # T-078
     o3 = check_order3_records(records, read_json)              # T-090
-    return {"order1": o1, "order1b": o1b, "order2": o2, "order3_attempt": o3["attempt"], "order3": o3["order3"]}
+    o4 = check_order4_records(records, read_json)              # T-095
+    return {"order1": o1, "order1b": o1b, "order2": o2, "order3_attempt": o3["attempt"], "order3": o3["order3"],
+            "order4": o4}
 
 
 # ---- T-073：順番2の前の関門と、順番2の記録の照合
@@ -2964,6 +2968,284 @@ def check_order3_records(records, read_json):
             raise LedgerError("seq %d の順番3の試みは、同じ順番1b（seq %d）の順番3の記録（seq %d）のあとにある"
                               % (r["seq"], ref["seq"], sealed_at[ref["seq"]]))
     return {"attempt": att, "order3": o3}
+
+
+# ---- T-095：順番4（手法を作る期間の区画の、欠けた日の一覧。docs/stats/missing-days-method.md v3）の記録
+#
+# 一覧は統計係の src/stats/missing_days.py が作る。封印係の入口（src/sealer/seal_order4.py）は、HEAD の版のファイルを git から
+# 取り出した空のフォルダ（ORDER4_TREE_PREFIXES の下のファイルだけ）で、その版の missing_days.py を -I・-B の Python で流し、
+# 出力（JSON）をそのまま記録の list に入れる。記録は1件だけ。順番3の記録より後で、threshold-access（と、これから作る順番5・
+# モデルの kind。ORDER4_BEFORE_KINDS に足す）より前（candidates.md 3章 (5)、tags-naive.md 369行、missing-days-method.md 5章）。
+ORDER4_SCRIPT = "src/stats/missing_days.py"
+# 一覧のコードが照らす3つのファイル（missing_days.SEALED_CODE と同じ並び）と、それを縛る記録の欄
+ORDER4_IMPORTS = ("src/stats/periods.py", "src/stats/candidates.py", COUNTING_SCRIPT)
+# 封印の対象として想定されているもの（missing-days-method.md 5章）のうち、コードの外の2つ
+ORDER4_DOC_FILES = ("docs/stats/missing-days-method.md", "tests/stats/test_missing_days.py")
+# 流すフォルダに取り出すもの：コード、関門が読む封印の記録、マニフェスト（HEAD の版のこの下のファイルすべて）
+ORDER4_TREE_PREFIXES = ("data/manifest/", "sealed/", "src/")
+# 順番4の記録より後にだけ置ける kind。順番5とモデルの kind を作るときは、ここに足す（missing-days-method.md 5章）
+ORDER4_BEFORE_KINDS = (THRESHOLD_ACCESS_KIND,)
+ORDER4_DOC_KEYS = ("code", "head", "kind", "ledger_head", "list", "list_sha256", "python", "refs")
+ORDER4_REF_KEYS = ("candidates", "gkg_run_result", "order1b", "order3", "periods")
+ORDER4_CODE_KEYS = ("docs", "imports", "script", "tree")
+ORDER4_LIST_KEYS = ("block", "c7_denominator_by_day", "days_in_block", "input", "label", "missing_count", "missing_days",
+                    "partial_days_count", "rule", "zero_c7_denominator_days")
+ORDER4_LIST_INPUT_KEYS = ("day_files_read", "day_files_sha256_checked", "day_rows", "entry", "gkg_run_result_record_sha256",
+                          "gkg_run_result_seq", "manifest_lines", "manifest_path", "manifest_sha256", "run_id")
+ORDER4_LIST_RULE_KEYS = ("candidates_py_sha256", "counting_py_sha256", "function", "min_present_slots",
+                         "official_candidate", "periods_py_sha256", "present_slots", "slots_per_day", "source",
+                         "total_volume")
+ORDER4_MISSING_KEYS = ("below_min_files", "c7_denominator", "day", "files_listed", "files_ok", "zero_c7_denominator")
+ORDER4_RULE_SHA_KEYS = (("periods_py_sha256", "src/stats/periods.py"), ("candidates_py_sha256", "src/stats/candidates.py"),
+                        ("counting_py_sha256", COUNTING_SCRIPT))
+# candidates.md 3章 (5)（seq 2 で封印）の 96本と72本。一覧の rule の値と照らす
+ORDER4_SLOTS_PER_DAY = 96
+ORDER4_MIN_PRESENT_SLOTS = 72
+ORDER4_LABEL_RE = re.compile(r"\Amissing-days-method-v[0-9]+\Z")
+
+
+def order4_list_bytes(lst):
+    """一覧の JSON のバイト列（missing_days.canonical_bytes と同じ形：UTF-8、sort_keys、indent=2、末尾に改行1つ）。
+    記録の list_sha256 は、このバイト列の sha256（missing_days.py --sha256 の出力と同じ値）。"""
+    return (json.dumps(lst, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+
+
+def _nonneg(v):
+    return type(v) is int and v >= 0
+
+
+def _block_days(start, end):
+    try:
+        d, e = datetime.date.fromisoformat(start), datetime.date.fromisoformat(end)
+    except (TypeError, ValueError):
+        return None
+    out = []
+    while d <= e:
+        out.append(d.isoformat())
+        d += datetime.timedelta(days=1)
+    return out
+
+
+def check_order4_list(lst, what, block, gkg_ref, gkg_doc, shas, official_candidate):
+    """一覧（missing_days.py の出力）の形と、中のつじつま（git もデータも使わない）。
+      - キーの集まり（ORDER4_LIST_KEYS・input・rule・missing_days の各日）。label の形。
+      - block が periods の1件目の出力の method の区画と同じ。days_in_block・c7_denominator_by_day の日が区画のすべての日。
+      - input：day の行の数と開いた日の集計の数が区画の日数、sha256 を照らしたこと、gkg-run-result の記録の seq・行の sha256 が
+        参照（refs.gkg_run_result）と同じ、run_id・マニフェストのパス・行数・sha256 がその記録の中身と同じ。
+      - rule：96・72、三つのコードの sha256 が記録の code.imports と同じ、正式な候補が順番1b の記録と同じ。
+      - missing_days：日付の順で重ならない。各日の c7_denominator が c7_denominator_by_day と同じ、below_min_files が
+        files_ok < 72、zero_c7_denominator が分母 = 0、どちらかが真（欠けた日の規則）。分母が0の日はすべて欠けた日で、
+        zero_c7_denominator_days と同じ。missing_count が件数。
+    欠けた日でない日の files_ok は一覧に無いので、「72本未満なのに欠けた日に入っていない」日は、ここでは見つけられない
+    （作り直し（verify の --store）で照らす）。違えば LedgerError。"""
+    if not isinstance(lst, dict) or set(lst) != set(ORDER4_LIST_KEYS):
+        raise LedgerError("%s の list のキーが、missing_days.py の出力のキー（%s）と一致しない" % (what, "、".join(ORDER4_LIST_KEYS)))
+    if not isinstance(lst["label"], str) or not ORDER4_LABEL_RE.match(lst["label"]):
+        raise LedgerError("%s の list.label が missing-days-method-v<番号> の形でない" % what)
+    b = lst["block"]
+    if not isinstance(b, dict) or b != {"name": METHOD_BLOCK, "start": block[0], "end": block[1]}:
+        raise LedgerError("%s の list.block が、periods の1件目の出力の method の区画（%s〜%s）と違う" % (what, block[0], block[1]))
+    days = _block_days(*block)
+    by_day = lst["c7_denominator_by_day"]
+    if not isinstance(by_day, dict) or sorted(by_day) != days or not all(_nonneg(v) for v in by_day.values()):
+        raise LedgerError("%s の list.c7_denominator_by_day が、区画のすべての日の0以上の整数でない" % what)
+    if lst["days_in_block"] != len(days):
+        raise LedgerError("%s の list.days_in_block が区画の日数（%d）と違う" % (what, len(days)))
+    inp = lst["input"]
+    if not isinstance(inp, dict) or set(inp) != set(ORDER4_LIST_INPUT_KEYS):
+        raise LedgerError("%s の list.input のキーが決まったものと一致しない" % what)
+    if inp["day_rows"] != len(days) or inp["day_files_read"] != len(days) or inp["day_files_sha256_checked"] is not True \
+            or not isinstance(inp["entry"], str) or not inp["entry"]:
+        raise LedgerError("%s の list.input の day_rows・day_files_read が区画の日数でないか、sha256 を照らしていない" % what)
+    if (inp["gkg_run_result_seq"], inp["gkg_run_result_record_sha256"]) != (gkg_ref["seq"], gkg_ref["record_sha256"]):
+        raise LedgerError("%s の list.input の gkg-run-result の seq・行の sha256 が、参照する gkg-run-result の記録（seq %d）と違う"
+                          % (what, gkg_ref["seq"]))
+    for k in ("run_id", "manifest_path", "manifest_lines", "manifest_sha256"):
+        if inp[k] != gkg_doc.get(k):
+            raise LedgerError("%s の list.input.%s が、参照する gkg-run-result の記録の中身と違う" % (what, k))
+    rule = lst["rule"]
+    if not isinstance(rule, dict) or set(rule) != set(ORDER4_LIST_RULE_KEYS):
+        raise LedgerError("%s の list.rule のキーが決まったものと一致しない" % what)
+    if (rule["slots_per_day"], rule["min_present_slots"]) != (ORDER4_SLOTS_PER_DAY, ORDER4_MIN_PRESENT_SLOTS):
+        raise LedgerError("%s の list.rule の96・72が、candidates.md 3章 (5) の値と違う" % what)
+    for key, path in ORDER4_RULE_SHA_KEYS:
+        if rule[key] != shas[path]:
+            raise LedgerError("%s の list.rule.%s が、記録の code.imports の %s の sha256 と違う" % (what, key, path))
+    if rule["official_candidate"] != official_candidate:
+        raise LedgerError("%s の list.rule.official_candidate が、順番1b の記録の正式な候補（%s）と違う" % (what, official_candidate))
+    miss = lst["missing_days"]
+    if not isinstance(miss, list):
+        raise LedgerError("%s の list.missing_days が一覧でない" % what)
+    seen = []
+    for m in miss:
+        if not isinstance(m, dict) or set(m) != set(ORDER4_MISSING_KEYS) or not isinstance(m["day"], str) \
+                or m["day"] not in by_day \
+                or not _nonneg(m["files_ok"]) or not _nonneg(m["files_listed"]) or m["files_ok"] > m["files_listed"]:
+            raise LedgerError("%s の list.missing_days の要素の形が違う" % what)
+        d = m["day"]
+        if m["c7_denominator"] != by_day[d] or m["below_min_files"] is not (m["files_ok"] < ORDER4_MIN_PRESENT_SLOTS) \
+                or m["zero_c7_denominator"] is not (by_day[d] == 0) \
+                or not (m["below_min_files"] or m["zero_c7_denominator"]):
+            raise LedgerError("%s の list.missing_days の %s が、欠けた日の規則（72本未満か C7 の分母が0）と合わない" % (what, d))
+        seen.append(d)
+    if seen != sorted(set(seen)):
+        raise LedgerError("%s の list.missing_days が日付の順でないか、同じ日が二つある" % what)
+    zero = [d for d in days if by_day[d] == 0]
+    if lst["zero_c7_denominator_days"] != zero or not set(zero) <= set(seen):
+        raise LedgerError("%s の list.zero_c7_denominator_days が、C7 の分母が0の日（すべて欠けた日）と合わない" % what)
+    if lst["missing_count"] != len(miss):
+        raise LedgerError("%s の list.missing_count が missing_days の件数と違う" % what)
+    if not _nonneg(lst["partial_days_count"]) or lst["partial_days_count"] > len(days) - len(miss):
+        raise LedgerError("%s の list.partial_days_count が0以上で欠けた日でない日の数以下の整数でない" % what)
+
+
+def _file_list(v, paths, what, name):
+    if not isinstance(v, list) or [x.get("path") if isinstance(x, dict) else None for x in v] != list(paths) \
+            or not all(sorted(x) == ["path", "sha256"] for x in v):
+        raise LedgerError("%s の code.%s が [{path, sha256}...]（%s の順）でない" % (what, name, "・".join(paths)))
+    for x in v:
+        _check_hex(x["sha256"], HEX64, "%s の code.%s の %s の sha256" % (what, name, x["path"]))
+    return {x["path"]: x["sha256"] for x in v}
+
+
+def _target_sha(record, role, path):
+    got = [t["sha256"] for t in record["targets"] if t["role"] == role and t["path"] == path]
+    return got[0] if len(got) == 1 else None
+
+
+def order4_refs(records, seq, read_json):
+    """seq の順番4の記録が参照する記録（記録だけから決まる）。返り値: {キー: 記録}（無いものは None）。
+      order3          seq より前の stats-order3 の最後
+      gkg_run_result  seq より前の、正式な run（mode official）の gkg-run-result（ちょうど1件のときだけ。そうでなければ None）
+      periods         periods の1件目（missing_days.SEALED_CODE の seq 1）
+      candidates      candidates の1件目（同じく seq 2）
+      order1b         order3 が参照する順番1b（同じく seq 6）"""
+    before = [r for r in records if r["seq"] < seq]
+    o3 = [r for r in before if r["kind"] == ORDER3_KIND]
+    o3 = o3[-1] if o3 else None
+    off = [r for r in before if r["kind"] == GKG_RESULT_KIND and read_json(r, GKG_RESULT_KIND).get("mode") == "official"]
+    o1b = None
+    if o3 is not None:
+        s = read_json(o3, ORDER3_KIND)["ref_1b"]["seq"]
+        o1b = next((r for r in before if r["seq"] == s and r["kind"] == ORDER1B_KIND), None)
+    return {"order3": o3, "gkg_run_result": off[0] if len(off) == 1 else None,
+            "periods": _first_of_kind(before, PERIODS_KIND), "candidates": _first_of_kind(before, CANDIDATES_KIND),
+            "order1b": o1b}
+
+
+def check_order4_imports(refs, read_json, shas, what):
+    """一覧のコードが照らす3つのファイルの sha256（shas：{パス: sha256}）が、封印の記録の値と同じこと
+    （missing_days.SEALED_CODE の出どころと同じ欄）：periods.py は periods の1件目の role code と candidates の1件目の
+    role import、candidates.py は candidates の1件目の role code、counting.py は順番1b の中身の files。違えば LedgerError。
+    書く入口は、一覧のコードを流す前にもこれで確かめる。"""
+    o1b_doc = read_json(refs["order1b"], ORDER1B_KIND)
+    bound = {
+        "src/stats/periods.py": [_target_sha(refs["periods"], "code", "src/stats/periods.py"),
+                                 _target_sha(refs["candidates"], "import", "src/stats/periods.py")],
+        "src/stats/candidates.py": [_target_sha(refs["candidates"], "code", "src/stats/candidates.py")],
+        COUNTING_SCRIPT: [{f["path"]: f["sha256"] for f in o1b_doc["files"]}.get(COUNTING_SCRIPT)],
+    }
+    for path, vals in bound.items():
+        if any(v != shas.get(path) for v in vals):
+            raise LedgerError("%s の %s の sha256 が、封印の記録（periods・candidates・順番1b）が縛る値と違う" % (what, path))
+
+
+def check_order4_position(records, seq):
+    """seq に順番4の記録を置けるか（書く入口も照合も使う）：順番4の記録が seq より前に無い（1件だけ）、seq より前に
+    stats-order3 の記録がある、ORDER4_BEFORE_KINDS の記録が seq より前に無い。違えば LedgerError。"""
+    before = [r for r in records if r["seq"] < seq]
+    o4 = [r for r in before if r["kind"] == ORDER4_KIND]
+    if o4:
+        raise LedgerError("順番4（%s）の記録は、もう seq %d にある（1件だけ）" % (ORDER4_KIND, o4[0]["seq"]))
+    if not any(r["kind"] == ORDER3_KIND for r in before):
+        raise LedgerError("順番3（%s）の記録より前に、順番4の記録は置けない（封印の順は 3→4→5。reviews/T-092.md）" % ORDER3_KIND)
+    late = [r for r in before if r["kind"] in ORDER4_BEFORE_KINDS]
+    if late:
+        raise LedgerError("%s の記録（seq %d）より後に、順番4の記録は置けない（判定・モデルより前、遅くとも threshold-access より前。"
+                          "candidates.md 3章 (5)）" % (late[0]["kind"], late[0]["seq"]))
+
+
+def check_order4_doc(records, record, doc, read_json):
+    """順番4の記録の、git を使わない照合（書く仕組みも verify も。check_stats_order から）。
+      - targets がちょうど1つ（role は kind、path は sealed/<kind>-<sha256>.json）、キー、kind、head、python。
+      - 位置（check_order4_position）。
+      - refs（order4_refs の5つの記録の {seq, record_sha256}）。
+      - code：script・imports・docs・tree の形。imports の3つの sha256 が、periods の1件目（role code）・candidates の1件目
+        （role code と import）・順番1b の中身の files の値と同じ。
+      - list_sha256 が order4_list_bytes(list) の sha256。list の形とつじつま（check_order4_list）。
+    コードの版が head の版と同じこと、tree の sha256 は verify.check_order4_git が git で照らす。一覧の値が本当にその版の
+    コードの出力かは、日の集計を持つ者が verify の --store で作り直して照らす。違えば LedgerError。"""
+    what = "seq %d の %s（順番4）" % (record["seq"], ORDER4_KIND)
+    check_single_target(record, what)
+    _check_doc_kind(record, doc)
+    if set(doc) != set(ORDER4_DOC_KEYS):
+        raise LedgerError("%s の中身のキーが、決まったもの（%s）と一致しない" % (what, "、".join(ORDER4_DOC_KEYS)))
+    _check_hex(doc["head"], HEX40, what + " の head")
+    if not isinstance(doc["python"], str) or not doc["python"]:
+        raise LedgerError("%s の python が文字列でない" % what)
+    check_order4_position(records, record["seq"])
+    refs = order4_refs(records, record["seq"], read_json)
+    for k in ORDER4_REF_KEYS:
+        if refs[k] is None:
+            raise LedgerError("%s：参照する %s の記録が決まらない（正式な run の gkg-run-result がちょうど1件、stats-order3 と、"
+                              "それが参照する順番1b、periods・candidates の記録が要る）" % (what, k))
+    want = {k: record_ref(refs[k]) for k in ORDER4_REF_KEYS}
+    if doc["refs"] != want:
+        raise LedgerError("%s の refs が、記録から決まる参照（%s）と違う" % (what, "、".join(
+            "%s seq %d" % (k, want[k]["seq"]) for k in ORDER4_REF_KEYS)))
+    code = doc["code"]
+    if not isinstance(code, dict) or set(code) != set(ORDER4_CODE_KEYS):
+        raise LedgerError("%s の code が {script, imports, docs, tree} でない" % what)
+    s = code["script"]
+    if not isinstance(s, dict) or sorted(s) != ["path", "sha256"] or s["path"] != ORDER4_SCRIPT:
+        raise LedgerError("%s の code.script が {path: %s, sha256} でない" % (what, ORDER4_SCRIPT))
+    _check_hex(s["sha256"], HEX64, what + " の code.script.sha256")
+    shas = _file_list(code["imports"], ORDER4_IMPORTS, what, "imports")
+    _file_list(code["docs"], ORDER4_DOC_FILES, what, "docs")
+    t = code["tree"]
+    if not isinstance(t, dict) or sorted(t) != ["files", "prefixes", "sha256"] or t["prefixes"] != list(ORDER4_TREE_PREFIXES) \
+            or type(t["files"]) is not int or t["files"] < 1:
+        raise LedgerError("%s の code.tree が {prefixes: %s, files, sha256} でない" % (what, list(ORDER4_TREE_PREFIXES)))
+    _check_hex(t["sha256"], HEX64, what + " の code.tree.sha256")
+    o1b_doc = read_json(refs["order1b"], ORDER1B_KIND)
+    check_order4_imports(refs, read_json, shas, what + " の code.imports")
+    lst = doc["list"]
+    if not isinstance(doc["list_sha256"], str) or sha256_hex(order4_list_bytes(lst)) != doc["list_sha256"]:
+        raise LedgerError("%s の list_sha256 が、list の JSON（missing_days.py の出力の形）の sha256 と違う" % what)
+    block = blocks_of(read_json(refs["periods"], "output")).get(METHOD_BLOCK)
+    if block is None:
+        raise LedgerError("%s：periods の1件目の出力に method の区画が無い" % what)
+    check_order4_list(lst, what, block, want["gkg_run_result"], read_json(refs["gkg_run_result"], GKG_RESULT_KIND), shas,
+                      o1b_doc["counting"]["official_candidate"])
+
+
+def check_order4_records(records, read_json):
+    """順番4の記録をすべて照らす（check_stats_order から）。1件だけ（2件目は check_order4_position が止める）。
+    返り値: [記録]。"""
+    o4 = [r for r in records if r["kind"] == ORDER4_KIND]
+    for r in o4:
+        check_order4_doc(records, r, read_json(r, ORDER4_KIND), read_json)
+    return o4
+
+
+def order4_ref(records, seq, read_json):
+    """seq の記録（順番5）が参照に入れる順番4の記録の {seq, record_sha256, list_sha256}（missing-days-method.md 6章、
+    reviews/T-085.md のリードの判断 2）。seq より前に順番4の記録がちょうど1件なければ LedgerError。"""
+    o4 = [r for r in records if r["kind"] == ORDER4_KIND and r["seq"] < seq]
+    if len(o4) != 1:
+        raise LedgerError("seq %d より前に、順番4（%s）の記録が%s。順番5は順番4のあとにだけ置ける（tags-naive.md 369行）"
+                          % (seq, ORDER4_KIND, "無い" if not o4 else "%d 件ある" % len(o4)))
+    return dict(record_ref(o4[0]), list_sha256=read_json(o4[0], ORDER4_KIND)["list_sha256"])
+
+
+def check_ref_order4(records, record, ref, read_json, what=None):
+    """順番5の記録（kind はまだ無い）の参照 ref が、それより前の順番4の記録の {seq, record_sha256, list_sha256} とちょうど
+    同じことを求める（T-095。順番5の kind を作るときに、その照合から呼ぶ）。違えば LedgerError。"""
+    what = what or "seq %d の %s" % (record["seq"], record["kind"])
+    want = order4_ref(records, record["seq"], read_json)
+    if ref != want:
+        raise LedgerError("%s の順番4への参照 %r が、それより前の順番4の記録（seq %d）の seq・行の sha256・一覧の sha256 と違う"
+                          % (what, ref, want["seq"]))
 
 
 def themes_manifest_commits(git):

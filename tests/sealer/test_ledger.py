@@ -301,7 +301,8 @@ class TestChain(LedgerCase):
                           "stats-order1", "stats-order1b",       # T-037：順番1・順番1b
                           "gkg-run-result",                      # T-066：マニフェストの時刻証明
                           "stats-order2",                        # T-078：順番2の試み
-                          "stats-order3-attempt", "stats-order3"})  # T-090：順番3の試みと順番3の記録
+                          "stats-order3-attempt", "stats-order3",  # T-090：順番3の試みと順番3の記録
+                          "stats-order4"})                       # T-095：順番4（欠けた日の一覧）
         self.assertNotIn("acquisition", ledger.ALLOWED_KINDS)
         self.add(n=1)
         for i, k in enumerate(ledger.ALLOWED_KINDS):

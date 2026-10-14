@@ -26,7 +26,10 @@
                                                        時機の条件・コードの版。--day-files で決まった記録の decide() を
                                                        流し直す（手順書16章）。順番3の試みと順番3の記録
                                                        （stats-order3-attempt・stats-order3。T-090）の形・時機の条件・
-                                                       コードの版と、封印した版の order3_gate() の計算し直し（手順書17章）
+                                                       コードの版と、封印した版の order3_gate() の計算し直し（手順書17章）。
+                                                       順番4（stats-order4。T-095）の形・位置・参照・一覧のつじつま・
+                                                       コードの版。--store <日の集計の置き場所> で、固定した版の
+                                                       missing_days.py で一覧を作り直して照らす（手順書18章。all にも付けられる）
     python3 -B src/sealer/verify.py gkg-runs           GKG の取得の run の開始（gkg-run-start。T-031）の
                                                        ledger_head・drand・中身・順序。試しの run の回数と、
                                                        各 run の run_id・code_sha256・日を並べる
@@ -1323,6 +1326,187 @@ def check_order3_entries(st, attempts, order3):
                  sys.version.split()[0]))
 
 
+# ---- T-095：順番4（欠けた日の一覧）の記録の、git を使う照合と、固定した版の一覧のコードの流し方（書く入口と verify が同じ関数を使う）
+
+# 一覧のコードを流す時間の上限（秒）。所要時間の目安は 60〜100分（missing-days-method.md 4章）。超えたら止める（書く入口は何も
+# 書かない。verify は記録と合わないとする）
+ORDER4_TIMEOUT_SECONDS = 4 * 3600
+
+
+def order4_tree(repo, commit):
+    """commit の版の ledger.ORDER4_TREE_PREFIXES の下のファイルすべて：[(パス, sha256, バイト列)]（パスの順）。
+    バイト列は git cat-file blob（filter・textconv を通らない）。普通のファイル（mode 100644・100755）でないもの（リンク・
+    submodule）があれば LedgerError。"""
+    out = []
+    listing = _rgit(repo, "ls-tree", "-r", "-z", "--full-tree", commit, "--", *ledger.ORDER4_TREE_PREFIXES)
+    for item in listing.split(b"\0"):
+        if not item:
+            continue
+        meta, _tab, name = item.partition(b"\t")
+        mode, typ, obj = meta.decode("ascii").split()
+        path = name.decode("utf-8")
+        if typ != "blob" or mode not in ("100644", "100755"):
+            raise ledger.LedgerError("commit %s の版の %s が普通のファイルでない（mode %s）。順番4の一覧のコードを流すフォルダに"
+                                     "置けない" % (commit[:12], path, mode))
+        data = _rgit(repo, "cat-file", "blob", obj)
+        out.append((path, ledger.sha256_hex(data), data))
+    out.sort(key=lambda x: x[0])
+    if not out:
+        raise ledger.LedgerError("commit %s の版に %s のファイルが無い" % (commit[:12], "・".join(ledger.ORDER4_TREE_PREFIXES)))
+    return out
+
+
+def order4_tree_sha256(tree):
+    """tree（order4_tree の返り値）の sha256：各ファイルの「<sha256><空白2つ><パス>\\n」（shasum -a 256 の出力の形）を
+    パスの順につないだバイト列の sha256。"""
+    return ledger.sha256_hex("".join("%s  %s\n" % (sha, path) for path, sha, _d in tree).encode("utf-8"))
+
+
+def order4_code(repo, commit, tree):
+    """記録の code の欄を、commit の版から作る：script（missing_days.py）・imports（3つ）・docs（文書とテスト）・tree。
+    どれかが commit の版に無ければ LedgerError。"""
+    by = {p: s for p, s, _d in tree}
+    for rel in (ledger.ORDER4_SCRIPT,) + ledger.ORDER4_IMPORTS:
+        if rel not in by:
+            raise ledger.LedgerError("commit %s の版に %s が無い" % (commit[:12], rel))
+    docs = []
+    for rel in ledger.ORDER4_DOC_FILES:
+        if not _git_ok(repo, "cat-file", "-e", "%s:%s" % (commit, rel)):
+            raise ledger.LedgerError("commit %s の版に %s が無い" % (commit[:12], rel))
+        docs.append({"path": rel, "sha256": ledger.sha256_hex(_rgit(repo, "cat-file", "blob", "%s:%s" % (commit, rel)))})
+    return {"script": {"path": ledger.ORDER4_SCRIPT, "sha256": by[ledger.ORDER4_SCRIPT]},
+            "imports": [{"path": rel, "sha256": by[rel]} for rel in ledger.ORDER4_IMPORTS],
+            "docs": docs,
+            "tree": {"prefixes": list(ledger.ORDER4_TREE_PREFIXES), "files": len(tree), "sha256": order4_tree_sha256(tree)}}
+
+
+def run_order4(tree, store, tmp, what):
+    """tree（order4_tree の返り値。固定した版のファイル）だけを空のフォルダに書き出し（_BoundDir。書いたあとに読み戻して
+    sha256 を照らす）、その中の missing_days.py を -I・-B・空の pycache_prefix の Python で `--store <store>` を付けて流す。
+    作業ツリーのファイルは使わない。関門（official_day_records・gkg-run-result）は、書き出したフォルダの sealed/ と
+    data/manifest/ を読む。store は日の集計の置き場所（絶対パス。記録には入れない）。
+    返り値: 標準出力のバイト列（一覧の JSON）。Python を起動できなければ Unchecked。0 以外で終わる・時間の上限を超えたら
+    LedgerError（標準エラーの最後の行を添える）。"""
+    bound = _BoundDir(None, None, [(p, s) for p, s, _d in tree], tmp, what, blobs={p: d for p, _s, d in tree})
+    with tempfile.TemporaryDirectory(dir=tmp) as pycache:
+        cmd = [sys.executable, "-I", "-B", "-X", "pycache_prefix=" + pycache, ledger.ORDER4_SCRIPT, "--store", store]
+        try:
+            r = subprocess.run(cmd, cwd=bound.dir, capture_output=True, env=_child_env(), timeout=ORDER4_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            raise ledger.LedgerError("%s：%s が %d 秒の上限の中に終わらなかった" % (what, ledger.ORDER4_SCRIPT,
+                                                                     ORDER4_TIMEOUT_SECONDS)) from None
+        except OSError as e:
+            raise Unchecked("%s：Python を起動できない（%s）" % (what, e.__class__.__name__)) from None
+    if r.returncode != 0:
+        last = (r.stderr.decode("utf-8", "replace").strip().splitlines() or [""])[-1][:300]
+        raise ledger.LedgerError("%s：固定した版の %s が終了コード %d で終わった（%s）" % (what, ledger.ORDER4_SCRIPT, r.returncode,
+                                                                          last))
+    return r.stdout
+
+
+def parse_order4_output(raw, what):
+    """一覧のコードの標準出力を JSON として読み、ledger.order4_list_bytes で書き直したバイト列が raw とちょうど同じことを
+    確かめる（記録の list から list_sha256 を作り直せるようにするため）。返り値: (一覧, sha256)。"""
+    try:
+        lst = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise ledger.LedgerError("%s：%s の出力が JSON でない" % (what, ledger.ORDER4_SCRIPT)) from None
+    if ledger.order4_list_bytes(lst) != raw:
+        raise ledger.LedgerError("%s：%s の出力が、決まった形（UTF-8、sort_keys、indent=2、末尾に改行1つ）でない" % (what, ledger.ORDER4_SCRIPT))
+    return lst, ledger.sha256_hex(raw)
+
+
+def check_order4_git(repo, data, rec, doc, base):
+    """順番4の記録の、git を使う照合（書く仕組み（base は HEAD）と verify（base は記録を最初に含んだコミット）が呼ぶ）。
+      - head の commit があり、その版の sealed/ledger.jsonl がこの記録を足す直前の記録（先頭 seq−1 行）と同じ。head が base の
+        祖先（か同じ）。
+      - code（script・imports・docs・tree）を head の版から作り直したものが、記録の code とちょうど同じ（版の固定）。
+    違えば LedgerError。返り値: 照らさなかったことの一覧（今は空）。"""
+    what = "seq %d の %s（順番4）" % (rec["seq"], ledger.ORDER4_KIND)
+    head = doc["head"]
+    if not _git_ok(repo, "cat-file", "-e", head + "^{commit}"):
+        raise ledger.LedgerError("%s の head %s の commit が、このリポジトリに無い" % (what, head[:12]))
+    if _version_or_empty(repo, head, LEDGER_REL) != ledger.prefix_bytes(data, rec["seq"] - 1):
+        raise ledger.LedgerError("%s の head %s の版の sealed/ledger.jsonl が、この記録を足す直前の記録（先頭 %d 行）と"
+                                 "一致しない" % (what, head[:12], rec["seq"] - 1))
+    if base != head and not _git_ok(repo, "merge-base", "--is-ancestor", head, base):
+        raise ledger.LedgerError("%s の head %s が、%s の祖先でない" % (what, head[:12], base[:12]))
+    got = order4_code(repo, head, order4_tree(repo, head))
+    if got != doc["code"]:
+        bad = [k for k in ledger.ORDER4_CODE_KEYS if got[k] != doc["code"].get(k)]
+        raise ledger.LedgerError("%s の code の %s が、head %s の版のファイルから作り直したものと違う（一覧を作ったコードの版を"
+                                 "偽っている）" % (what, "・".join(bad), head[:12]))
+    return []
+
+
+def rerun_order4(repo, doc, store, tmp, what):
+    """記録の head の版のファイルで、一覧のコードを流し直し（run_order4）、出力のバイト列の sha256 が list_sha256 と同じで、
+    中身が list と同じことを確かめる。tree の sha256 も記録と照らす。違えば LedgerError。"""
+    tree = order4_tree(repo, doc["head"])
+    if order4_tree_sha256(tree) != doc["code"]["tree"]["sha256"]:
+        raise ledger.LedgerError("%s：head の版のファイルの sha256 が、記録の code.tree と違う" % what)
+    raw = run_order4(tree, store, tmp, what)
+    lst, sha = parse_order4_output(raw, what)
+    if sha != doc["list_sha256"] or lst != doc["list"]:
+        raise ledger.LedgerError("%s：固定した版のコードで作り直した一覧の sha256 %s が、記録の list_sha256 %s と違う"
+                                 % (what, sha, doc["list_sha256"]))
+    return sha
+
+
+def check_order4_entries(st, recs, store):
+    """順番4の記録ごとに、ledger_head を照らし、行を出す。git の履歴があれば、記録を最初に含んだコミットを base にして
+    check_order4_git で照らす。store（--store）を渡したときだけ、固定した版のコードで一覧を作り直して照らす。渡さないとき、
+    git の履歴が無いとき・浅い clone のとき・まだコミットされていないときは「照らさなかった」（T-095）。"""
+    repo = Repo(st.root)
+    why = None
+    try:
+        repo.git("rev-parse", "--git-dir")
+    except (ledger.LedgerError, OSError):
+        why = "git の履歴が無い"
+    if why is None and not _not_shallow(repo):
+        why = "浅い clone"
+    commits = None
+    for r in recs:
+        doc = st.file_json(r, ledger.ORDER4_KIND)
+        ledger.check_ledger_head(st.data, r, doc)
+        lst = doc["list"]
+        print("  %s seq %d（順番4）: 一覧の sha256 %s、%s（%s〜%s）の %d 日のうち欠けた日 %d 日、run_id %s（gkg-run-result seq %d）、"
+              "順番3 seq %d、%s の sha256 %s、head %s"
+              % (r["kind"], r["seq"], doc["list_sha256"], lst["block"]["name"], lst["block"]["start"], lst["block"]["end"],
+                 lst["days_in_block"], lst["missing_count"], lst["input"]["run_id"], doc["refs"]["gkg_run_result"]["seq"],
+                 doc["refs"]["order3"]["seq"], ledger.ORDER4_SCRIPT, doc["code"]["script"]["sha256"], doc["head"]))
+        if why is not None:
+            st.unchecked.append("seq %d の順番4の記録の git からの照合（%s）" % (r["seq"], why))
+            print("照らさなかった：%s なので、seq %d のコードの版を git から照らしていない" % (why, r["seq"]))
+            continue
+        if commits is None:
+            commits = repo.commit_for_seq(st.data, partial=True)
+        c = commits.get(r["seq"])
+        if c is None:
+            st.unchecked.append("seq %d の順番4の記録の git からの照合（記録がまだコミットされていない）" % r["seq"])
+            print("照らさなかった：記録がまだコミットされていないので、seq %d を git から照らしていない" % r["seq"])
+            continue
+        check_order4_git(repo, st.data, r, doc, c)
+        print("    head %s の版の記録、%s と照らす3つのファイル・文書とテスト・流すフォルダのファイル %d 件（sha256 %s…）を git から"
+              "照らした。記録と同じ" % (doc["head"][:12], ledger.ORDER4_SCRIPT, doc["code"]["tree"]["files"],
+                                  doc["code"]["tree"]["sha256"][:12]))
+        if not store:
+            st.unchecked.append("seq %d の順番4の一覧の作り直し（日の集計の置き場所 --store を渡していない）" % r["seq"])
+            print("照らさなかった：日の集計の置き場所（--store）を渡していないので、seq %d の一覧を作り直していない" % r["seq"])
+            continue
+        if not os.path.isdir(store):
+            raise ledger.LedgerError("--store %s がフォルダでない" % store)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                rerun_order4(repo, doc, os.path.realpath(store), tmp, "seq %d の順番4の一覧の作り直し" % r["seq"])
+        except Unchecked as e:
+            st.unchecked.append("seq %d の順番4の一覧の作り直し（%s）" % (r["seq"], e))
+            print("照らさなかった：seq %d の順番4の一覧の作り直し（%s）" % (r["seq"], e))
+            continue
+        print("    head %s の版の %s で一覧を作り直した。sha256 は記録の list_sha256 と同じ（流した Python：%s）"
+              % (doc["head"][:12], ledger.ORDER4_SCRIPT, sys.version.split()[0]))
+
+
 def cmd_stats_order(st, a):
     """統計係の順番1・順番1b の記録の照合と一覧。T-037（差し戻し1回目で改めた）、T-056。"""
     got = ledger.check_stats_order(st.records, st.file_json)
@@ -1357,6 +1541,8 @@ def cmd_stats_order(st, a):
         check_order2_plans(st, got["order2"], getattr(a, "day_files", None) or ())
     if got["order3_attempt"] or got["order3"]:
         check_order3_entries(st, got["order3_attempt"], got["order3"])          # T-090
+    if got["order4"]:
+        check_order4_entries(st, got["order4"], getattr(a, "store", None))       # T-095
     o1 = ledger.first_order1(st.records)
     print("除外の規則の kind（%s）の記録：%s（1 件だけ）。順番1・1b は最初の method-access より前、"
           "最初の gkg-run-start の前に順番1b。" % (ledger.ORDER1_KIND, "無し" if o1 is None else "seq %d" % o1["seq"]))
@@ -2022,6 +2208,9 @@ def main(argv=None):
         parsers[name].add_argument("--rev", default="working")
     # T-078：stats-order にも日の集計の置き場所（決まった順番2の記録の decide() を流し直す。渡したときだけ）
     parsers["stats-order"].add_argument("--day-files", action="append", default=[])
+    # T-095：正式な run の日の集計の置き場所。渡したときだけ、順番4の一覧を固定した版のコードで作り直して照らす（60〜100分）
+    for name in ("stats-order", "all"):
+        parsers[name].add_argument("--store")
     for name in ("gkg-runs", "all"):
         # T-066：日の集計（と取得の記録）の置き場所。渡したときだけ sha256 を照らす（第三者はディスクを持たない）。
         # all では、順番2の decide() の流し直しにも使う（T-078）

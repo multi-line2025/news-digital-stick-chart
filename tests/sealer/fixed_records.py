@@ -35,6 +35,11 @@ RESULT_COMMIT = "220297a38a7bf32d6319148d2c7abc650467c819"
 # 順番3の試みと順番3の記録を、本物の記録の clone に足して確かめるのに使う（tests/sealer/test_t090.py の TestRealClone）。
 ORDER2_COMMIT = "e92e7840a0167b962fd1334baece35d379f918e7"
 
+# 4つ目の固定コミット（T-095）。順番3の記録（seq 14。seq 13 が通った試み）をコミットしたもの。seq 12 が正式な run
+# （run_id 4199ae53d35b918a）の gkg-run-result で、src/stats/missing_days.py は T-093 の版（sha256 0ff14106…）。
+# 順番4の記録を、本物の記録の clone に足して確かめるのに使う（tests/sealer/test_t095.py）。
+ORDER3_COMMIT = "d74f27be28168521bf12e5f67ce3d00b325409d5"
+
 # checkout(code="head") で HEAD の版にそろえるのは、封印係のコードと手順書（テストする側）だけ。ほかのファイル
 # （src/stats・src/collector・docs/stats・data・sealed・reviews など）は固定のコミットの版のまま使う。
 # この中でも、固定した記録が縛るパス（記録の targets と、targets の中身の JSON に書かれたパス）は固定の版のまま

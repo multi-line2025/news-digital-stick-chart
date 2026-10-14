@@ -35,6 +35,8 @@ check_acquisition_pairs と同じ。
        - stats-order2（T-073・T-078）：ledger_head、形（ledger.check_order2_run・check_order2_doc。check_stats_order の
          中）、HEAD のマニフェストからの行き先と runs・inputs（ledger.check_order2_plan）、head が今の HEAD、コードの版と
          時機の条件の計算し直し（verify.check_order2_git）。書く入口は seal_order2.py
+       - stats-order4（T-095）：ledger_head、形・位置・参照・一覧のつじつま（ledger.check_order4_records。check_stats_order の
+         中）、head が今の HEAD、コードの版（verify.check_order4_git）、privacy_scan と同じ検査。書く入口は seal_order4.py
        - stats-order3-attempt・stats-order3（T-090）：ledger_head、形（ledger.check_order3_records。check_stats_order の中）、
          head が今の HEAD、git からの計算し直し（verify.check_order3_git）、試みの gate を封印した版の order3_gate() で計算し
          直した結果と同じこと（verify.recompute_order3_gate）、privacy_scan と同じ検査。書く入口は seal_order3.py
@@ -108,7 +110,7 @@ def check_privacy(rec, doc):
 WRITTEN_KINDS = (ledger.THRESHOLD_ACCESS_KIND, ledger.ACQ_START_KIND, ledger.ACQ_RESULT_KIND,
                  ledger.METHOD_ACCESS_KIND, ledger.GKG_RUN_KIND, ledger.ORDER1_KIND,
                  ledger.ORDER1B_KIND, ledger.GKG_RESULT_KIND, ledger.ORDER2_KIND,
-                 ledger.ORDER3_ATTEMPT_KIND, ledger.ORDER3_KIND)
+                 ledger.ORDER3_ATTEMPT_KIND, ledger.ORDER3_KIND, ledger.ORDER4_KIND)
 
 
 def _paths(project):
@@ -228,6 +230,20 @@ def check_new(project, data_after, records_after, rec, doc):
                     verify.recompute_order3_gate(repo, records_after, rec, doc, read, tmp)
                 except verify.Unchecked as e:
                     raise ledger.LedgerError("順番3の関門を計算し直せない（%s）。書かない" % e) from None
+        return
+    if kind == ledger.ORDER4_KIND:
+        # T-095：順番4の記録。形・位置（順番3より後、threshold-access より前、1件だけ）・参照・一覧のつじつま
+        # （ledger.check_order4_records。check_stats_order の中）に加えて、privacy_scan と同じ検査、ledger_head、head が今の
+        # HEAD、コードの版を HEAD の版から作り直したものと同じこと（verify.check_order4_git）
+        check_privacy(rec, doc)
+        ledger.check_ledger_head(data_after, rec, doc)
+        repo = verify.Repo(project)
+        head = verify._rgit(repo, "rev-parse", "--verify", "HEAD^{commit}").decode().strip()
+        if doc["head"] != head:
+            raise ledger.LedgerError("%s の記録の head %s が、今の HEAD %s と違う。書かない" % (kind, doc["head"][:12], head[:12]))
+        notes = verify.check_order4_git(repo, data_after, rec, doc, head)
+        if notes:
+            raise ledger.LedgerError("%s の記録の照合で、照らせないものがある（%s）。書かない" % (kind, "、".join(notes)))
         return
     if kind == ledger.GKG_RESULT_KIND:
         # T-066：中身の形・ledger_head・指す gkg-run-start、マニフェストの先頭と run-complete の行
