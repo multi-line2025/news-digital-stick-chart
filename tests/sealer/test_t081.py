@@ -84,7 +84,7 @@ class TestRawStaging(t78.Synth):
     def test_filter_does_not_change_committed_bytes(self):
         with t78.write_with(self.set_filter):
             rec, rel, ots, _doc = self.write()
-        paths = {"sealed/ledger.jsonl", rel, os.path.relpath(ots, self.root)}
+        paths = {"sealed/ledger.jsonl", rel, t78.rel_to(self.root, ots)}
         self.assertEqual(committed_files(self), paths)
         for p in paths:
             with open(os.path.join(self.root, p), "rb") as f:

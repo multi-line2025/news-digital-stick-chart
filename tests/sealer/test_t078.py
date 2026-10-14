@@ -54,6 +54,13 @@ SEALED_COUNTING = fixed_records.show(COUNTING_REL, fixed_records.RESULT_COMMIT)
 SEALED_SHA = ledger.sha256_hex(SEALED_COUNTING)
 
 
+def rel_to(root, path):
+    """path の root からの相対パス（/ 区切り）。両方の実体（realpath）で比べる（T-083。T-082 の監査 軽-4）。macOS の既定の
+    TMPDIR（/var/folders/…。/var は /private/var へのリンク）では、仮のプロジェクトのルートはリンクのままのパスで、書く仕組みが
+    返すパスはリンクを解いたパスになる。そのまま os.path.relpath で比べると '../../…' の形になって食い違う。"""
+    return os.path.relpath(os.path.realpath(path), os.path.realpath(root)).replace(os.sep, "/")
+
+
 def sealed_counting():
     """封印した版の counting.py を、同じプロセスのモジュールとして読み込む（比べるためだけ）。"""
     mod = types.ModuleType("counting_sealed_for_t078")
@@ -608,7 +615,7 @@ class TestCommitInEntry(Synth):
         self.assertEqual(self.head(), self.written_commit)
         self.assertEqual(self.git("rev-parse", "HEAD^").decode().strip(), before)
         files = set(self.git("show", "--name-only", "--format=", "HEAD").decode().split())
-        self.assertEqual(files, {"sealed/ledger.jsonl", rel, os.path.relpath(ots, self.root)})
+        self.assertEqual(files, {"sealed/ledger.jsonl", rel, rel_to(self.root, ots)})
         who = "%s <%s>" % (seal_order2.AUTHOR_NAME, seal_order2.AUTHOR_EMAIL)
         self.assertEqual(self.git("log", "-1", "--format=%an <%ae>|%cn <%ce>").decode().strip(), who + "|" + who)
         self.assertEqual(self.git("log", "-1", "--format=%B").decode().strip(), seal_order2.COMMIT_MESSAGE)
@@ -826,7 +833,7 @@ class TestCommitFails(Synth):
         with write_with(untracked):
             rec, rel, ots, _doc = self.write()
         files = set(self.git("show", "--name-only", "--format=", "HEAD").decode().split())
-        self.assertEqual(files, {"sealed/ledger.jsonl", rel, os.path.relpath(ots, self.root)})
+        self.assertEqual(files, {"sealed/ledger.jsonl", rel, rel_to(self.root, ots)})
         self.assertIn(b"?? extra.txt", self.git("status", "--porcelain"))
 
 

@@ -554,6 +554,17 @@ git ls-tree -r --name-only <seq 1 を含むコミット> -- data/
 SEALER_DOC_TEST_WORKTREE=1 PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/sealer
 ```
 
+### テストを流す Python と TMPDIR（T-083）
+
+- テストは、プロジェクトの `.venv/bin/python`（3.14）で流す。`python3 -m venv .venv` で用意する。
+  ```sh
+  PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m unittest discover -s tests/sealer
+  PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m unittest discover -s tests/stats
+  PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m unittest discover -s tests/collector
+  ```
+- macOS の `/usr/bin/python3`（3.9）で `tests/stats`・`tests/collector` を流すと、一部が落ちる（`tests/stats` の test_t019 の2件、`tests/collector` の test_filelist の `TestChildGuard`・`TestPostCutoffInvisible` など）。版の違いによる既知の環境の差で、記録や検証の誤りではない（T-076 の監査の軽-1）。`tests/sealer` は、`/usr/bin/python3 -B` でも全件通る。
+- `TMPDIR` がシンボリックリンクを含む場所（macOS の既定の `/var/folders/…`。`/var` は `/private/var` へのリンク）でも、`tests/sealer` は全件通る。テストの中で、仮のプロジェクトのルートと書く仕組みが返すパスを比べるときは、両方の実体（`realpath`）で比べる（`tests/sealer/test_t078.py` の `rel_to`。T-083。T-082 の監査の軽-4）。
+
 ## 9. 閾値と判定期間の候補（candidates）の検証（T-013）
 
 CLAUDE.md の「閾値の決め方」は、閾値と判定期間の候補を「手法を作る期間のデータに触れる前に」決めて封印すると定めている。候補は docs/stats/candidates.md（T-011。2026-10-06 にオーナーが承認）で、値は `src/stats/candidates.py` の出力である。
@@ -1365,6 +1376,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B src/collector/privacy_scan.py --all-history
       - `.ots`：最後の seq の `.ots` があれば、すべての seq の `.ots` を記録の先頭 N 行と照らす（`seal_records.load_checked`）。無ければ（`.ots` も作れなかった形）、seq 1〜N−1 の `.ots` を先頭 N−1 行と照らす。
       - 鎖：HEAD の版の `sealed/ledger.jsonl` が、今の記録から最後の1行を除いたものとバイト列で同じ（コミットしていないのは最後の1件だけ）。
       - 中身：`targets` がちょうど1つで、そのファイルの sha256 が記録の値と同じ。中身の `kind`、`ledger_head`、`head` が今の HEAD、順番1・1b・2 の形（`ledger.check_stats_order`）、`privacy_scan` と同じ検査。
+      - この照合が止めるのは、事故や一部だけの書き換え（記録・中身・`.ots` のどれかだけが合わない形）である。最後の1行と中身をそろえて書き直したもの（`.ots` があれば、それも作り直したもの）は止めない。運営が手で記録を足すのと同じで、運営の力は増えない（T-083。T-081 の監査の軽-2。この章の「限界」の「コミットと投稿の前に、手で捨てる形が残る」）。8つの照合（`targets` の数・中身の `kind`・`check_ledger_head`・`head`・`check_stats_order`・`privacy_scan`・`check_sealed_inside`・`.ots`）には、それぞれ外すと落ちるテストがある（`tests/sealer/test_t083.py`）。
   - コミットのあとの確かめで、作成者・本文・ファイルが決めた値と違った：そのコミットを push しない。リードに報告する。
 
 ### 第三者の確かめ方
