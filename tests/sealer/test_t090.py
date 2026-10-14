@@ -63,6 +63,19 @@ def write_reading(root):
         f.write(READING_TEXT)
 
 
+def rehead(doc, head):
+    """作り物の試みの中身の head を head にし、読んだ参照・list-heads・timing_check・gate を、それに合う形にそろえる
+    （worktree の HEAD は head の1つ）。"""
+    refs = doc["refs_read"]["refs"]
+    out = dict(doc, head=head, refs_read={"head": head, "refs": refs, "worktree_heads": [head]},
+               bundle_heads=[{"name": r["ref"], "commit": r["commit"]} for r in refs] + [{"name": "HEAD", "commit": head}])
+    if doc["timing_check"] is not None:
+        out["timing_check"] = dict(doc["timing_check"], head=head, worktree_heads=[head])
+    if doc["gate"] is not None:
+        out["gate"] = dict(doc["gate"], timing_check=out["timing_check"])
+    return out
+
+
 def order3_blocks():
     with open(DOC, encoding="utf-8") as f:
         return re.findall(r"<!-- test:order3 -->\n```sh\n(.*?)```", f.read(), re.S)
@@ -247,27 +260,33 @@ class TestStops(O3Case):
         self.assertEqual((g["may_seal"], g["reason"]), (False, R_O2A))
         self.verify_zero("all")
 
-    def test_bundle_halt_not_counted(self):
-        """bundle の list-heads が合わない試みは、関門の結果を出さずに止まり（halt）、記録に残る。破れとしては数えない
-        （seal-order1.md 178行）：時機の条件が破れていても、あとの試みを恒久には止めない。verify は注意を出す。"""
+    def test_bundle_halt_without_timing(self):
+        """参照を読んでから bundle を作るまでに参照が変わる（ここでは、読んだ直後に枝を1つ足す）と、bundle の list-heads が読んだ
+        参照と合わない。そのときは時機の条件（F と ok）を計算せず、関門も流さずに halt（bundle）を記録する（seal-order1.md
+        177・178行。T-091）。make_bundle・bundle の照らし方は差し替えない。破れの枝があっても記録に ok は入らない。"""
         self.o2()
         self.side_branch_violation()
-        real = seal_order3.make_bundle
+        real = verify.read_refs_now
 
-        def unmatched(*a, **k):
-            got, _m = real(*a, **k)
-            return got, False
-        with mock.patch.object(seal_order3, "make_bundle", unmatched):
+        def read_then_change(repo, label="順番2"):
+            snap = real(repo, label)
+            self.git("branch", "race-extra")
+            return snap
+        with mock.patch.object(verify, "read_refs_now", read_then_change), \
+                mock.patch.object(verify, "timing_from_refs", side_effect=AssertionError("計算してはいけない")):
             out = self.attempt()
         adoc = out["attempt"][3]
         self.assertIsNone(adoc["gate"])
         self.assertEqual(adoc["halt"]["cause"], "bundle")
-        self.assertFalse(adoc["timing_check"]["ok"])
+        self.assertIsNone(adoc["timing_check"])
+        self.assertIn({"name": "refs/heads/race-extra", "commit": adoc["head"]}, adoc["bundle_heads"])
+        self.assertNotIn("refs/heads/race-extra", [r["ref"] for r in adoc["refs_read"]["refs"]])
         self.assertIsNone(out["order3"])
         out_v = self.verify_zero("all")
         self.assertIn("関門の結果を出さずに止まった（bundle：", out_v)
-        self.assertIn("破れとしては数えない", out_v)
+        self.assertIn("時機の条件 計算していない", out_v)
         self.remove_branch()
+        self.remove_branch("race-extra")
         out2 = self.attempt()
         self.assertTrue(self.gate(out2)["may_seal"])
         self.verify_zero("all")
@@ -470,11 +489,202 @@ class TestForgeries(O3Case):
         out = self.attempt()
         self.assertIsNotNone(out["order3"])
         doc = self.next_head(out["attempt"][3])
-        doc = dict(doc, timing_check=dict(doc["timing_check"], head=doc["head"],
-                                          worktree_heads=[doc["head"]]))
-        doc["gate"] = dict(doc["gate"], timing_check=doc["timing_check"])
-        self.raw(A3, doc)
+        self.raw(A3, rehead(doc, doc["head"]))
         self.verify_stops("のあとにある", "all")
+
+
+# ---------------------------------------------------------------- 4b. T-091（T-090 の監査 中-2）：照合を1つずつ外すと落ちる単体のテスト
+
+class TestLedgerUnits(O3Case):
+    """ledger.check_order3_records の照合のうち、ほかの照合（git・関門の計算し直し）では止まらないものを、1つずつ確かめる。
+    次の記録として足した形にして、git を使わない照合だけを流す。どのテストも、その照合だけが出す文まで見る。"""
+
+    def check(self, kind, doc, text):
+        data = self.ledger_bytes()
+        content = ledger.canonical_line(doc) + b"\n"
+        sha = ledger.sha256_hex(content)
+        _r, rec, line = ledger.build_next_record(
+            data, kind, [{"path": "sealed/%s-%s.json" % (kind, sha), "role": kind, "sha256": sha}], "", self.tick())
+        recs = ledger.verify_chain(data + line)
+
+        def read(r, role):
+            return doc if r["seq"] == rec["seq"] else ledger.read_target_json(self.root, r, role)
+        ledger.check_order3_records(recs, read)                      # 元の中身は通る（下の変えた形と比べるため）
+        return recs, read
+
+    def refused(self, kind, doc, bad, text):
+        recs, read = self.check(kind, doc, text)
+        read2 = lambda r, role: bad if r["seq"] == recs[-1]["seq"] else read(r, role)  # noqa: E731
+        with self.assertRaisesRegex(ledger.LedgerError, text):
+            ledger.check_order3_records(recs, read2)
+
+    def attempt_doc(self):
+        self.o2()
+        return self.build_attempt()
+
+    def test_head_not_in_worktree_heads(self):
+        doc = self.attempt_doc()
+        other = self.git("rev-parse", "HEAD~1").decode().strip()
+        bad = rehead(doc, doc["head"])
+        bad["refs_read"]["worktree_heads"] = [other]
+        bad["timing_check"] = dict(bad["timing_check"], worktree_heads=[other])
+        bad["gate"] = dict(bad["gate"], timing_check=bad["timing_check"])
+        bad["bundle_heads"] = [h if h["name"] != "HEAD" else {"name": "HEAD", "commit": other} for h in bad["bundle_heads"]]
+        self.refused(A3, doc, bad, "の head が refs_read.worktree_heads に無い")
+
+    def test_ok_with_graft(self):
+        doc = self.attempt_doc()
+        self.assertTrue(doc["timing_check"]["ok"])
+        bad = dict(doc, timing_guards=dict(doc["timing_guards"], graft_file=True))
+        self.refused(A3, doc, bad, "timing_check.ok が True なのに、graft のファイル")
+
+    def test_halt_code_with_version(self):
+        doc = self.attempt_doc()
+        bad = dict(doc, gate=None, halt={"cause": "code", "reason": "作り物"})
+        self.refused(A3, doc, bad, "halt の cause が code なのに、code.found が true")
+
+    def test_halt_input_without_version(self):
+        doc = self.attempt_doc()
+        bad = dict(doc, gate=None, halt={"cause": "input", "reason": "作り物"},
+                   code=dict(doc["code"], found=False, commit=None))
+        self.refused(A3, doc, bad, "halt の cause が input なのに、code.found が false")
+
+    def test_halt_bundle_but_matched(self):
+        doc = self.attempt_doc()
+        bad = dict(doc, gate=None, halt={"cause": "bundle", "reason": "作り物"}, timing_check=None)
+        self.refused(A3, doc, bad, "bundle_heads と refs_read が合うのに halt（bundle）")
+
+    def test_unmatched_without_halt(self):
+        doc = self.attempt_doc()
+        bad = dict(doc, bundle_heads=doc["bundle_heads"] + [{"name": "refs/heads/zz", "commit": doc["head"]}])
+        self.refused(A3, doc, bad, "bundle_heads と refs_read が合わないのに halt（bundle）でない")
+
+    def test_halt_bundle_with_timing(self):
+        doc = self.attempt_doc()
+        bad = dict(doc, gate=None, halt={"cause": "bundle", "reason": "作り物"},
+                   bundle_heads=doc["bundle_heads"] + [{"name": "refs/heads/zz", "commit": doc["head"]}])
+        self.refused(A3, doc, bad, "halt（bundle）なのに timing_check がある")
+
+    def test_timing_refs_not_read(self):
+        doc = self.attempt_doc()
+        tc = dict(doc["timing_check"], refs=doc["timing_check"]["refs"] + [{"ref": "refs/heads/zz", "commit": doc["head"]}])
+        bad = dict(doc, timing_check=tc, gate=dict(doc["gate"], timing_check=tc))
+        self.refused(A3, doc, bad, "timing_check の head・refs・worktree_heads が refs_read と違う")
+
+    def order3_doc(self):
+        return TestForgeries.passed_without_order3(self)
+
+    def test_ref_order1(self):
+        doc = self.order3_doc()
+        self.refused(O3, doc, dict(doc, ref_order1=doc["ref_order2"]), "ref_order1 が、stats-order1 の記録")
+
+    def test_counting(self):
+        doc = self.order3_doc()
+        self.refused(O3, doc, dict(doc, counting=dict(doc["counting"], official_candidate="C1")),
+                     "counting が、参照する順番1b の記録の official_candidate")
+
+
+class TestRecordHead(O3Case):
+    """verify.check_order3_git の、head の版の記録（先頭 seq−1 行）と、head が base の祖先であることの照合。"""
+
+    def prepared(self):
+        doc = TestForgeries.passed_without_order3(self)
+        data = self.ledger_bytes()
+        content = ledger.canonical_line(doc) + b"\n"
+        sha = ledger.sha256_hex(content)
+        _r, rec, line = ledger.build_next_record(
+            data, O3, [{"path": "sealed/%s-%s.json" % (O3, sha), "role": O3, "sha256": sha}], "", self.tick())
+        recs = ledger.verify_chain(data + line)
+        read = lambda r, role: doc if r["seq"] == rec["seq"] else ledger.read_target_json(self.root, r, role)  # noqa: E731
+        repo = verify.Repo(self.root)
+        self.assertEqual(verify.check_order3_git(repo, data + line, recs, rec, doc, self.head(), read), [])
+        return doc, data + line, recs, rec, read, repo
+
+    def test_head_with_other_ledger(self):
+        doc, data, recs, rec, read, repo = self.prepared()
+        older = self.git("rev-parse", "HEAD~1").decode().strip()            # 試みの記録の前の commit（順3の文書はある）
+        with self.assertRaisesRegex(ledger.LedgerError, "の版の sealed/ledger.jsonl が、この記録を足す直前の記録"):
+            verify.check_order3_git(repo, data, recs, rec, dict(doc, head=older), self.head(), read)
+
+    def test_head_not_ancestor(self):
+        doc, data, recs, rec, read, repo = self.prepared()
+        base = self.head()
+        branch = self.git("symbolic-ref", "--short", "HEAD").decode().strip()
+        self.git("checkout", "-q", "-b", "elsewhere")
+        with open(os.path.join(self.root, "elsewhere.txt"), "w") as f:
+            f.write("x\n")
+        self.commit("祖先でない commit（テスト）")
+        side = self.head()
+        self.git("checkout", "-q", branch)
+        with self.assertRaisesRegex(ledger.LedgerError, "の祖先でない"):
+            verify.check_order3_git(repo, data, recs, rec, dict(doc, head=side), base, read)
+
+
+class TestOrder2BundleOrder(t78.Synth):
+    """T-091：順番2も seal-order1.md 177行の順（参照を読む → bundle を作って照らす → 合ったときだけ F と ok を計算する）。
+    参照を読んだ直後に枝を足すと、bundle が合わずに何も書かずに止まり、時機の条件は計算しない。"""
+
+    def test_order2_reads_then_bundle_then_timing(self):
+        real = verify.read_refs_now
+
+        def read_then_change(repo, label="順番2"):
+            snap = real(repo, label)
+            self.git("branch", "race-extra")
+            return snap
+        before = self.ledger_bytes()
+        with mock.patch.object(verify, "read_refs_now", read_then_change), \
+                mock.patch.object(verify, "timing_from_refs", side_effect=AssertionError("計算してはいけない")), \
+                self.assertRaisesRegex(ledger.LedgerError, "list-heads が、記録する refs・worktree の HEAD と合わない"):
+            self.write()
+        self.assertEqual(self.ledger_bytes(), before)
+        self.git("branch", "-D", "race-extra")
+        _rec, _rel, _o, doc = self.write()                     # 参照が変わらなければ、計算して書く
+        self.assertEqual(doc["status"], "decided")
+        self.verify_zero("all")
+
+
+class TestBundleMatchUnit(unittest.TestCase):
+    """ledger.bundle_heads_match（seal-order1.md 178行の照らし方）。"""
+
+    A, B = "a" * 40, "b" * 40
+
+    def test_cases(self):
+        refs = [{"ref": "refs/heads/main", "commit": self.A}]
+        ok = [{"name": "HEAD", "commit": self.A}, {"name": "refs/heads/main", "commit": self.A}]
+        self.assertTrue(ledger.bundle_heads_match(refs, [self.A], ok))
+        self.assertFalse(ledger.bundle_heads_match(refs, [self.A], ok + [{"name": "refs/heads/x", "commit": self.B}]))
+        self.assertFalse(ledger.bundle_heads_match(refs + [{"ref": "refs/heads/y", "commit": self.B}], [self.A], ok))
+        self.assertFalse(ledger.bundle_heads_match(refs, [self.A, self.B], ok))
+        self.assertTrue(ledger.bundle_heads_match(refs, [self.A, self.B],
+                                                  ok + [{"name": "worktrees/w/HEAD", "commit": self.B}]))
+        self.assertFalse(ledger.bundle_heads_match(refs, [self.A], [{"name": "HEAD", "commit": self.A},
+                                                                   {"name": "refs/heads/main", "commit": self.B}]))
+
+
+class TestHaltInput(O3Case):
+    """封印した版の order3_gate() が ValueError で入力を受け付けないときも、試みとして記録する（halt、cause "input"。
+    T-091。T-090 の監査 軽-2）。今の照合を通った記録からは起きないので、入力を作る関数を差し替えて起こす。verify は、
+    同じ差し替えのもとでは通り、差し替えなしで計算し直すと（入力を受け付けるので）止める。"""
+
+    def test_halt_input(self):
+        self.o2()
+        real = ledger.order3_gate_inputs
+
+        def broken(records, seq, tc, read_json):
+            d = real(records, seq, tc, read_json)
+            return dict(d, order2_records=d["order2_records"] + [{"seq": 1, "status": "decided", "stop_kind": None,
+                                                                  "ref_1b_seq": 999}])
+        with mock.patch.object(ledger, "order3_gate_inputs", broken):
+            out = self.attempt()
+            adoc = out["attempt"][3]
+            self.assertIsNone(adoc["gate"])
+            self.assertEqual(adoc["halt"]["cause"], "input")
+            self.assertIn("ValueError: ", adoc["halt"]["reason"])
+            self.assertTrue(adoc["code"]["found"])
+            self.assertIsNone(out["order3"])
+            out_v = self.verify_zero("all")
+            self.assertIn("記録の halt（input） と同じ", out_v)
+        self.verify_stops(re.escape("halt（input）なのに、封印した版の order3_gate() を記録から計算し直すと入力を受け付ける"), "all")
 
 
 # ---------------------------------------------------------------- 5. targets の数と role（stats-order2・stats-order3-attempt・stats-order3）
@@ -643,7 +853,7 @@ class TestRealClone(unittest.TestCase):
         self.assertEqual(adoc["code"]["commit"], "8e2c29b1afe7a9dc494e298b04b53dbbe115eaab")
         self.assertEqual(out["order3"][0]["seq"], 12)
         self.assertEqual(out["order3"][3]["ref_order1"]["seq"], 5)
-        code, out_v, err = tl.run_verify_inproc(self.c, "all")
+        code, out_v, err = tl.run_verify_inproc(self.c, "all", "--rev", "auto")
         self.assertEqual(code, 0, err)
         self.assertIn("封印した版の order3_gate()", out_v)
         for r in self.run_blocks():
@@ -654,9 +864,7 @@ class TestRealClone(unittest.TestCase):
         recs = ledger.verify_chain(data)
         bad = dict(adoc, gate=dict(adoc["gate"], may_seal=False, reason="作り物", chosen_order2_seq=None))
         head = self.git("rev-parse", "HEAD").decode().strip()
-        bad = dict(bad, ledger_head=ledger.expected_ledger_head(data, len(recs) + 1), head=head,
-                   timing_check=dict(adoc["timing_check"], head=head, worktree_heads=[head]))
-        bad["gate"]["timing_check"] = bad["timing_check"]
+        bad = rehead(dict(bad, ledger_head=ledger.expected_ledger_head(data, len(recs) + 1)), head)
         with mock.patch.object(seal_records, "check_new", lambda *a, **k: None):
             seal_records.write_doc_record(self.c, A3, bad, data, "作り物（テスト）",
                                           t78.T0.replace(year=2026, month=10, day=17), "ots", runner=tw.FakeOts())
@@ -710,7 +918,8 @@ class TestAllowedAndDoc(unittest.TestCase):
     def test_doc_chapters(self):
         with open(DOC, encoding="utf-8") as f:
             text = f.read()
-        for phrase in ("## 17. 順番3の封印（stats-order3-attempt・stats-order3。T-090）",
+        for phrase in ("## 17. 順番3の封印（stats-order3-attempt・stats-order3。T-090、T-091）", "### 決まりの字面と違う点（結果は同じ）",
+                       "`--commit-written` は関門を計算し直さない", "記録の欄の分け方と 176行", "順番1b の記録が無いとき",
                        "src/sealer/seal_order3.py \\\n  --bundle-out", "seal_order3.py --commit-written", READING,
                        "<!-- test:order3 -->", "/usr/bin/python3", "この2件は skip になる", "Python 3.14 で作る",
                        "python3.14 -m venv .venv"):

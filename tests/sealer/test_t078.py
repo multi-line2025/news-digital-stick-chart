@@ -700,13 +700,13 @@ class TestLight1(Synth):
 
     def test_bundle_list_heads_must_match(self):
         self.git("branch", "extra")
-        real = verify.order2_timing_now
+        real = verify.read_refs_now
 
-        def drop_extra(repo, records, ref):
-            tc, g = real(repo, records, ref)
-            return dict(tc, refs=[r for r in tc["refs"] if r["ref"] != "refs/heads/extra"]), g
+        def drop_extra(repo, label="順番2"):
+            snap = real(repo, label)
+            return dict(snap, refs=[r for r in snap["refs"] if r["ref"] != "refs/heads/extra"])
         before = self.ledger_bytes()
-        with mock.patch.object(verify, "order2_timing_now", drop_extra), \
+        with mock.patch.object(verify, "read_refs_now", drop_extra), \
                 self.assertRaisesRegex(ledger.LedgerError, "list-heads が、記録する refs・worktree の HEAD と合わない"):
             self.write()
         self.assertEqual(self.ledger_bytes(), before)

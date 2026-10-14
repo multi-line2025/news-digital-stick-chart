@@ -2649,7 +2649,11 @@ def check_order2_doc(records, record, doc, read_json):
 #   kind・ledger_head・head   いつもの形。head は書いた時点の HEAD（40桁）
 #   ref_1b                   参照する順番1b の記録 {seq, record_sha256}（この記録より前の stats-order1b の seq の最大。
 #                            counting.md 4章 (3) の 1）。無ければ null
-#   timing_check             順番3の時点で確かめ直した時機の条件（counting.check_timing_check の7つのキー）。ref_1b が null
+#   refs_read                {head, refs, worktree_heads}：試みのはじめに読んだ参照（T-091。seal-order1.md 177行の順の 1）
+#   bundle_heads             [{name, commit}...]：git bundle list-heads の出力（T-091）。refs_read と合わない
+#                            （bundle_heads_match が偽）ときだけ、そしてそのときは必ず halt（bundle）
+#   timing_check             順番3の時点で確かめ直した時機の条件（counting.check_timing_check の7つのキー）。bundle_heads が
+#                            refs_read と合ったときだけ、refs_read から計算する。halt（bundle）なら null。ref_1b が null
 #                            なら ref_1b_seq は null・ok は false・f_set は []
 #   timing_guards            {graft_file, shallow}（計算の前の確かめ。順番2と同じ）
 #   bundle                   {sha256, published: false, reason}（seal-order1.md 177行）
@@ -2657,9 +2661,9 @@ def check_order2_doc(records, record, doc, read_json):
 #                            封印した版。作業ツリーの版は使わない
 #   gate                     order3_gate() の record（キーはちょうど5個。seal-order1.md 176行）か null
 #   halt                     null か {cause, reason}：関門の結果を出さずに止まった試み。cause は "bundle"（bundle の
-#                            list-heads が記録する参照と合わない。seal-order1.md 178行。破れとしては数えない）か "code"
-#                            （封印した版の counting.py が履歴に無い、または順番1b の記録が無い）。gate と halt は、
-#                            ちょうど一方が null
+#                            list-heads が読んだ参照と合わない。seal-order1.md 178行。F と ok は計算しない）、"code"
+#                            （封印した版の counting.py が履歴に無い、または順番1b の記録が無い）、"input"（封印した版の
+#                            order3_gate() が ValueError で入力を受け付けなかった。T-091）。gate と halt は、ちょうど一方が null
 #   python                   関門を流した Python の版（申告）
 # 順番3の記録（kind stats-order3。通った試みのすぐあと（seq が試みの次）に1件）：
 #   kind・ledger_head・head
@@ -2674,10 +2678,10 @@ def check_order2_doc(records, record, doc, read_json):
 # どちらの kind も、targets はちょうど1つで、role が kind、path が sealed/<kind>-<sha256>.json（check_single_target）。
 
 ORDER3_READING_DOC = "docs/stats/seal-order3.md"
-ORDER3_ATTEMPT_KEYS = ("bundle", "code", "gate", "halt", "head", "kind", "ledger_head", "python", "ref_1b",
-                       "timing_check", "timing_guards")
+ORDER3_ATTEMPT_KEYS = ("bundle", "bundle_heads", "code", "gate", "halt", "head", "kind", "ledger_head", "python",
+                       "ref_1b", "refs_read", "timing_check", "timing_guards")
 ORDER3_GATE_KEYS = ("chosen_order2_seq", "may_seal", "reason", "ref_1b_seq", "timing_check")
-ORDER3_HALT_CAUSES = ("bundle", "code")
+ORDER3_HALT_CAUSES = ("bundle", "code", "input")
 ORDER3_DOC_KEYS = ("attempt", "counting", "head", "kind", "ledger_head", "reading", "ref_1b", "ref_order1",
                    "ref_order2")
 ORDER3_KINDS = (ORDER3_ATTEMPT_KIND, ORDER3_KIND)
@@ -2757,19 +2761,47 @@ def order3_gate_inputs(records, seq, timing_check, read_json):
             "timing_check": timing_check, "attempts": attempts}
 
 
+def bundle_heads_match(refs, worktree_heads, heads):
+    """bundle の list-heads（heads：[{"name", "commit"}...]）が、読んだ参照と合うか（seal-order1.md 178行）。
+      - 読んだ refs の各（名前、commit）が list-heads にそのまま現れる。
+      - list-heads の refs/ で始まる参照が、すべて読んだ refs にある。
+      - list-heads の HEAD と worktrees/<名前>/HEAD の commit の集合が、読んだ worktree_heads の集合と同じ。
+    書く仕組み（seal_order2.make_bundle・seal_order3）と照合（check_order3_attempt_doc）が使う。T-091 で関数にした。"""
+    listed = {(h["name"], h["commit"]) for h in heads}
+    recorded = {(r["ref"], r["commit"]) for r in refs}
+    listed_refs = {(n, c) for n, c in listed if n.startswith("refs/")}
+    wt = {c for n, c in listed if n == "HEAD" or (n.startswith("worktrees/") and n.endswith("/HEAD"))}
+    return recorded <= listed and listed_refs <= recorded and wt == set(worktree_heads)
+
+
+def _check_refs_list(refs, what, name):
+    if not isinstance(refs, list) or not refs:
+        raise LedgerError("%s の %s が空でない一覧でない" % (what, name))
+    names = set()
+    for r in refs:
+        if not isinstance(r, dict) or sorted(r) != ["commit", "ref"] or not isinstance(r["ref"], str) or not r["ref"] \
+                or not isinstance(r["commit"], str) or not HEX40.match(r["commit"]) or r["ref"] in names:
+            raise LedgerError("%s の %s の要素が {ref: 名前, commit: 40桁} でないか、名前が重なっている" % (what, name))
+        names.add(r["ref"])
+
+
 def check_order3_attempt_doc(records, record, doc, read_json):
     """順番3の試みの記録の、git を使わない照合（書く仕組みも verify も。check_stats_order から）。
       - targets・キー・kind・head・ref_1b（この記録より前の stats-order1b の seq の最大と、その行の sha256）。
-      - timing_check の形（check_order3_timing_shape）。ref_1b_seq・head が記録と同じで、head が worktree_heads にある。
+      - refs_read（読んだ参照。T-091）：head が記録の head と同じで、worktree_heads にある。
+      - bundle_heads（list-heads の出力。T-091）と refs_read が合う（bundle_heads_match）ことと、halt の cause が bundle で
+        あることが、ちょうど逆。halt（bundle）なら timing_check は null（F と ok を計算していない。seal-order1.md 177・178行）。
+      - timing_check があれば、形（check_order3_timing_shape）、ref_1b_seq、head・refs・worktree_heads が refs_read と同じ。
         timing_guards のどれか、refs/replace/ の参照、ledger の条件（順番1b が最初の method-access より前）に当たれば
         ok は false。
       - code（_check_code_field）、bundle（順番2と同じ形）、python。
-      - gate と halt のちょうど一方が null。halt の cause が code なら code.found は false。gate があれば code.found は true
-        で、gate はキーがちょうど5個、timing_check がこの記録の timing_check と同じ、ref_1b_seq が同じ、may_seal と
-        reason・chosen_order2_seq の対応、通ったなら timing_check.ok が true で、chosen_order2_seq は ref_1b を参照する
-        この記録より前の stats-order2 の seq。
-    gate の値そのもの（関門の規則に従っているか）は、封印した版の order3_gate() を流し直して照らす（verify.recompute_order3_gate。
-    git の履歴が要る）。違えば LedgerError。返り値: 参照する順番1b の記録（無ければ None）。"""
+      - gate と halt のちょうど一方が null。halt の cause は bundle・code・input。code なら code.found は false、input なら
+        code.found は true。gate があれば code.found は true で、gate はキーがちょうど5個、timing_check がこの記録の
+        timing_check と同じ、ref_1b_seq が同じ、may_seal と reason・chosen_order2_seq の対応、通ったなら timing_check.ok が
+        true で、chosen_order2_seq は ref_1b を参照するこの記録より前の stats-order2 の seq。
+    gate の値そのもの（関門の規則に従っているか）と、halt（input）が本当に入力を受け付けない形かは、封印した版の
+    order3_gate() を流し直して照らす（verify.recompute_order3_gate。git の履歴が要る）。違えば LedgerError。
+    返り値: 参照する順番1b の記録（無ければ None）。"""
     what = "seq %d の %s（順番3の試み）" % (record["seq"], ORDER3_ATTEMPT_KIND)
     check_single_target(record, what)
     _check_doc_kind(record, doc)
@@ -2780,16 +2812,52 @@ def check_order3_attempt_doc(records, record, doc, read_json):
     if doc["ref_1b"] != record_ref(ref):
         raise LedgerError("%s の ref_1b %r が、この記録より前の stats-order1b の seq の最大（%s）とその行の sha256 と違う"
                           % (what, doc["ref_1b"], "無し" if ref is None else "seq %d" % ref["seq"]))
+    rr = doc["refs_read"]
+    if not isinstance(rr, dict) or sorted(rr) != ["head", "refs", "worktree_heads"]:
+        raise LedgerError("%s の refs_read が {head, refs, worktree_heads} でない" % what)
+    _check_refs_list(rr["refs"], what, "refs_read.refs")
+    wh = rr["worktree_heads"]
+    if not isinstance(wh, list) or not wh or len(set(wh)) != len(wh) \
+            or not all(isinstance(x, str) and HEX40.match(x) for x in wh):
+        raise LedgerError("%s の refs_read.worktree_heads が、重ならない40桁の16進の空でない一覧でない" % what)
+    if rr["head"] != doc["head"]:
+        raise LedgerError("%s の refs_read.head が、記録の head と違う" % what)
+    if doc["head"] not in wh:
+        raise LedgerError("%s の head が refs_read.worktree_heads に無い（読んだ worktree の HEAD に、書いた時点の HEAD が無い）"
+                          % what)
+    bh = doc["bundle_heads"]
+    if not isinstance(bh, list) or not all(isinstance(h, dict) and sorted(h) == ["commit", "name"]
+                                           and isinstance(h["name"], str) and h["name"]
+                                           and isinstance(h["commit"], str) and HEX40.match(h["commit"]) for h in bh):
+        raise LedgerError("%s の bundle_heads が [{name, commit: 40桁}...] でない" % what)
+    gate, halt = doc["gate"], doc["halt"]
+    if (gate is None) == (halt is None):
+        raise LedgerError("%s の gate と halt は、ちょうど一方が null" % what)
+    if halt is not None and (not isinstance(halt, dict) or sorted(halt) != ["cause", "reason"]
+                             or halt["cause"] not in ORDER3_HALT_CAUSES or not isinstance(halt["reason"], str)
+                             or not halt["reason"]):
+        raise LedgerError("%s の halt が {cause: bundle・code・input のどれか, reason} でない" % what)
+    halt_bundle = halt is not None and halt["cause"] == "bundle"
+    if bundle_heads_match(rr["refs"], wh, bh) == halt_bundle:
+        raise LedgerError("%s の bundle_heads と refs_read が%s（list-heads が読んだ参照と合わないときだけ、そしてそのときは必ず"
+                          " halt（bundle）。seal-order1.md 178行）" % (what, "合うのに halt（bundle）" if halt_bundle else
+                                                                   "合わないのに halt（bundle）でない"))
     tc = doc["timing_check"]
-    check_order3_timing_shape(tc, what)
-    if tc["ref_1b_seq"] != (None if ref is None else ref["seq"]) or tc["head"] != doc["head"] \
-            or doc["head"] not in tc["worktree_heads"]:
-        raise LedgerError("%s の timing_check の ref_1b_seq・head が記録と違うか、head が worktree_heads に無い" % what)
+    if halt_bundle:
+        if tc is not None:
+            raise LedgerError("%s は halt（bundle）なのに timing_check がある（list-heads が合わなければ、F と ok は計算しない。"
+                              "seal-order1.md 177・178行）" % what)
+    else:
+        check_order3_timing_shape(tc, what)
+        if tc["ref_1b_seq"] != (None if ref is None else ref["seq"]):
+            raise LedgerError("%s の timing_check.ref_1b_seq が、参照する順番1b の seq と違う" % what)
+        if (tc["head"], tc["refs"], tc["worktree_heads"]) != (rr["head"], rr["refs"], wh):
+            raise LedgerError("%s の timing_check の head・refs・worktree_heads が refs_read と違う" % what)
     g = doc["timing_guards"]
     if not isinstance(g, dict) or tuple(sorted(g)) != ORDER2_GUARD_KEYS or not all(isinstance(v, bool) for v in g.values()):
         raise LedgerError("%s の timing_guards が {graft_file, shallow}（どちらも True か False）でない" % what)
-    blocked = g["graft_file"] or g["shallow"] or any(r["ref"].startswith(REPLACE_REF_PREFIX) for r in tc["refs"])
-    if tc["ok"] and (blocked or not order2_ledger_timing_ok(records, ref["seq"])):
+    blocked = g["graft_file"] or g["shallow"] or any(r["ref"].startswith(REPLACE_REF_PREFIX) for r in rr["refs"])
+    if tc is not None and tc["ok"] and (blocked or not order2_ledger_timing_ok(records, ref["seq"])):
         raise LedgerError("%s の timing_check.ok が True なのに、graft のファイル・浅い clone・refs/replace/ の参照、または"
                           "順番1b が最初の method-access より後、のどれかに当たる" % what)
     d1b = None if ref is None else read_json(ref, ORDER1B_KIND)
@@ -2802,16 +2870,12 @@ def check_order3_attempt_doc(records, record, doc, read_json):
     _check_hex(b["sha256"], HEX64, what + " の bundle.sha256")
     if not isinstance(doc["python"], str) or not doc["python"]:
         raise LedgerError("%s の python が文字列でない" % what)
-    gate, halt = doc["gate"], doc["halt"]
-    if (gate is None) == (halt is None):
-        raise LedgerError("%s の gate と halt は、ちょうど一方が null" % what)
     if halt is not None:
-        if not isinstance(halt, dict) or sorted(halt) != ["cause", "reason"] or halt["cause"] not in ORDER3_HALT_CAUSES \
-                or not isinstance(halt["reason"], str) or not halt["reason"]:
-            raise LedgerError("%s の halt が {cause: bundle か code, reason} でない" % what)
         if halt["cause"] == "code" and code["found"]:
             raise LedgerError("%s の halt の cause が code なのに、code.found が true（封印した版が履歴にあれば、関門を流せる）"
                               % what)
+        if halt["cause"] == "input" and not code["found"]:
+            raise LedgerError("%s の halt の cause が input なのに、code.found が false（関門を流していない）" % what)
         return ref
     if not code["found"]:
         raise LedgerError("%s は関門の結果（gate）を持つのに、code.found が false（封印した版が無ければ関門は流せない）" % what)

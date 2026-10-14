@@ -19,16 +19,18 @@ docs/stats/tags-naive.md 368行）の試みを、1回ごとに ledger に記録�
        記録が、まだ無い（一つの順番1b に1件だけ）。
      - 統計係の文書 ledger.ORDER3_READING_DOC（その数え方で K を何と読むか。tags-naive.md 1章 (2)・368行）が、HEAD に
        コミットしてあり、作業ツリーと同じで、空でない。
-  2. 時機の条件を、順番3の時点で確かめ直す（verify.order2_timing_now。順番2と同じ計算。counting.md 4章 (3) の 3）。
-     順番1b の記録が無ければ、F を数えず ok は false。
-  3. git bundle create --all を --bundle-out に作り、list-heads が記録する refs と worktree の HEAD と合うかを見る
-     （seal-order1.md 177・178行）。合わなければ、関門を流さずに halt（cause "bundle"）の試みを記録する（破れとしては
-     数えない）。
+  2. 参照を読む（verify.read_refs_now：for-each-ref の全行、worktree の HEAD、graft・浅い clone）。
+  3. git bundle create --all を --bundle-out に作り、list-heads が読んだ refs と worktree の HEAD と合うかを見る
+     （seal-order1.md 177・178行。ledger.bundle_heads_match）。合わなければ、時機の条件（F と ok）を計算せず、関門も
+     流さずに halt（cause "bundle"）の試みを記録する（timing_check は null。list-heads は bundle_heads に入れる）。
+     合ったときだけ、読んだ参照から時機の条件を順番3の時点で確かめ直す（verify.timing_from_refs。順番2と同じ計算。
+     counting.md 4章 (3) の 3）。順番1b の記録が無ければ、F を数えず ok は false。T-091 でこの順にした。
   4. 封印した版の counting.py（参照する順番1b の記録が sha256 で縛る版）を git の履歴から探す（verify.find_order2_code。
      作業ツリーの版は使わない）。無ければ、関門を流さずに halt（cause "code"）の試みを記録する。
   5. 見つかった版の order3_gate() を、その counting.py だけを置いた空のフォルダで、-I・-B の Python で流す
      （verify.run_order3_gate）。入力は記録だけから決まる（ledger.order3_gate_inputs：順番1b の seq、順番2の記録、
-     2 の timing_check、前の試みの gate を attempt_from_record にしたもの）。返った record を gate に入れる。
+     3 の timing_check、前の試みの gate を attempt_from_record にしたもの）。返った record を gate に入れる。
+     order3_gate() が ValueError で入力を受け付けなかったときは、halt（cause "input"）の試みを記録する（T-091）。
   6. HEAD と作業ツリーがはじめと同じことを確かめ直し、試みの記録を書き（書く前の照合：seal_records.check_new）、.ots を
      作り、パスを指定してコミットする（seal_order2.commit_record と同じ固定のしかた）。
   7. gate が通った（may_seal が true）ときだけ、続けて順番3の記録（stats-order3）を書いて、.ots を作り、コミットする。
@@ -40,7 +42,6 @@ docs/stats/tags-naive.md 368行）の試みを、1回ごとに ledger に記録�
 
 import argparse
 import datetime
-import hashlib
 import os
 import subprocess
 import sys
@@ -59,8 +60,8 @@ ATTEMPT_MESSAGE = "順番3の試みの記録（stats-order3-attempt。src/sealer
 ORDER3_MESSAGE = "順番3の記録（stats-order3。src/sealer/seal_order3.py が書いてコミットした）"
 MESSAGES = {ledger.ORDER3_ATTEMPT_KIND: ATTEMPT_MESSAGE, ledger.ORDER3_KIND: ORDER3_MESSAGE}
 
-BUNDLE_HALT_REASON = ("bundle の list-heads が、記録する refs・worktree の HEAD と合わない（確かめてから bundle を作るまでに"
-                      "参照が変わった）。関門の結果を出さずに止まる（seal-order1.md 178行。破れとしては数えない）")
+BUNDLE_HALT_REASON = ("bundle の list-heads が、読んだ refs・worktree の HEAD と合わない（参照を読んでから bundle を作るまでに"
+                      "参照が変わった）。時機の条件（F と ok）を計算せず、関門の結果を出さずに止まる（seal-order1.md 177・178行）")
 
 
 class Order3Written(ledger.LedgerError):
@@ -102,66 +103,38 @@ def reading_doc_sha(repo, root):
     return ledger.sha256_hex(body)
 
 
-def timing_without_1b(repo):
+def timing_without_1b(snap):
     """順番1b の記録が無いときの timing_check と timing_guards（F を数えず、ok は false。counting.md 4章 (3) の 1・249行）。
-    参照の一覧・worktree の HEAD・HEAD・計算の前の確かめは、順番2と同じ読み方で記録する（verify.order2_timing_now）。"""
-    if not verify._main_worktree(repo):
-        raise ledger.LedgerError("本体の worktree（clone した最初の作業ツリー）でない。順番3は本体の worktree で行う。書かない")
-    common = verify._rgit(repo, "rev-parse", "--path-format=absolute", "--git-common-dir").decode().strip()
-    graft = os.path.lexists(os.path.join(common, "info", "grafts"))
-    shallow = verify._rgit(repo, "rev-parse", "--is-shallow-repository").strip() != b"false"
-    head = verify._rgit(repo, "rev-parse", "--verify", "HEAD^{commit}").decode().strip()
-    refs = []
-    for line in verify._rgit(repo, "for-each-ref", "--format=%(refname) %(objectname)").decode("utf-8").splitlines():
-        name, _sp, obj = line.partition(" ")
-        refs.append({"ref": name, "commit": obj})
-    refs.sort(key=lambda x: x["ref"])
-    heads = []
-    for line in verify._rgit(repo, "worktree", "list", "--porcelain").decode("utf-8").splitlines():
-        if line.startswith("HEAD ") and line[5:].strip() not in heads:
-            heads.append(line[5:].strip())
-    heads.sort()
-    tc = {"ok": False, "ref_1b_seq": None, "head": head, "f_set": [], "refs": refs, "worktree_heads": heads,
-          "reason": "順番1b の記録が無い"}
+    参照の一覧・worktree の HEAD・HEAD・計算の前の確かめは、verify.read_refs_now で読んだもの（snap）をそのまま記録する。"""
+    tc = {"ok": False, "ref_1b_seq": None, "head": snap["head"], "f_set": [], "refs": snap["refs"],
+          "worktree_heads": snap["worktree_heads"], "reason": "順番1b の記録が無い"}
     ledger.check_order3_timing_shape(tc, "時機の条件の確かめ")
-    return tc, {"graft_file": graft, "shallow": shallow}
-
-
-def make_bundle(repo, root, path, tc):
-    """git bundle create <path> --all を作り、list-heads が timing_check の refs・worktree_heads と合うかを見る（seal-order1.md
-    177・178行。seal_order2.make_bundle と同じ照らし方）。返り値: (記録の bundle の欄, 合ったか)。合わなくても止めない
-    （試みの記録に halt として残す）。パスの誤り（既にある・プロジェクトか Git の中）は LedgerError（何も書かない）。"""
-    path = os.path.abspath(path)
-    if os.path.lexists(path):
-        raise ledger.LedgerError("bundle のパス %s が既にある。上書きしない。書かない" % path)
-    seal_order2._outside(root, path)
-    seal_order2._git(repo, "bundle", "create", "-q", path, "--all")
-    heads = []
-    for line in seal_order2._git(repo, "bundle", "list-heads", path).decode("utf-8").splitlines():
-        sha, _sp, name = line.partition(" ")
-        heads.append((name, sha))
-    recorded = {(r["ref"], r["commit"]) for r in tc["refs"]}
-    listed_refs = {(n, c) for n, c in heads if n.startswith("refs/")}
-    wt = {c for n, c in heads if n == "HEAD" or (n.startswith("worktrees/") and n.endswith("/HEAD"))}
-    matched = recorded <= set(heads) and listed_refs <= recorded and wt == set(tc["worktree_heads"])
-    with open(path, "rb") as f:
-        sha = hashlib.sha256(f.read()).hexdigest()
-    return {"sha256": sha, "published": False, "reason": seal_order2.BUNDLE_REASON}, matched
+    return tc, {"graft_file": snap["graft"], "shallow": snap["shallow"]}
 
 
 def build_attempt(root, data, records, bundle_out):
-    """手順 1〜6 の書く前まで。返り値: 書く試みの中身。"""
+    """手順 1〜6 の書く前まで。返り値: 書く試みの中身。
+    T-091：seal-order1.md 177行の順に、参照を読む → bundle を作って list-heads と照らす → 合ったときだけ、読んだ参照から F と
+    ok を計算する。合わなければ F と ok は計算せず、halt（bundle）の試みにする（timing_check は null、list-heads は
+    bundle_heads に入れる）。"""
     repo = verify.Repo(root)
     head = seal_order2.clean_head(repo)
     seq = len(records) + 1
     ref = current_ref(records)
     check_not_sealed(root, records, ref)                                    # 1. 書く前の確かめ
     reading_doc_sha(repo, root)
-    if ref is not None:                                                     # 2. 時機の条件（順番3の時点で確かめ直す）
-        tc, guards = verify.order2_timing_now(repo, records, ref, label="順番3")
-    else:
-        tc, guards = timing_without_1b(repo)
-    bundle, matched = make_bundle(repo, root, bundle_out, tc)              # 3. bundle
+    snap = verify.read_refs_now(repo, label="順番3")                        # 2. 参照を読む
+    if snap["head"] != head:
+        raise ledger.LedgerError("確かめているあいだに HEAD が変わった。書かない")
+    bundle, heads = seal_order2.create_bundle(repo, root, bundle_out)      # 3. bundle を作り、list-heads と照らす
+    matched = ledger.bundle_heads_match(snap["refs"], snap["worktree_heads"], heads)
+    tc = None
+    guards = {"graft_file": snap["graft"], "shallow": snap["shallow"]}
+    if matched:                                                             # 合ったときだけ時機の条件（確かめ直し）
+        if ref is not None:
+            tc, guards = verify.timing_from_refs(repo, records, ref, snap)
+        else:
+            tc, guards = timing_without_1b(snap)
     d1b = None if ref is None else ledger.read_target_json(root, ref, ledger.ORDER1B_KIND)
     code_sha = None if d1b is None else {f["path"]: f["sha256"] for f in d1b["files"]}.get(ledger.COUNTING_SCRIPT)
     commit, code = (None, None) if d1b is None else verify.find_order2_code(repo, head, d1b)   # 4. 封印した版
@@ -177,6 +150,9 @@ def build_attempt(root, data, records, bundle_out):
         with tempfile.TemporaryDirectory() as tmp:
             try:
                 gate = verify.run_order3_gate(code, code_sha, inputs, tmp, "順番3の関門")
+            except verify.Order3InputRejected as e:
+                # T-091（T-090 の監査 軽-2）：関門のコードを一回動かしたので、入力を受け付けなかったことも試みとして記録する
+                halt = {"cause": "input", "reason": verify.order3_input_halt_reason(str(e))}
             except verify.Unchecked as e:
                 raise ledger.LedgerError("順番3の関門を流せない（%s）。書かない" % e) from None
     doc = {
@@ -184,6 +160,8 @@ def build_attempt(root, data, records, bundle_out):
         "ledger_head": ledger.expected_ledger_head(data, seq),
         "head": head,
         "ref_1b": ledger.record_ref(ref),
+        "refs_read": {"head": snap["head"], "refs": snap["refs"], "worktree_heads": snap["worktree_heads"]},
+        "bundle_heads": heads,
         "timing_check": tc,
         "timing_guards": guards,
         "bundle": bundle,

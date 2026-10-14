@@ -15,10 +15,11 @@
      ここで閉じる。手順書14章）。開けば、記録に入れる trial_result・input_run・gkg_run_result と、git の確かめに通った
      HEAD の版のマニフェストのバイト列が決まる。input_run の mode の置き場所が引数に無ければ、何も書かずに止まる。
   2. 参照する順番1b の記録：この記録より前の stats-order1b の seq の最大（counting.expected_ref_1b と同じ決め方）。
-  3. 時機の条件（(a)）：verify.order2_timing_now（graft・浅い clone・refs/replace/ の確かめ、for-each-ref、worktree の
-     一覧、F の集合と親、ledger の条件）。確かめた内容を timing_check と timing_guards に組で入れる。続けて
-     git bundle create --all を --bundle-out に作り、list-heads が記録した refs と worktree の HEAD と合うことを確かめる
-     （合わなければ何も書かない）。sha256 を bundle に入れる。
+  3. 時機の条件（(a)）：seal-order1.md 177行の順に行う（T-091）。まず参照を読み（verify.read_refs_now：for-each-ref、
+     worktree の一覧、graft・浅い clone）、git bundle create --all を --bundle-out に作り、list-heads が読んだ refs と
+     worktree の HEAD と合うことを確かめる（合わなければ何も書かない。F と ok はまだ計算していない）。合ったときだけ、
+     読んだ参照から F の集合と親、ledger の条件を計算する（verify.timing_from_refs）。確かめた内容を timing_check と
+     timing_guards に組で入れ、sha256 を bundle に入れる。
   4. コードの版：参照する順番1b の記録が縛る src/stats/counting.py の sha256 の版を、git の履歴から探す
      （verify.find_order2_code。作業ツリーの counting.py は使わない）。
   5. 行き先：(a) を満たさなければ stop_kind "a"。満たし、版が履歴に無ければ "c"。どちらでもなければ、見つかった版の
@@ -273,10 +274,10 @@ def _outside(root, path):
         raise ledger.LedgerError("bundle を Git の作業ツリーか .git の中（%s）に置こうとしている。Git の外に置く。書かない" % path)
 
 
-def make_bundle(repo, root, path, tc):
-    """git bundle create <path> --all を作り、list-heads が timing_check の refs・worktree_heads と合うことを確かめる
-    （seal-order1.md 3章 (3) の 177・178行と同じ形）。返り値: 記録の bundle の欄。合わなければ LedgerError（何も書かない。
-    作った bundle のファイルは消さずに残す）。"""
+def create_bundle(repo, root, path):
+    """git bundle create <path> --all を作り（一時の参照は付けない。seal-order1.md 177行）、そのバイト列の sha256 と
+    `git bundle list-heads` の出力を返す。返り値: (記録の bundle の欄, [{"name", "commit"}...]（list-heads の行の順）)。
+    パスの誤り（既にある・プロジェクトか Git の中）は LedgerError（何も書かない）。T-091 で make_bundle から分けた。"""
     path = os.path.abspath(path)
     if os.path.lexists(path):
         raise ledger.LedgerError("bundle のパス %s が既にある。上書きしない。書かない" % path)
@@ -285,16 +286,22 @@ def make_bundle(repo, root, path, tc):
     heads = []
     for line in _git(repo, "bundle", "list-heads", path).decode("utf-8").splitlines():
         sha, _sp, name = line.partition(" ")
-        heads.append((name, sha))
-    recorded = {(r["ref"], r["commit"]) for r in tc["refs"]}
-    listed_refs = {(n, c) for n, c in heads if n.startswith("refs/")}
-    wt = {c for n, c in heads if n == "HEAD" or (n.startswith("worktrees/") and n.endswith("/HEAD"))}
-    if not recorded <= set(heads) or not listed_refs <= recorded or wt != set(tc["worktree_heads"]):
-        raise ledger.LedgerError("bundle（%s）の list-heads が、記録する refs・worktree の HEAD と合わない（確かめてから bundle を"
-                                 "作るまでに参照が変わった）。書かない（bundle のファイルは残してある）" % path)
+        heads.append({"name": name, "commit": sha})
     with open(path, "rb") as f:
         sha = hashlib.sha256(f.read()).hexdigest()
-    return {"sha256": sha, "published": False, "reason": BUNDLE_REASON}
+    return {"sha256": sha, "published": False, "reason": BUNDLE_REASON}, heads
+
+
+def make_bundle(repo, root, path, snap):
+    """bundle を作り、list-heads が snap（verify.read_refs_now で読んだ参照。refs・worktree_heads を持つもの）と合うことを
+    確かめる（seal-order1.md 3章 (3) の 177・178行。照らし方は ledger.bundle_heads_match）。返り値: 記録の bundle の欄。
+    合わなければ LedgerError（何も書かない。作った bundle のファイルは消さずに残す）。T-091：時機の条件（F と ok）は、
+    これが通ったあとで計算する。"""
+    field, heads = create_bundle(repo, root, path)
+    if not ledger.bundle_heads_match(snap["refs"], snap["worktree_heads"], heads):
+        raise ledger.LedgerError("bundle（%s）の list-heads が、記録する refs・worktree の HEAD と合わない（参照を読んでから bundle を"
+                                 "作るまでに参照が変わった）。書かない（bundle のファイルは残してある）" % os.path.abspath(path))
+    return field
 
 
 def build_doc(root, data, records, stores, bundle_out):
@@ -310,8 +317,9 @@ def build_doc(root, data, records, stores, bundle_out):
         raise ledger.LedgerError("stats-order1b（順番1b）の記録が無い。書かない")
     d1b = ledger.read_target_json(root, ref, ledger.ORDER1B_KIND)
     code_sha = {f["path"]: f["sha256"] for f in d1b["files"]}[ledger.COUNTING_SCRIPT]
-    tc, guards = verify.order2_timing_now(repo, records, ref)              # 3. 時機の条件
-    bundle = make_bundle(repo, root, bundle_out, tc)
+    snap = verify.read_refs_now(repo)                                      # 3. 参照を読む → bundle を照らす →
+    bundle = make_bundle(repo, root, bundle_out, snap)                     #    合ったときだけ時機の条件（T-091。
+    tc, guards = verify.timing_from_refs(repo, records, ref, snap)         #    seal-order1.md 177行の順）
     commit, code = verify.find_order2_code(repo, head, d1b)               # 4. コードの版（git の履歴から）
     out = None
     if not tc["ok"]:                                                        # 5. 行き先
