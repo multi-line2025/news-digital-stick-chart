@@ -46,6 +46,9 @@ D = datetime.date
 BLOCK3 = (D(2015, 3, 2), D(2015, 3, 4))
 DAYS3 = ("2015-03-02", "2015-03-03", "2015-03-04")
 RID = "0123456789abcdef"
+REFS = {"gkg_run_result_seq": 12, "gkg_run_result_record_sha256": "a" * 64,
+        "manifest_path": "data/manifest/gdelt-gkg-method.jsonl", "manifest_lines": 5,
+        "manifest_sha256": "b" * 64}
 
 gkg = md._gkg()
 
@@ -102,7 +105,7 @@ class Fixture:
         return self.files.get(name, b"")
 
     def build(self, block=BLOCK3):
-        return md.build(self.rows, block, self.read)
+        return md.build(self.rows, block, self.read, dict(REFS))
 
 
 class OpenRecorder:
@@ -252,13 +255,65 @@ class TestStops(unittest.TestCase):
                 fx.build()
             self.assertEqual(fx.opened, [], msg)
 
-    def test_counting_sha_checked(self):
+    def test_code_sha_checked(self):
+        """T-093：periods・candidates・counting のどれかの sha256 が違えば、何も読まずに止まる。"""
+        got = md.check_stats_code()
+        self.assertEqual(got, {"src/stats/periods.py": md.PERIODS_SHA256,
+                               "src/stats/candidates.py": md.CANDIDATES_SHA256,
+                               "src/stats/counting.py": md.COUNTING_SHA256})
         self.assertEqual(md.check_counting(), md.COUNTING_SHA256)
-        with mock.patch.object(md, "COUNTING_SHA256", "0" * 64):
-            with self.assertRaisesRegex(md.MissingDaysError, "順番1b"):
-                md.check_counting()
-            with self.assertRaisesRegex(md.MissingDaysError, "順番1b"):
-                md.official_record("/nonexistent")
+        for i, (rel, _sha, src) in enumerate(md.SEALED_CODE):
+            bad = list(md.SEALED_CODE)
+            bad[i] = (rel, "0" * 64, src)
+            never = mock.Mock(side_effect=AssertionError("照合より前に記録を読んではいけない"))
+            with mock.patch.object(md, "SEALED_CODE", tuple(bad)), \
+                    mock.patch.object(md._gkg(), "official_day_records", never):
+                with self.assertRaisesRegex(md.MissingDaysError, "%s の sha256 が、封印の記録の値と違う"
+                                            % re.escape(rel)):
+                    md.check_stats_code()
+                with self.assertRaisesRegex(md.MissingDaysError, re.escape(rel)):
+                    md.official_record("/nonexistent")
+            never.assert_not_called()
+
+    def test_module_path_checked(self):
+        other = mock.Mock(__file__=os.path.join(PROJECT, "elsewhere", "periods.py"))
+        with mock.patch.dict(md._MODULES, {"src/stats/periods.py": other}):
+            with self.assertRaisesRegex(md.MissingDaysError, "src/stats/periods.py でない"):
+                md.check_stats_code()
+
+    def test_pins_match_real_ledger(self):
+        """T-093：SEALED_CODE の値が、本物の封印の記録の該当する欄と同じ（記録は読むだけ）。"""
+        sealed = os.path.join(PROJECT, "sealed")
+        with open(os.path.join(sealed, "ledger.jsonl"), encoding="utf-8") as f:
+            records = [json.loads(l) for l in f if l.strip()]
+
+        def read_1b(r):
+            (t,) = r["targets"]
+            with open(os.path.join(PROJECT, t["path"]), "rb") as f:
+                data = f.read()
+            self.assertEqual(hashlib.sha256(data).hexdigest(), t["sha256"])
+            return json.loads(data)
+        md.check_sealed_code_in_ledger(records, read_1b)
+        # 値を一つ変えると止まる。出どころの seq・kind が違っても止まる
+        for i, (rel, _sha, src) in enumerate(md.SEALED_CODE):
+            bad = list(md.SEALED_CODE)
+            bad[i] = (rel, "1" * 64, src)
+            with mock.patch.object(md, "SEALED_CODE", tuple(bad)):
+                with self.assertRaisesRegex(md.MissingDaysError, re.escape(rel)):
+                    md.check_sealed_code_in_ledger(records, read_1b)
+        bad = [dict(r) for r in records]
+        bad[0]["kind"] = "candidates"
+        with self.assertRaisesRegex(md.MissingDaysError, "seq 1 が periods の記録でない"):
+            md.check_sealed_code_in_ledger(bad, read_1b)
+        with self.assertRaisesRegex(md.MissingDaysError, "seq 6"):
+            md.check_sealed_code_in_ledger([r for r in records if r["seq"] != 6], read_1b)
+
+    def test_refs_keys_checked(self):
+        fx = Fixture({d: (96, THEMED) for d in DAYS3})
+        for refs in ({}, dict(REFS, extra=1), {k: v for k, v in REFS.items() if k != "manifest_sha256"}):
+            with self.assertRaisesRegex(md.MissingDaysError, "refs のキー"):
+                md.build(fx.rows, BLOCK3, fx.read, refs)
+        self.assertEqual(fx.opened, [])
 
     def test_counting_sha_matches_sealed_order1b(self):
         sealed = os.path.join(PROJECT, "sealed")
@@ -333,8 +388,9 @@ class TestSourceShape(unittest.TestCase):
                     "LACIE"):
             self.assertNotIn(bad, src.split('"""', 2)[2], bad)
         body = inspect.getsource(md.official_record).split('"""', 2)[2]
-        self.assertLess(body.index("check_counting()"), body.index("official_day_records()"))
-        self.assertLess(body.index("official_day_records()"), body.index("store_reader("))
+        self.assertLess(body.index("check_stats_code()"), body.index("official_day_records()"))
+        self.assertLess(body.index("official_day_records()"), body.index("sealed_refs("))
+        self.assertLess(body.index("sealed_refs("), body.index("store_reader("))
 
     def test_main_rejects_bad_args(self):
         for argv in ([], ["--sha256"], ["--store"], ["--store", "x", "--y"], ["--x", "y"]):
@@ -426,8 +482,15 @@ class TestGateEndToEnd(tag.E2ECase):
         self.assertEqual(calls[0], ("official", out["run_id"]))
 
         self.seal_result(out["run_id"])
+        # 写しの順番1b（seq 6）は仮の中身なので、counting.py の値と照らすと止まる（日の集計は開かない）
         opened = []
-        with mock.patch.object(ledger, "require_gkg_run_result", gate), OpenRecorder() as rec:
+        with self.assertRaisesRegex(md.MissingDaysError, r"src/stats/counting.py の sha256 が、seq 6"):
+            self.entry(opened)
+        self.assertEqual(opened, [])
+        # 写しでは、本物と同じ seq 1・2（periods・candidates）の照合だけを残して流す
+        opened = []
+        with mock.patch.object(md, "SEALED_CODE", md.SEALED_CODE[:2]), \
+                mock.patch.object(ledger, "require_gkg_run_result", gate), OpenRecorder() as rec:
             got = self.entry(opened)
         self.assertEqual(calls[-1], ("official", out["run_id"]))
         names = [counting.day_file_name("official", out["run_id"], d) for d in DAYS3]
@@ -437,6 +500,16 @@ class TestGateEndToEnd(tag.E2ECase):
         self.assertEqual(sorted(os.path.basename(p) for p in in_store), sorted(names))
         self.assertFalse(any(os.path.abspath(p).startswith(self.home) for p in rec.paths))
         self.assertEqual(got["input"]["run_id"], out["run_id"])
+        # gkg-run-result の記録の参照と、使ったマニフェストの sha256（T-093）
+        led = ledger.verify_chain(ledger.read_ledger(os.path.join(self.project, "sealed", "ledger.jsonl")))
+        (res,) = [r for r in led if r["kind"] == ledger.GKG_RESULT_KIND and r["seq"] == got["input"]["gkg_run_result_seq"]]
+        self.assertEqual(got["input"]["gkg_run_result_record_sha256"],
+                         hashlib.sha256(ledger.canonical_line(res)).hexdigest())
+        mpath = os.path.join(self.project, *got["input"]["manifest_path"].split("/"))
+        with open(mpath, "rb") as f:
+            mlines = f.read().splitlines(keepends=True)
+        self.assertEqual(hashlib.sha256(b"".join(mlines[:got["input"]["manifest_lines"]])).hexdigest(),
+                         got["input"]["manifest_sha256"])
         self.assertEqual([(m["day"], m["files_ok"], m["below_min_files"], m["zero_c7_denominator"])
                           for m in got["missing_days"]],
                          [("2015-03-03", 71, True, False), ("2015-03-04", 72, False, True)])
@@ -450,11 +523,13 @@ class TestGateEndToEnd(tag.E2ECase):
             body = f.read()
         with open(path, "wb") as f:
             f.write(make_day("2015-03-02", THEMED))
-        with self.assertRaisesRegex(md.MissingDaysError, "sha256 が、day の行と一致しない"):
-            self.entry()
+        with mock.patch.object(md, "SEALED_CODE", md.SEALED_CODE[:2]):
+            with self.assertRaisesRegex(md.MissingDaysError, "sha256 が、day の行と一致しない"):
+                self.entry()
         with open(path, "wb") as f:
             f.write(body)
-        self.assertEqual(md.sha256_of(self.entry()), md.sha256_of(got))
+        with mock.patch.object(md, "SEALED_CODE", md.SEALED_CODE[:2]):
+            self.assertEqual(md.sha256_of(self.entry()), md.sha256_of(got))
 
 
 class TestRealManifestRows(unittest.TestCase):

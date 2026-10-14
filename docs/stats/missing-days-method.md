@@ -1,6 +1,6 @@
 # 順番4：手法を作る期間の区画の、欠けた日の一覧（T-087、T-089 で作り直し）
 
-文書の版：`missing-days-method-v2`
+文書の版：`missing-days-method-v3`
 
 この文書は、手法を作る期間の区画（2015-03-02〜2020-12-14）について、欠けた日の一覧をどう作るかを定める。
 一覧を作るコードは `src/stats/missing_days.py`、テストは `tests/stats/test_missing_days.py`。
@@ -36,7 +36,7 @@
   - C7 の分母は、V1 か V2 の少なくとも一方にテーマが付いた文書の数を、数える組（翻訳の印の無い組）とすべてのテーマで足したものである（docs/stats/counting.md、順番1b で封印）。
 - **数え方**：順番1b（seq 6）で封印した `src/stats/counting.py` の関数をそのまま使い、新しく書かない。
   - `counting.candidate_counts(counting.parse_day(日の集計), counting.OFFICIAL_CANDIDATE)` の2つ目の値。
-  - コードは、使う counting.py の sha256 が、順番1b の記録の値（`6f25985b…8c9fd3`）と同じであることを確かめてから動く。
+  - コードは、使う counting.py の sha256 が、順番1b の記録の値（`6f25985b…8c9fd3`）と同じであることを確かめてから動く（下の (3)）。
 - **T-085 の読み方（docs）を取り消した理由**（reviews/T-087.md 3章から引く）：
   - T-085 では、「CLAUDE.md は報道量を記事の数として扱っている」を理由に、マニフェストの `docs`（取得できたファイルの文書の数）と読んだ。
   - しかし CLAUDE.md 21〜22行は、報道量を「全体の報道量で割った比率」で扱い、正式な数え方の分母を「同じ数え方の全テーマの合計」と定めている。candidates.md 102行も、「全体の報道量」を r(d) の分母の意味で使っている。tags-naive.md 74・138行、counting.md 259行も同じ使い方である（T-087 の監査 中-2）。
@@ -46,11 +46,27 @@
 
 candidates.md と counting.md の文言は変えない。この文書は読み方を足すだけである。
 
+### (3) 中で使うコードの照合（T-093）
+`missing_days.py` が中で使う3つのファイルは、封印の記録が縛る sha256 と同じでなければ、何も読まずに止まる。照らす値と出どころは次のとおり（記録を読んで決めた。コードの `SEALED_CODE`）。
+
+| ファイル | sha256 | 出どころ（記録の欄） |
+|---|---|---|
+| `src/stats/periods.py` | `81de229d065196a26e15d90c5a80eb1043ca534a6eaf66cdebd36285ae087605` | seq 1（kind `periods`）の `targets` の role `code`。seq 2（kind `candidates`）の `targets` の role `import` も同じ値 |
+| `src/stats/candidates.py` | `21b5838782991596057be2fdffdeac596bf4548517ef077e5c4547a719512e89` | seq 2（kind `candidates`）の `targets` の role `code` |
+| `src/stats/counting.py` | `6f25985b21cd8ac93680b81308f3d1860b4ae6496577e10141d1e17ecf8c9fd3` | seq 6（kind `stats-order1b`）の中身（`sealed/stats-order1b-44a7cdfc….json`）の `files` |
+
+照らし方は二段である。
+1. 実行のはじめに、読み込んだモジュールが `src/stats` のそのファイルであることと、ファイルの sha256 が表の値と同じことを確かめる（`check_stats_code()`）。合わなければ、マニフェストも日の集計も読まずに止まる。
+2. gkg-run-result の関門を通ったあとで、関門が検証した封印の記録を読み、表の値が上の欄の値と同じことを確かめる（`check_sealed_code_in_ledger()`）。seq と kind が表と合わない場合も止まる。この確かめは、日の集計を開く前に行う。
+
+テスト：`test_code_sha_checked`・`test_module_path_checked`・`test_pins_match_real_ledger`（本物の封印の記録で通り、値を一つ変えると止まる）。合成の run のテストでは、写しの順番1b が仮の中身なので、counting.py の照合で止まることを確かめる。そのあとは、seq 1・2 の照合だけを残して流す。
+
 ## 3. 入力
 
 - **day の行**：`src/collector/gkg.py` の `official_day_records()` だけから取る。
   - この関数は、最初に封印係の関門 `ledger.require_gkg_run_result("official", run_id)` を呼ぶ。gkg-run-result の記録（seq 12。マニフェストの時刻証明）が無い・合わなければ、マニフェストを読まずに止まる。
   - 読むのは、gkg-run-result が封印したマニフェスト（`data/manifest/gdelt-gkg-method.jsonl`）の先頭だけである。
+  - そのあとで、同じ関門をもう一度呼んで gkg-run-result の記録を受け取り、その seq・記録の行の sha256（`ledger.canonical_line` の sha256）と、記録の中身にある使ったマニフェストの先頭の行数と sha256 を、出力の `input` に入れる（T-093）。関門の返した記録が封印の記録の中に同じ形であること、中身の mode と run_id がこの run と同じことを確かめる。
 - **日の集計**：day の行の `file_name` のファイルだけを、引数 `--store` で渡した置き場所から開く。
   - 本物の置き場所は `/Volumes/LACIE SHARE/news-stick-data/gkg-method`。
   - 開いたバイト列の sha256 を、day の行の `sha256` と照らす。合わなければ（ファイルが無い場合も）、一覧を作らずに止まる。
@@ -77,14 +93,16 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/stats/missing_days.py --store 
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/stats/missing_days.py --store "$STORE" --sha256   # その JSON の sha256
 ```
 
+所要時間の目安：**60〜100分**。2115個の日の集計をすべて開いて `parse_day()` の検査を通すためで、ほとんどが計算の時間である。実測は、T-089 で約92分、T-089 の監査で約66分だった（機械と置き場所の状態で変わる）。
+
 JSON は UTF-8、キーの順（`sort_keys`）、`indent=2`、末尾に改行1つ。sha256 は、この出力のバイト列全体の値である（`shasum -a 256` と同じ値）。置き場所のパスと実行の日時は出力に入れない（どこで流しても同じ値になるようにするため）。
 
 | キー | 中身 |
 |---|---|
 | `label` | `missing-days-method-v2`（下の「label の扱い」） |
 | `block` | 区画の名前と端（`method`、2015-03-02、2020-12-14） |
-| `rule` | 規則の出典、使う関数、96・72、二つの量を何で数えたか、正式な候補（C7）、counting.py の sha256 |
-| `input` | 入口、run_id、day の行の数、開いた日の集計の数、sha256 を照らしたこと |
+| `rule` | 規則の出典、使う関数、96・72、二つの量を何で数えたか、正式な候補（C7）、counting.py・candidates.py・periods.py の sha256 |
+| `input` | 入口、run_id、day の行の数、開いた日の集計の数、sha256 を照らしたこと、gkg-run-result の記録の seq と記録の行の sha256（`gkg_run_result_seq`・`gkg_run_result_record_sha256`）、使ったマニフェストのパス・先頭の行数・sha256（`manifest_path`・`manifest_lines`・`manifest_sha256`） |
 | `days_in_block` | 区画の日数 |
 | `missing_count` | 欠けた日の数 |
 | `missing_days` | 欠けた日の一覧（日付の順）。各日に `day`・`files_ok`・`files_listed`・`c7_denominator`・`below_min_files`（72本未満か）・`zero_c7_denominator`（C7 の分母が0か） |
@@ -97,13 +115,14 @@ JSON は UTF-8、キーの順（`sort_keys`）、`indent=2`、末尾に改行1�
 **label の扱い**（T-087 の監査 軽-4）：
 - label は、この文書の版と1対1にする。コードの定数 `LABEL` と、この文書の冒頭の「文書の版」を同じにし、テスト（`test_label_matches_doc`）で照合する。
 - 引数では変えられない。規則・読み方・入力・出力の形を変えるときは、文書の版とコードの `LABEL` を一緒に上げ、新しい版として封印する。
-- v1 は T-087 の版（全体の報道量 = docs。封印していない）。v2 はこの版（全体の報道量 = C7 の分母）。
+- v1 は T-087 の版（全体の報道量 = docs。封印していない）。v2 は T-089 の版（全体の報道量 = C7 の分母。封印していない）。v3 はこの版（T-093。規則と読み方は v2 と同じ。中で使うコードの照合を足し、出力の `rule` と `input` に欄を足した）。
 - 正式な回の番号は、label ではなく封印の記録（追記のみ）の長さで決まる。
 
 ## 5. 封印の時機と、取り直しをしないこと
 
 - **手法を作る期間の区画は、正式な run（run_id 4199ae53d35b918a。seq 12 で封印したマニフェスト）の結果で確定とし、取り直さない**（T-087 の監査 中-1）。
   - 理由：欠けた日の件数と日付（`files_ok` による48日）は、T-082 の監査と T-087 で既に知られている。この後に取り直しを選べると、結果を見てから欠けた日を変えられる。
+  - 支える仕組み：入口の `official_day_records()` は、封印の記録に official の gkg-run-start がちょうど1件のときだけ読み、2件目があると止まる。そのため、取り直しの正式な run を始めると、この一覧のコードは動かなくなる。
   - したがって、この区画では「封印より前に取り直したら一覧を作り直す」という道は使わない。candidates.md 3章 (5) の取り直しの手順は、ほかの区画（閾値を決める期間・基準値を測る期間・前向きの予言）に当てはまる。
 - **判定（島かどうか）を一つも計算しないうちに封印する。**
 - **順番5（タグの一覧の結果）より前に封印する。** candidates.md 3章 (5) は「モデルより前（遅くとも threshold-access より前）」とするが、順番5 より前に置けば、この両方より前になる。順番4 を順番5 より前に封印することの強制は、封印係のタスクで扱う（T-087 の監査 中-3）。
