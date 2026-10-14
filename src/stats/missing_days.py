@@ -41,12 +41,40 @@ PROJECT = os.path.dirname(os.path.dirname(HERE))
 GKG_PATH = os.path.join(PROJECT, "src", "collector", "gkg.py")
 COUNTING_PATH = os.path.join(HERE, "counting.py")
 
-if HERE not in sys.path:
-    sys.path.insert(0, HERE)
+_LOADED_SHA = {}
 
-import candidates  # noqa: E402
-import counting  # noqa: E402
-import periods  # noqa: E402
+
+def _load_verified(name, rel, deps=()):
+    """src/stats のファイルを1回だけ読み、そのバイト列の sha256 を記録し、同じバイト列を compile/exec して
+    モジュールにする（T-096）。import の仕組みを通さないので、__pycache__ の .pyc は読まない。
+
+    deps：このファイルが import する src/stats のモジュール（名前, モジュール）。exec のあいだだけ
+    sys.modules に置き、照合したバイト列から作ったものを import させる（終わったら元に戻す）。
+    """
+    import types
+    path = os.path.join(PROJECT, *rel.split("/"))
+    with open(path, "rb") as f:
+        data = f.read()
+    _LOADED_SHA[rel] = hashlib.sha256(data).hexdigest()
+    mod = types.ModuleType(name)
+    mod.__file__ = path
+    saved = {n: sys.modules.get(n) for n, _m in deps}
+    try:
+        for n, m in deps:
+            sys.modules[n] = m
+        exec(compile(data, path, "exec", dont_inherit=True), mod.__dict__)
+    finally:
+        for n, old in saved.items():
+            if old is None:
+                sys.modules.pop(n, None)
+            else:
+                sys.modules[n] = old
+    return mod
+
+
+periods = _load_verified("periods", "src/stats/periods.py")
+candidates = _load_verified("candidates", "src/stats/candidates.py", deps=(("periods", periods),))
+counting = _load_verified("counting", "src/stats/counting.py")
 
 # 出力の label。文書（docs/stats/missing-days-method.md）の版と1対1にする。引数では変えない。
 # 文書の規則・読み方・出力の形を変えたときだけ、文書の版と一緒に番号を上げる（テストで文書と照合する）。
@@ -99,14 +127,14 @@ def _gkg():
 
 
 def check_stats_code():
-    """使っている periods・candidates・counting が src/stats のそのファイルで、sha256 が SEALED_CODE と同じか。"""
+    """使っている periods・candidates・counting が src/stats のそのファイルから作ったもので、動いているコードの
+    バイト列（_load_verified が読んで compile したもの）の sha256 が SEALED_CODE と同じか。"""
     out = {}
     for rel, want, _src in SEALED_CODE:
         path = os.path.join(PROJECT, *rel.split("/"))
         if os.path.realpath(_MODULES[rel].__file__) != os.path.realpath(path):
             raise MissingDaysError("読み込んだモジュールが %s でない" % rel)
-        with open(path, "rb") as f:
-            sha = hashlib.sha256(f.read()).hexdigest()
+        sha = _LOADED_SHA.get(rel)
         if sha != want:
             raise MissingDaysError("%s の sha256 が、封印の記録の値と違う" % rel)
         out[rel] = sha

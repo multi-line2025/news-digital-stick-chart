@@ -56,7 +56,8 @@ candidates.md と counting.md の文言は変えない。この文書は読み�
 | `src/stats/counting.py` | `6f25985b21cd8ac93680b81308f3d1860b4ae6496577e10141d1e17ecf8c9fd3` | seq 6（kind `stats-order1b`）の中身（`sealed/stats-order1b-44a7cdfc….json`）の `files` |
 
 照らし方は二段である。
-1. 実行のはじめに、読み込んだモジュールが `src/stats` のそのファイルであることと、ファイルの sha256 が表の値と同じことを確かめる（`check_stats_code()`）。合わなければ、マニフェストも日の集計も読まずに止まる。
+1. 3つのファイルは、import の仕組みを通さずに読み込む（`_load_verified()`。T-096）。ファイルを1回だけ読み、そのバイト列の sha256 を記録し、同じバイト列を compile して実行する。そのため、`__pycache__` に古い `.pyc` があっても読まない（`-B` は `.pyc` を書かないだけで、読むことは止めない）。candidates.py の `import periods` も、この方法で読み込んだ periods を使う。
+   - 実行のはじめに、読み込んだモジュールが `src/stats` のそのファイルから作ったものであることと、動いているコードのバイト列の sha256 が表の値と同じことを確かめる（`check_stats_code()`）。合わなければ、マニフェストも日の集計も読まずに止まる。
 2. gkg-run-result の関門を通ったあとで、関門が検証した封印の記録を読み、表の値が上の欄の値と同じことを確かめる（`check_sealed_code_in_ledger()`）。seq と kind が表と合わない場合も止まる。この確かめは、日の集計を開く前に行う。
 
 テスト：`test_code_sha_checked`・`test_module_path_checked`・`test_pins_match_real_ledger`（本物の封印の記録で通り、値を一つ変えると止まる）。合成の run のテストでは、写しの順番1b が仮の中身なので、counting.py の照合で止まることを確かめる。そのあとは、seq 1・2 の照合だけを残して流す。
@@ -99,7 +100,7 @@ JSON は UTF-8、キーの順（`sort_keys`）、`indent=2`、末尾に改行1�
 
 | キー | 中身 |
 |---|---|
-| `label` | `missing-days-method-v2`（下の「label の扱い」） |
+| `label` | `missing-days-method-v3`（下の「label の扱い」） |
 | `block` | 区画の名前と端（`method`、2015-03-02、2020-12-14） |
 | `rule` | 規則の出典、使う関数、96・72、二つの量を何で数えたか、正式な候補（C7）、counting.py・candidates.py・periods.py の sha256 |
 | `input` | 入口、run_id、day の行の数、開いた日の集計の数、sha256 を照らしたこと、gkg-run-result の記録の seq と記録の行の sha256（`gkg_run_result_seq`・`gkg_run_result_record_sha256`）、使ったマニフェストのパス・先頭の行数・sha256（`manifest_path`・`manifest_lines`・`manifest_sha256`） |
@@ -115,7 +116,8 @@ JSON は UTF-8、キーの順（`sort_keys`）、`indent=2`、末尾に改行1�
 **label の扱い**（T-087 の監査 軽-4）：
 - label は、この文書の版と1対1にする。コードの定数 `LABEL` と、この文書の冒頭の「文書の版」を同じにし、テスト（`test_label_matches_doc`）で照合する。
 - 引数では変えられない。規則・読み方・入力・出力の形を変えるときは、文書の版とコードの `LABEL` を一緒に上げ、新しい版として封印する。
-- v1 は T-087 の版（全体の報道量 = docs。封印していない）。v2 は T-089 の版（全体の報道量 = C7 の分母。封印していない）。v3 はこの版（T-093。規則と読み方は v2 と同じ。中で使うコードの照合を足し、出力の `rule` と `input` に欄を足した）。
+- v1 は T-087 の版（全体の報道量 = docs。封印していない）。v2 は T-089 の版（全体の報道量 = C7 の分母。封印していない）。v3 はこの版（T-093。規則と読み方は v2 と同じ。中で使うコードの照合を足し、出力の `rule` と `input` に欄を足した）。T-096 の直し（照合したバイト列から読み込む）は、規則・読み方・入力・出力の形を変えないので、版は v3 のままとする。
+- 文書の中で今の版を書く箇所は、冒頭の「文書の版」、4章の表の `label` の行、この節の「はこの版」の3つである。テスト（`test_label_matches_doc`）が、3つとも `LABEL` と同じことを確かめる。
 - 正式な回の番号は、label ではなく封印の記録（追記のみ）の長さで決まる。
 
 ## 5. 封印の時機と、取り直しをしないこと

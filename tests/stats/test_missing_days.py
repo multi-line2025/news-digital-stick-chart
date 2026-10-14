@@ -215,7 +215,7 @@ class TestStops(unittest.TestCase):
         data = make_day("2015-03-02", THEMED)                     # 別の日の集計を、正しい sha256 で
         fx.files[fx.rows[1]["file_name"]] = data
         fx.rows[1]["sha256"] = hashlib.sha256(data).hexdigest()
-        with self.assertRaises(counting.CountingError):
+        with self.assertRaises(md.counting.CountingError):
             fx.build()
 
     def test_bad_rows_stop_before_opening_any_file(self):
@@ -353,6 +353,19 @@ class TestOutputShape(unittest.TestCase):
         for m in rec["missing_days"]:
             self.assertEqual(m["c7_denominator"], rec["c7_denominator_by_day"][m["day"]])
 
+    def test_output_same_as_plain_import(self):
+        """T-096：照合したバイト列から読み込んだモジュールでも、ふつうに import したモジュール（T-093 の
+        実行と同じ読み込み方。本物の src/stats に .pyc は無い）でも、出力のバイト列は同じ。"""
+        import periods as plain_periods
+        fx = Fixture({"2015-03-02": (72, THEMED), "2015-03-03": (71, THEMED),
+                      "2015-03-04": (96, NO_THEMES)})
+        a = md.canonical_bytes(fx.build())
+        with mock.patch.object(md, "counting", counting), mock.patch.object(md, "candidates", candidates), \
+                mock.patch.object(md, "periods", plain_periods):
+            b = md.canonical_bytes(fx.build())
+        self.assertIsNot(md.counting, counting)
+        self.assertEqual(a, b)
+
     def test_canonical_json_and_sha256(self):
         fx = Fixture({d: (96, THEMED) for d in DAYS3})
         a = fx.build()
@@ -369,12 +382,75 @@ class TestOutputShape(unittest.TestCase):
             doc = f.read()
         labels = set(re.findall(r"missing-days-method-v\d+", doc))
         self.assertIn(md.LABEL, labels)
-        m = re.search(r"^文書の版：`(missing-days-method-v\d+)`", doc, re.M)
-        self.assertIsNotNone(m)
-        self.assertEqual(m.group(1), md.LABEL)
+        # T-096：今の版を書く3か所が、どれも LABEL と同じ
+        heads = re.findall(r"^文書の版：`(missing-days-method-v\d+)`", doc, re.M)
+        self.assertEqual(heads, [md.LABEL])
+        rows = re.findall(r"^\| `label` \| `(missing-days-method-v\d+)`", doc, re.M)
+        self.assertEqual(rows, [md.LABEL])
+        this = re.findall(r"(v\d+) はこの版", doc)
+        self.assertEqual(["missing-days-method-" + v for v in this], [md.LABEL])
+        # 文書に出てくるほかの版は、今の版より小さい番号だけ
+        cur = int(md.LABEL.rsplit("v", 1)[1])
+        for v in re.findall(r"\bv(\d+) は", doc):
+            self.assertLessEqual(int(v), cur)
 
     def test_method_block_matches_periods_and_gkg(self):
         self.assertEqual(md.method_block(), (D(2015, 3, 2), D(2020, 12, 14)))
+
+
+class TestStalePycIgnored(unittest.TestCase):
+    """T-096：__pycache__ に中身の違う古い .pyc があっても、照合したバイト列のコードが動く。
+    写し（一時的なディレクトリ）の中で確かめる。本物の src/stats には .pyc を置かない。"""
+
+    NAMES = ("periods", "candidates", "counting")
+
+    def setUp(self):
+        import py_compile
+        import shutil
+        import tempfile
+        self.tmp = tempfile.mkdtemp(prefix="md-pyc-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.stats = os.path.join(self.tmp, "src", "stats")
+        os.makedirs(os.path.join(self.stats, "__pycache__"))
+        for n in ("missing_days",) + self.NAMES:
+            shutil.copyfile(os.path.join(SRC, n + ".py"), os.path.join(self.stats, n + ".py"))
+        # 中身の違う版（STALE_PYC を足したもの）を、元のソースを確かめない形の .pyc にして置く
+        for n in self.NAMES:
+            with open(os.path.join(SRC, n + ".py"), "rb") as f:
+                src = f.read() + b"\nSTALE_PYC = True\n"
+            alt = os.path.join(self.tmp, n + "_stale.py")
+            with open(alt, "wb") as f:
+                f.write(src)
+            cfile = os.path.join(self.stats, "__pycache__",
+                                 "%s.%s.pyc" % (n, sys.implementation.cache_tag))
+            py_compile.compile(alt, cfile=cfile, doraise=True,
+                               invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH)
+
+    def run_py(self, code):
+        import subprocess
+        r = subprocess.run([sys.executable, "-B", "-c", code], capture_output=True, cwd=self.tmp,
+                           env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
+        self.assertEqual(r.returncode, 0, r.stderr.decode(errors="replace"))
+        return json.loads(r.stdout.decode())
+
+    def test_plain_import_would_use_stale_pyc(self):
+        """前提の確かめ：ふつうの import（-B を付けても）は、古い .pyc を読む。"""
+        got = self.run_py("import sys, json; sys.path.insert(0, %r)\n"
+                          "import periods, candidates, counting\n"
+                          "print(json.dumps([hasattr(m, 'STALE_PYC') for m in (periods, candidates, counting)]))"
+                          % self.stats)
+        self.assertEqual(got, [True, True, True])
+
+    def test_missing_days_runs_verified_bytes(self):
+        got = self.run_py("import sys, json; sys.path.insert(0, %r)\n"
+                          "import missing_days as md\n"
+                          "md.check_stats_code()\n"
+                          "print(json.dumps([hasattr(md.periods, 'STALE_PYC'), hasattr(md.candidates, 'STALE_PYC'),"
+                          " hasattr(md.counting, 'STALE_PYC'), hasattr(md.candidates.periods, 'STALE_PYC'),"
+                          " md.candidates.periods is md.periods, 'periods' in sys.modules,"
+                          " sorted(md._LOADED_SHA.values()) == sorted(s for _r, s, _x in md.SEALED_CODE)]))"
+                          % self.stats)
+        self.assertEqual(got, [False, False, False, False, True, False, True])
 
 
 class TestSourceShape(unittest.TestCase):
