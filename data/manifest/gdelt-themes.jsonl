@@ -1,1 +1,3 @@
 {"attempted_at": "2026-10-15T00:17:06Z", "code_path": "src/collector/themes.py", "code_sha256": "73877f10b4bccaae4d66bd51ffee33f5dd3af8eda9d5aaa2eac469eddcc66d1c", "exclusion_rule_record_sha256": "5ebf9a2e7877297c6bab88c75406886aef9e3e3be52f554d9220b1ed7f91a858", "exclusion_rule_seq": 5, "kind": "attempt", "source_url": "https://data.gdeltproject.org/api/v2/guides/LOOKUP-GKGTHEMES.TXT"}
+{"at": "2026-10-15T00:17:26Z", "code_sha256": "73877f10b4bccaae4d66bd51ffee33f5dd3af8eda9d5aaa2eac469eddcc66d1c", "kind": "fetch"}
+{"at": "2026-10-15T00:17:27Z", "kind": "failed", "reason": "ThemesError"}
