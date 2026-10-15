@@ -40,6 +40,10 @@ ORDER2_COMMIT = "e92e7840a0167b962fd1334baece35d379f918e7"
 # 順番4の記録を、本物の記録の clone に足して確かめるのに使う（tests/sealer/test_t095.py）。
 ORDER3_COMMIT = "d74f27be28168521bf12e5f67ce3d00b325409d5"
 
+# 5つ目の固定コミット（T-099）。区分表の取得の2段目が形の判定で止まった跡（T-098）：data/manifest/gdelt-themes.jsonl が
+# attempt・fetch・failed の3行。記録は seq 1〜14。tests/sealer/test_t099.py が使う。
+THEMES_FAILED_COMMIT = "e3784c29ee2bc8500be467ede043635e10cd0064"
+
 # checkout(code="head") で HEAD の版にそろえるのは、封印係のコードと手順書（テストする側）だけ。ほかのファイル
 # （src/stats・src/collector・docs/stats・data・sealed・reviews など）は固定のコミットの版のまま使う。
 # この中でも、固定した記録が縛るパス（記録の targets と、targets の中身の JSON に書かれたパス）は固定の版のまま

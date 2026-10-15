@@ -1727,6 +1727,7 @@ def cmd_stats_order(st, a):
                 print("照らさなかった：順番1・1b の値：%s" % m)
     print("区分表の取得（%s）：行のある commit %d 件。どれも、親の sealed/ledger.jsonl に stats-order1 の行がある。"
           "作業ツリーのマニフェストの %d 行の exclusion_rule_seq と sha256 は stats-order1 の記録と一致する。"
+          "行の形と並び（attempt → fetch → failed か result）は themes.py の取り決めどおり（T-099）。"
           % (ledger.THEMES_MANIFEST, n, rows))
 
 

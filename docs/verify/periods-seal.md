@@ -989,7 +989,19 @@ rec, rel, ots_path = seal_stats.seal_order1b(project, files, approvals, now, ots
 - **区分表の取得は ledger に記録を書かない**（T-037 の差し戻し1回目 中1。初回の版は「acquisition-start のうち区分表のもの」を照らしていたが、その道は本物の流れに無かった）。収集係の `src/collector/themes.py` は、試行と結果を `data/manifest/gdelt-themes.jsonl` に書く。そのため、区分表の取得との前後は git の履歴で照らす（`ledger.check_order1_before_themes`。`verify.py stats-order` と `all`）：
   - F = `git log --all --full-history --format=%H -- data/manifest/gdelt-themes.jsonl` の commit のうち、その版のマニフェストに空でない行があるもの（集合として扱い、並び順と時刻は使わない）。
   - F のどの commit についても、その親（`git rev-parse <C>^@`）のうち少なくとも一つの版の `sealed/ledger.jsonl` に、`stats-order1` の記録の行（正規の形のバイト列）がある。F が空でないのに `stats-order1` が無いとき、親の無い commit が F にあるときも失敗する（seal-order1.md 3章 (2) と同じ考え方）。
-  - 作業ツリーのマニフェストの各行の `exclusion_rule_seq`・`exclusion_rule_record_sha256` が、`stats-order1` の記録の seq と行の sha256 と一致する（`ledger.check_themes_manifest_refs`）。
+  - 作業ツリーのマニフェストの行を、収集係の `src/collector/themes.py` の行の取り決めで照らす（`ledger.check_themes_manifest_refs`。T-099 で kind ごとに分けた）。
+    - 行の kind と、各 kind で求めるキー（themes.py の `run` と `_fetch_and_write` が書くものとちょうど同じ。`ledger.THEMES_ROW_KEYS`）：
+
+      | kind | いつ書くか（themes.py） | キー | `exclusion_rule_seq`・`exclusion_rule_record_sha256` |
+      |---|---|---|---|
+      | `attempt` | 1段目。試行の行（通信しない） | `kind`・`attempted_at`・`code_path`・`code_sha256`・`source_url`・2つのキー | 求める |
+      | `fetch` | 2段目。通信の直前 | `kind`・`at`・`code_sha256` | 求めない（書かない） |
+      | `failed` | 通信か形の誤りで止まったとき | `kind`・`at`・`reason`（例外の名前） | 求めない（書かない） |
+      | `result` | 成功したとき | `kind`・`file_name`・`sha256`・`rows`・`kept_columns`・`dropped_columns`・`fetched_at`・`attempted_at`・`sheet_names_replaced`・`headerless`・`source_url`・`code_path`・`code_sha256`・`store_location`・2つのキー | 求める |
+    - 並び：`attempt` → `fetch` → `failed` か `result`。`attempt` は1行目だけで、`failed`・`result` のあとに行は無い（themes.py は2回目の取得をしない）。`attempt` だけ、`attempt`・`fetch` だけ（通信の途中で止まった形）も通す。
+    - 形：時刻（`attempted_at`・`at`・`fetched_at`）は `YYYY-MM-DDTHH:MM:SSZ` で、行の順に後ろへ戻らない。`code_sha256` は64桁の16進で、`fetch`・`result` の値は `attempt` と同じ。`code_path` は `src/collector/themes.py`。`failed` の `reason` は例外の名前の形。`result` の `file_name` は `gdelt-themes-<時刻>.tsv`、`attempted_at`・`source_url`・`code_path` は `attempt` と同じ。
+    - `attempt` と `result` の2つのキーが、`stats-order1` の記録の seq と行の sha256 と一致する。
+    - 今の本物のマニフェスト（T-098。コミット e3784c2）は `attempt`・`fetch`・`failed` の3行で、2つのキーを照らすのは1行目だけである。テストは `tests/sealer/test_t099.py`。
   - git の履歴が無いところ（`.git` の無い写し）では、この照合を行わず、そう表示する（止めない）。`verify.py all` は最後の行に「ただし、次は照らさなかった（終了コード 0 は、照らした検査がすべて通ったことだけを示す）：区分表の取得と順番1 の前後」と出す。**終了コード 0 は、照らした検査がすべて通ったことだけを示す。** 照らさなかったものがあるかは、出力の最後の行で確かめる（T-037 再提出1回目 軽2）。`--rev auto` は git の履歴を要るので、第三者は履歴のある clone で確かめる。
   - **浅い clone では照らせない。** `verify.py stats-order`（と `all`）は、git の履歴があって浅い clone のとき、マニフェストに行のある commit が0件でも、浅い clone なら止まる（「浅い clone である。区分表の取得との前後の照合には履歴が要る」と出して終了コード 1。照合を始める前に `git rev-parse --is-shallow-repository` で確かめるため。浅い clone では、行のある commit が本当に0件かどうかも、親の版も確かめられない）。`--depth` を付けずに clone する（`git fetch --unshallow` でもよい）（T-037 再提出1回目 軽1、T-041 で書き方を実際の条件に合わせた）。浅い clone の確かめ（`--is-shallow-repository`）は、`seal_stats.py` でも `verify.py` でも、GIT_ で始まる環境変数を決めたもの（`GIT_NO_REPLACE_OBJECTS=1` と、存在しないパスの `GIT_GRAFT_FILE`）だけに固定した環境で行う（`ledger.fixed_git_env`。docs/stats/counting.md 4章 (3) と同じ固定の仕方。T-056。T-054 の軽-1）。
   - 書く仕組みの側は、`seal_order1` が、区分表のマニフェストが作業ツリーにも履歴にも無いことを確かめる（2章の項目2）。

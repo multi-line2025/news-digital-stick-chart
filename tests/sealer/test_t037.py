@@ -275,9 +275,13 @@ class TestOrder1Flow(StatsCase):
 class TestThemesByGit(StatsCase):
     def themes_row(self, seq=None, sha=None):
         o1 = ledger.first_order1(self.records())
+        # T-099：themes.py の書く試行の行と同じキー（ledger.THEMES_ROW_KEYS["attempt"]）
         return json.dumps({"kind": "attempt", "exclusion_rule_seq": o1["seq"] if seq is None else seq,
                            "exclusion_rule_record_sha256":
-                               sha or hashlib.sha256(ledger.canonical_line(o1)).hexdigest()}) + "\n"
+                               sha or hashlib.sha256(ledger.canonical_line(o1)).hexdigest(),
+                           "attempted_at": "2026-10-09T00:00:00Z", "code_path": "src/collector/themes.py",
+                           "code_sha256": "7" * 64,
+                           "source_url": "https://data.gdeltproject.org/api/v2/guides/LOOKUP-GKGTHEMES.TXT"}) + "\n"
 
     def test_honest_themes_after_order1_passes(self):
         self.base()
