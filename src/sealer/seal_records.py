@@ -275,18 +275,21 @@ def check_new(project, data_after, records_after, rec, doc, order4_store=None, o
         verify.check_order5_git(repo, data_after, records_after, rec, doc, head, read)
         if kind == ledger.ORDER5_ATTEMPT_KIND:
             return
+        # T-111 差し戻し1回目 中-1：input.day_files_digest と themes_table を、マニフェストから照らす
+        verify.check_order5_inputs(project, records_after, rec, doc, read)
         if not order5_inputs:
             raise ledger.LedgerError("%s の記録は、日の集計と区分表の置き場所で計算し直してからでなければ書かない" % kind)
-        with tempfile.TemporaryDirectory() as tmp:
-            try:
-                verify.recompute_order5(project, records_after, rec, doc, read, order5_inputs["store"],
-                                        order5_inputs["themes_store"], tmp)
-            except verify.Unchecked as e:
-                raise ledger.LedgerError("%s の記録を計算し直せない（%s）。書かない" % (kind, e)) from None
         if doc["status"] == "ok":
             _done, absent = verify.check_order5_outside(doc, order5_inputs["outside_dir"], kind)
             if absent:
                 raise ledger.LedgerError("%s の記録の Git の外のファイル（%s）が置き場所に無い。書かない" % (kind, "・".join(absent)))
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                # 中-2：detail の中身も計算し直した値と照らす（ok なら detail は必ずある。上で確かめた）
+                verify.recompute_order5(project, records_after, rec, doc, read, order5_inputs["store"],
+                                        order5_inputs["themes_store"], tmp, outside_dir=order5_inputs["outside_dir"])
+            except verify.Unchecked as e:
+                raise ledger.LedgerError("%s の記録を計算し直せない（%s）。書かない" % (kind, e)) from None
         return
     if kind == ledger.GKG_RESULT_KIND:
         # T-066：中身の形・ledger_head・指す gkg-run-start、マニフェストの先頭と run-complete の行

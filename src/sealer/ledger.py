@@ -3393,6 +3393,102 @@ ORDER5_SEALED = (("src/stats/periods.py", "periods", "targets:code"),
                  ("src/stats/counting.py", "stats-order1b", "files"),
                  ("1cb463a:src/stats/tagrules.py", "stats-order1", "order1:targets"))
 ORDER5_1CB463A_COMMIT = "1cb463acfcf15ba315e6c454625ad681e86bbc2a"
+# T-111 差し戻し1回目 中-1：main・detail に入る決まった値（docs/stats/order5-tag-list.md 付録A と 5章 (4)。src/stats/order5.py の
+# 定数と同じであることを tests/sealer/test_t111.py が照らす）
+ORDER5_LABEL = "order5-tag-list-v3"
+# 比べる版（tags-naive.md 423〜428行。order5-tag-list.md 3章の2の表）：(名前, commit, sha256, 封印の対象か)
+ORDER5_VERSIONS = (
+    ("1cb463a", "1cb463acfcf15ba315e6c454625ad681e86bbc2a", None, True),      # sha256 は stats-order1 の値
+    ("0e14f3b", "0e14f3b36f012098fc53d9456e6c4d9d5231e43b",
+     "8ed1613885d7e64ebdca47c97c4781fa3b42f735b37e91901321a38ef8328956", False),
+    ("247fc1d", "247fc1de62e32322207f9576480deb9536eb8dd5",
+     "3a688f94c1aff8e67a2d8e94072e29569f15699be2f569b7840dea22635a70ba", False),
+)
+# 封印済みのコードの出どころの欄（main の code.sealed の sources。"seq <seq> <kind> <欄>"）
+ORDER5_SOURCE_FIELDS = {"periods": "targets:code", "stats-order1": "order1:targets", "stats-order1b": "files"}
+ORDER5_REF_NOTE = "比べるための参考で、正式ではない"
+ORDER5_ENTRY = "src/collector/gkg.py official_day_records()"
+ORDER5_DETAIL_NOTE = "Git の外に置く。sha256 は main の outside に入る"
+ORDER5_CITATION = (
+    "Data: The GDELT Project (https://www.gdeltproject.org/). This project is not affiliated with or "
+    "endorsed by the GDELT Project.",
+    "データ出典：GDELT Project（https://www.gdeltproject.org/）。本プロジェクトは GDELT Project と提携・承認の"
+    "関係にありません。",
+)
+ORDER5_LIMITS = (
+    "区分表は名前の欄だけを取得した（説明の欄は無い）。除外の規則は名前の欄だけで照合した（tags-naive.md 159・224行）。",
+    "記号（下線以外）を含むテーマ名は、区分表には入るが、取得のときの THEME_RE（src/collector/gkg.py。"
+    "counting.THEME_NAME_RE と同じ形）に合わないので日の集計に数えられていない。そのため件数は0で、一覧に入らない"
+    "（themes_table.names_not_in_day_aggregate_form。T-107 の監査の中-1）。",
+    "翻訳の印の付いた組の記事は数えていない（外国語の報道は数えていない。counting.md 98行）。",
+    "V1 と V2 で名前が違う同じテーマは、別々のテーマとして数える（counting.md 104行）。",
+    "欠けた日は順番4の一覧（seq 15）だけで決め、数え直していない（missing-days-method.md 6章）。",
+    "手法を作る期間の全体にわたって存在しないテーマは扱わない（CLAUDE.md）。区分表には、この期間のあとに生まれた"
+    "テーマの名前も入りうるが、名前だけでは一覧に入らない。",
+    "参考の基準の案 B1〜B5 の結果は、順番2の記録（試しの run の3日）から写した。手法を作る期間の全体では計算していない。",
+    "数え方の候補の一覧に、作る人が検討して載せなかった案があるかは、記録からは確かめられない（seal-order1.md 164行）。",
+)
+
+
+def order5_reference_criteria(refs, order2_doc, criteria_ids):
+    """main の reference_criteria の決まった値（order5-tag-list.md 5章 (4)）：seq 10（順番3が参照した順番2）の記録の中身から。"""
+    out2 = order2_doc.get("counting_output") or {}
+    comp = None
+    if out2.get("status") == "decided":
+        comp = {"input_mode": out2.get("input_mode"), "input_run_id": out2.get("input_run_id"),
+                "input_days": [x.get("day") for x in out2.get("inputs") or []], "results": out2.get("results")}
+    return {"source": refs["order2"], "order2_status": out2.get("status"), "criteria_ids": list(criteria_ids),
+            "computed": comp, "official": False, "note": ORDER5_REF_NOTE}
+
+
+def check_order5_main_fixed(records, refs, main, read_json, what):
+    """seal-order1.md 143行が封印係に求める確かめと、記録だけから決まる main の値（T-111 差し戻し1回目 中-1）：
+      - label・limits・citation が付録Aの決まった文、a_equals_v が真。
+      - candidates：識別子が順番1b の記録の candidate_ids の順。official が真なのはちょうど一つで、それが順番1b の正式な候補。
+        ほかの候補の note は「比べるための参考で、正式ではない」、正式な候補の note は null。
+      - ok なら official の candidate・official・version・setting、comparisons（allset・1cb463a）の official が偽で note が付く。
+      - reference_criteria が seq 10 の記録から決まる値（すべての基準の案の識別子が順番1b の記録の criteria_ids と同じ）。
+      - input の entry・run_id・day_rows・day_files_read・照らした印・gkg-run-result の seq と行の sha256・マニフェストの
+        パス・行数・sha256（seq 12 の記録から）。day_files_digest はマニフェストから verify.check_order5_inputs が照らす。"""
+    by = {r["seq"]: r for r in records}
+    d1b = read_json(by[refs["order1b"]["seq"]], ORDER1B_KIND)
+    c = d1b.get("counting") or {}
+    ids, crit, oc = list(c.get("candidate_ids") or []), list(c.get("criteria_ids") or []), c.get("official_candidate")
+    if main.get("label") != ORDER5_LABEL or main.get("limits") != list(ORDER5_LIMITS) \
+            or main.get("citation") != list(ORDER5_CITATION) or main.get("a_equals_v") is not True:
+        raise LedgerError("%s の main の label・limits・citation・a_equals_v が、決まった値（order5-tag-list.md 付録A）と違う" % what)
+    cands = main.get("candidates") or []
+    if [x.get("id") for x in cands] != ids or not ids:
+        raise LedgerError("%s の main.candidates の識別子が、順番1b の記録の candidate_ids と違う" % what)
+    offs = [x.get("id") for x in cands if x.get("official") is True]
+    if offs != [oc] or any(x.get("official") not in (True, False) for x in cands):
+        raise LedgerError("%s の main.candidates で、正式な結果がちょうど一つ（順番1b の正式な候補 %s）でない" % (what, oc))
+    if any(x.get("note") != (None if x.get("id") == oc else ORDER5_REF_NOTE) for x in cands):
+        raise LedgerError("%s の main.candidates の注記が違う（正式でない候補に「%s」が付かない）" % (what, ORDER5_REF_NOTE))
+    if main.get("status") == "ok":
+        o = main.get("official") or {}
+        if (o.get("candidate"), o.get("official"), o.get("version"), o.get("setting")) != (oc, True, "current", "owner_choice"):
+            raise LedgerError("%s の main.official の candidate・official・version・setting が違う" % what)
+        comps = main.get("comparisons") or {}
+        if sorted(comps) != ["1cb463a", "allset"] or any(v.get("official") is not False or v.get("note") != ORDER5_REF_NOTE
+                                                         for v in comps.values()):
+            raise LedgerError("%s の main.comparisons の official・note が違う（比べるための参考で、正式ではない）" % what)
+    want = order5_reference_criteria(refs, read_json(by[refs["order2"]["seq"]], ORDER2_KIND), crit)
+    if main.get("reference_criteria") != want:
+        raise LedgerError("%s の main.reference_criteria が、seq %d（順番2）の記録から決まる値と違う" % (what, refs["order2"]["seq"]))
+    g = by[refs["gkg_run_result"]["seq"]]
+    gdoc = read_json(g, GKG_RESULT_KIND)
+    b = main.get("block") or {}
+    n = len(_block_days(b.get("start"), b.get("end")) or [])
+    inp = main.get("input") or {}
+    want_inp = {"entry": ORDER5_ENTRY, "run_id": gdoc.get("run_id"), "day_rows": n, "day_files_read": n,
+                "day_files_sha256_checked": True, "c7_denominators_match_order4": True,
+                "gkg_run_result_seq": g["seq"], "gkg_run_result_record_sha256": refs["gkg_run_result"]["record_sha256"],
+                "manifest_path": gdoc.get("manifest_path"), "manifest_lines": gdoc.get("manifest_lines"),
+                "manifest_sha256": gdoc.get("manifest_sha256")}
+    bad = sorted(k for k, v in want_inp.items() if inp.get(k) != v)
+    if bad or set(inp) != set(want_inp) | {"day_files_digest"}:
+        raise LedgerError("%s の main.input の %s が、seq %d の記録から決まる値と違う" % (what, "・".join(bad) or "キー", g["seq"]))
 
 
 def order5_main_bytes(main):
@@ -3566,14 +3662,21 @@ def check_order5_doc(records, record, doc, read_json):
     md = main.get("missing_days") or {}
     if md.get("days") != days or md.get("count") != len(days):
         raise LedgerError("%s の main.missing_days が、順番4の一覧の欠けた日と違う" % what)
+    check_order5_main_fixed(records, refs, main, read_json, what)
     code5 = main.get("code") or {}
     got = {c.get("name"): c.get("sha256") for c in code5.get("sealed") or []}
     if any(got.get(n) != sealed[n] for n in sealed):
         raise LedgerError("%s の main.code.sealed の sha256 が、封印済みのコードの値と違う" % what)
-    v1 = [v for v in code5.get("versions") or [] if v.get("name") == "1cb463a"]
-    if len(v1) != 1 or v1[0].get("sha256") != sealed["1cb463a:src/stats/tagrules.py"] \
-            or v1[0].get("commit") != ORDER5_1CB463A_COMMIT:
-        raise LedgerError("%s の main.code.versions の 1cb463a の版が、stats-order1 の値と違う" % what)
+    # T-111 差し戻し1回目：code の全体（sealed の sources、versions の3行）も、記録と決まった値から決まる
+    srcs = {PERIODS_KIND: _first_of_kind(records, PERIODS_KIND), ORDER1_KIND: first_order1(records),
+            ORDER1B_KIND: by[refs["order1b"]["seq"]]}
+    want_sealed = [{"name": n, "sha256": sealed[n], "sources": ["seq %d %s %s" % (srcs[k]["seq"], k, ORDER5_SOURCE_FIELDS[k])]}
+                   for n, k, _f in ORDER5_SEALED]
+    want_versions = [{"name": n, "commit": c, "path": "src/stats/tagrules.py",
+                      "sha256": sealed["1cb463a:src/stats/tagrules.py"] if s_ is None else s_, "sealed": sl}
+                     for n, c, s_, sl in ORDER5_VERSIONS]
+    if code5 != {"sealed": want_sealed, "versions": want_versions}:
+        raise LedgerError("%s の main.code（sealed の値と出どころ、versions の3行）が、記録と決まった値から決まるものと違う" % what)
 
 
 def check_order5_records(records, read_json):

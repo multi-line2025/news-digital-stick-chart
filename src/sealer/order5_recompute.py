@@ -200,7 +200,9 @@ def compute(mods, inp, read_day, themes_data):
 
     def cand(cid, result):
         st = statuses[cid]
-        v = {"id": cid, "status": st["status"], "reason": st["reason"], "zero_days": st["zero_days"]}
+        col, den = {x[0]: (x[1], x[2]) for x in c.CANDIDATES}[cid]
+        v = {"id": cid, "numerator_column": col, "denominator_kind": den, "status": st["status"], "reason": st["reason"],
+             "zero_days": st["zero_days"]}
         if result is None:
             v.update(n_med=None, a=None, a_float=None, usable_day_count=None, tag_count=None)
         else:
@@ -245,7 +247,12 @@ def compute(mods, inp, read_day, themes_data):
     out.update(status="ok", official=summary,
                candidates=[cand(cid, results.get(cid)) for cid in c.CANDIDATE_IDS],
                comparisons={"allset": cmp(allset), "1cb463a": cmp(v1)},
-               coverage={"quarters": quarters, "total": total(usable)})
+               coverage={"quarters": quarters, "total": total(usable)},
+               # T-111 差し戻し1回目 中-2：detail（Git の外。tags-naive.md 154行で公開が必要）の中身も計算する
+               detail={"official_result": official, "allset_result": allset, "versions": {"1cb463a": v1},
+                       "candidate_lists": [{"id": cid, "official": cid == c7,
+                                            "tag_list": (list(results[cid]["tag_list"]) if cid in results else None)}
+                                           for cid in c.CANDIDATE_IDS]})
     return _json(out)
 
 
@@ -296,6 +303,34 @@ def compare_with_main(main, got):
                 have = "?"
             if have != want:
                 bad.append("coverage.ratios.%s" % k)
+    return sorted(set(bad))
+
+
+DETAIL_FIXED = {"part": "detail", "in_git": False}
+
+
+def compare_with_detail(detail, got, label, note, citation):
+    """計算し直した値（compute の返り値の detail）と、Git の外の detail を照らす（T-111 差し戻し1回目 中-2）。
+    official_result・allset_result・versions.1cb463a・candidate_lists と、label・part・in_git・note・citation。
+    違う項目の名前の一覧を返す（空なら一致）。"""
+    bad = []
+    if not isinstance(detail, dict):
+        return ["detail"]
+    g = got.get("detail")
+    if g is None:
+        return ["detail（計算し直した値が無い）"]
+    for k in ("official_result", "allset_result", "candidate_lists"):
+        if _json(detail.get(k)) != g[k]:
+            bad.append("detail.%s" % k)
+    if _json((detail.get("versions") or {}).get("1cb463a")) != g["versions"]["1cb463a"] \
+            or sorted(detail.get("versions") or {}) != ["1cb463a"]:
+        bad.append("detail.versions")
+    fixed = dict(DETAIL_FIXED, label=label, note=note, citation=list(citation))
+    for k, v in fixed.items():
+        if detail.get(k) != v:
+            bad.append("detail.%s" % k)
+    if set(detail) != set(fixed) | {"official_result", "allset_result", "versions", "candidate_lists"}:
+        bad.append("detail のキー")
     return sorted(set(bad))
 
 

@@ -15,7 +15,7 @@ stats-order5）。T-111。手順は docs/verify/periods-seal.md 19章。
   1. 書く前の確かめ（どれも結果に依らない。止まれば何も書かない）：位置（順番4のあと、threshold-access の前、順番5の記録が
      まだ無い。ledger.check_order5_position）、参照（ledger.order5_refs）、封印済みのコードの値（ledger.order5_sealed_code）、
      HEAD の版から作った code（verify.order5_code）、置き場所がフォルダであること、Git の外のフォルダがプロジェクトと Git の外に
-     あること。
+     あること。出力のフォルダ order5-seq<試みの seq> を作り、その中でハードリンクを作れること（prepare_out_dir）。
   2. **試みの記録を書いてコミットする**（.ots も作る。HEAD は B になる）。流した回数は、試みの記録の数で数える
      （T-110 の監査 中-1 の申し送り）。
   3. HEAD（B）の版のファイルを空のフォルダに取り出し、その中の order5.py を -I・-B・空の pycache_prefix の Python で流す
@@ -73,6 +73,36 @@ def check_outside(root, path):
     return real
 
 
+PROBE_NAMES = (".link-probe", ".link-probe-2")
+
+
+def prepare_out_dir(outside, seq):
+    """試みを書く前に、Git の外のフォルダの中に出力のフォルダ order5-seq<seq> を作り、そこでハードリンクを作れることを
+    確かめる（T-111 差し戻し1回目 軽-4。order5.py は書き出しに os.link を使うので、作れないと流しても書けず、試みだけが
+    残る）。確かめに使った2つのファイル（PROBE_NAMES。同じ中身の2つの名前）は消さずに残す（削除はしない決まり）。
+    前の実行が確かめの途中で止まったフォルダ（中身が PROBE_NAMES だけ）は、そのまま使う。ほかのファイルがあれば止まる。
+    作れなければ LedgerError（試みを書かない）。返り値：出力のフォルダ。"""
+    out_dir = os.path.join(outside, "order5-seq%d" % seq)
+    os.makedirs(out_dir, exist_ok=True)
+    other = sorted(set(os.listdir(out_dir)) - set(PROBE_NAMES))
+    if other:
+        raise ledger.LedgerError("出力のフォルダ %s に、ほかのファイル（%s）がある。試みを書かない" % (out_dir, "・".join(other[:3])))
+    a, b = (os.path.join(out_dir, n) for n in PROBE_NAMES)
+    if not os.path.lexists(a):
+        with open(a, "xb") as f:
+            f.write(b"order5 link probe\n")
+    try:
+        if not os.path.lexists(b):
+            os.link(a, b)
+        same = os.stat(a).st_ino == os.stat(b).st_ino
+    except OSError as e:
+        raise ledger.LedgerError("Git の外のフォルダ %s でハードリンクを作れない（%s）。order5.py は書き出しに使うので、試みを"
+                                 "書かない" % (outside, e.__class__.__name__)) from None
+    if not same:
+        raise ledger.LedgerError("Git の外のフォルダ %s のハードリンクの確かめが合わない。試みを書かない" % outside)
+    return out_dir
+
+
 def build_attempt(root, data, records):
     """手順 1。返り値：試みの中身。"""
     repo = verify.Repo(root)
@@ -117,12 +147,10 @@ def _write(root, kind, doc, data, records, note, now, ots_cmd, runner, **kw):
     return rec, rel, ots_path, commit
 
 
-def run_and_build(root, data, records, att_rec, store, themes_store, outside, tmp):
-    """手順 3〜4。返り値：(順番5の記録の中身, 出力のフォルダ)。"""
+def run_and_build(root, data, records, att_rec, store, themes_store, out_dir, tmp):
+    """手順 3〜4。out_dir は prepare_out_dir で作った出力のフォルダ。返り値：(順番5の記録の中身, 出力のフォルダ)。"""
     repo = verify.Repo(root)
     head = seal_order2.clean_head(repo)
-    out_dir = os.path.join(outside, "order5-seq%d" % att_rec["seq"])
-    os.mkdir(out_dir)                                     # 新しく作る（既にあれば止まる）
     tree = verify.order4_tree(repo, head)
     what = "順番5（HEAD %s の版の %s）" % (head[:12], ledger.ORDER5_SCRIPT)
     try:
@@ -163,6 +191,7 @@ def seal(store, themes_store, outside_dir, now, ots_cmd, runner=subprocess.run):
     outside = check_outside(root, outside_dir)
     data, records = seal_records.load_checked(root, ots_cmd, runner=runner)
     adoc = build_attempt(root, data, records)
+    out_dir = prepare_out_dir(outside, len(records) + 1)          # 軽-4：試みを書く前にハードリンクを確かめる
     note = ("統計係の順番5の試み（docs/stats/order5-tag-list.md）。stats-order5-attempt の %d 件目。order5.py を流す前に書いた。"
             "採用の区切りには使わない。" % (sum(1 for r in records if r["kind"] == ledger.ORDER5_ATTEMPT_KIND) + 1))
     arec, arel, aots, acommit = _write(root, ledger.ORDER5_ATTEMPT_KIND, adoc, data, records, note, now, ots_cmd, runner)
@@ -170,7 +199,7 @@ def seal(store, themes_store, outside_dir, now, ots_cmd, runner=subprocess.run):
     try:
         data, records = seal_records.load_checked(root, ots_cmd, runner=runner)
         with tempfile.TemporaryDirectory() as tmp:
-            doc, out_dir = run_and_build(root, data, records, arec, store, themes_store, outside, tmp)
+            doc, out_dir = run_and_build(root, data, records, arec, store, themes_store, out_dir, tmp)
         out["out_dir"] = out_dir
         note5 = ("統計係の順番5（タグの一覧の結果。docs/stats/order5-tag-list.md）。試み seq %d、順番4 seq %d。main の sha256 %s。"
                  "採用の区切りには使わない。" % (arec["seq"], doc["refs"]["order4"]["seq"], doc["main_sha256"]))

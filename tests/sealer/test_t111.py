@@ -62,6 +62,7 @@ import ledger  # noqa: E402
 import order5_recompute as rc  # noqa: E402
 
 EXTRA_TAG = @EXTRA@
+DETAIL_EXTRA_TAG = @DETAIL@
 
 
 def canon(x):
@@ -109,31 +110,64 @@ def main(argv):
         day_rows.append({"day": d, "file_name": rows[d]["file_name"], "sha256": sha})
     inp = {"block": ["2015-03-02", "2020-12-14"], "missing_days": missing, "rows": day_rows,
            "themes_sha256": hashlib.sha256(tdata).hexdigest(), "themes_rows": len(tdata.decode().splitlines()) - 1}
-    got = rc.compute(rc.load_sealed(folder), inp, read_day, tdata)
+    mods = rc.load_sealed(folder)
+    got = rc.compute(mods, inp, read_day, tdata)
     if EXTRA_TAG and got["status"] == "ok":
         got["official"]["tag_list"] = sorted(got["official"]["tag_list"] + ["ZZ_FAKE"])
         got["official"]["tag_count"] += 1
+    import fractions
     cov = got.get("coverage")
     if cov:
         for q in cov["quarters"] + [cov["total"]]:
             n = q["docs_all_groups"]
-            import fractions
             q["ratios"] = {k: (None if not n else "%d/%d" % (fractions.Fraction(q[k], n).numerator,
                                                              fractions.Fraction(q[k], n).denominator))
                            for k in q if k.startswith("docs_without_")}
-    detail = {"label": "fake", "part": "detail", "official": got.get("official")}
-    extra = {"label": "fake", "part": "extra"}
-    main = {"label": "order5-tag-list-fake", "status": got["status"],
-            "block": {"name": "method", "start": "2015-03-02", "end": "2020-12-14"}, "refs": refs,
-            "code": {"sealed": [{"name": n, "sha256": s} for n, s in sealed.items()],
-                     "versions": [{"name": "1cb463a", "commit": ledger.ORDER5_1CB463A_COMMIT,
-                                   "sha256": sealed["1cb463a:src/stats/tagrules.py"]}]},
-            "themes_table": dict(got["themes_table"], file_name=trow["file_name"]),
-            "missing_days": {"source": "order4", "count": len(missing), "days": missing},
-            "candidates": got["candidates"]}
+    counting = mods["counting"]
+    cols = {cid: (col, den) for cid, col, den in counting.CANDIDATES}
+    cands = [dict(x, official=x["id"] == "C7", note=None if x["id"] == "C7" else ledger.ORDER5_REF_NOTE)
+             for x in got["candidates"]]
+    by = {r["seq"]: r for r in recs}
+    d1b = read(by[refs["order1b"]["seq"]], ledger.ORDER1B_KIND)
+    rc_ref = ledger.order5_reference_criteria(refs, read(by[refs["order2"]["seq"]], ledger.ORDER2_KIND),
+                                              d1b["counting"]["criteria_ids"])
+    digest = hashlib.sha256("".join("%s\t%s\t%s\n" % (d, rows[d]["file_name"], rows[d]["sha256"])
+                                    for d in sorted(rows)).encode("ascii")).hexdigest()   # マニフェストの day の行から
+    inp_rec = {"entry": ledger.ORDER5_ENTRY, "run_id": gdoc["run_id"], "day_rows": len(day_rows),
+               "day_files_read": len(day_rows), "day_files_sha256_checked": True, "c7_denominators_match_order4": True,
+               "gkg_run_result_seq": g["seq"], "gkg_run_result_record_sha256": refs["gkg_run_result"]["record_sha256"],
+               "manifest_path": gdoc["manifest_path"], "manifest_lines": gdoc["manifest_lines"],
+               "manifest_sha256": gdoc["manifest_sha256"], "day_files_digest": digest}
+    tt = dict(got["themes_table"], file_name=trow["file_name"], sha256=trow["sha256"], rows=trow["rows"],
+              kept_columns=trow["kept_columns"], headerless=trow.get("headerless"), description_column=False)
+    detail = extra = None
     if got["status"] == "ok":
-        main.update(official={"candidate": "C7", "official": True, "result": got["official"]},
-                    comparisons=got["comparisons"], coverage=cov,
+        dd = got["detail"]
+        detail = {"label": ledger.ORDER5_LABEL, "part": "detail", "in_git": False, "note": ledger.ORDER5_DETAIL_NOTE,
+                  "official_result": dd["official_result"], "allset_result": dd["allset_result"],
+                  "versions": dd["versions"], "candidate_lists": dd["candidate_lists"],
+                  "citation": list(ledger.ORDER5_CITATION)}
+        if DETAIL_EXTRA_TAG:
+            detail["candidate_lists"][0]["tag_list"] = (detail["candidate_lists"][0]["tag_list"] or []) + ["ZZ_FAKE"]
+        extra = {"label": ledger.ORDER5_LABEL, "part": "extra-versions"}
+    main = {"label": ledger.ORDER5_LABEL, "status": got["status"],
+            "block": {"name": "method", "start": "2015-03-02", "end": "2020-12-14"}, "refs": refs,
+            "code": {"sealed": [{"name": n, "sha256": sealed[n],
+                                 "sources": [{"periods": "seq 1 periods targets:code", "stats-order1b": "seq 6 stats-order1b files"
+                                              }.get(k, "seq 5 stats-order1 order1:targets")]}
+                                for n, k, _f in ledger.ORDER5_SEALED],
+                     "versions": [{"name": n, "commit": c, "path": "src/stats/tagrules.py",
+                                   "sha256": sealed["1cb463a:src/stats/tagrules.py"] if s_ is None else s_, "sealed": sl}
+                                  for n, c, s_, sl in ledger.ORDER5_VERSIONS]},
+            "input": inp_rec, "themes_table": tt, "reference_criteria": rc_ref, "a_equals_v": True,
+            "limits": list(ledger.ORDER5_LIMITS), "citation": list(ledger.ORDER5_CITATION),
+            "missing_days": {"source": "order4", "count": len(missing), "days": missing},
+            "candidates": cands}
+    if got["status"] == "ok":
+        main.update(official={"candidate": "C7", "version": "current", "setting": "owner_choice", "official": True,
+                              "result": got["official"]},
+                    comparisons={k: dict(v, official=False, note=ledger.ORDER5_REF_NOTE) for k, v in got["comparisons"].items()},
+                    coverage=cov,
                     outside={"detail": {"file_name": "order5-detail.json", "sha256": hashlib.sha256(canon(detail)).hexdigest()},
                              "extra": {"file_name": "order5-extra.json", "sha256": hashlib.sha256(canon(extra)).hexdigest()}})
         for n, x in (("order5-detail.json", detail), ("order5-extra.json", extra)):
@@ -151,8 +185,8 @@ if __name__ == "__main__":
 '''
 
 
-def fake5(extra=False):
-    return FAKE5.replace("@EXTRA@", "True" if extra else "False")
+def fake5(extra=False, detail=False):
+    return FAKE5.replace("@EXTRA@", "True" if extra else "False").replace("@DETAIL@", "True" if detail else "False")
 
 
 def order5_blocks():
@@ -195,16 +229,16 @@ class Case(t95.Clone):
     @contextlib.contextmanager
     def synthetic(self):
         """計算し直しの入力の sha256 を、合成のファイルの値にする（本物の照合を通ったあとで置き換える）。"""
-        real_rows, real_trow = ledger.order4_day_rows, verify.order5_themes_row
+        real_rows, real_trow = verify.order5_day_rows, verify.order5_themes_row
         import hashlib
 
-        def rows(body, gdoc, days):
-            return {d: dict(r, sha256=self.shas5[d]) for d, r in real_rows(body, gdoc, days).items()}
+        def rows(root, gdoc, block):
+            return {d: dict(r, sha256=self.shas5[d]) for d, r in real_rows(root, gdoc, block).items()}
 
         def trow(root):
             r = real_trow(root)
             return dict(r, sha256=hashlib.sha256(self.tdata).hexdigest(), rows=len(THEME_NAMES))
-        with mock.patch.object(ledger, "order4_day_rows", rows), mock.patch.object(verify, "order5_themes_row", trow):
+        with mock.patch.object(verify, "order5_day_rows", rows), mock.patch.object(verify, "order5_themes_row", trow):
             yield
 
     def seal5(self, store=None, runner=None):
@@ -262,7 +296,8 @@ class TestWrite(Case):
         self.assertEqual(doc["code"]["script"]["sha256"], ledger.sha256_hex(fake5().encode()))
         self.assertEqual([x["name"] for x in doc["code"]["sealed"]], [n for n, _k, _f in ledger.ORDER5_SEALED])
         self.assertEqual(sorted(os.listdir(out["out_dir"])),
-                         [".fake-sealed", "order5-detail.json", "order5-extra.json", "order5-main.json"])
+                         [".fake-sealed", ".link-probe", ".link-probe-2", "order5-detail.json", "order5-extra.json",
+                          "order5-main.json"])
         for c, msg in ((acommit, seal_order5.ATTEMPT_MESSAGE), (commit, seal_order5.ORDER5_MESSAGE)):
             got = self.git("log", "-1", "--format=%an <%ae>|%cn <%ce>|%B", c).decode().rstrip("\n")
             self.assertEqual(got, WHO + "|" + WHO + "|" + msg)
@@ -329,7 +364,8 @@ class TestStopped(Case):
         out = self.seal5()
         doc = out["order5"][3]
         self.assertEqual((doc["status"], doc["outside"]), ("stopped", None))
-        self.assertEqual(sorted(os.listdir(out["out_dir"])), [".fake-sealed", "order5-main.json"])
+        self.assertEqual(sorted(os.listdir(out["out_dir"])), [".fake-sealed", ".link-probe", ".link-probe-2",
+                                                              "order5-main.json"])
         out_v = self.verify_zero(*self.full())
         self.assertIn("status stopped", out_v)
 
@@ -348,7 +384,7 @@ class TestForgeries(Case):
         records = ledger.verify_chain(data)
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(ledger, "PROJECT_ROOT", self.c):
             doc, out_dir = seal_order5.run_and_build(self.c, data, records, records[-1], self.store5, self.tstore,
-                                                     self.outside_new(), tmp)
+                                                     seal_order5.prepare_out_dir(self.outside_new(), records[-1]["seq"]), tmp)
         self.raw5(O5, doc)
         self.verify_zero("all", "--rev", "auto")
         self.verify_stops("official.result.tag_count", *self.full())
@@ -369,7 +405,7 @@ class TestForgeries(Case):
         records = ledger.verify_chain(data)
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(ledger, "PROJECT_ROOT", self.c), self.synthetic():
             return seal_order5.run_and_build(self.c, data, records, records[-1], self.store5, self.tstore,
-                                             self.outside_new(), tmp)
+                                             seal_order5.prepare_out_dir(self.outside_new(), records[-1]["seq"]), tmp)
 
     def test_forgeries_refused(self):
         doc, out_dir = self.honest()
@@ -391,7 +427,39 @@ class TestForgeries(Case):
             "封印済みのコード": (self.resha(doc, dict(main, code=dict(main["code"], sealed=[{"name": "src/stats/tagrules.py",
                                                                                     "sha256": "b" * 64}]))),
                          "main.code.sealed"),
+            "比べる版": (self.resha(doc, dict(main, code=dict(main["code"], versions=main["code"]["versions"][:2]))),
+                     "main.code（sealed の値と出どころ、versions の3行）"),
+            "分子の欄": (self.resha(doc, dict(main, candidates=[dict(x, numerator_column="v2_docs") if x["id"] == "C1" else x
+                                                               for x in main["candidates"]])),
+                     "candidates.C1.numerator_column"),
             "置き場所なし": (doc, "計算し直してからでなければ書かない"),
+            # T-111 差し戻し1回目 中-1：seal-order1.md 143行の確かめと、記録とマニフェストから決まる値
+            "candidates の official": (self.resha(doc, dict(main, candidates=[dict(x, official=True) if x["id"] == "C1" else x
+                                                                             for x in main["candidates"]])),
+                                      "正式な結果がちょうど一つ"),
+            "candidates の注記": (self.resha(doc, dict(main, candidates=[dict(x, note=None) if x["id"] == "C2" else x
+                                                                       for x in main["candidates"]])), "注記が違う"),
+            "comparisons の official": (self.resha(doc, dict(main, comparisons=dict(
+                main["comparisons"], allset=dict(main["comparisons"]["allset"], official=True)))), "main.comparisons"),
+            "reference_criteria の official": (self.resha(doc, dict(main, reference_criteria=dict(
+                main["reference_criteria"], official=True))), "reference_criteria"),
+            "reference_criteria の値": (self.resha(doc, dict(main, reference_criteria=dict(
+                main["reference_criteria"], computed=dict(main["reference_criteria"]["computed"], input_run_id="0" * 16)))),
+                "reference_criteria"),
+            "基準の案が足りない": (self.resha(doc, dict(main, reference_criteria=dict(
+                main["reference_criteria"], criteria_ids=["B1", "B2"]))), "reference_criteria"),
+            "label": (self.resha(doc, dict(main, label="order5-tag-list-v9")), "label・limits・citation"),
+            "limits": (self.resha(doc, dict(main, limits=main["limits"][:-1])), "label・limits・citation"),
+            "citation": (self.resha(doc, dict(main, citation=[])), "label・limits・citation"),
+            "input の run_id": (self.resha(doc, dict(main, input=dict(main["input"], run_id="0" * 16))), "main.input の run_id"),
+            "input の manifest_lines": (self.resha(doc, dict(main, input=dict(main["input"], manifest_lines=1))),
+                                       "main.input の manifest_lines"),
+            "input の day_files_digest": (self.resha(doc, dict(main, input=dict(main["input"], day_files_digest="0" * 64))),
+                                         "day_files_digest"),
+            "themes_table の sha256": (self.resha(doc, dict(main, themes_table=dict(main["themes_table"], sha256="0" * 64))),
+                                      "themes_table の sha256"),
+            "themes_table の rows": (self.resha(doc, dict(main, themes_table=dict(main["themes_table"], rows=1))),
+                                    "themes_table の rows"),
             # 流したコードの版を偽る（試みと同じに保つ欄は変えず、取り出したファイルの数だけ変える）：git の照合が止める
             "code の tree": (dict(doc, code=dict(doc["code"], tree=dict(doc["code"]["tree"],
                                                                        files=doc["code"]["tree"]["files"] + 1))),
@@ -406,6 +474,36 @@ class TestForgeries(Case):
         # Git の外のファイルが無い
         os.rename(os.path.join(out_dir, "order5-extra.json"), os.path.join(out_dir, "moved.json"))
         self.refuses5(O5, doc, "Git の外のファイル（order5-extra.json）が置き場所に無い", **inp)
+
+    def test_detail_forged(self):
+        """T-111 差し戻し1回目 中-2：detail の中身を偽る版の order5.py（C1 の一覧にテーマを足し、main の outside の sha256 は
+        合わせる）は、書く仕組みが detail を計算し直した値と照らして止める。照合を飛ばして足すと、--store と --order5-outside を
+        渡した verify が止める（--order5-outside だけでは sha256 が合うので見つからない）。"""
+        self.put5(fake5(detail=True))
+        with self.assertRaisesRegex(seal_order5.Order5Written, "detail の値が、封印済みのコードで計算し直した値と違う（detail.candidate_lists）"):
+            self.seal5()
+        data = self.ledger_bytes()
+        records = ledger.verify_chain(data)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(ledger, "PROJECT_ROOT", self.c):
+            doc, out_dir = seal_order5.run_and_build(self.c, data, records, records[-1], self.store5, self.tstore,
+                                                     seal_order5.prepare_out_dir(self.outside_new(), records[-1]["seq"]), tmp)
+        self.raw5(O5, doc)
+        out_v = self.verify_zero("all", "--rev", "auto", "--order5-outside", out_dir)
+        self.assertIn("detail の中身は、--store と --themes-store も渡したときだけ", out_v)
+        self.verify_stops("detail.candidate_lists", *self.full("--order5-outside", out_dir))
+
+    def test_hardlink_probe(self):
+        """T-111 差し戻し1回目 軽-4：Git の外のフォルダでハードリンクを作れなければ、試みを書かずに止まる。"""
+        before = self.ledger_bytes()
+        with mock.patch.object(seal_order5.os, "link", side_effect=OSError("リンクを作れない（テスト）")), \
+                self.assertRaisesRegex(ledger.LedgerError, "ハードリンクを作れない") as cm:
+            self.seal5()
+        self.assertNotIsInstance(cm.exception, seal_order5.Order5Written)
+        self.assertEqual(self.ledger_bytes(), before)
+        self.assertEqual(self.git("status", "--porcelain"), b"")
+        # 確かめの途中で止まったフォルダ（確かめのファイルだけ）は、次の実行でそのまま使う
+        out = self.seal5()
+        self.assertEqual(out["order5"][0]["kind"], O5)
 
     def test_attempt_code_forged(self):
         """試みの記録の order5.py の sha256 を偽ると、書く仕組み（git の照合）が書かず、照合を飛ばして足すと verify が止める。"""
@@ -453,6 +551,97 @@ class TestOrderUnit(unittest.TestCase):
             self.assertIn(k, seal_records.WRITTEN_KINDS)
             self.assertIn(k, ledger.ORDER4_BEFORE_KINDS)
         self.assertEqual(ledger.ORDER5_BEFORE_KINDS, (ledger.THRESHOLD_ACCESS_KIND,))
+
+
+class TestConstantsSameAsOrder5(unittest.TestCase):
+    """ledger の決まった値（label・limits・citation・注記）が、統計係の src/stats/order5.py の定数と、文書の付録Aと同じ。
+    order5.py は ast で読むだけ（作業ツリーのファイル。HEAD を git で読むことは tests/sealer の規則で限っているため。合否は
+    コミットしたあとに流した結果で判断する）。"""
+
+    def test_same(self):
+        import ast
+        with open(os.path.join(tl.PROJECT, "src", "stats", "order5.py"), encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        c = {}
+        for st in tree.body:
+            if isinstance(st, ast.Assign) and len(st.targets) == 1 and isinstance(st.targets[0], ast.Name):
+                try:
+                    c[st.targets[0].id] = ast.literal_eval(st.value)
+                except ValueError:
+                    pass
+        self.assertEqual(c["LABEL"], ledger.ORDER5_LABEL)
+        self.assertEqual(c["REF_NOTE"], ledger.ORDER5_REF_NOTE)
+        self.assertEqual(tuple(c["LIMITS"]), ledger.ORDER5_LIMITS)
+        self.assertEqual(tuple(c["CITATION"]), ledger.ORDER5_CITATION)
+        self.assertEqual(c["ENTRY"], ledger.ORDER5_ENTRY)
+        with open(os.path.join(tl.PROJECT, "docs", "stats", "order5-tag-list.md"), encoding="utf-8") as f:
+            doc = f.read()
+        for text in ledger.ORDER5_LIMITS + ledger.ORDER5_CITATION + (ledger.ORDER5_DETAIL_NOTE, ledger.ORDER5_REF_NOTE):
+            self.assertIn(text, doc)
+
+
+class TestRealOrder5Build(unittest.TestCase):
+    """T-111 差し戻し1回目 軽-1：本物の src/stats/order5.py の build() の出力（合成のデータ。tests/stats/test_order5.py の
+    Fixture）を、封印係の order5_recompute.compute() で計算し直した値と照らすと一致する（通常・C2 が計算できない・C7 で止まる）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, os.path.join(tl.PROJECT, "tests", "stats"))
+        import test_order5 as to5
+        import order5_recompute as rc
+        cls.to5, cls.rc = to5, rc
+        cls.mods = {"periods": to5.o5.periods, "exclusion": to5.o5.exclusion, "tagrules": to5.o5.tagrules,
+                    "counting": to5.o5.counting, "tagrules_1cb463a": to5.VERSIONS["1cb463a"]}
+
+    def check(self, fx, status):
+        main, detail, _extra = fx.build()
+        self.assertEqual(main["status"], status)
+        inp = {"block": [self.to5.BLOCK[0].isoformat(), self.to5.BLOCK[1].isoformat()],
+               "missing_days": sorted(m["day"] for m in fx.order4["missing_days"]),
+               "rows": [{"day": r["day"], "file_name": r["file_name"], "sha256": r["sha256"]} for r in fx.rows],
+               "themes_sha256": fx.result_row["sha256"], "themes_rows": fx.result_row["rows"]}
+        got = self.rc.compute(self.mods, inp, fx.read, fx.table_bytes)
+        self.assertEqual(self.rc.compare_with_main(main, got), [])
+        if status == "ok":
+            self.assertEqual(self.rc.compare_with_detail(detail, got, ledger.ORDER5_LABEL, ledger.ORDER5_DETAIL_NOTE,
+                                                         ledger.ORDER5_CITATION), [])
+            bad = dict(detail, allset_result=dict(detail["allset_result"], tag_list=[]))
+            self.assertIn("detail.allset_result", self.rc.compare_with_detail(bad, got, ledger.ORDER5_LABEL,
+                                                                              ledger.ORDER5_DETAIL_NOTE, ledger.ORDER5_CITATION))
+        return main, got
+
+    def test_standard(self):
+        main, _got = self.check(self.to5.Fixture(self.to5.standard_spec()), "ok")
+        self.assertTrue(main["official"]["result"]["tag_list"])
+        # 本物の order5.py の main の code・決まった文・注記・reference_criteria の形が、ledger の決まった値と同じ
+        o5 = self.to5.o5
+        sealed = {n: sha for n, sha, _src in o5.SEALED_CODE}
+        srcs = {"periods": "seq 1 periods targets:code", "stats-order1": "seq 5 stats-order1 order1:targets",
+                "stats-order1b": "seq 6 stats-order1b files"}
+        self.assertEqual(main["code"], {
+            "sealed": [{"name": n, "sha256": sealed[n], "sources": [srcs[k]]} for n, k, _f in ledger.ORDER5_SEALED],
+            "versions": [{"name": n, "commit": c, "path": "src/stats/tagrules.py",
+                          "sha256": sealed["1cb463a:src/stats/tagrules.py"] if s_ is None else s_, "sealed": sl}
+                         for n, c, s_, sl in ledger.ORDER5_VERSIONS]})
+        self.assertEqual((main["label"], main["limits"], main["citation"]),
+                         (ledger.ORDER5_LABEL, list(ledger.ORDER5_LIMITS), list(ledger.ORDER5_CITATION)))
+        self.assertEqual([x["note"] for x in main["candidates"]], [ledger.ORDER5_REF_NOTE] * 6 + [None])
+        self.assertEqual(sorted(main["input"]), sorted(["entry", "run_id", "day_rows", "day_files_read",
+                                                        "day_files_sha256_checked", "c7_denominators_match_order4",
+                                                        "gkg_run_result_seq", "gkg_run_result_record_sha256",
+                                                        "manifest_path", "manifest_lines", "manifest_sha256",
+                                                        "day_files_digest"]))
+        rc = main["reference_criteria"]
+        self.assertEqual(sorted(rc), ["computed", "criteria_ids", "note", "official", "order2_status", "source"])
+
+    def test_c2_not_computable(self):
+        main, _got = self.check(self.to5.Fixture(self.to5.standard_spec(v1_empty_day="2015-03-31")), "ok")
+        self.assertIn("not_computable", [x["status"] for x in main["candidates"]])
+
+    def test_c7_stopped(self):
+        spec = self.to5.standard_spec()
+        spec["2015-03-31"] = [("2", "", "", False)] * 2           # 欠けた日でない日に、テーマの付いた文書が無い
+        self.check(self.to5.Fixture(spec), "stopped")
 
 
 class TestRecomputeUnit(unittest.TestCase):
