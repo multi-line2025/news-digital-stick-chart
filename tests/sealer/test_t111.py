@@ -392,6 +392,10 @@ class TestForgeries(Case):
                                                                                     "sha256": "b" * 64}]))),
                          "main.code.sealed"),
             "置き場所なし": (doc, "計算し直してからでなければ書かない"),
+            # 流したコードの版を偽る（試みと同じに保つ欄は変えず、取り出したファイルの数だけ変える）：git の照合が止める
+            "code の tree": (dict(doc, code=dict(doc["code"], tree=dict(doc["code"]["tree"],
+                                                                       files=doc["code"]["tree"]["files"] + 1))),
+                            "順番5を流したコードの版を偽っている"),
         }
         for name, (bad, text) in cases.items():
             with self.subTest(name=name):
@@ -402,6 +406,15 @@ class TestForgeries(Case):
         # Git の外のファイルが無い
         os.rename(os.path.join(out_dir, "order5-extra.json"), os.path.join(out_dir, "moved.json"))
         self.refuses5(O5, doc, "Git の外のファイル（order5-extra.json）が置き場所に無い", **inp)
+
+    def test_attempt_code_forged(self):
+        """試みの記録の order5.py の sha256 を偽ると、書く仕組み（git の照合）が書かず、照合を飛ばして足すと verify が止める。"""
+        data = self.ledger_bytes()
+        adoc = seal_order5.build_attempt(self.c, data, ledger.verify_chain(data))
+        bad = dict(adoc, code=dict(adoc["code"], script={"path": ledger.ORDER5_SCRIPT, "sha256": "c" * 64}))
+        self.refuses5(A5, bad, "順番5を流したコードの版を偽っている")
+        self.raw5(A5, bad)
+        self.verify_stops("順番5を流したコードの版を偽っている", "all", "--rev", "auto")
 
     @staticmethod
     def resha(doc, main):

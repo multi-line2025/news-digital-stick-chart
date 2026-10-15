@@ -1933,7 +1933,7 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_order5.py --store 
 テストは `tests/sealer/test_t111.py`。本物の記録の固定したコミット（`fixed_records.ORDER5_CODE_COMMIT`。seq 1〜15）の clone で、order5.py をテストの仮のコード（合成の日の集計と合成の区分表から、本物と同じ名前・形のファイルを書く）に置き換えて確かめる。合成のファイルの sha256 は本物の day の行・区分表の result の行と違うので、計算し直しの入力のその値だけを置き換える。また verify の `--store` は順番4（seq 15）の C7 の分母の数え直しにも使われるが、合成の日の集計は本物の seq 15 と合わないので、このテストの中では順番4の数え直しを差し替える（順番4の数え直しは test_t095 で確かめている）。
 - 書く → コミット → verify（`TestWrite`）。計算し直しと Git の外のファイルの照合が通り、detail を1バイト変えると止まる。order5.py が止まったときは試みだけが残り、もう一度流すと新しい試みとして記録される。順番5のあとは試みも書かない。
 - C7 で止まった形（`TestStopped`）：stopped の記録が書かれ、outside は null。
-- 偽り（`TestForgeries`）：一覧にテーマを足す版の order5.py は、書く仕組みの計算し直しが止める。照合を飛ばして足すと `--store` の verify が止める。`main_sha256`・`refs`・`attempt`・`code`・`status`・`outside`・main の欠けた日・参照・封印済みのコード・置き場所なし・一覧の件数・Git の外のファイルの欠け、を偽った中身は書かない。
+- 偽り（`TestForgeries`）：一覧にテーマを足す版の order5.py は、書く仕組みの計算し直しが止める。照合を飛ばして足すと `--store` の verify が止める。`main_sha256`・`refs`・`attempt`・`code`（試みとの違い、取り出したファイルの数）・`status`・`outside`・main の欠けた日・参照・封印済みのコード・置き場所なし・一覧の件数・Git の外のファイルの欠け、を偽った中身は書かない。試みの記録の order5.py の sha256 を偽ると、書く仕組みは書かず、照合を飛ばして足すと verify が止める。
 - 位置の単体のテスト（`TestOrderUnit`）、照らし方の単体のテスト（`TestRecomputeUnit`）。
 
 ### 判断が要った点
