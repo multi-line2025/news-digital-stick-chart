@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -40,7 +41,13 @@ class TestSummaryDoesNotShrink(Clone):
         self.assertIn("run_id %s のマニフェストの時刻証明（gkg-run-result の記録が無い。run-complete まである）"
                       % self.rid, before)
         self.write_manifest(dump(rows_of(self.body)[:-1]))
-        code, out, err = tl.run_verify_inproc(self.c, "all", "--rev", "auto")
+        # T-112：作業ツリーのマニフェストを短くすると、GKG の追記だけの照合（作業ツリーの版を渡す）が止める
+        # （tests/sealer/test_t112.py）。ここでは、まとめの「照らさなかった」だけを見るので、その照合を差し替えて流す
+        code, _out, err = tl.run_verify_inproc(self.c, "all", "--rev", "auto")
+        self.assertEqual(code, 1)
+        self.assertIn("HEAD の版を先頭に持たない", err)
+        with mock.patch.object(tl.verify, "gkg_manifests_append_only", lambda st: None):
+            code, out, err = tl.run_verify_inproc(self.c, "all", "--rev", "auto")
         self.assertEqual(code, 0, err)
         after = unchecked_line(out)
         self.assertIn("run_id %s のマニフェストの時刻証明（gkg-run-result の記録が無い。終わっていない run（run-complete "
