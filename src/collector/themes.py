@@ -89,8 +89,15 @@ data/manifest/gdelt-themes.jsonl の行で決まる。実行の入口は5章（T
       求める（check_append_only）。行を消して普通にコミットし直した跡、途中の1組だけを消した跡、
       行を変えた跡があれば、通信の前に止まる。
     - 回数は、履歴の各版の attempt の行の数の最大値と、HEAD の版の数のうち大きい方で数える。
-    - 限界：履歴そのものを書き換えて過去の版を消すこと（reset・rebase・filter-branch、reflog の
-      期限切れのあとの gc など）は見分けられない（0.1章と同じ）。
+    - 浅い clone と graft のファイルがあれば止まる（check_no_graft_or_shallow。差し戻し2回目 中-2）。
+      置き換えの参照（refs/replace/）は、コードの関門（codegate.check_clean）が止める。
+    - 履歴は --reflog も合わせて見る（差し戻し2回目 中-2）。理由（前提 → 結論）：この関門は取得する
+      機械の上で、取得の前に動く。reflog はその機械にある → 枝を消す・reset・amend で --all から
+      外れた過去の版も、reflog の期限（既定で90日、届かない commit は30日）までは見つかる。止める
+      方向にしか働かない（版が増えても、追記だけなら先頭部分であることは変わらない）。
+    - 限界：過去の版を履歴と reflog の両方から消すこと（reset・rebase・filter-branch・枝を消すこと
+      （orphan で始め直して元の枝を消す）のあとで reflog を消すか期限切れにして gc する）は
+      見分けられない。reflog は clone に入らないので、第三者の照合（verify）には使えない。
 
 ------------------------------------------------------------------------
 1. 取得元と通信
@@ -194,8 +201,10 @@ data/manifest/gdelt-themes.jsonl の行で決まる。実行の入口は5章（T
     build_output（2章・2.1章の判定）で止まったとき、表の数と文字の種類だけを標準エラーに1行で
     出す。ファイル・マニフェストには書かない。failed の行の reason は今までどおり例外の型の名前で、
     stage は shape。診断の計算や出力が落ちても、failed の行は書く（軽-8）。
-    件数の欄らしい欄（ASCII の数字だけの値が1つ以上で、名前の形に合う値の数以上）は、
-    count_like: true と values・ascii_digits_only だけを出す（捨てる欄から導いた数を出さない。軽-5）。
+    名前の規則に合わない値のうち、数の形（NUMBER_SHAPE_RE：ASCII の数字と , . だけで、数字を含む）の
+    値は、文字の種類の内訳などから外し、nonmatch_number_shaped に数だけを数える（差し戻し2回目
+    中-3・軽-4）。合わない値の過半数が数の形の欄は、件数の欄らしい欄として count_like: true と
+    values・ascii_digits_only・number_shaped だけを出す（捨てる欄から導いた数を出さない。軽-5）。
     そのほかの欄は count_like: false と下の数を出す。
     限界：エージェントが流すと、標準エラーの出力は会話の記録に残る（軽-6）。合わない値が1つだけの
     ときは、その長さの範囲と文字の種類ごとの数が分かる（テーマの名前は個人情報ではない）。
@@ -204,7 +213,8 @@ data/manifest/gdelt-themes.jsonl の行で決まる。実行の入口は5章（T
       columns_not_shown（DIAG_MAX_COLUMNS を超えて数を出さなかった欄の数）、
       first_row_numeric_columns（1行目で数字だけの値の欄の数）、
       columns（先頭から DIAG_MAX_COLUMNS 欄まで、欄ごとに）：values・empty・theme_name_match・
-        theme_name_nonmatch・ascii_digits_only・nonmatch_first_char_not_upper・nonmatch_too_long
+        theme_name_nonmatch・ascii_digits_only・nonmatch_number_shaped・
+        nonmatch_first_char_not_upper・nonmatch_too_long
         （161文字以上）・nonmatch_values_with（合わない値のうち、その種類の文字を含む値の数）・
         nonmatch_chars（合わない値に含まれるその種類の文字の数）。文字の種類は upper・lower・
         digit・underscore・space・symbol（そのほかの ASCII）・non_ascii。
@@ -247,6 +257,21 @@ MAX_TOTAL_ATTEMPTS = 3
 # 0.2章：failed の行の stage（止まった段。T-101 差し戻し1回目 中-3）。fetch：通信（HTTP・時間・長さ・
 # 通信の失敗）、read：表として読む（UTF-8・形式）、shape：欄の判定（2章・2.1章）、write：書く前の検査
 FAILED_STAGES = ("fetch", "read", "shape", "write")
+# 0.2章：マニフェストの行の形（T-101 差し戻し2回目 4）。kind ごとのキーの集まり（並べ替えた形。行は
+# sort_keys で書く）。_append_line は、書く前にこの形と照らす。封印係の照合（T-103）はこの定数と照らす。
+# failed の stage の値は FAILED_STAGES。e3784c2 の本物の1回目の failed の行は stage を持たない（追記だけ
+# なので直さない）。その形は MANIFEST_LEGACY_FAILED_KEYS（書くことはない。照合のための記録）
+MANIFEST_ROW_KEYS = {
+    "attempt": ("attempted_at", "code_path", "code_sha256", "exclusion_rule_record_sha256",
+                "exclusion_rule_seq", "kind", "source_url"),
+    "fetch": ("at", "code_sha256", "kind"),
+    "failed": ("at", "kind", "reason", "stage"),
+    "result": ("attempted_at", "code_path", "code_sha256", "dropped_columns",
+               "exclusion_rule_record_sha256", "exclusion_rule_seq", "fetched_at", "file_name",
+               "headerless", "kept_columns", "kind", "rows", "sha256", "sheet_names_replaced",
+               "source_url", "store_location"),
+}
+MANIFEST_LEGACY_FAILED_KEYS = ("at", "kind", "reason")
 DIAG_MAX_COLUMNS = 8             # 6章：診断で欄ごとの数を出す欄の数の上限
 REQUEST_TIMEOUT_SECONDS = 60
 TOTAL_DEADLINE_SECONDS = 300
@@ -263,6 +288,7 @@ DROP_HEADER_RE = re.compile(
 NAME_HEADER_RE = re.compile(
     r"\A(?:theme|themes|name|names|theme ?name|category ?name|tag)\Z", re.I)
 ASCII_DIGITS_RE = re.compile(r"\A[0-9]+\Z")
+NUMBER_SHAPE_RE = re.compile(r"\A(?=[^0-9]*[0-9])[0-9,.]+\Z")   # 6章：数の形（ASCII の数字と , . だけ）
 NUMBER_SEPARATORS = frozenset(",. +-_'\u00a0\u202f")
 THEME_NAME_RE = re.compile(r"\A[A-Z][A-Z0-9_]{0,159}\Z")
 
@@ -701,7 +727,17 @@ def _read_manifest(path):
         return f.read()
 
 
+def check_row_shape(entry):
+    """書く行が MANIFEST_ROW_KEYS の形（と failed の stage が FAILED_STAGES）であること。"""
+    kind = entry.get("kind")
+    if kind not in MANIFEST_ROW_KEYS or tuple(sorted(entry)) != MANIFEST_ROW_KEYS[kind]:
+        raise ThemesError("マニフェストの行の形が、MANIFEST_ROW_KEYS と違う（コードの誤り）")
+    if kind == "failed" and entry["stage"] not in FAILED_STAGES:
+        raise ThemesError("failed の行の stage が FAILED_STAGES に無い（コードの誤り）")
+
+
 def _append_line(path, entry, what):
+    check_row_shape(entry)
     line = (json.dumps(entry, sort_keys=True, ensure_ascii=True) + "\n").encode("ascii")
     if privacy_scan.find_in_bytes(line):
         raise ThemesError("%s にメールアドレスの形の文字列があるので書かずに止まる" % what)
@@ -733,7 +769,9 @@ def _manifest_versions(root):
     cg = _load_codegate()
     rel = "/".join(MANIFEST_DIR_PARTS + (MANIFEST_NAME,))
     try:
-        code, out = cg.run_git(root, "log", "--all", "--full-history", "--format=%H", "--", rel)
+        check_no_graft_or_shallow(root, cg)
+        code, out = cg.run_git(root, "log", "--all", "--reflog", "--full-history", "--format=%H",
+                               "--", rel)
         if code != 0:
             raise ThemesError("履歴の関門：git log を実行できない")
         versions = []
@@ -751,6 +789,28 @@ def _manifest_versions(root):
     except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
         raise ThemesError("履歴の関門：git の実行に失敗した") from None
     return versions
+
+
+def check_no_graft_or_shallow(root, cg=None):
+    """0.3章（T-101 差し戻し2回目 中-2）。浅い clone（.git/shallow）と graft のファイルは、commit の
+    親を変えて、履歴の版を見えなくできる。どちらかがあれば止まる。graft のファイルの場所は
+    git rev-parse --path-format=absolute --git-common-dir の下の info/grafts で決める
+    （docs/stats/seal-order1.md と同じやり方。GIT_GRAFT_FILE に左右されない。codegate の git は
+    環境変数を固定して動かすので、GIT_GRAFT_FILE・GIT_SHALLOW_FILE は渡らない）。"""
+    cg = cg or _load_codegate()
+    code, out = cg.run_git(root, "rev-parse", "--is-shallow-repository")
+    if code != 0 or out.strip() not in (b"true", b"false"):
+        raise ThemesError("履歴の関門：浅い clone かどうかを確かめられない")
+    if out.strip() != b"false":
+        raise ThemesError("履歴の関門：浅い clone（.git/shallow）なので、履歴の版を確かめられない。"
+                          "取得しない（リードに報告）")
+    code, out = cg.run_git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    common = out.decode("utf-8", "replace").strip() if code == 0 else ""
+    if not common or not os.path.isabs(common):
+        raise ThemesError("履歴の関門：git の共通のディレクトリを決められない")
+    if os.path.lexists(os.path.join(common, "info", "grafts")):
+        raise ThemesError("履歴の関門：graft のファイル（info/grafts）がある。commit の親を変えられる"
+                          "ので取得しない（リードに報告）")
 
 
 def check_append_only(versions, head_manifest):
@@ -822,7 +882,12 @@ def _char_classes(v):
 
 
 def diagnose_shape(sheets):
-    """表の形の数と種類だけを数える（値・名前・断片は返さない）。返り値は数だけの dict。"""
+    """表の形の数と種類だけを数える（値・名前・断片は返さない）。返り値は数だけの dict。
+
+    T-101 差し戻し2回目 中-3・軽-4：名前の規則に合わない値のうち、数の形（NUMBER_SHAPE_RE。ASCII の
+    数字と , . だけ）の値は、文字の種類の内訳から外して数だけを数える（nonmatch_number_shaped）。
+    合わない値の過半数が数の形の欄は、件数の欄らしい欄（count_like）とし、values・ascii_digits_only・
+    number_shaped だけを出す。"""
     out = {"sheets": len(sheets), "rows": 0, "column_count_distribution": {}, "columns": []}
     cols = []
     for _n, rows in sheets:
@@ -834,6 +899,7 @@ def diagnose_shape(sheets):
                 while len(cols) <= i:
                     cols.append({"values": 0, "empty": 0, "theme_name_match": 0,
                                  "theme_name_nonmatch": 0, "ascii_digits_only": 0,
+                                 "nonmatch_number_shaped": 0,
                                  "nonmatch_first_char_not_upper": 0, "nonmatch_too_long": 0,
                                  "nonmatch_values_with": {}, "nonmatch_chars": {}})
                 d = cols[i]
@@ -847,6 +913,9 @@ def diagnose_shape(sheets):
                     d["theme_name_match"] += 1
                     continue
                 d["theme_name_nonmatch"] += 1
+                if NUMBER_SHAPE_RE.match(v):
+                    d["nonmatch_number_shaped"] += 1      # 数だけを数え、内訳に入れない
+                    continue
                 if v and not ("A" <= v[0] <= "Z"):
                     d["nonmatch_first_char_not_upper"] += 1
                 if len(v) > 160:
@@ -855,17 +924,20 @@ def diagnose_shape(sheets):
                     if n:
                         d["nonmatch_values_with"][cls] = d["nonmatch_values_with"].get(cls, 0) + 1
                         d["nonmatch_chars"][cls] = d["nonmatch_chars"].get(cls, 0) + n
-    # 軽-5：件数の欄らしい欄（ASCII の数字だけの値が、名前の形に合う値以上で1つ以上）は、捨てる欄から
-    # 導いた数を出さない。出すのは values と ascii_digits_only だけ
     out["columns"] = [{"count_like": True, "values": d["values"],
-                       "ascii_digits_only": d["ascii_digits_only"]}
-                      if d["ascii_digits_only"] and d["ascii_digits_only"] >= d["theme_name_match"]
-                      else dict(d, count_like=False) for d in cols]
+                       "ascii_digits_only": d["ascii_digits_only"],
+                       "number_shaped": d["nonmatch_number_shaped"]}
+                      if is_count_like(d) else dict(d, count_like=False) for d in cols]
     out["columns_not_shown"] = max(0, max((len(r) for _n, rows in sheets for r in rows), default=0)
                                    - DIAG_MAX_COLUMNS)
     out["first_row_numeric_columns"] = sum(
         1 for _n, rows in sheets[:1] for v in (rows[0] if rows else []) if looks_like_number(v))
     return out
+
+
+def is_count_like(d):
+    """件数の欄らしい欄：名前の規則に合わない値の過半数が、数の形（NUMBER_SHAPE_RE）。"""
+    return d["nonmatch_number_shaped"] * 2 > d["theme_name_nonmatch"]
 
 
 def format_diagnosis(d):

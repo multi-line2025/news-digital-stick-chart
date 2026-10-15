@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -403,6 +404,48 @@ class TestCodeGate(unittest.TestCase):
         self.assertEqual(tr.calls, [])
         self.assertFalse(os.path.exists(self._mp()))
 
+    # ---- T-101 差し戻し2回目 中-2：graft・浅い clone・枝を消すこと
+
+    def _git_common(self):
+        out = subprocess.run(["git", "-C", self.root, "rev-parse", "--path-format=absolute",
+                              "--git-common-dir"], capture_output=True, check=True).stdout
+        return out.decode().strip()
+
+    def test_graft_file_stops(self):
+        self._prep_run()
+        self._fail_cycle()
+        head = subprocess.run(["git", "-C", self.root, "rev-parse", "HEAD"], capture_output=True,
+                              check=True).stdout.decode().strip()
+        os.makedirs(os.path.join(self._git_common(), "info"), exist_ok=True)
+        with open(os.path.join(self._git_common(), "info", "grafts"), "w") as f:
+            f.write(head + "\n")                              # 親の無い commit にする1行
+        self._assert_stops_without_network("graft のファイル")
+
+    def test_shallow_file_stops(self):
+        self._prep_run()
+        self._fail_cycle()
+        head = subprocess.run(["git", "-C", self.root, "rev-parse", "HEAD"], capture_output=True,
+                              check=True).stdout.decode().strip()
+        with open(os.path.join(self._git_common(), "shallow"), "w") as f:
+            f.write(head + "\n")
+        self._assert_stops_without_network("浅い clone")
+
+    def test_orphan_branch_and_deleting_old_branch_stops_while_reflog_exists(self):
+        """枝を消す形：orphan で始め直し、元の枝を消す。reflog がある間は止まる。"""
+        self._prep_run()
+        for _ in range(3):
+            self._fail_cycle()
+        lines = open(self._mp(), "rb").read().splitlines()
+        old = subprocess.run(["git", "-C", self.root, "rev-parse", "--abbrev-ref", "HEAD"],
+                             capture_output=True, check=True).stdout.decode().strip()
+        self.taf.git(self.root, "checkout", "-q", "--orphan", "fresh")
+        with open(self._mp(), "wb") as f:
+            f.write(b"".join(l + b"\n" for l in lines[:3]))
+        self.taf.git(self.root, "add", "-A")
+        self.taf.git(self.root, "commit", "-q", "-m", "始め直し")
+        self.taf.git(self.root, "branch", "-q", "-D", old)
+        self._assert_stops_without_network("先頭部分でない")
+
     def test_count_uses_history_maximum(self):
         a = b'{"kind": "attempt"}\n'
         f = b'{"kind": "fetch"}\n{"kind": "failed"}\n'
@@ -449,7 +492,8 @@ class TestCodeGate(unittest.TestCase):
                                                      themes.MANIFEST_NAME)))
 
     def test_reset_of_history_is_a_documented_limit(self):
-        """限界（README 8章）：git reset で履歴そのものを戻すと、手元の検査では見分けられない。"""
+        """T-101 差し戻し2回目：git reset で戻しても、reflog がある間は止まる（--reflog）。
+        限界（README 8章）：reflog を消して gc すると、手元の検査では見分けられない。"""
         self._prep_run()
         tr = FakeTransport(GOOD, status=503)
         with self.assertRaises(self.mod.AttemptRecorded):
@@ -462,7 +506,12 @@ class TestCodeGate(unittest.TestCase):
         self.taf.git(self.root, "commit", "-q", "-m", "失敗の行")
         self.taf.git(self.root, "reset", "-q", "--hard", "HEAD~1")
         tr2 = FakeTransport(GOOD)
-        self.run_mod(tr2)
+        with self.assertRaisesRegex(self.mod.ThemesError, "先頭部分でない"):
+            self.run_mod(tr2)                              # reflog に失敗の行の版が残っている
+        self.assertEqual(tr2.calls, [])
+        self.taf.git(self.root, "reflog", "expire", "--expire=now", "--all")
+        self.taf.git(self.root, "gc", "-q", "--prune=now")
+        self.run_mod(tr2)                                  # 限界：reflog を消すと通る
         self.assertEqual(len(tr2.calls), 1)
 
     def test_other_root_stops(self):
@@ -1146,7 +1195,8 @@ class TestDiagnosis(RunCase):
         self.assertEqual(c0["nonmatch_chars"]["lower"], 3)
         self.assertEqual((c0["nonmatch_first_char_not_upper"], c0["nonmatch_too_long"]), (2, 1))
         # 軽-5：件数の欄らしい欄は values と ascii_digits_only だけ（digit などの数を出さない）
-        self.assertEqual(c1, {"count_like": True, "values": 7, "ascii_digits_only": 6})
+        self.assertEqual(c1, {"count_like": True, "values": 7, "ascii_digits_only": 6,
+                              "number_shaped": 6})
         self.assertFalse(c0["count_like"])
         # 失敗の行の reason は今までどおり。ファイルは書かない
         lines = [json.loads(l) for l in self.written()[themes.MANIFEST_NAME].splitlines()]
@@ -1214,6 +1264,38 @@ class TestDiagnosis(RunCase):
         shutil.rmtree(self.tmp, True)
         self.setUp()
 
+    def test_count_like_repro_lowercase_names_with_one_number(self):
+        """中-3（監査の再現）：小文字の名前の欄に数字だけの値が1つ混ざっても、内訳は消えない。"""
+        rows = [["tax_policy", "12"], ["econ_x", "7"], ["1999", "3"]]
+        d = themes.diagnose_shape([("", rows)])
+        c0, c1 = d["columns"]
+        self.assertFalse(c0["count_like"])
+        self.assertEqual((c0["theme_name_nonmatch"], c0["nonmatch_number_shaped"]), (3, 1))
+        self.assertEqual(c0["nonmatch_values_with"], {"lower": 2, "underscore": 2})
+        self.assertNotIn("digit", c0["nonmatch_values_with"])   # 数の形の値は内訳に入れない
+        self.assertEqual(c1, {"count_like": True, "values": 3, "ascii_digits_only": 3,
+                              "number_shaped": 3})
+        text = themes.format_diagnosis(d)
+        for v in ("tax_", "_pol", "olicy", "econ", "1999"):
+            self.assertNotIn(v, text)
+
+    def test_count_like_repro_separated_numbers(self):
+        """軽-4（監査の再現）："1,234" の欄は count_like になり、桁の数を出さない。"""
+        rows = [["ZQXJ_A", "1,234"], ["ZQXJ_B", "5,678.9"], ["ZQXJ_C", "12"]]
+        d = themes.diagnose_shape([("", rows)])
+        c0, c1 = d["columns"]
+        self.assertFalse(c0["count_like"])
+        self.assertEqual(c1, {"count_like": True, "values": 3, "ascii_digits_only": 1,
+                              "number_shaped": 3})
+        self.assertNotIn("1,234", themes.format_diagnosis(d))
+
+    def test_number_shape_rule(self):
+        for v, want in (("12", True), ("1,234", True), ("1.5", True), ("1,234.5", True),
+                        (",.", False), ("", False), ("1 234", False), ("12a", False),
+                        ("\uff11\uff12", False), ("-12", False)):
+            with self.subTest(v=v):
+                self.assertEqual(bool(themes.NUMBER_SHAPE_RE.match(v)), want)
+
     def test_many_columns_are_capped(self):
         rows = [["1"] + ["ZQXJ_Wvkq"] * 11]
         d = themes.diagnose_shape([("", rows)])
@@ -1236,6 +1318,60 @@ class TestDiagnosis(RunCase):
         self.assertIn("診断", err.getvalue())
         self.assertEqual(out.getvalue(), "")
         self.assert_no_fragments(err.getvalue(), DIAG_NAMES + DIAG_COUNTS)
+
+
+class TestRowShape(RunCase):
+    """T-101 差し戻し2回目 4：マニフェストの行の形の定数（封印係の T-103 が照らす）と、書く行がその形で
+    あること。"""
+
+    def test_constants(self):
+        self.assertEqual(themes.MANIFEST_ROW_KEYS, {
+            "attempt": ("attempted_at", "code_path", "code_sha256", "exclusion_rule_record_sha256",
+                        "exclusion_rule_seq", "kind", "source_url"),
+            "fetch": ("at", "code_sha256", "kind"),
+            "failed": ("at", "kind", "reason", "stage"),
+            "result": ("attempted_at", "code_path", "code_sha256", "dropped_columns",
+                       "exclusion_rule_record_sha256", "exclusion_rule_seq", "fetched_at",
+                       "file_name", "headerless", "kept_columns", "kind", "rows", "sha256",
+                       "sheet_names_replaced", "source_url", "store_location")})
+        for keys in themes.MANIFEST_ROW_KEYS.values():
+            self.assertEqual(tuple(sorted(keys)), keys)
+        self.assertEqual(themes.FAILED_STAGES, ("fetch", "read", "shape", "write"))
+        self.assertEqual(themes.MANIFEST_LEGACY_FAILED_KEYS, ("at", "kind", "reason"))
+        self.assertEqual(set(themes.MANIFEST_NEXT), {None} | set(themes.MANIFEST_ROW_KEYS))
+
+    def _check_written(self):
+        for raw in self.written()[themes.MANIFEST_NAME].splitlines():
+            row = json.loads(raw)
+            self.assertEqual(tuple(sorted(row)), themes.MANIFEST_ROW_KEYS[row["kind"]])
+            if row["kind"] == "failed":
+                self.assertIn(row["stage"], themes.FAILED_STAGES)
+            self.assertEqual(raw, json.dumps(row, sort_keys=True, ensure_ascii=True).encode())
+
+    def test_written_rows_follow_constants(self):
+        with self.assertRaises(themes.ThemesError):
+            self.run_themes(GOOD, status=503)              # attempt・fetch・failed
+        self.commit_all()
+        self._check_written()
+        with self.assertRaises(themes.AttemptRecorded):
+            self.run_themes(GOOD)                          # 取り直しの attempt
+        self.commit_all()
+        self.assertEqual(self.run_themes(GOOD)["kind"], "result")
+        self._check_written()
+        self.assertEqual([json.loads(l)["kind"] for l in
+                          self.written()[themes.MANIFEST_NAME].splitlines()],
+                         ["attempt", "fetch", "failed", "attempt", "fetch", "result"])
+
+    def test_wrong_shape_is_not_written(self):
+        mp = self.manifest_path()
+        for entry in ({"kind": "fetch", "at": "x", "code_sha256": "y", "extra": 1},
+                      {"kind": "failed", "at": "x", "reason": "E"},
+                      {"kind": "failed", "at": "x", "reason": "E", "stage": "other"},
+                      {"kind": "other"}):
+            with self.subTest(entry=entry):
+                with self.assertRaises(themes.ThemesError):
+                    themes._append_line(mp, entry, "マニフェストの行")
+        self.assertFalse(os.path.exists(mp))
 
 
 class TestMain(unittest.TestCase):
