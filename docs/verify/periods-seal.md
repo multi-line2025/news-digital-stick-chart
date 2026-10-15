@@ -1658,7 +1658,7 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_order4.py --store 
 ```
 
 - ルートは、このファイルの場所から決まる（`seal_order3.py` と同じ。引数では変えられない）。
-- 所要時間は 60〜100分（一覧のコードが2115個の日の集計を開くため。missing-days-method.md 4章）。上限は4時間（`verify.ORDER4_TIMEOUT_SECONDS`）で、超えたら何も書かずに止まる。
+- 所要時間は 2〜3.5時間：一覧のコードが2115個の日の集計を開く（60〜100分。missing-days-method.md 4章）のに加えて、書く前の照合で、封印済みの `counting.py` が同じ2115個を開いて C7 の分母を数え直す（T-100。もう60〜100分）。上限はそれぞれ4時間（`verify.ORDER4_TIMEOUT_SECONDS`）で、超えたら何も書かずに止まる。
 - 終了コード：書いてコミットしたら 0。何も書かずに止まったら 1（「失敗（順番4の記録は書いていない）」）。書いたあとで止まったら 1（「止まった（順番4の記録は書いた）」）。引数の誤りは 2。
 - 結果（一覧の sha256 と欠けた日の数）は、コミットのあとで画面に出す。
 
@@ -1672,7 +1672,7 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_order4.py --store 
    - `--store` がフォルダである（中のファイルは開かない）。
 2. **固定した版の一覧のコードを流す**（`verify.run_order4`）：HEAD の版の `src/`・`sealed/`・`data/manifest/` の下のファイルすべてを、`git cat-file blob` のバイト列のまま空の一時フォルダに書き出し（書いたあとに読み戻して sha256 を照らす）、その中の `src/stats/missing_days.py` を `-I`・`-B`・空の `pycache_prefix` の Python で `--store <置き場所>` を付けて流す。中の関門（`official_day_records()`・gkg-run-result）は、書き出したフォルダの `sealed/` と `data/manifest/` を読む。0 以外で終われば、標準エラーの最後の行を添えて止まる。
 3. 出力が決まった形の JSON であること（`ledger.order4_list_bytes` で書き直したバイト列が出力とちょうど同じ）。HEAD と作業ツリーがはじめと同じこと。
-4. 記録を書く（書く前の照合：`ledger.check_order4_records`・`verify.check_order4_git`・`verify.check_order4_rules`（72本の条件。下の「照合」の (1)）・`ledger_head`・`head` が今の HEAD・`privacy_scan` と同じ検査）。中身のファイルは、記録に追記したあとで書く（差し戻し1回目 軽-1。追記の前で止まっても、一覧の入った中身のファイルを作業ツリーに残さない。追記のあとで中身を書けなかったときは「止まった（順番4の記録は書いた）」で終わり、コミットしない）。`.ots` を作り、記録・中身・`.ots` だけをパス指定で index に入れてコミットする（16章の手順7と同じ固定のしかた。本文は `seal_order4.ORDER4_MESSAGE`）。
+4. 記録を書く（書く前の照合：`ledger.check_order4_records`・`verify.check_order4_git`・`verify.check_order4_rules`（72本の条件。下の「照合」の (1)）・`verify.recount_order4`（C7 の分母。下の「照合」の (2)。`--store` の置き場所で数え直す。T-100）・`ledger_head`・`head` が今の HEAD・`privacy_scan` と同じ検査）。中身のファイルは、記録に追記したあとで書く（差し戻し1回目 軽-1。追記の前で止まっても、一覧の入った中身のファイルを作業ツリーに残さない。追記のあとで中身を書けなかったときは「止まった（順番4の記録は書いた）」で終わり、コミットしない）。`.ots` を作り、記録・中身・`.ots` だけをパス指定で index に入れてコミットする（16章の手順7と同じ固定のしかた。本文は `seal_order4.ORDER4_MESSAGE`）。
 
 ### 一覧のコードの版の決め方（統計係の JSON を入力にしない理由）
 
@@ -1710,7 +1710,7 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_order4.py --store 
   - `candidates` の記録（seq 2）が sha256 で縛る `candidates.py`（と、それが読み込む `periods.py`）を、sha256 で探して（作業ツリーの同じ名前のファイルか、git の履歴）、その2つだけを置いた空のフォルダで `-I`・`-B` の Python で読み込み、各日の `day_is_missing(files_ok, 1)` を計算する。一覧のコード（`missing_days.py`）は使わない。
   - その結果が、一覧の `below_min_files`（欠けた日に入っていて、その欄が真）と全日で同じ。欠けた日の `files_ok`・`files_listed` が day の行と同じ。`partial_days_count` が、欠けた日でなく `files_ok` < 96 の日の数と同じ。96・72 が封印済みの版の値と同じ。
   - データを持たない第三者も、これを照らせる。72本の規則を変えたコードで一覧を作っても、ここで止まる。
-- **(2) C7 の分母**（`verify.recount_order4`。verify に `--store` を渡したときだけ。60〜100分）：
+- **(2) C7 の分母**（`verify.recount_order4`。書く仕組みはいつも行い（入口の `--store`。置き場所が無ければ書かない。T-100）、verify は `--store` を渡したときだけ行う。60〜100分）：
   - `missing_days.py` は流さない。順番1b の記録（seq 6）が sha256 で縛る `counting.py` だけを置いた空のフォルダで、各日の日の集計を開き、day の行の `sha256` と照らしてから `parse_day`・`candidate_counts(…, C7)` で C7 の分母を数え直す（照らす前には数えない。リンクは開かない）。
   - 数え直した分母が、一覧の `c7_denominator_by_day` と全日で同じ。封印済みの `day_is_missing(files_ok, 分母)` で決め直した欠けた日が、一覧の欠けた日と同じ。
   - `--store` を渡さないときは「照らさなかった」と出す（終了コードは 0 のまま）。
@@ -1738,12 +1738,16 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_order4.py --store 
 5. ots が使えること（書いたあとに `.ots` を作る）。
 6. 1回だけ行う。2件目は、入口も照合も止める。
 
-書いたあとは、16章と同じく `verify.py all --rev auto` と `privacy_scan.py --all-history` を流し、push し、24時間以内に投稿する（投稿に入れるのはハッシュと時刻だけ）。あわせて、日の集計を持つ運営が `verify.py stats-order --store "$STORE"` を流し、(2) の C7 の分母の数え直しが通ることを確かめる（書く仕組みは (2) を行わないため。60〜100分）。
+書いたあとは、16章と同じく `verify.py all --rev auto` と `privacy_scan.py --all-history` を流し、push し、24時間以内に投稿する（投稿に入れるのはハッシュと時刻だけ）。あわせて、日の集計を持つ運営が `verify.py stats-order --store "$STORE"` を流し、(2) の C7 の分母の数え直しが通ることを確かめる（書く仕組みも (2) を行うが、書いてコミットした記録を verify の側でも照らすため。手順は下の「本番の実行の手順」）。
 
 ### 止まった場合の扱い
 
 - **何も書かずに止まったとき**（作業ツリーがきれいでない、順番4の記録がもうある、順番3の記録が無い、`threshold-access` がある、参照する記録が決まらない、3つのファイルの sha256 が封印の記録と違う、置き場所がフォルダでない、一覧のコードが 0 以外で終わった（日の集計が無い・sha256 が合わない・関門で止まった）、出力の形が違う、時間の上限を超えた、流しているあいだに HEAD が変わった、など）：記録は残らない。原因を直してから、もう一度流す。どれも、一覧の値を見て選べるものではない（一覧の値は封印済みの入力と固定した版で決まり、止まった回は値を画面にも記録にも出さない）。
 - **書いたあとで止まったとき**：16章と同じ。`.ots` が作れなかったときは `stamp.py stamp --seq N`。コミットが失敗したときは、消さずに、原因を直してから `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_order4.py --commit-written` でコミットする（最後の記録が `stats-order4` で、作業ツリーの変更がその記録・中身・`.ots` だけのとき。コミットの前の照合は16章の `check_written` と同じ）。
+  - **追記のあとで中身のファイルを書けなかった**（T-100。監査 P2）：入口は「止まった（順番4の記録は書いた）」で終わり、コミットしない。記録の行は作業ツリーの `sealed/ledger.jsonl` にあり、中身のファイルは無い。消さずに、原因（ディスク・権限など）を直してから、`PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_order4.py --write-content --store "$STORE"` を流す（`seal_order4.write_content`）。
+    - 条件：最後の記録が `stats-order4` で、その中身のファイルが無い。HEAD の版の `sealed/ledger.jsonl` が、今の記録から最後の1行を除いたものと同じ（記録はまだコミットしていない）。作業ツリーの変更がその行と、その seq の `.ots` だけ。`.ots` の照合に通る。
+    - 同じ HEAD で `build_doc` を流し直し（一覧のコードを流すので60〜100分）、中身のバイト列の sha256 が記録の `targets` の sha256 とちょうど同じときだけ書き、入口と同じ固定のしかたでコミットする。違えば何も書かない（HEAD・置き場所・Python の版のどれかが書いた時と違う）。同じバイト列なので、書いた時の照合（check_new）に通ったものと同じ中身である。そのあと `.ots` が無ければ `stamp.py stamp --seq N` で作ってコミットする。
+    - 跡：記録の行はこの入口でもコミットされ、消えない。中身を書いたのがあとであることは記録からは分からない（`recorded_at` は追記の時刻のまま）。16章の限界の「コミットと投稿の前に手で捨てる形」は、この形でも残る（作業ツリーの記録の行を手で捨てれば跡は残らない）。この入口はそれを広げも狭めもしない。中身は追記の前の照合に通ったものと同じバイト列に限られるので、中身を選び直す道は作らない。
 
 ### 第三者の確かめ方
 
@@ -1774,11 +1778,57 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py stats-order --store "$
 
 - **一覧を作るコードの版は、前もって縛っていない**（差し戻し1回目 中-1）。運営は、`missing_days.py`（と、その中で読む `src/collector/gkg.py` など）を変えてコミットしてから書ける。一覧の値（48日）は T-082 の監査と T-093 で既に知られているので、値を知ったうえでコードを変えることもできる。この仕組みは、記録がその版を縛ること（`code`）に加えて、一覧の値を封印済みのコードで照らすことで、これに当たる。
   - 72本の条件に当たる日（と、その `files_ok`・`files_listed`、一部が欠けた日の数）は、(1) が書く仕組みと verify で止める。データを持たない第三者も照らせる。
-  - C7 の分母（と、分母が0の日）は、(2) でしか照らせない。(2) は日の集計を持つ者（運営、監査係）だけが行える。書く仕組みは (2) を行わないので、分母を偽る版で書けば記録は書かれ、`--store` を渡した verify が止める。そのため、書いたあとに運営が (2) を流す（「書く前に確かめること」の最後）。第三者が (2) の結果を自分で確かめる手段は、日の集計が Git の外にある限り無い。
+  - C7 の分母（と、分母が0の日）は、(2) でしか照らせない。(2) は日の集計を持つ者（運営、監査係）だけが行える。T-100 から、書く仕組みも (2) を行うので、分母を偽る版では記録は書かれない。照合を飛ばして手で足した記録は、`--store` を渡した verify が止める。第三者が (2) の結果を自分で確かめる手段は、日の集計が Git の外にある限り無い。
   - 照らすのは一覧の値で、`missing_days.py` の中身そのもの（読み方の文の言い回しなど、値に効かない部分）は照らさない。
 - **入口を通さずに、手で `missing_days.py` を動かせば、結果を先に見られる。** 一覧の件数と日付は既に知られている。上のとおり、値を選ぶためにコードを変えても、72本の条件は (1) で、C7 の分母は (2) で止まる。止められないのは「封印するかどうか」と「いつ封印するか」（順番3のあと、threshold-access の前）の選択である。封印しないことは、順番5が順番4を参照できない形で残る（順番5の照合が止める）。
 - **止まった回は記録に残らない。** 順番3の試みと違い、順番4は止まった回を記録しない。止まった回は一覧の値を記録にも画面にも出さない。
-- **threshold-access の書く仕組みは、順番4を求めない。** 順番4より前に `threshold-access` を書くと、そのあとは順番4を書けない（入口も照合も止める）。threshold-access の側の照合は、別のタスク（T-097）で扱う。
+- **threshold-access と順番4**：下の「threshold-access と順番4（T-097。T-100 で入れた）」。
 - **`periods`・`candidates` の1件目を参照する。** `missing_days.SEALED_CODE` が seq 1・2 を指すのに合わせた。区切りの作り直しで2件目以降の `periods` を足しても、参照は1件目のままである。
 - **`.pth` で、照らしていないコードが入りうる**（差し戻し1回目 軽-4）。封印済みの版と一覧のコードは `-I`・`-B` で流すが、`-I` が無視するのは利用者の site と環境変数で、流した Python の `site-packages`（`.venv` の python で流すなら `.venv/lib/python*/site-packages`）の `.pth` は読み込まれる。`.pth` の `import` の行は起動のたびに実行されるので、そこに置いたコードは、記録も照合も縛っていない。`python` の欄は版の申告だけで、この中身は記録に残らない。第三者は、`python3 -c 'import site; print(site.getsitepackages())'` のフォルダに、自分の知らない `.pth` が無いことを確かめた Python で verify を流す。
 - 16章の限界のうち、コミットと投稿の前に手で捨てる形は、順番4にも当てはまる。(1)(2) は verify を動かしている Python で流す。値は標準ライブラリの JSON と整数だけで決まるので、Python の版で変わらないと見込む（確かめたのは、テストで使った2つの版だけ）。
+
+### threshold-access と順番4（T-097。T-100 で入れた）
+
+- **決まり**（`ledger.check_threshold_access_after_order4`）：
+  - 最初の `threshold-access` の記録より前に、正式な run の `gkg-run-result` か順番3（`stats-order3`）の記録があるなら、その `threshold-access` より前に順番4（`stats-order4`）の記録がなければならない。
+  - 無ければ、書く仕組みは何も書かず、verify は止まる（監査 probe A の形）。
+  - `check_stats_order` から呼ぶので、`seal_access.py` の書く前の照合と、`verify.py stats-order`・`all` の両方で流れる。
+- **条件を付けた理由**：
+  - 順番4は、正式な run の結果と順番3がそろってはじめて書ける。どちらも無い記録（区切りや取得の照合だけを確かめる仮の記録など）では、一覧がまだ決まらないので求めない。
+  - どちらも無いうちに `threshold-access` を書くと、そのあとは順番4を書けない（`check_order4_position`）。その場合、順番5が順番4を参照できない形（`ledger.check_ref_order4` が止める）で記録に残る。
+- **何を求めるか（今の段階の判断）**：順番4だけを求める。
+  - 前提1：candidates.md 3章 (5) が `threshold-access` との前後を定めているのは、手法を作る期間の区画の一覧（順番4）だけである（「モデルより前、遅くとも threshold-access より前」）。
+  - 前提2：順番5（タグの一覧の結果）とモデルの kind は、まだ無い。順番5と `threshold-access` の前後を定めた決まりは、封印済みの文書の中に見つけていない（tags-naive.md 369行は、順番4と順番5の前後だけを定めている）。
+  - 結論：今は順番4だけを求める。順番5・モデルの kind を作るときに、`threshold-access` より前に求めるかを、その決まりから決めて足す（`ledger.ORDER4_BEFORE_KINDS` と同じく、そのタスクで扱う）。
+- **本物の記録への影響**：今の本物の記録（seq 1〜14）には `threshold-access` が無いので、この決まりで変わる出力は無い（`verify.py all --rev auto` の出力が変わらないことを確かめた）。順番4を書くまで、`seal_access.py` は書かない。
+- テストは `tests/sealer/test_t100.py` にある。
+  - `TestThresholdAccess`：本物の記録の clone で、順番4より前の `threshold-access` は書かず、順番4のあとは書ける。照合を飛ばして足すと verify が止め、そのあとは順番4も書けない。
+  - `TestThresholdUnit`：記録の並びだけで決まりを確かめる。
+
+### 本番の実行の手順（T-100）
+
+日の集計の置き場所（LACIE SHARE）を持つ運営が、プロジェクトのルートで、この順に行う。途中で止まったら、それより後のことはしない。
+
+1. 「書く前に確かめること」の1〜6を確かめる。`git status --porcelain` が空であることを確かめ、`git rev-parse HEAD` の値を控える。
+2. 書く（2〜3.5時間。日の集計を開くのは、入口が流す一覧のコードと、書く前の照合で流す封印済みの `counting.py` だけ）：
+   ```sh
+   STORE="/Volumes/LACIE SHARE/news-stick-data/gkg-method"
+   PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_order4.py --store "$STORE"
+   ```
+   - 0 で終われば、記録・中身・`.ots` がコミットされている。画面の1行目（記録の行）、一覧の sha256、コミットの40桁を控える。
+   - 1 で終わったら、「止まった場合の扱い」に従う。「失敗（順番4の記録は書いていない）」なら何も書いていない。もう一度流す前に、原因をリードに報告する。
+3. 書いたあとの照合（どちらも 0 で終わること）：
+   ```sh
+   PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py all --rev auto
+   OUT="${TMPDIR:-/tmp}/order4-verify-store.txt"
+   PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py stats-order --store "$STORE" > "$OUT"
+   ```
+   - `OUT` は、プロジェクトと Git の外のファイルにする。2つ目のコマンドは60〜100分かかる。
+   - `$OUT` に、次の2行があること：「72本の条件：…同じ」と「C7 の分母：封印済みの counting.py で、日の集計 2115 個 … 一覧の分母と欠けた日と同じ」。
+   - どちらかのコマンドが 0 で終わらなければ、push も投稿もせずに、リードに報告する（記録は消さない）。
+4. 結果を記録する：次をリードに渡し、リードが `reviews/` に記録する（封印係は `reviews/` に書かない）。
+   - `$OUT` の順番4の行：`stats-order4 seq N（順番4）` で始まる行と、そのあとの「head … を git から照らした」「72本の条件」「C7 の分母」の行。
+   - 使った Python の版。
+   - 置き場所のパスの名前。ボリューム名を含むので、公開物には入れない。
+5. `PYTHONDONTWRITEBYTECODE=1 python3 -B src/collector/privacy_scan.py --all-history` が 0 なら push する。記録の時刻から24時間以内に、記録のハッシュと時刻を投稿する（投稿はリード。docs/verify/x-post.md）。
+6. 統計係の報告した値（T-093・T-096 の一覧の sha256）と、記録の `list_sha256` を比べ、結果をリードに渡す。違えば、どちらの値も消さずにリードに報告する。

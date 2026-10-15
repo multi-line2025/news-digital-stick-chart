@@ -1963,6 +1963,7 @@ def check_stats_order(records, read_json):
         check_order2_doc(records, r, doc, read_json)          # T-078
     o3 = check_order3_records(records, read_json)              # T-090
     o4 = check_order4_records(records, read_json)              # T-095
+    check_threshold_access_after_order4(records, read_json)    # T-100（T-097）
     return {"order1": o1, "order1b": o1b, "order2": o2, "order3_attempt": o3["attempt"], "order3": o3["order3"],
             "order4": o4}
 
@@ -3148,6 +3149,25 @@ def check_order4_imports(refs, read_json, shas, what):
     for path, vals in bound.items():
         if any(v != shas.get(path) for v in vals):
             raise LedgerError("%s の %s の sha256 が、封印の記録（periods・candidates・順番1b）が縛る値と違う" % (what, path))
+
+
+def check_threshold_access_after_order4(records, read_json):
+    """最初の threshold-access の記録より前に、正式な run の gkg-run-result か順番3（stats-order3）の記録があるなら、その
+    threshold-access より前に順番4（stats-order4）の記録がなければならない（T-100。T-097、T-095 の監査 probe A。
+    candidates.md 3章 (5)：手法を作る期間の区画の一覧は、遅くとも threshold-access より前に封印する）。
+    条件を付ける理由：順番4は、正式な run の結果と順番3がそろってはじめて書ける。どちらも無い記録（区切りや取得の照合だけを
+    確かめる仮の記録など）では、一覧がまだ決まらないので求めない。どちらも無いうちに threshold-access を書くと、そのあとは
+    順番4を書けない（check_order4_position）ので、順番5が順番4を参照できない形で記録に残る。違えば LedgerError。"""
+    ta = next((r for r in records if r["kind"] == THRESHOLD_ACCESS_KIND), None)
+    if ta is None:
+        return
+    before = [r for r in records if r["seq"] < ta["seq"]]
+    trigger = [r for r in before if r["kind"] == ORDER3_KIND or (
+        r["kind"] == GKG_RESULT_KIND and read_json(r, GKG_RESULT_KIND).get("mode") == "official")]
+    if trigger and not any(r["kind"] == ORDER4_KIND for r in before):
+        raise LedgerError("threshold-access の記録（seq %d）より前に、順番4（%s）の記録が無い（seq %d の %s があるので、手法を作る"
+                          "期間の区画の欠けた日の一覧を、閾値を決める期間に触れる前に封印する。candidates.md 3章 (5)）"
+                          % (ta["seq"], ORDER4_KIND, trigger[0]["seq"], trigger[0]["kind"]))
 
 
 def check_order4_position(records, seq):

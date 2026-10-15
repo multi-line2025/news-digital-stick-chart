@@ -6,6 +6,8 @@
 引数では変えられない。seal_order2.py・seal_order3.py と同じ）
     PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_order4.py --store <正式な run の日の集計の置き場所>
     PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_order4.py --commit-written
+    PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_order4.py --write-content --store <置き場所>
+      （追記のあとで中身を書けなかったときだけ。T-100）
 
 一覧のコード（統計係の src/stats/missing_days.py）は、作業ツリーのものを使わない。HEAD の版のファイル（src/・sealed/・
 data/manifest/ の下のすべて。ledger.ORDER4_TREE_PREFIXES）を git から空のフォルダに取り出し、その中の missing_days.py を
@@ -25,7 +27,8 @@ data/manifest/ の下のすべて。ledger.ORDER4_TREE_PREFIXES）を git から
   2. 固定した版の一覧のコードを流す（60〜100分。verify.run_order4）。0 以外で終われば止まる（何も書かない）。
   3. 出力が決まった形の JSON であること（verify.parse_order4_output）。HEAD と作業ツリーがはじめと同じこと。
   4. 記録を書き（書く前の照合：seal_records.check_new。ledger.check_order4_records・verify.check_order4_git・
-     verify.check_order4_rules（72本の条件を、封印済みの candidates.py とマニフェストで照らす）・privacy_scan と同じ検査）。
+     verify.check_order4_rules（72本の条件を、封印済みの candidates.py とマニフェストで照らす）・verify.recount_order4（C7 の
+     分母を、--store の日の集計で封印済みの counting.py で数え直す。T-100）・privacy_scan と同じ検査）。
      中身のファイルは、記録に追記したあとで書く（追記の前で止まっても、一覧の入ったファイルを作業ツリーに残さない）。
      .ots を作り、記録・中身・.ots だけをパス指定で index に入れてコミットする（seal_order2.commit_record と同じ
      固定のしかた。本文は ORDER4_MESSAGE）。
@@ -66,10 +69,18 @@ def check_store(store):
     return os.path.realpath(store)
 
 
-def prepare(root, records):
+def _head(repo, clean):
+    """clean が真なら、作業ツリーがきれいで HEAD の40桁（seal_order2.clean_head）。偽なら HEAD の40桁だけ（--write-content。
+    作業ツリーの変更は呼ぶ側が確かめる）。"""
+    if clean:
+        return seal_order2.clean_head(repo)
+    return verify._rgit(repo, "rev-parse", "--verify", "HEAD^{commit}").decode().strip()
+
+
+def prepare(root, records, clean=True):
     """手順 1。返り値: (HEAD, 参照する記録, HEAD の版のファイル, 記録の code)。"""
     repo = verify.Repo(root)
-    head = seal_order2.clean_head(repo)
+    head = _head(repo, clean)
     seq = len(records) + 1
     ledger.check_order4_position(records, seq)
     read = lambda r, role: ledger.read_target_json(root, r, role)  # noqa: E731
@@ -85,10 +96,10 @@ def prepare(root, records):
     return head, refs, tree, code
 
 
-def build_doc(root, data, records, store, tmp):
-    """手順 1〜3。返り値: 書く中身。"""
+def build_doc(root, data, records, store, tmp, clean=True):
+    """手順 1〜3。返り値: 書く中身。data・records は、この記録を足す前の記録。clean が偽なのは --write-content だけ。"""
     repo = verify.Repo(root)
-    head, refs, tree, code = prepare(root, records)                          # 1. 書く前の確かめ
+    head, refs, tree, code = prepare(root, records, clean)                   # 1. 書く前の確かめ
     store = check_store(store)
     what = "順番4の一覧（HEAD %s の版の %s）" % (head[:12], ledger.ORDER4_SCRIPT)
     try:
@@ -96,7 +107,7 @@ def build_doc(root, data, records, store, tmp):
     except verify.Unchecked as e:
         raise ledger.LedgerError("一覧のコードを流せない（%s）。書かない" % e) from None
     lst, sha = verify.parse_order4_output(raw, what)                          # 3. 出力の形
-    if seal_order2.clean_head(repo) != head:
+    if _head(repo, clean) != head:
         raise ledger.LedgerError("流しているあいだに HEAD が変わった。書かない")
     return {
         "kind": ledger.ORDER4_KIND,
@@ -116,6 +127,7 @@ def seal(store, now, ots_cmd, runner=subprocess.run):
     root = ledger.check_sealed_inside(ledger.PROJECT_ROOT)
     repo = verify.Repo(root)
     data, records = seal_records.load_checked(root, ots_cmd, runner=runner)
+    store = check_store(store)
     with tempfile.TemporaryDirectory() as tmp:
         doc = build_doc(root, data, records, store, tmp)
     lst = doc["list"]
@@ -124,16 +136,16 @@ def seal(store, now, ots_cmd, runner=subprocess.run):
             % (lst["label"], doc["list_sha256"], doc["refs"]["gkg_run_result"]["seq"], doc["refs"]["order3"]["seq"]))
     try:
         rec, rel, ots_path = seal_records.write_doc_record(root, ledger.ORDER4_KIND, doc, data, note, now, ots_cmd,
-                                                           runner=runner, content_after_append=True)
+                                                           runner=runner, content_after_append=True, order4_store=store)
     except ledger.LedgerError as e:
         after = ledger.verify_chain(ledger.read_ledger(os.path.join(root, "sealed", "ledger.jsonl")))
         if len(after) <= len(records):
             raise                              # 追記の前で止まった：何も書いていない
         last = after[-1]
         if not os.path.isfile(os.path.join(root, last["targets"][0]["path"])):
-            raise Order4Written("記録 seq %d を追記したが、中身を書けなかった（%s）。コミットしていない。消さずに、リードに報告する"
-                                "（中身は、同じ HEAD と記録で入口の build_doc を流し直せば同じバイト列になる。記録の targets の sha256 と"
-                                "照らせる）" % (last["seq"], e)) from None
+            raise Order4Written("記録 seq %d を追記したが、中身を書けなかった（%s）。コミットしていない。消さずに、原因を直して"
+                                "から seal_order4.py --write-content --store <置き場所> で中身を書いてコミットする（同じ HEAD で流し直し、"
+                                "記録の targets の sha256 と同じバイト列のときだけ書く。手順書18章）" % (last["seq"], e)) from None
         try:
             c = seal_order2.commit_record(repo, root, last, None, ORDER4_MESSAGE)
         except ledger.LedgerError as e2:
@@ -150,13 +162,75 @@ def seal(store, now, ots_cmd, runner=subprocess.run):
     return rec, rel, ots_path, doc, commit
 
 
+def write_content(store):
+    """追記のあとで中身のファイルを書けなかった記録（T-100。T-095 の監査 P2）の中身を、同じ HEAD で build_doc を流し直して
+    作り、記録の targets の sha256 と同じバイト列のときだけ書いて、入口と同じ固定のしかたでコミットする（--write-content）。
+    条件（どれかに当たれば何も書かない）：
+      - 最後の記録が stats-order4 で、その中身のファイルが無い（リンクも無い）。
+      - HEAD の版の sealed/ledger.jsonl が、今の記録から最後の1行を除いたものと同じ（その記録はまだコミットしていない）。
+      - 作業ツリーの変更が、sealed/ledger.jsonl と、その seq の .ots だけ。
+      - 最後の1行を除いた記録と、すべての .ots の照合（その seq の .ots があれば、それも）に通る。
+    中身は決まった値だけから作られる（HEAD・記録・置き場所の日の集計・Python の版）。どれかが書いた時と違えば、バイト列が
+    sha256 と合わずに止まる。中身の照合（check_new）は、同じバイト列なので、書いた時に通ったものと同じである。
+    返り値: コミットの40桁。"""
+    root = ledger.check_sealed_inside(ledger.PROJECT_ROOT)
+    repo = verify.Repo(root)
+    data = ledger.read_ledger(os.path.join(root, "sealed", "ledger.jsonl"))
+    records = ledger.verify_chain(data)
+    last = records[-1]
+    if last["kind"] != ledger.ORDER4_KIND:
+        raise ledger.LedgerError("最後の記録が %s でない。書かない" % ledger.ORDER4_KIND)
+    ledger.check_single_target(last, "最後の記録")
+    t = last["targets"][0]
+    if os.path.lexists(os.path.join(root, t["path"])):
+        raise ledger.LedgerError("%s は既にある。--write-content は、中身を書けなかったときだけ使う" % t["path"])
+    prefix = ledger.prefix_bytes(data, last["seq"] - 1)
+    r = subprocess.run(["git", "-C", root, "cat-file", "blob", "HEAD:sealed/ledger.jsonl"], capture_output=True,
+                       env=ledger.fixed_git_env())
+    if r.returncode != 0 or r.stdout != prefix:
+        raise ledger.LedgerError("HEAD の版の sealed/ledger.jsonl が、今の記録から最後の seq %d を除いたものと同じでない。書かない"
+                                 % last["seq"])
+    ots = os.path.join(root, "sealed", ledger.ots_name(last["seq"]))
+    allowed = {"sealed/ledger.jsonl", "sealed/" + ledger.ots_name(last["seq"])}
+    changed = {line[3:] for line in verify._rgit(repo, "status", "--porcelain", "--untracked-files=all")
+               .decode("utf-8").splitlines()}
+    if not changed or not changed <= allowed:
+        raise ledger.LedgerError("作業ツリーの変更（%s）が、記録 seq %d の行と .ots だけでない。書かない"
+                                 % ("、".join(sorted(changed)), last["seq"]))
+    ledger.check_anchors(data if os.path.isfile(ots) else prefix, os.path.join(root, "sealed"))
+    before = ledger.verify_chain(prefix)
+    store = check_store(store)
+    with tempfile.TemporaryDirectory() as tmp:
+        doc = build_doc(root, prefix, before, store, tmp, clean=False)
+    content = ledger.canonical_line(doc) + b"\n"
+    if ledger.sha256_hex(content) != t["sha256"]:
+        raise ledger.LedgerError("流し直した中身の sha256 %s が、記録 seq %d の targets の sha256 %s と違う（HEAD・置き場所・"
+                                 "Python の版のどれかが、書いた時と違う）。書かない。リードに報告する"
+                                 % (ledger.sha256_hex(content), last["seq"], t["sha256"]))
+    ledger.write_once(os.path.join(root, t["path"]), content)
+    return seal_order2.commit_record(repo, root, last, ots if os.path.isfile(ots) else None, ORDER4_MESSAGE)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(allow_abbrev=False, description=__doc__.splitlines()[0])
     p.add_argument("--store", help="正式な run の日の集計の置き場所（フォルダ。記録には入れない）")
     p.add_argument("--ots", default=stamp.DEFAULT_OTS)
     p.add_argument("--commit-written", action="store_true",
                    help="書いたがコミットしていない最後の stats-order4 の記録を、入口と同じ固定のしかたでコミットする")
+    p.add_argument("--write-content", action="store_true",
+                   help="記録に追記したあとで中身を書けなかった最後の stats-order4 の中身を、同じ HEAD で流し直して書き、"
+                        "コミットする（--store が要る）")
     a = p.parse_args(argv)
+    if a.write_content:
+        if not a.store:
+            p.error("--write-content には --store が要る")
+        try:
+            c = write_content(a.store)
+        except ledger.LedgerError as e:
+            print("失敗（中身は書いていない）: %s" % e, file=sys.stderr)
+            return 1
+        print("コミット: %s（中身を書いた。.ots が無ければ stamp.py stamp --seq N で作る）" % c)
+        return 0
     if a.commit_written:
         try:
             c = seal_order2.commit_written(ledger.check_sealed_inside(ledger.PROJECT_ROOT), (ledger.ORDER4_KIND,), MESSAGES)

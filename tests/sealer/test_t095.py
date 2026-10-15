@@ -77,6 +77,7 @@ import ledger  # noqa: E402
 MIN_FILES = @MIN@
 ZERO_BELOW = @ZERO@
 VARIANT = @VARIANT@
+C7_ADD = @C7ADD@
 
 
 def sha(rel):
@@ -111,7 +112,7 @@ def main(argv):
         with open(path, "rb") as f:
             s = counting.parse_day(f.read(), expect_day=x, expect_mode="official")
         v = counting.candidate_counts(s, counting.OFFICIAL_CANDIDATE)[1]
-        c7[x] = 0 if v < ZERO_BELOW else v
+        c7[x] = 0 if v < ZERO_BELOW else v + C7_ADD
     missing, partial = [], 0
     for x in days:
         f = rows[x]["files_ok"]
@@ -148,9 +149,10 @@ if __name__ == "__main__":
 '''
 
 
-def fake(min_files=72, zero_below=1, variant=0):
+def fake(min_files=72, zero_below=1, variant=0, c7_add=0):
+    """c7_add：0 でない分母に足す値（分母を偽る版。T-100）。"""
     return (FAKE_TEMPLATE.replace("@MIN@", str(min_files)).replace("@ZERO@", str(zero_below))
-            .replace("@VARIANT@", str(variant)))
+            .replace("@VARIANT@", str(variant)).replace("@C7ADD@", str(c7_add)))
 
 
 # 合成の置き場所で C7 の分母が0になる日（どれも、本物の files_ok では72本以上の日）
@@ -250,7 +252,8 @@ class Clone(unittest.TestCase):
         return self.now
 
     def seal(self, store=None, runner=None):
-        with mock.patch.object(ledger, "PROJECT_ROOT", self.c):
+        """入口で書く。書く前の照合（check_new）の C7 の分母の数え直しは、合成の置き場所の sha256 で行う（sealed_rows）。"""
+        with mock.patch.object(ledger, "PROJECT_ROOT", self.c), self.sealed_rows():
             return seal_order4.seal(store or self.store, self.tick(), "ots", runner=runner or tw.FakeOts())
 
     def build(self, store=None):
@@ -387,6 +390,7 @@ class TestWrite(Clone):
     def test_main_prints_after_commit(self):
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(ledger, "PROJECT_ROOT", self.c), mock.patch.object(seal_order4.stamp, "check_ots"), \
+                self.sealed_rows(), \
                 mock.patch.object(seal_records.stamp, "stamp_seq", side_effect=ledger.LedgerError("ots が無い（テスト）")), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = seal_order4.main(["--store", self.store])
@@ -479,14 +483,37 @@ class TestDoctoredRules(Clone):
         self.assertEqual(code, 1)
 
     def test_zero_rule_changed(self):
-        """分母を0とみなす条件を変えた版（分母が12より小さい日を0にする）：一覧の中のつじつまは合い、72本の条件も合うので、
-        書く仕組みと --store なしの verify は止められない。封印済みの counting.py で数え直す verify（--store）が止める。"""
+        """分母を0とみなす条件を変えた版（分母が12より小さい日を0にする）：一覧の中のつじつまは合い、72本の条件も合う。
+        書く仕組みは、置き場所の日の集計を封印済みの counting.py で数え直して止める（T-100）。照合を飛ばして足すと、--store
+        なしの verify は止められず、--store の verify が止める。"""
+        text = "C7 の分母が、封印済みの counting.py で日の集計から数え直した値と違う"
         self.commit_script(fake(zero_below=12))
-        _rec, _rel, _o, doc, _c = self.seal()
+        before = self.ledger_bytes()
+        with self.assertRaisesRegex(ledger.LedgerError, text):
+            self.seal()
+        self.assertEqual(self.ledger_bytes(), before)
+        self.assertEqual(self.content_files(), [])
+        doc = self.next_head(self.build())
         self.assertEqual(doc["list"]["missing_count"], 2115)
+        self.raw(doc)
         self.verify_zero("all", "--rev", "auto")
-        self.verify_stops("C7 の分母が、封印済みの counting.py で日の集計から数え直した値と違う",
-                          "all", "--rev", "auto", "--store", self.store)
+        self.verify_stops(text, "all", "--rev", "auto", "--store", self.store)
+
+    def test_c7_values_changed(self):
+        """T-100（監査 P1）：分母の値そのものを偽る版（0 でない分母に 5 を足す。欠けた日は変わらない）で書こうとすると、書く
+        仕組みが止める（何も書かない）。"""
+        self.commit_script(fake(c7_add=5))
+        before = self.ledger_bytes()
+        with self.assertRaisesRegex(ledger.LedgerError, "C7 の分母が、封印済みの counting.py で日の集計から数え直した値と違う"):
+            self.seal()
+        self.assertEqual(self.ledger_bytes(), before)
+        self.assertEqual(self.content_files(), [])
+        self.assertEqual(self.git("status", "--porcelain"), b"")
+
+    def test_writer_needs_store(self):
+        """書く仕組みは、置き場所を渡さなければ順番4の記録を書かない（入口を通さずに write_doc_record を呼んだ形）。"""
+        doc = self.next_head(self.build())
+        self.refuses(doc, "C7 の分母を数え直してからでなければ書かない")
 
 
 # ---------------------------------------------------------------- 3. 作り物

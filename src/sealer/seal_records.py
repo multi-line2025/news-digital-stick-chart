@@ -183,7 +183,7 @@ def head_manifest(project, rel):
     return r.stdout
 
 
-def check_new(project, data_after, records_after, rec, doc):
+def check_new(project, data_after, records_after, rec, doc, order4_store=None):
     """手順 3。追記した後の記録に対して、新しい記録の照合をする。"""
     kind = rec["kind"]
     if kind not in WRITTEN_KINDS:
@@ -250,6 +250,15 @@ def check_new(project, data_after, records_after, rec, doc):
                 verify.check_order4_rules(project, records_after, rec, doc, read, tmp)
             except verify.Unchecked as e:
                 raise ledger.LedgerError("%s の記録の72本の条件を照らせない（%s）。書かない" % (kind, e)) from None
+            # T-100（T-095 の監査 P1）：C7 の分母も、日の集計の置き場所（入口の --store）で、封印済みの counting.py
+            # （seq 6）で数え直して照らす。置き場所が無ければ書かない
+            if order4_store is None:
+                raise ledger.LedgerError("%s の記録は、日の集計の置き場所（--store）で C7 の分母を数え直してからでなければ"
+                                         "書かない" % kind)
+            try:
+                verify.recount_order4(project, records_after, rec, doc, read, order4_store, tmp)
+            except verify.Unchecked as e:
+                raise ledger.LedgerError("%s の記録の C7 の分母を数え直せない（%s）。書かない" % (kind, e)) from None
         return
     if kind == ledger.GKG_RESULT_KIND:
         # T-066：中身の形・ledger_head・指す gkg-run-start、マニフェストの先頭と run-complete の行
@@ -301,11 +310,13 @@ def check_new(project, data_after, records_after, rec, doc):
                                        result_refs(project, records_after, extra=(rec, doc)))
 
 
-def write_doc_record(project, kind, doc, data, note, now, ots_cmd, runner=subprocess.run, content_after_append=False):
+def write_doc_record(project, kind, doc, data, note, now, ots_cmd, runner=subprocess.run, content_after_append=False,
+                     order4_store=None):
     """手順 3〜6。返り値: (記録, 中身のパス, .ots のパス か None)。
     content_after_append（T-095 差し戻し1回目 軽-1。順番4の入口が使う）：真なら、中身のファイルを記録に追記したあとで書く。
     追記の前で止まったときに、中身（一覧）の入ったファイルが作業ツリーに残らないようにするため。追記のあとで中身を書けな
-    かったときは LedgerError（記録は鎖に残る。呼ぶ側が「書いた」と知らせる）。"""
+    かったときは LedgerError（記録は鎖に残る。呼ぶ側が「書いた」と知らせる）。
+    order4_store（T-100）：順番4の記録を書くときの日の集計の置き場所（check_new が C7 の分母を数え直すのに使う）。"""
     ledger.check_sealed_inside(project)    # T-017：入口を飛ばして直接呼んでも、リンクなら止まる
     _sealed, ledger_path = _paths(project)
     content = ledger.canonical_line(doc) + b"\n"
@@ -315,7 +326,7 @@ def write_doc_record(project, kind, doc, data, note, now, ots_cmd, runner=subpro
     _records, rec, line = ledger.build_next_record(data, kind, targets, note, now)
     data_after = data + line
     records_after = ledger.verify_chain(data_after)
-    check_new(project, data_after, records_after, rec, doc)
+    check_new(project, data_after, records_after, rec, doc, order4_store=order4_store)
     if not content_after_append:
         ledger.write_once(os.path.join(project, rel), content)
     after = ledger.append_record(ledger_path, kind, targets, note, now, expected_data=data)
