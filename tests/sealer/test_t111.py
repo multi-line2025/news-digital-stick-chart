@@ -554,7 +554,8 @@ class TestOrderUnit(unittest.TestCase):
 
 
 class TestConstantsSameAsOrder5(unittest.TestCase):
-    """ledger の決まった値（label・limits・citation・注記）が、統計係の src/stats/order5.py の定数と、文書の付録Aと同じ。
+    """ledger の決まった値（label・limits・citation・注記）が、統計係の src/stats/order5.py の定数と同じ（文書の付録Aとの
+    一致は統計係のテストが照らす）。
     order5.py は ast で読むだけ（作業ツリーのファイル。HEAD を git で読むことは tests/sealer の規則で限っているため。合否は
     コミットしたあとに流した結果で判断する）。"""
 
@@ -574,10 +575,9 @@ class TestConstantsSameAsOrder5(unittest.TestCase):
         self.assertEqual(tuple(c["LIMITS"]), ledger.ORDER5_LIMITS)
         self.assertEqual(tuple(c["CITATION"]), ledger.ORDER5_CITATION)
         self.assertEqual(c["ENTRY"], ledger.ORDER5_ENTRY)
-        with open(os.path.join(tl.PROJECT, "docs", "stats", "order5-tag-list.md"), encoding="utf-8") as f:
-            doc = f.read()
-        for text in ledger.ORDER5_LIMITS + ledger.ORDER5_CITATION + (ledger.ORDER5_DETAIL_NOTE, ledger.ORDER5_REF_NOTE):
-            self.assertIn(text, doc)
+        # 文書（docs/stats/order5-tag-list.md 付録A）と order5.py の定数が同じことは、統計係のテスト
+        # （tests/stats/test_order5.py の test_doc_has_fixed_strings）が照らす。tests/sealer は docs/stats を読まない
+        # （15章の規則。test_t077 の TestRuleScan）
 
 
 class TestRealOrder5Build(unittest.TestCase):
