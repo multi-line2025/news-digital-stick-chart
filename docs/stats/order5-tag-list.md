@@ -1,6 +1,6 @@
-# 順番5：タグの一覧の結果（T-109、T-110）
+# 順番5：タグの一覧の結果（T-109、T-110、T-113）
 
-文書の版：`order5-tag-list-v2`
+文書の版：`order5-tag-list-v3`
 
 この文書は、順番5（タグの一覧の結果）で何を計算し、どの形で出すかを、封じた決まりの行を引いて並べる。
 新しい決まりは足さない。計算のコードは `src/stats/order5.py`、テストは `tests/stats/test_order5.py`。
@@ -12,6 +12,10 @@
   リードの判断、中-1 への対処）。
 - v1（T-109）からの変更：Git に入れる本体（main）を絞り、一覧の全体を Git の外のファイル（detail・extra）に移した
   （リードの判断4・6）。流し方を封印係の入口の形にし、第三者が order5.py に頼らずに計算し直す手順を5章に書いた。
+- v2（T-110）からの変更（T-113。T-110 の監査の軽-1〜5）：5章を main の全体を再現できる形にした（区分表の名前の区切り方、
+  `day_files_digest` のバイト列、`coverage` の書き方、`themes_table` の数、そのほかの値と決まった文。付録A）。
+  detail は公開しなければならないことを書いた（4章 (5)）。書き出しで本来の名前を付けるのを `os.link` にし、途中で失敗した
+  ときの扱いを事実どおりに書いた（4章 (3)）。出力の形は v2 と同じ（label だけが変わる）。
 
 引く文書と、行の番号の版（どれも封印済み。文言は変えない）：
 
@@ -140,15 +144,23 @@
     --store <日の集計の置き場所> --themes-store <区分表の置き場所> --out-dir <書き出すディレクトリ> --repo <本体のリポジトリ>
 ```
 
-- 終わり値：0 できた、3 C7 で止まった（main だけ書く）、1 照合・入力・書き出しで止まった（本来の名前のファイルは一つも書かない）、2 引数が違うか、書き出すディレクトリが無いか、同じ名前（`.partial` を含む）のファイルがある。
-- 書き出し（`write_outputs()`）：三つの記録をすべて作り終え、三つとも `check_public()` を通してから書く。すべてのバイト列を先に作り、一時の名前（`<名前>.partial`）に O_EXCL で書き、全部を書けてから detail・extra・main の順に本来の名前へ移す（main が最後）。一時の名前に書く途中で失敗したら、本来の名前のファイルは一つも無い（`.partial` は消さずに残す。削除はリードを通す）。テスト `TestWriteOutputs`。
+- 終わり値：0 できた、3 C7 で止まった（main だけ書く）、1 照合・入力・書き出しで止まった（本来の名前のファイルは残さない。下の例外を除く）、2 引数が違うか、書き出すディレクトリが無いか、同じ名前（`.partial` を含む）のファイルがある。
+- 標準出力には、書いたファイルの名前と sha256 だけを出す。標準エラーには、開いたファイルの数と所要時間、止まったときの理由（例外の型と文）だけを出し、一覧・件数・数は出さない（テスト `test_stderr_has_no_list`）。
+- 書き出し（`write_outputs()`）は次の順で行う（テスト `TestWriteOutputs`）。
+  1. 三つの記録をすべて作り終え、三つとも `check_public()` を通してから、すべてのバイト列を作る。ここまでに止まれば、何も書かない。
+  2. 一時の名前（`<名前>.partial`）に O_EXCL で書く。途中で失敗したら、本来の名前のファイルは作っていない。書けた `.partial` は残る。
+  3. detail・extra・main の順に、`os.link(<名前>.partial, <名前>)` で本来の名前を付ける（main が最後）。`os.link` は、本来の名前が既にあれば失敗し、上書きしない。そのため、名前の有無を確かめてから付けるまでのあいだに別のファイルができても、そのファイルを上書きしない（v2 の `lexists` と `rename` のあいだの隙間を閉じた）。途中で失敗したら、この実行で付けた本来の名前（どれも `.partial` と同じ中身のリンク）を外してから、終わり値 1 で止まる。`.partial` は残る。
+  4. 三つとも付けられたら、`.partial` の名前を外す。外せなくても、本来の名前のファイルはそろっている（中身は同じ）。
+  - 例外：3 で付けた名前を外す処理そのものが失敗した場合は、外せなかった名前が残る。そのときは、止まった理由の文に、外せなかった名前を書く。main は最後に付けるので、main が残っていれば、ほかの二つもそろっている。
+  - 残った `.partial` やファイルは、order5.py は消さない（`.partial` があると次の実行は終わり値 2 で止まる）。消すのはリードを通してから。
+  - `os.link` が使えないファイルシステム（ハードリンクを持たないもの）には書けない。書き出すディレクトリは、封印係の入口が決める。
 - JSON は UTF-8、キーの順（`sort_keys`）、区切りは `,` と `:`（空白なし）、末尾に改行1つ。NaN は使わない。sha256 は、このバイト列全体の値。置き場所のパスと実行の日時は出力に入れない。
 
 ### (4) main（`order5-main.json`。Git に入れて封印する本体）
 
 | キー | 中身 |
 |---|---|
-| `label` | `order5-tag-list-v2` |
+| `label` | `order5-tag-list-v3` |
 | `status` | `ok` か `stopped`（C7 の分母が 0 の欠けた日でない日がある） |
 | `block` | 区画の名前と端 |
 | `refs` | 順番1・1b・2・3（seq・`record_sha256`）、順番4（seq・`record_sha256`・`list_sha256`）、gkg-run-result（seq・`record_sha256`） |
@@ -170,6 +182,11 @@
 
 ### (5) Git の外のファイル（sha256 は main の `outside` に入る。置き場所はリードとオーナーが決める）
 
+**detail と extra は扱いが違う。**
+- detail は**公開しなければならない**。tags-naive.md 154行は「一覧に入らなかったテーマとその理由も、すべて公開する」と定めていて、テーマごとの理由（四半期ごとの件数・平均・A 以上か・当たった除外の語）は detail にしか無いため（main には理由ごとの件数だけが入る）。公開するかどうかを選べるものではない。公開する前に、公開物の検査（privacy_scan など）を通す。
+- extra（0e14f3b・247fc1d の版の結果）は封印の対象でなく、公開するかは試運転の手順5でオーナーが決める（reviews/T-109.md のリードの判断4）。
+- どちらも、公開するバイト列の sha256 が main の `outside` の値と同じであること。
+
 - **detail**（`order5-detail.json`）：`label`、`part: detail`、`in_git: false`、注記、`official_result`（正式な一覧の `build_tag_list()` の出力の全体。テーマごとの四半期の件数・平均・A 以上か・当たった除外の語・一覧に入ったか。tags-naive.md 154行の「一覧に入らなかったテーマとその理由も、すべて公開する」はこのファイルで満たす）、`allset_result`（全体）、`versions.1cb463a`（全体）、`candidate_lists`（C1〜C7 の一覧。計算できない候補は null）、`citation`。
 - **extra**（`order5-extra.json`。封印の対象にしない。公開するかは試運転の手順5でオーナーが決める。リードの判断4）：`label`、`part: extra-versions`、`in_git: false`、`sealed: false`、注記、`versions`（0e14f3b・247fc1d の `result`（全体）と `compare_with_official`、`official: false`、注記）、`citation`。
 
@@ -181,31 +198,84 @@
 
 ## 5. 第三者が order5.py に頼らずに計算し直す手順（tags-naive.md 428行・429行）
 
-封印係の `verify`（T-111）と第三者は、封印済みの `tagrules.py`（seq 5）・`counting.py`（seq 6）と封印済みの入力だけから、main の正式な一覧と要約を計算し直して照らす。この章だけで再現できるように書く（order5.py は読まなくてよい）。
+封印係の `verify`（T-111）と第三者は、封印済みの `tagrules.py`（seq 5）・`counting.py`（seq 6）・`periods.py`（seq 1）と、封印済みの記録と入力だけから、**main の全体**を作り直して、バイト列か値で照らす。この章と付録Aだけで再現できるように書く（order5.py は読まなくてよい）。下で「記録の行の sha256」は、ledger の記録（1行の JSON）を `json.dumps(記録, sort_keys=True, separators=(",", ":"), ensure_ascii=False)` の UTF-8 にしたバイト列の sha256（`ledger.canonical_line`）。日は `datetime.date`、日の文字列は `YYYY-MM-DD`。名前の並びは Python の文字列の比較の順（コードポイントの順）。
 
-**入力**
-1. 区画：2015-03-02〜2020-12-14（両端を含む。seq 1 の `periods.py` の `FROZEN_BLOCKS` の method）。日は `datetime.date`。
-2. 欠けた日 `missing`：seq 15 の記録の中身の `list.missing_days` の各要素の `day` を `datetime.date` にした集合（48日）。数え直さない。
-3. 日の集計：seq 12 で封印したマニフェスト（`gkg-run-result` の中身の `manifest_lines` 行）の、正式な run の `day` の行（区画の各日にちょうど一つ）。各行の `file_name` のファイルを開き、sha256 を行の `sha256` と照らす。
-4. 区分表：`data/manifest/gdelt-themes.jsonl` の最後の行（`kind: result`）の `file_name` のファイル。sha256 を `21aef571…`（その行の `sha256`）と照らす。UTF-8 で、改行で区切り、1行目（`THEME`）を除いた各行が名前。名前の**集合**（重なりは一つにまとめる）を `T` とする。
+### (1) 入力
+1. 区画：2015-03-02〜2020-12-14（両端を含む。seq 1 の `periods.py` の `FROZEN_BLOCKS` の method）。区画のすべての日（2115日）を `days` とする。
+2. 欠けた日 `missing`：seq 15 の記録の中身の `list.missing_days` の各要素の `day` を日にした集合（48日）。数え直さない。
+3. 日の集計：seq 12 の記録の中身（gkg-run-result）の `manifest_path` のファイルの先頭 `manifest_lines` 行（その sha256 が中身の `manifest_sha256`）のうち、`kind` が `day` の行（区画の各日にちょうど一つ。`mode` は `official`）。各行の `file_name` のファイルを開き、sha256 を行の `sha256` と照らす。
+4. 区分表：`data/manifest/gdelt-themes.jsonl` の最後の行（`kind: result`）の `file_name` のファイル。sha256 を、その行の `sha256`（`21aef571…`）と照らす。
+   - **名前の取り出し方**：バイト列を UTF-8 で文字列にする。文字列は改行（`\n`）1つで終わっていなければならない。**末尾の改行1つを除いてから**、`\n` で区切る。1つ目（`THEME`）を除いた残りが名前の行で、その数は result の行の `rows`（59315）と同じ。途中に空の行があれば、空の名前は名前の形（`\A[A-Z][\x21-\x60\x7B-\x7E]{0,159}\Z`）に合わないので止まる。末尾の改行を除かずに区切ると、最後に空の名前が1つ増えるので、そうしない（テスト `test_table_names_split_after_dropping_last_newline`）。
+   - 名前の行の**集合**（重なりは一つにまとめる）を `T` とする。
 
-**正式な一覧（main の `official`）**
-1. 各日 d について、`s = counting.parse_day(日の集計のバイト列, expect_day=d の文字列, expect_mode="official")`、`counts_d, total_d = counting.candidate_counts(s, "C7")`。
-   - 同じことを平易に言うと：T の行のうち、組（2番目の欄）が `T` で終わらないものについて、テーマ（V の行で番号から名前にする）ごとに7番目の欄（`v1_or_v2_docs`）を足したものが分子で、0 のテーマは入れない。分母はその分子の全テーマの和。
-2. `counts = {名前: {d: counts_d[名前] （0 でない日だけ）}}`、`totals = {d: total_d}`（区画のすべての日。欠けた日も入れてよい）。
-3. `themes = {名前: None for 名前 in T}`（区分表に説明の欄は無い）。
-4. `result = tagrules.build_tag_list(themes, counts, totals, missing, date(2015,3,2), date(2020,12,14))`。`optional` は渡さない（オーナーの選択 `("ethnic_religious_group",)` が使われる）。
-5. main の `official.result` は、`result` から `themes` を除いたものに、`tag_count = len(result["tag_list"])` と `reason_counts` を足したもの。`reason_counts` は `result["themes"]` の行について、`all_themes`＝行の数、`in_list`＝`in_list` が真の数、`not_present_throughout`＝`present_throughout` が偽の数、`mean_below_a`＝`mean_ratio_at_least_a` が偽の数、`excluded`＝`exclusion_matches` が空でない数。detail の `official_result` は `result` そのもの。
+### (2) 日ごとの値
+各日 d（`days` のすべて。欠けた日も含む）について、`s_d = counting.parse_day(日の集計のバイト列, expect_day=d の文字列, expect_mode="official")` とし、候補 c ごとに `counts_c_d, total_c_d = counting.candidate_counts(s_d, c)` とする。
+- C7 を平易に言うと：T の行のうち、組（2番目の欄）が `T` で終わらないものについて、テーマ（V の行で番号から名前にする）ごとに7番目の欄（`v1_or_v2_docs`）を足したものが分子で、0 のテーマは入れない。分母はその分子の全テーマの和。
+- `counts_c = {名前: {d: counts_c_d[名前]（0 でない日だけ）}}`、`totals_c = {d: total_c_d}`（区画のすべての日）。
+- 欄の手厚さの日ごとの値：`counting.coverage([s_d])`（`docs_all_groups`・`docs_without_any_theme`・`docs_without_v1_theme`・`docs_without_v2_theme` の4つの整数）。
+- 照らし：すべての日で `total_C7_d` が seq 15 の `list.c7_denominator_by_day[d の文字列]` と同じこと（違えば作らない）。
 
-**各候補の要約（main の `candidates`）**：候補 c（C1〜C7）ごとに、1・2 の `"C7"` を c に替えて `counts_c`・`totals_c` を作る。`counting.order5_candidate_status(c, totals_c, missing, 区画のすべての日)` の `status` が `ok` なら、`build_tag_list(themes, counts_c, totals_c, missing, 区画の端)`（`optional` なし）の `n_med`・`a`・`a_float`・`usable_day_count`・`len(tag_list)` が要約。`ok` でなければそれらは null。C7 の `status` が `stop` なら、main は `stopped`。
+### (3) 一覧と要約
+- `themes = {名前: None for 名前 in T}`。
+- 候補 c ごとの状態：`st_c = counting.order5_candidate_status(c, totals_c, missing, days)`。
+- `st_C7["status"]` が `stop` なら、main は `status: "stopped"` の形（(5) の最後）。
+- そうでなければ、`result = tagrules.build_tag_list(themes, counts_C7, totals_C7, missing, date(2015,3,2), date(2020,12,14))`（`optional` は渡さない。オーナーの選択 `("ethnic_religious_group",)` が使われる）。
+- `allset = tagrules.build_tag_list(...同じ引数..., optional=tagrules.OPTIONAL_CATEGORIES)`。
+- `old1 = <1cb463a の版>.build_tag_list(themes, counts_C7, totals_C7, missing, 区画の端)`。1cb463a の版は `git show 1cb463a:src/stats/tagrules.py`（sha256 `f7c325cb…`。seq 5 の対象）をモジュールとして読み込んだもの（引数は6つ）。
+- C1〜C6 のうち `st_c["status"]` が `ok` のものは `r_c = tagrules.build_tag_list(themes, counts_c, totals_c, missing, 区画の端)`。C7 は `r_C7 = result`。
 
-**比較の要約（main の `comparisons`）**：
-- `allset`：`build_tag_list(..., optional=tagrules.OPTIONAL_CATEGORIES)` を `old`、正式な `result` を `new` として `tagrules.compare_lists(old, new)`。`diff_count` は `only_in_old` と `only_in_new` の件数の和。
-- `1cb463a`：`git show 1cb463a:src/stats/tagrules.py`（sha256 `f7c325cb…`。seq 5 の対象）を読み込んだモジュールの `build_tag_list(themes, counts, totals, missing, 区画の端)`（引数は6つ）を `old` にして同じく。
+### (4) main の各値
+**`label`**：`order5-tag-list-v3`。**`status`**：`ok`（または `stopped`）。**`a_equals_v`**：true。
+**`block`**：`{"name": "method", "start": "2015-03-02", "end": "2020-12-14"}`。
 
-**欄の手厚さ（main の `coverage`）**：各日の `counting.coverage([s])` の4つの値を、欠けた日でない日について、`tagrules.quarters(区画の端)` の四半期ごとと期間全体で足す。割合は、それぞれを `docs_all_groups` で割った既約分数の文字列（`docs_all_groups` が 0 なら null）。
+**`refs`**：
+- `order1`・`order1b`・`order2`・`order3`：それぞれ、順番3の記録（stats-order3。ちょうど1件）の中身の `ref_order1`・`ref_1b`・`ref_order2` が指す記録と、順番3の記録そのものの `{"seq", "record_sha256"}`（記録の行の sha256）。
+- `order4`：seq 15 の記録の `{"seq", "record_sha256"}` に、`list_sha256`（中身の `list` を `json.dumps(list, ensure_ascii=False, sort_keys=True, indent=2) + "\n"` の UTF-8 にしたバイト列の sha256。中身の `list_sha256` と同じ）を足したもの。
+- `gkg_run_result`：seq 12 の記録の `{"seq", "record_sha256"}`。
 
-照らすのは、計算し直した値と main の値が同じこと。main の `outside` の sha256 と、Git の外に置いた detail・extra のバイト列の sha256 が同じことも照らせる。
+**`code`**：
+- `sealed`：3章の1の表の5行を表の順に、`{"name": 対象, "sha256": 値, "sources": [出どころ]}`。出どころの文字列は `"seq <seq> <kind> <欄>"` で、欄は periods が `targets:code`、exclusion・tagrules・1cb463a が `order1:targets`、counting が `files`（例：`"seq 1 periods targets:code"`、`"seq 5 stats-order1 order1:targets"`、`"seq 6 stats-order1b files"`）。
+- `versions`：3章の2の表の3行を表の順に、`{"name": 版, "commit": 40桁, "path": "src/stats/tagrules.py", "sha256": 値, "sealed": 封印の対象か（1cb463a だけ true）}`。
+
+**`input`**：
+- `entry`：`"src/collector/gkg.py official_day_records()"`。
+- `run_id`：day の行の `run_id`（ただ一つ）。`day_rows`・`day_files_read`：区画の日数（2115）。`day_files_sha256_checked`・`c7_denominators_match_order4`：true。
+- `gkg_run_result_seq`・`gkg_run_result_record_sha256`：seq 12 の記録の seq と記録の行の sha256。`manifest_path`・`manifest_lines`・`manifest_sha256`：seq 12 の記録の中身の同じ名前の値。
+- **`day_files_digest`**：区画の日を日付の順に並べ、日ごとに `"<YYYY-MM-DD>\t<file_name>\t<sha256>\n"`（day の行の `file_name` と `sha256`。タブ区切り、改行は `\n`）をつないだ文字列を、ASCII のバイト列にした sha256（16進の小文字）。
+
+**`themes_table`**（区分表の result の行を `R` とする）：
+- `file_name`・`sha256`・`rows`・`kept_columns`・`headerless`：`R` の同じ名前の値。`description_column`：false。
+- `unique_names`：`len(T)`。`duplicate_rows`：名前の行の数 − `len(T)`。
+- `names_not_in_day_aggregate_form`：`T` のうち `\A[A-Z][A-Z0-9_]{0,159}\Z` に完全には合わない名前を並べたもの（`names`）とその数（`count`）。
+- `official_data_themes_not_in_table`：`counts_C7` のキー（区画のどこかの日（**欠けた日を含む**）に C7 の分子が 0 でないテーマ）のうち、`T` に無いものの数。
+
+**`missing_days`**：`{"source": "order4", "count": len(missing), "days": 欠けた日の文字列を並べたもの}`。
+
+**`official`**：`{"candidate": "C7", "version": "current", "setting": "owner_choice", "official": true, "result": X}`。`X` は `result` のうち次のキーだけを写したもの：`proposed_label`・`block_start`・`block_end`・`usable_day_count`・`quarters`・`quarters_without_usable_days`・`n_med`・`a`・`a_float`・`v_equals_a`・`enabled_optional_categories`・`tag_list`。これに `tag_count = len(result["tag_list"])` と `reason_counts` を足す。`reason_counts` は `result["themes"]` の行について、`all_themes`＝行の数、`in_list`＝`in_list` が真の数、`not_present_throughout`＝`present_throughout` が偽の数、`mean_below_a`＝`mean_ratio_at_least_a` が偽の数、`excluded`＝`exclusion_matches` が空でない数。
+
+**`candidates`**：C1〜C7 の順に、
+`{"id": c, "official": c が C7 か, "numerator_column": 分子の欄, "denominator_kind": 分母の種類, "status": st_c["status"], "reason": st_c["reason"], "zero_days": st_c["zero_days"], "note": C7 なら null、ほかは付録Aの注記, "n_med", "a", "a_float", "usable_day_count", "tag_count"}`。
+分子の欄と分母の種類は `counting.CANDIDATES`（counting.md 2章の表）。`r_c` があれば `n_med`・`a`・`a_float`・`usable_day_count` は `r_c` の同じ名前の値、`tag_count` は `len(r_c["tag_list"])`。無ければ5つとも null。
+
+**`comparisons`**：`{"allset": Y(tagrules.compare_lists(allset, result)), "1cb463a": Y(tagrules.compare_lists(old1, result))}`。`Y(m)` は `m`（`only_in_old`・`only_in_new`・`in_both`・`enabled_optional_categories`）に、`diff_count = len(only_in_old) + len(only_in_new)`、`official: false`、`note`（付録Aの注記）を足したもの。
+
+**`reference_criteria`**：順番3が参照した順番2の記録（seq 10）の中身を `O` として、`{"source": refs.order2, "order2_status": O.counting_output.status, "criteria_ids": ["B1","B2","B3","B4","B5"], "computed": C, "official": false, "note": 付録Aの注記}`。`C` は、`O.counting_output.status` が `decided` なら `{"input_mode": O.counting_output.input_mode, "input_run_id": O.counting_output.input_run_id, "input_days": O.counting_output.inputs の各要素の day, "results": O.counting_output.results（そのまま）}`、ほかは null。
+
+**`coverage`**：欠けた日でない日を `U` とする。
+- `quarters`：`tagrules.quarters(区画の端)` の i 番目の四半期 `[qa, qb]`（i は 0 から）ごとに、`{"index": i, "start": qa の文字列, "end": qb の文字列, "usable_days": U のうち qa〜qb の日の数, "docs_all_groups", "docs_without_any_theme", "docs_without_v1_theme", "docs_without_v2_theme"（それらの日の (2) の値の和）, "ratios": {3つの docs_without_*: 割合}}`。
+- `total`：`U` のすべての日について同じもの（`index`・`start`・`end` は無い）。
+- **割合の書き方**：`docs_all_groups` が 0 なら null。そうでなければ、その値 ÷ `docs_all_groups` を既約分数にし、`"<分子>/<分母>"`（10進の整数。分母が1でも `/1` を付ける。0 は `"0/1"`）。
+
+**`outside`**：`{"detail": {"file_name": "order5-detail.json", "sha256": detail のバイト列の sha256}, "extra": {"file_name": "order5-extra.json", "sha256": extra のバイト列の sha256}}`。detail・extra の中身は 4章 (5) のとおりで、注記の文は付録A。
+
+**`limits`**・**`citation`**：付録Aの文を、その順の一覧で。
+
+**数の書き方**：`n_med`・`a` は `build_tag_list()` が出す `"<分子>/<分母>"`。`a_float` と、detail の `mean_ratio` は Python の浮動小数（JSON に書くときは Python の `json.dumps` が出す最短の表現）。
+
+**`status: stopped` のとき**：上のうち `label`・`status`・`block`・`refs`・`code`・`input`・`themes_table`・`missing_days`・`reference_criteria`・`a_equals_v`・`limits`・`citation` と、`candidates`（`n_med`・`a`・`a_float`・`usable_day_count`・`tag_count` はすべて null）、`outside: null`。`official`・`comparisons`・`coverage` は無い。
+
+### (5) バイト列
+main・detail・extra は、`json.dumps(記録, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"` を UTF-8 にしたもの。照らすのは、作り直したバイト列（または値）が main と同じこと。main の `outside` の sha256 と、Git の外に置いた detail・extra のバイト列の sha256 が同じことも照らせる。
 
 ## 6. 限界
 
@@ -233,6 +303,26 @@
 
 - 順番1〜4 の決まりと記録（seq 1〜15）、区分表のマニフェストの result の行（行数と sha256）、T-106 の診断の数（記号を含む名前が36個）、reviews/T-109.md のリードの判断と監査の所見を知っていた。
 - 区分表のファイル、日の集計、テーマごとの数は開いていない。この文書の決め方は、それらの結果に依らない。
+
+## 付録A：main・detail・extra に入る決まった文
+
+`order5.py` の定数の写し（テスト `test_doc_has_fixed_strings` が照合する）。
+
+- 注記（`candidates` の C7 以外・`comparisons`・`reference_criteria`・extra の各版）：`比べるための参考で、正式ではない`
+- `limits`（この順）：
+  1. `区分表は名前の欄だけを取得した（説明の欄は無い）。除外の規則は名前の欄だけで照合した（tags-naive.md 159・224行）。`
+  2. `記号（下線以外）を含むテーマ名は、区分表には入るが、取得のときの THEME_RE（src/collector/gkg.py。counting.THEME_NAME_RE と同じ形）に合わないので日の集計に数えられていない。そのため件数は0で、一覧に入らない（themes_table.names_not_in_day_aggregate_form。T-107 の監査の中-1）。`
+  3. `翻訳の印の付いた組の記事は数えていない（外国語の報道は数えていない。counting.md 98行）。`
+  4. `V1 と V2 で名前が違う同じテーマは、別々のテーマとして数える（counting.md 104行）。`
+  5. `欠けた日は順番4の一覧（seq 15）だけで決め、数え直していない（missing-days-method.md 6章）。`
+  6. `手法を作る期間の全体にわたって存在しないテーマは扱わない（CLAUDE.md）。区分表には、この期間のあとに生まれたテーマの名前も入りうるが、名前だけでは一覧に入らない。`
+  7. `参考の基準の案 B1〜B5 の結果は、順番2の記録（試しの run の3日）から写した。手法を作る期間の全体では計算していない。`
+  8. `数え方の候補の一覧に、作る人が検討して載せなかった案があるかは、記録からは確かめられない（seal-order1.md 164行）。`
+- `citation`（この順）：
+  1. `Data: The GDELT Project (https://www.gdeltproject.org/). This project is not affiliated with or endorsed by the GDELT Project.`
+  2. `データ出典：GDELT Project（https://www.gdeltproject.org/）。本プロジェクトは GDELT Project と提携・承認の関係にありません。`
+- detail の `note`：`Git の外に置く。sha256 は main の outside に入る`
+- extra の `note`：`0e14f3b と 247fc1d の版（tags-naive.md 426行。封印の対象にしない。git の履歴で時刻が分かる）`
 
 ## 9. 引用
 

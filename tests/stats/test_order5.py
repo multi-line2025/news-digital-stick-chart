@@ -494,6 +494,47 @@ class TestChecks(unittest.TestCase):
             with self.assertRaisesRegex(o5.Order5Error, msg):
                 o5.parse_themes_table(data, r)
 
+    def test_repo_passed_to_git_show(self):
+        calls = []
+        real_show = o5._git_show
+
+        def fake_show(commit, path, repo=None):
+            calls.append(repo)
+            return real_show(commit, path)
+        with mock.patch.object(o5, "_git_show", fake_show):
+            o5.load_old_versions(repo="/some/repo")
+        self.assertEqual(calls, ["/some/repo"] * 3)
+        never = mock.Mock(side_effect=AssertionError("stop"))
+        with mock.patch.object(o5, "_git_show", fake_show), mock.patch.object(gkg, "official_day_records", never):
+            with self.assertRaises(AssertionError):
+                o5.official_record("/x", "/y", repo="/other/repo")
+        self.assertEqual(calls[-3:], ["/other/repo"] * 3)
+
+    def test_table_names_split_after_dropping_last_newline(self):
+        """5章：末尾の改行1つを除いてから改行で区切る。空の名前は出ない。途中の空の行は名前の形に合わず止まる。"""
+        data = b"THEME\nZZ_A\nZZ_B\nZZ_A\n"
+        row = {"sha256": hashlib.sha256(data).hexdigest(), "rows": 3}
+        t = o5.parse_themes_table(data, row)
+        self.assertEqual((t["names"], t["unique"]), (["ZZ_A", "ZZ_B", "ZZ_A"], {"ZZ_A", "ZZ_B"}))
+        self.assertNotIn("", t["unique"])
+        for bad, rows in ((b"THEME\nZZ_A\n\nZZ_B\n", 3), (b"THEME\nZZ_A\nZZ_B\n\n", 3)):
+            with self.assertRaisesRegex(o5.Order5Error, "名前の形"):
+                o5.parse_themes_table(bad, {"sha256": hashlib.sha256(bad).hexdigest(), "rows": rows})
+
+    def test_diff_count_with_only_in_old(self):
+        """1cb463a の版（語の完全一致だけ）では外れず、今の版（くっつき一致）で外れるテーマが only_in_old に入る。"""
+        spec = {}
+        for d, rows in standard_spec().items():
+            spec[d] = rows + docs(12, ["ZZ_CIVILWAR"])
+        main, detail, _x = Fixture(spec).build()
+        c = main["comparisons"]["1cb463a"]
+        self.assertIn("ZZ_CIVILWAR", c["only_in_old"])
+        self.assertIn("ZZ_EBOLA", c["only_in_new"])       # 1cb463a は病名でも外す
+        self.assertEqual(c["diff_count"], len(c["only_in_old"]) + len(c["only_in_new"]))
+        self.assertGreaterEqual(c["diff_count"], 2)
+        self.assertEqual(c["in_both"], len(set(detail["versions"]["1cb463a"]["tag_list"])
+                                           & set(detail["official_result"]["tag_list"])))
+
     def test_table_name_re_is_themes_py(self):
         themes = gkg._load_sibling("themes")
         self.assertEqual(o5.TABLE_NAME_RE.pattern, themes.THEME_NAME_RE.pattern)
@@ -598,6 +639,17 @@ class TestOutput(unittest.TestCase):
         for v in o5.PINS.values():
             self.assertIn(str(v) if not isinstance(v, int) or v > 1000 else "seq %d" % v, text)
 
+    def test_doc_has_fixed_strings(self):
+        with open(DOC, encoding="utf-8") as f:
+            text = f.read()
+        for t in (o5.REF_NOTE, o5.ENTRY, o5.OFFICIAL_SETTING) + o5.LIMITS + o5.CITATION:
+            self.assertIn(t, text)
+        main, detail, extra = Fixture(standard_spec()).build()
+        self.assertIn("`%s`" % detail["note"], text)
+        self.assertIn("`%s`" % extra["note"], text)
+        self.assertEqual(main["limits"], list(o5.LIMITS))
+
+
     def test_main_rejects_bad_args(self):
         import io
         err = io.StringIO()
@@ -679,16 +731,16 @@ class TestWriteOutputs(unittest.TestCase):
             Fixture(standard_spec()).build(versions=bad)
 
     def test_write_order_and_bytes(self):
-        renames = []
-        real_rename = os.rename
+        links = []
+        real_link = os.link
 
-        def rec(a, b):
-            renames.append(os.path.basename(b))
-            return real_rename(a, b)
-        with mock.patch.object(os, "rename", rec):
+        def rec(a, b, **k):
+            links.append(os.path.basename(b))
+            return real_link(a, b, **k)
+        with mock.patch.object(os, "link", rec):
             got = o5.write_outputs(self.out, self.parts())
-        self.assertEqual(renames, [o5.DETAIL_NAME, o5.EXTRA_NAME, o5.MAIN_NAME])     # main を最後に
-        self.assertEqual(sorted(os.listdir(self.out)), sorted(o5.OUT_NAMES))
+        self.assertEqual(links, [o5.DETAIL_NAME, o5.EXTRA_NAME, o5.MAIN_NAME])     # main を最後に
+        self.assertEqual(sorted(os.listdir(self.out)), sorted(o5.OUT_NAMES))     # .partial は残らない
         for name, sha in got:
             with open(os.path.join(self.out, name), "rb") as f:
                 self.assertEqual(hashlib.sha256(f.read()).hexdigest(), sha)
@@ -714,6 +766,87 @@ class TestWriteOutputs(unittest.TestCase):
                 o5.write_outputs(self.out, self.parts())
         self.assertEqual(calls, [o5.DETAIL_NAME + ".partial", o5.EXTRA_NAME + ".partial"])
         self.assertFalse(any(os.path.lexists(os.path.join(self.out, n)) for n in o5.OUT_NAMES))
+
+    def test_link_failure_removes_final_names(self):
+        """名前を付ける途中（main の link）で失敗したら、付けた detail・extra の名前を外して止まる。"""
+        real_link = os.link
+
+        def fail_main(a, b, **k):
+            if os.path.basename(b) == o5.MAIN_NAME:
+                raise OSError("見本の link の失敗")
+            return real_link(a, b, **k)
+        with mock.patch.object(os, "link", fail_main):
+            with self.assertRaisesRegex(o5.Order5Error, "付けた名前は外した。"):
+                o5.write_outputs(self.out, self.parts())
+        self.assertEqual(sorted(os.listdir(self.out)), sorted(n + ".partial" for n in o5.OUT_NAMES))
+
+    def test_unlink_failure_is_reported(self):
+        real_link = os.link
+
+        def fail_main(a, b, **k):
+            if os.path.basename(b) == o5.MAIN_NAME:
+                raise OSError("見本")
+            return real_link(a, b, **k)
+        with mock.patch.object(os, "link", fail_main), \
+                mock.patch.object(os, "unlink", side_effect=OSError("見本の unlink の失敗")):
+            with self.assertRaisesRegex(o5.Order5Error, "外せなかったもの"):
+                o5.write_outputs(self.out, self.parts())
+        self.assertFalse(os.path.lexists(os.path.join(self.out, o5.MAIN_NAME)))
+
+    def test_final_name_appearing_after_check_is_not_overwritten(self):
+        """移す前の存在の確かめ：確かめのあとで本来の名前ができても、link が失敗して上書きしない。"""
+        real_write = o5._write_new
+
+        def write_then_race(path, data):
+            real_write(path, data)
+            if path.endswith(o5.EXTRA_NAME + ".partial"):
+                with open(os.path.join(self.out, o5.EXTRA_NAME), "wb") as f:
+                    f.write(b"other")
+        with mock.patch.object(o5, "_write_new", write_then_race):
+            with self.assertRaisesRegex(o5.Order5Error, "本来の名前を付けられなかった"):
+                o5.write_outputs(self.out, self.parts())
+        with open(os.path.join(self.out, o5.EXTRA_NAME), "rb") as f:
+            self.assertEqual(f.read(), b"other")
+        self.assertFalse(os.path.lexists(os.path.join(self.out, o5.DETAIL_NAME)))
+        self.assertFalse(os.path.lexists(os.path.join(self.out, o5.MAIN_NAME)))
+
+    def test_detail_checked_before_returning(self):
+        """check_public は detail・extra・main の三つすべてに掛かる。detail だけに入るもの（1cb463a の全体）で止まる。"""
+        seen = []
+        real = o5.check_public
+
+        def spy(rec):
+            seen.append(rec.get("part", "main"))
+            return real(rec)
+        with mock.patch.object(o5, "check_public", spy):
+            Fixture(standard_spec()).build()
+        self.assertEqual(seen, ["detail", "extra-versions", "main"])
+        bad = dict(VERSIONS)
+        real_v = VERSIONS["1cb463a"]
+
+        class Odd:
+            @staticmethod
+            def build_tag_list(*a, **k):
+                r = real_v.build_tag_list(*a, **k)
+                r["URL"] = "x"
+                return r
+        bad["1cb463a"] = Odd
+        seen.clear()
+        with mock.patch.object(o5, "check_public", spy):
+            with self.assertRaisesRegex(o5.Order5Error, "決めていないキー"):
+                Fixture(standard_spec()).build(versions=bad)
+        self.assertEqual(seen, ["detail"])
+
+    def test_stderr_has_no_list(self):
+        import io
+        err = io.StringIO()
+        with mock.patch.object(o5, "official_record", return_value=(self.main, self.detail, self.extra)), \
+                mock.patch.object(sys, "stdout", io.StringIO()), mock.patch.object(sys, "stderr", err):
+            self.assertEqual(o5.main(["--store", "s", "--themes-store", "t", "--out-dir", self.out]), 0)
+        text = err.getvalue()
+        self.assertRegex(text, r"\Aorder5: ファイルを 0 個開いた（[0-9.]+ 秒）\n\Z")
+        for name in ("ZZ_ALPHA", "ZZ_EBOLA", "ZZ-SYM", "49"):
+            self.assertNotIn(name, text)
 
     def test_existing_partial_refused(self):
         with open(os.path.join(self.out, o5.EXTRA_NAME + ".partial"), "wb") as f:
@@ -758,6 +891,133 @@ class TestWriteOutputs(unittest.TestCase):
         code, _m = self.run_main(exc=o5.Order5Error("見本"))
         self.assertEqual(code, 1)
         self.assertEqual(os.listdir(out2), [])
+
+
+class TestRecipe(unittest.TestCase):
+    """文書5章の手順だけで main の全体を作り直すと、order5.py の main とバイト列で同じになる（合成のデータ）。
+    order5.py の関数は使わず、counting・tagrules・1cb463a の版と、決まった文（付録A）・表（3章）だけを使う。"""
+
+    def recipe(self, fx, ctx):
+        days = [BLOCK[0] + datetime.timedelta(days=i) for i in range((BLOCK[1] - BLOCK[0]).days + 1)]
+        missing = {D.fromisoformat(m["day"]) for m in ctx["order4_list"]["missing_days"]}
+        text = fx.table_bytes.decode("utf-8")
+        assert text.endswith("\n")
+        lines = text[:-1].split("\n")
+        name_rows = lines[1:]
+        T = set(name_rows)
+        rows = {r["day"]: r for r in fx.rows}
+        counts = {c: {} for c in counting.CANDIDATE_IDS}
+        totals = {c: {} for c in counting.CANDIDATE_IDS}
+        cov = {}
+        digest = ""
+        for d in days:
+            r = rows[d.isoformat()]
+            sd = counting.parse_day(fx.files[r["file_name"]], expect_day=d.isoformat(), expect_mode="official")
+            for c in counting.CANDIDATE_IDS:
+                cd, td = counting.candidate_counts(sd, c)
+                totals[c][d] = td
+                for n, v in cd.items():
+                    counts[c].setdefault(n, {})[d] = v
+            cov[d] = counting.coverage([sd])
+            digest += "%s\t%s\t%s\n" % (d.isoformat(), r["file_name"], r["sha256"])
+            assert totals["C7"][d] == ctx["order4_list"]["c7_denominator_by_day"][d.isoformat()]
+        themes = {n: None for n in T}
+        st = {c: counting.order5_candidate_status(c, totals[c], missing, days) for c in counting.CANDIDATE_IDS}
+        result = tagrules.build_tag_list(themes, counts["C7"], totals["C7"], missing, *BLOCK)
+        allset = tagrules.build_tag_list(themes, counts["C7"], totals["C7"], missing, *BLOCK,
+                                         optional=tagrules.OPTIONAL_CATEGORIES)
+        old1 = VERSIONS["1cb463a"].build_tag_list(themes, counts["C7"], totals["C7"], missing, *BLOCK)
+        r_c = {c: (result if c == "C7" else tagrules.build_tag_list(themes, counts[c], totals[c], missing, *BLOCK))
+               for c in counting.CANDIDATE_IDS if st[c]["status"] == "ok"}
+        note = o5.REF_NOTE
+
+        def Y(m):
+            return dict(m, diff_count=len(m["only_in_old"]) + len(m["only_in_new"]), official=False, note=note)
+        keys = ("proposed_label", "block_start", "block_end", "usable_day_count", "quarters",
+                "quarters_without_usable_days", "n_med", "a", "a_float", "v_equals_a", "enabled_optional_categories",
+                "tag_list")
+        X = {k: result[k] for k in keys}
+        th = result["themes"]
+        X.update(tag_count=len(result["tag_list"]), reason_counts={
+            "all_themes": len(th), "in_list": sum(r["in_list"] for r in th),
+            "not_present_throughout": sum(not r["present_throughout"] for r in th),
+            "mean_below_a": sum(not r["mean_ratio_at_least_a"] for r in th),
+            "excluded": sum(bool(r["exclusion_matches"]) for r in th)})
+        cands = []
+        for c, col, den in counting.CANDIDATES:
+            e = {"id": c, "official": c == "C7", "numerator_column": col, "denominator_kind": den,
+                 "status": st[c]["status"], "reason": st[c]["reason"], "zero_days": st[c]["zero_days"],
+                 "note": None if c == "C7" else note}
+            r = r_c.get(c)
+            e.update(n_med=r and r["n_med"], a=r and r["a"], a_float=r and r["a_float"],
+                     usable_day_count=r and r["usable_day_count"], tag_count=r and len(r["tag_list"]))
+            cands.append(e)
+        U = [d for d in days if d not in missing]
+        ck = ("docs_all_groups", "docs_without_any_theme", "docs_without_v1_theme", "docs_without_v2_theme")
+
+        def tot(ds):
+            out = {k: sum(cov[d][k] for d in ds) for k in ck}
+            n = out["docs_all_groups"]
+            out["ratios"] = {k: None if not n else "%d/%d" % (fractions.Fraction(out[k], n).numerator,
+                                                               fractions.Fraction(out[k], n).denominator)
+                             for k in ck[1:]}
+            out["usable_days"] = len(ds)
+            return out
+        quarters = []
+        for i, (qa, qb) in enumerate(tagrules.quarters(*BLOCK)):
+            q = tot([d for d in U if qa <= d <= qb])
+            q.update(index=i, start=qa.isoformat(), end=qb.isoformat())
+            quarters.append(q)
+        R = fx.result_row
+        old_re = re.compile(r"\A[A-Z][A-Z0-9_]{0,159}\Z")
+        outside_names = sorted(n for n in T if not old_re.fullmatch(n))
+        crit = ctx["criteria"]
+        return {
+            "label": "order5-tag-list-v3", "status": "ok", "a_equals_v": True,
+            "block": {"name": "method", "start": BLOCK[0].isoformat(), "end": BLOCK[1].isoformat()},
+            "refs": ctx["refs"],
+            "code": {"sealed": [{"name": n, "sha256": h, "sources": ["seq %d %s %s" % x for x in src]}
+                                for n, h, src in o5.SEALED_CODE],
+                     "versions": [{"name": n, "commit": c, "path": "src/stats/tagrules.py", "sha256": h, "sealed": sd}
+                                  for n, c, h, sd in o5.OLD_VERSIONS]},
+            "input": dict(ctx["gkg"], entry="src/collector/gkg.py official_day_records()", run_id=RID,
+                          day_rows=len(days), day_files_read=len(days), day_files_sha256_checked=True,
+                          c7_denominators_match_order4=True,
+                          day_files_digest=hashlib.sha256(digest.encode("ascii")).hexdigest()),
+            "themes_table": {"file_name": R["file_name"], "sha256": R["sha256"], "rows": R["rows"],
+                             "kept_columns": R["kept_columns"], "headerless": R["headerless"],
+                             "description_column": False, "unique_names": len(T),
+                             "duplicate_rows": len(name_rows) - len(T),
+                             "names_not_in_day_aggregate_form": {"count": len(outside_names), "names": outside_names},
+                             "official_data_themes_not_in_table": len(set(counts["C7"]) - T)},
+            "missing_days": {"source": "order4", "count": len(missing), "days": sorted(d.isoformat() for d in missing)},
+            "official": {"candidate": "C7", "version": "current", "setting": "owner_choice", "official": True,
+                         "result": X},
+            "candidates": cands,
+            "comparisons": {"allset": Y(tagrules.compare_lists(allset, result)),
+                            "1cb463a": Y(tagrules.compare_lists(old1, result))},
+            "reference_criteria": {"source": ctx["refs"]["order2"], "order2_status": ctx["order2_status"],
+                                   "criteria_ids": ["B1", "B2", "B3", "B4", "B5"], "computed": crit,
+                                   "official": False, "note": note},
+            "coverage": {"quarters": quarters, "total": tot(U)},
+            "limits": list(o5.LIMITS), "citation": list(o5.CITATION),
+        }
+
+    def test_main_reproduced_from_doc(self):
+        for spec in (standard_spec(), standard_spec(v1_empty_day="2015-04-02")):
+            fx = Fixture(spec)
+            ctx = fx.ctx()
+            main, detail, extra = fx.build(ctx=ctx)
+            want = self.recipe(fx, ctx)
+            want["outside"] = {"detail": {"file_name": "order5-detail.json",
+                                          "sha256": hashlib.sha256(o5.canonical_bytes(detail)).hexdigest()},
+                               "extra": {"file_name": "order5-extra.json",
+                                         "sha256": hashlib.sha256(o5.canonical_bytes(extra)).hexdigest()}}
+            got_bytes = o5.canonical_bytes(main)
+            want_bytes = (json.dumps(want, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                                     allow_nan=False) + "\n").encode("utf-8")
+            self.assertEqual(json.loads(got_bytes), json.loads(want_bytes))
+            self.assertEqual(got_bytes, want_bytes)
 
 
 class TestStalePycIgnored(unittest.TestCase):

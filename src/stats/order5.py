@@ -28,7 +28,8 @@
   python -I -B -X pycache_prefix=<空> src/stats/order5.py --store <日の集計の置き場所> \
       --themes-store <区分表の置き場所> --out-dir <書き出すディレクトリ> --repo <本体のリポジトリ>
   標準出力には、書いたファイルの名前と sha256 だけを出す。終わり値：0 できた、3 C7 で止まった（main だけ書く）、
-  1 照合・入力・書き出しで止まった（本来の名前のファイルは書かない）、2 引数か書き出す先が違う。
+  1 照合・入力・書き出しで止まった（本来の名前のファイルは残さない。write_outputs の注記）、2 引数か書き出す先が違う。
+  標準エラーには、開いたファイルの数と所要時間、止まったときの理由だけを出す（一覧や数は出さない）。
 """
 
 import array
@@ -86,7 +87,7 @@ tagrules = _load_verified("tagrules", "src/stats/tagrules.py", deps=(("exclusion
 counting = _load_verified("counting", "src/stats/counting.py")
 
 # 出力の label。文書（docs/stats/order5-tag-list.md）の版と1対1にする（テストで照合する）。
-LABEL = "order5-tag-list-v2"
+LABEL = "order5-tag-list-v3"
 
 PERIODS_SHA256 = "81de229d065196a26e15d90c5a80eb1043ca534a6eaf66cdebd36285ae087605"
 EXCLUSION_SHA256 = "22bc0ed138a42b95c36797bbe5b41163c871af14f32be590dafde20fe16fdd1d"
@@ -921,20 +922,43 @@ def _out_dir_ok(out_dir):
 
 
 def write_outputs(out_dir, parts):
-    """parts：[(名前, 記録)]。すべてのバイト列を先に作り、一時の名前（.partial）にすべて書いてから、
-    detail・extra・main の順に本来の名前へ移す。一時の名前に書く途中で失敗したら、本来の名前のファイルは
-    一つも無い（.partial は消さずに残す。削除はリードを通す）。返り値：[(名前, sha256)]。"""
+    """parts：[(名前, 記録)]。返り値：[(名前, sha256)]。docs/stats/order5-tag-list.md 4章 (3)。
+
+    1. すべてのバイト列を先に作る（記録はどれも build() で check_public() を通したもの）。
+    2. 一時の名前（<名前>.partial）に O_EXCL で書く。ここで失敗したら、本来の名前のファイルは作っていない
+       （書けた .partial は残る）。
+    3. detail・extra・main の順に、os.link(一時の名前, 本来の名前) で本来の名前を付ける（main が最後）。link は、
+       本来の名前が既にあれば FileExistsError で失敗するので、確かめてから付けるまでの隙間は無い。途中で失敗したら、
+       この呼び出しで付けた本来の名前（どれも .partial と同じ中身のリンク）を外してから止まる。
+    4. すべて付けられたら、.partial の名前を外す（後片付け）。
+    外す処理そのものが失敗した場合は、残った名前を Order5Error の文に書いて止まる（main は最後に付けるので、
+    main があればほかの二つもある）。"""
     if not _out_dir_ok(out_dir):
         raise Order5Error("書き出すディレクトリが無いか、同じ名前のファイルがある")
     blobs = [(name, canonical_bytes(rec)) for name, rec in parts]
     for name, data in blobs:
         _write_new(os.path.join(out_dir, name + PARTIAL_SUFFIX), data)
     order = sorted(blobs, key=lambda b: b[0] == MAIN_NAME)      # main を最後に
-    for name, _data in order:
-        dst = os.path.join(out_dir, name)
-        if os.path.lexists(dst):
-            raise Order5Error("移す先に同じ名前のファイルがある")
-        os.rename(os.path.join(out_dir, name + PARTIAL_SUFFIX), dst)
+    linked = []
+    try:
+        for name, _data in order:
+            os.link(os.path.join(out_dir, name + PARTIAL_SUFFIX), os.path.join(out_dir, name),
+                    follow_symlinks=False)
+            linked.append(name)
+    except OSError as e:
+        left = []
+        for name in reversed(linked):
+            try:
+                os.unlink(os.path.join(out_dir, name))
+            except OSError:
+                left.append(name)
+        raise Order5Error("本来の名前を付けられなかった（%s）。付けた名前は外した%s。.partial は残っている"
+                          % (type(e).__name__, "" if not left else "が、外せなかったもの：%s" % left)) from None
+    for name, _data in blobs:
+        try:
+            os.unlink(os.path.join(out_dir, name + PARTIAL_SUFFIX))
+        except OSError:
+            pass        # 本来の名前は付いている。.partial が残っても中身は同じ
     return [(name, hashlib.sha256(data).hexdigest()) for name, data in blobs]
 
 
@@ -958,7 +982,8 @@ def main(argv=None):
         if detail is not None:
             parts = [(DETAIL_NAME, detail), (EXTRA_NAME, extra)] + parts
         written = write_outputs(out_dir, parts)
-    except Exception as e:  # 関門・照合・入力の誤り・書き出しの失敗で止まる。本来の名前のファイルは書かない
+    except Exception as e:  # 関門・照合・入力の誤り・書き出しの失敗で止まる。本来の名前のファイルは残さない
+        # （名前を外す処理そのものが失敗したときだけ残りうる。そのときは残った名前を下の文に書く）
         sys.stderr.write("order5: 止まった：%s: %s\n" % (type(e).__name__, e))
         return 1
     sys.stderr.write("order5: ファイルを %d 個開いた（%.1f 秒）\n" % (len(opened), time.monotonic() - t0))
