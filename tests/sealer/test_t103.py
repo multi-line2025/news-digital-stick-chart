@@ -38,7 +38,7 @@ import seal_records  # noqa: E402
 
 REL = ledger.THEMES_MANIFEST
 THEMES_PY = os.path.join(tl.PROJECT, "src", "collector", "themes.py")
-NOT_PREFIX = "の版が、HEAD の版の先頭部分でない"
+NOT_PREFIX = "の版が1本の鎖にならない"                # T-104：鎖の形に改めた
 
 
 class CloneCase(unittest.TestCase):
@@ -79,14 +79,16 @@ class TestThemesAppendOnly(CloneCase):
     def test_honest_passes_and_reports(self):
         rc, out, err = self.verify("all", "--rev", "auto")
         self.assertEqual(rc, 0, err)
-        self.assertIn("追記だけ（T-103）：data/manifest/gdelt-themes.jsonl の版 2 個（git log --all --reflog --full-history）", out)
-        self.assertIn("取得の試みの回数（履歴に現れた attempt の行の数の最大値）は 1（上限 3）。最後の行：failed", out)
+        self.assertIn("追記だけ（T-103・T-104）：data/manifest/gdelt-themes.jsonl の commit の版 2 個（git log --all --reflog "
+                      "--full-history）と HEAD・作業ツリーの版は、1本の鎖", out)
+        self.assertIn("取得の試みの回数（鎖の上で最も長い版の attempt の行の数）は 1（上限 3）。最も長い版の最後の行：failed", out)
 
     def test_delete_failed_line(self):
-        """failed の行を消してコミットする（失敗の跡を消して、fetch で終わる形に見せる）と止まる。"""
+        """failed の行を消してコミットする（失敗の跡を消して、fetch で終わる形に見せる）と止まる（T-104：消した版は鎖からは外れ
+        ないので、親の版との比べで止まる）。"""
         body = self.read()
         self.put(b"\n".join(body.split(b"\n")[:2]) + b"\n", msg="failed の行を消した（テスト）")
-        self.stops(NOT_PREFIX)
+        self.stops("の版が、親 ")
 
     def test_recount_by_rewriting(self):
         """全部を消して、新しい試行の行1行から始め直す（回数を数え直させる）と止まる。"""
@@ -98,14 +100,12 @@ class TestThemesAppendOnly(CloneCase):
         self.stops(NOT_PREFIX)
 
     def test_deleted_file_counts_as_empty(self):
-        """ファイルを消したコミットの版は空として扱う（空は先頭部分なので、それだけでは止まらない）。消す前の版が残る。"""
+        """ファイルを消したコミットの版は空として扱う。行のある親の版を先頭に持たないので、同じ中身で戻しても止まる（T-104）。"""
         body = self.read()
         self.git("rm", "-q", "--cached", "--", REL)
         self.git("commit", "-q", "-m", "マニフェストを索引から外した（テスト）")
         self.put(body, msg="同じ中身で戻した（テスト）")
-        rc, out, err = self.verify()
-        self.assertEqual(rc, 0, err)
-        self.assertIn("の版 4 個", out)
+        self.stops("の版が、親 ")
 
     def test_rewrite_on_other_branch(self):
         """HEAD でない枝で書き換えても、--all で見つけて止まる。"""
@@ -124,7 +124,7 @@ class TestThemesAppendOnly(CloneCase):
         with open(os.path.join(self.c, ".git", "info", "grafts"), "w") as f:
             f.write(head + "\n")
         self.assertEqual(self.git("log", "--format=%H", "HEAD").decode().split(), [head])   # grafts は効いている
-        with self.assertRaisesRegex(ledger.LedgerError, NOT_PREFIX):
+        with self.assertRaisesRegex(ledger.LedgerError, "の版が、親 "):
             verify.check_manifest_append_only(verify.Repo(self.c), REL)
         rc, _out, _err = self.verify()
         self.assertEqual(rc, 1)
@@ -180,7 +180,7 @@ class TestGkgAppendOnly(CloneCase):
         body = self.read(rel)
         rc, out, err = self.verify("gkg-runs")
         self.assertEqual(rc, 0, err)
-        self.assertIn("data/manifest/gdelt-gkg-trial.jsonl（trial）：版 1 個", out)
+        self.assertIn("data/manifest/gdelt-gkg-trial.jsonl（trial）：commit の版 1 個", out)
         self.put(body.replace(b'"kind": "run-complete"', b'"kind":  "run-complete"'), rel, msg="書き換え（テスト）")
         self.put(body, rel, msg="戻した（テスト）")
         self.stops(NOT_PREFIX, "gkg-runs")

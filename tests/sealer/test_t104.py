@@ -141,5 +141,71 @@ class TestUncommittedListed(Case):
         self.assertIn("区分表のマニフェストの 6 行目（failed）の git の履歴との照合（その行がまだコミットされていない）", last)
 
 
+# ---------------------------------------------------------------- T-103 の監査の残り（T-104 に加えたもの）
+
+class TestChain(Case):
+    """版が1本の鎖になること（T-103 の監査 中-1）。HEAD がほかの参照より遅れているだけなら通る。"""
+
+    def ahead_branch(self, rows, rel=REL, extra_bytes=None):
+        """枝 ahead に、rows（または extra_bytes）を足したコミットを作り、main に戻る（git fetch のあとの、HEAD が遅れた形）。"""
+        self.git("checkout", "-q", "-b", "ahead")
+        if extra_bytes is None:
+            self.append(rows)
+        else:
+            with open(os.path.join(self.c, rel), "ab") as f:
+                f.write(extra_bytes)
+            self.git("add", "--", rel)
+            self.git("commit", "-q", "-m", "足した（テスト）")
+        self.git("checkout", "-q", "main")
+
+    def test_head_behind_passes_and_counts_longest(self):
+        """監査 third・pD の形：ほかの参照が HEAD より先の版（正直な取り直しの試行の行）を持つ。通り、回数は鎖の上で最も長い版の
+        attempt の数（2）で数え、最後の行もその版のもの（T-103 の監査 軽-4）。"""
+        self.ahead_branch([self.retry()])
+        rc, out, err = self.verify("stats-order")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("取得の試みの回数（鎖の上で最も長い版の attempt の行の数）は 2（上限 3）。最も長い版の最後の行：attempt", out)
+
+    def test_old_commit_checkout_passes(self):
+        """古い commit（試行の行だけの版。67ed3c1）を checkout した形（HEAD がほかの参照より遅れた形）も通る。回数と最後の行は、
+        鎖の上で最も長い版（main の3行）のもの。"""
+        old = "67ed3c1f3c5fc4fb079a0dcad00f10791e77f550"
+        self.git("checkout", "-q", old)
+        self.assertEqual(len(self.rows()), 1)
+        rc, out, err = self.verify("stats-order")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("取得の試みの回数（鎖の上で最も長い版の attempt の行の数）は 1（上限 3）。最も長い版の最後の行：failed", out)
+
+    def test_working_tree_truncated_stops(self):
+        """作業ツリーだけで、コミットした行を消した形（HEAD の版より短い）は止まる（鎖の上にはあるが、作業ツリーは HEAD の版を
+        先頭に持たなければならない）。"""
+        self.put(t99.body_of(self.rows()[:2]))
+        self.stops("HEAD の版を先頭に持たない")
+
+    def test_delete_and_retake_stops(self):
+        """監査 pF の形：fetch・failed の行を消して、通信をやり直した行を足す（消して取り直す）。鎖が分かれて止まる。"""
+        a, f, fl = self.rows()
+        self.put(t99.body_of([a, dict(f, at="2026-10-16T02:00:00Z")]), msg="消して取り直した（テスト）")
+        self.stops(t103.NOT_PREFIX)
+
+    def test_reflog_only_rewrite_stops(self):
+        """書き換えた版を枝に作り、その枝を消す（reflog にだけ残る）。--reflog があるので止まる（外すと落ちる。T-103 の監査 中-2）。"""
+        self.git("checkout", "-q", "-b", "side")
+        body = self.read()
+        self.put(body.replace(b'"reason": "ThemesError"', b'"reason": "OtherError"'), msg="枝で書き換えた（テスト）")
+        self.git("checkout", "-q", "main")
+        self.git("branch", "-q", "-D", "side")
+        self.assertEqual(self.git("branch", "--list", "side"), b"")
+        self.stops(t103.NOT_PREFIX)
+
+    def test_gkg_head_behind_passes(self):
+        """GKG のマニフェストでも、ほかの参照が HEAD より先の版を持つだけなら通る。"""
+        rel = ledger.GKG_MANIFESTS["trial"]
+        self.ahead_branch(None, rel=rel, extra_bytes=b'{"kind": "note"}\n')
+        rc, out, err = self.verify("gkg-runs")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("data/manifest/gdelt-gkg-trial.jsonl（trial）：commit の版 2 個", out)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1720,12 +1720,10 @@ def cmd_stats_order(st, a):
     def themes_rules(v):
         ledger.check_themes_manifest_refs(st.records, v)
         return sum(1 for x in v.split(b"\n") if x.strip() and json.loads(x).get("kind") == "attempt")
-    n_versions, counts = check_manifest_append_only(repo, ledger.THEMES_MANIFEST, themes_rules)
-    if body is not None:
-        counts.append(themes_rules(body))
-    max_attempts = max(counts) if counts else 0
+    n_versions, _counts, longest = check_manifest_append_only(repo, ledger.THEMES_MANIFEST, themes_rules, working=body)
+    max_attempts = themes_rules(longest)          # 回数は、鎖の上で最も長い版の attempt の行の数（T-104 軽-4）
     last_kind = None
-    for x in (body or b"").split(b"\n"):
+    for x in longest.split(b"\n"):
         if x.strip():
             last_kind = json.loads(x).get("kind")
     n_code, code_notes = check_themes_attempt_code(repo, body)          # T-102
@@ -1754,8 +1752,9 @@ def cmd_stats_order(st, a):
           "fetch の行 %d 行は、その行を初めて含んだコミットの第一の親の版で、マニフェストが直前の attempt で終わり、themes.py が"
           "同じ版。failed・result の行 %d 行は、直前の fetch と同じコミットで入った（T-104）。"
           % (ledger.THEMES_MANIFEST, n, rows, n_code["attempt"], n_code["fetch"], n_code["failed"] + n_code["result"]))
-    print("  追記だけ（T-103）：%s の版 %d 個（git log --all --reflog --full-history）は、どれも HEAD の版の先頭部分で、行の取り決めに通る。"
-          "取得の試みの回数（履歴に現れた attempt の行の数の最大値）は %d（上限 %d）。最後の行：%s%s"
+    print("  追記だけ（T-103・T-104）：%s の commit の版 %d 個（git log --all --reflog --full-history）と HEAD・作業ツリーの版は、"
+          "1本の鎖（どの2つも、どちらかがどちらかの先頭部分）になり、どれも行の取り決めに通る。取得の試みの回数（鎖の上で最も長い版の"
+          " attempt の行の数）は %d（上限 %d）。最も長い版の最後の行：%s%s"
           % (ledger.THEMES_MANIFEST, n_versions, max_attempts, ledger.THEMES_MAX_ATTEMPTS, last_kind or "無し",
              THEMES_LAST_NOTE.get(last_kind, "")))
 
@@ -1773,31 +1772,51 @@ THEMES_LAST_NOTE = {
 }
 
 
-def check_manifest_append_only(repo, rel, rules=None):
-    """マニフェスト rel が追記だけであることを、git の履歴で照らす（T-103。T-099 の監査 重大-1）。
-      - 版：`git log --all --reflog --full-history --format=%H -- rel` のすべての commit の版（その commit に rel が無ければ空）。
-        --reflog は、手元で枝を消した commit も見るため（収集係の関門と同じ。第三者の clone では、手元の reflog は無い）。
-      - どの版も、HEAD の版のバイト列の先頭部分であること。行を消す・書き換える・並べ替えるコミットがどこかの参照から辿れれば
-        止まる（あとで行を足し直しても、消す前の版が HEAD の先頭部分でないので止まる）。
+def check_manifest_append_only(repo, rel, rules=None, working=None):
+    """マニフェスト rel が追記だけであることを、git の履歴で照らす（T-103。T-099 の監査 重大-1。T-104 で鎖の形に改めた）。
+      - 版：`git log --all --reflog --full-history --format=%H -- rel` のすべての commit の版（その commit に rel が無ければ空）と、
+        HEAD の版と、working（作業ツリーの版。渡したときだけ）。--reflog は、手元で枝を消した commit も見るため（収集係の
+        関門と同じ。外すと落ちるテストがある。第三者の clone には運営の reflog は無い）。
+      - 集めた版が1本の鎖になること：長さの順に並べて、どの隣り合う2つも、短い方が長い方の先頭部分（どの2つを取っても、
+        どちらかがどちらかの先頭部分）。HEAD がほかの参照より遅れているだけ（git fetch のあと、古い commit の checkout）なら
+        通る。行を消す・書き換える・並べ替えた版がどこかの参照から辿れれば、鎖が分かれて止まる（あとで行を足し直しても、
+        消す前の版と足し直した版のどちらも、もう一方の先頭部分にならない）。
+      - どの commit の版も、その親の版を先頭に持つこと（行を消すコミットが無い）。最後の行を消しただけの版は鎖からは外れない
+        ので、こちらで見つける。ファイルを消したコミットの版は空として扱うので、ここで止まる。
       - rules を渡せば、各版に当てる（返り値を集める）。
-    git は GIT_ の環境変数を固定して動かす（_rgit。GIT_NO_REPLACE_OBJECTS と、存在しないパスの GIT_GRAFT_FILE なので、
-    refs/replace/ と info/grafts は効かない）。浅い clone では、版を辿りきれないので LedgerError（呼ぶ側が止めるか
-    「照らさなかった」にする）。返り値: (版の数, [rules(版)...])。"""
+    この照合の git は GIT_ の環境変数を固定して動かす（_rgit。GIT_NO_REPLACE_OBJECTS と、存在しないパスの GIT_GRAFT_FILE
+    なので、refs/replace/ と info/grafts は、この照合の版の辿り方を変えない。verify のほかの照合の git がそうとは限らない。
+    手順書13章）。浅い clone では、版を辿りきれないので LedgerError（呼ぶ側が止めるか「照らさなかった」にする）。
+    返り値: (commit の版の数, [rules(版)...], 鎖の上で最も長い版)。"""
     if not _not_shallow(repo):
         raise ledger.LedgerError("浅い clone なので、%s が追記だけかを git の履歴で照らせない" % rel)
-    head = _version_or_empty(repo, "HEAD", rel)
     commits = _rgit(repo, "log", "--all", "--reflog", "--full-history", "--format=%H", "--", rel).decode().split()
-    got = []
+    entries = [("commit %s" % c[:12], _version_or_empty(repo, c, rel)) for c in commits]
+    entries.append(("HEAD", _version_or_empty(repo, "HEAD", rel)))
+    if working is not None:
+        entries.append(("作業ツリー", working))
+    chain = sorted(entries, key=lambda e: len(e[1]))
+    for (n1, v1), (n2, v2) in zip(chain, chain[1:]):
+        if not v2.startswith(v1):
+            raise ledger.LedgerError("%s の版が1本の鎖にならない：%s の版が、%s の版の先頭部分でない（行を消すか書き換えた版が"
+                                     "どこかの参照から辿れる。マニフェストは追記だけ）" % (rel, n1, n2))
+    # どの commit の版も、その親の版を先頭に持つ（行を消すコミットが無い）。HEAD が遅れているだけの形には、そういうコミットは
+    # 無い。最後の行を消しただけの版は鎖からは外れない（短い方が先頭部分）ので、親との比べで見つける（T-104）。ファイルを
+    # 消したコミットの版は空なので、行のある親の版を先頭に持たず、ここで止まる
     for c in commits:
         v = _version_or_empty(repo, c, rel)
-        if not head.startswith(v):
-            raise ledger.LedgerError("%s の commit %s の版が、HEAD の版の先頭部分でない（行を消すか書き換えたコミットが履歴にある。"
-                                     "マニフェストは追記だけ）" % (rel, c[:12]))
-        if rules is not None:
-            got.append(rules(v))
+        for p in _rgit(repo, "rev-parse", c + "^@").decode().split():
+            if not v.startswith(_version_or_empty(repo, p, rel)):
+                raise ledger.LedgerError("%s の commit %s の版が、親 %s の版を先頭に持たない（行を消すか書き換えたコミット。"
+                                         "マニフェストは追記だけ）" % (rel, c[:12], p[:12]))
+    got = []
     if rules is not None:
-        got.append(rules(head))
-    return len(commits), got
+        seen = set()
+        for _n, v in entries:
+            if v not in seen:
+                seen.add(v)
+                got.append(rules(v))
+    return len(commits), got, chain[-1][1]
 
 
 def check_themes_attempt_code(repo, body):
@@ -2316,9 +2335,15 @@ def gkg_manifests_append_only(st):
         print("照らさなかった：浅い clone なので、GKG のマニフェストが追記だけかを照らしていない")
         return
     for mode, rel in sorted(ledger.GKG_MANIFESTS.items()):
-        n, _ = check_manifest_append_only(repo, rel)
+        path = os.path.join(st.root, rel)
+        working = None
+        if os.path.isfile(path) and not os.path.islink(path):
+            with open(path, "rb") as f:
+                working = f.read()
+        n, _got, _longest = check_manifest_append_only(repo, rel, working=working)
         if n:
-            print("  %s（%s）：版 %d 個（git log --all --reflog --full-history）は、どれも HEAD の版の先頭部分（追記だけ。T-103）" % (rel, mode, n))
+            print("  %s（%s）：commit の版 %d 個（git log --all --reflog --full-history）と HEAD・作業ツリーの版は、1本の鎖になる"
+                  "（追記だけ。T-103・T-104）" % (rel, mode, n))
 
 
 def cmd_gkg_runs(st, a):
