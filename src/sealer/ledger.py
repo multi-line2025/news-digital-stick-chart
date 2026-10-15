@@ -3432,6 +3432,9 @@ THEMES_ROW_KEYS = {
 # どちらの形も受け付ける。stage の語は themes.FAILED_STAGES と同じ（tests/sealer/test_t102.py が照らす）
 THEMES_FAILED_KEYS_WITH_STAGE = ("at", "kind", "reason", "stage")
 THEMES_FAILED_STAGES = ("fetch", "read", "shape", "write")
+# stage の無い古い形の failed の行を書いた themes.py の版（e3784c2 の1回目の attempt の code_sha256）。古い形は、この版の
+# attempt の直後の failed にだけ許し、ほかの版の attempt のあとは stage のある形を求める（T-103。T-101 の監査 軽-3）
+THEMES_LEGACY_FAILED_CODE_SHA256 = "73877f10b4bccaae4d66bd51ffee33f5dd3af8eda9d5aaa2eac469eddcc66d1c"
 THEMES_REF_KINDS = ("attempt", "result")
 THEMES_NEXT = {None: ("attempt",), "attempt": ("fetch",), "fetch": ("failed", "result"), "failed": ("attempt",),
                "result": ()}
@@ -3516,6 +3519,12 @@ def check_themes_manifest_refs(records, manifest_bytes):
                                   % (THEMES_MANIFEST, i, row["exclusion_rule_seq"],
                                      "（無し）" if o1 is None else "（seq %d）" % o1["seq"]))
             n += 1
+        if kind == "failed":
+            legacy = attempt["code_sha256"] == THEMES_LEGACY_FAILED_CODE_SHA256
+            if ("stage" in row) == legacy:
+                raise LedgerError("%s の %d 行目（failed）の形が、直前の attempt のコードの版に合わない（stage の無い形は、"
+                                  "%s… の版の attempt のあとだけ。ほかの版のあとは stage のある形）"
+                                  % (THEMES_MANIFEST, i, THEMES_LEGACY_FAILED_CODE_SHA256[:12]))
         if kind == "attempt":
             attempt = row
             n_attempts += 1

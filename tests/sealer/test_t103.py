@@ -214,7 +214,8 @@ for _name in [n for n in dir(t100.TestWriteContent) if n.startswith("test_")]:
 
 
 class TestRowKeysSameAsThemes(unittest.TestCase):
-    """収集係の themes.py の行の形の定数（T-101 差し戻し2回目）と、ledger の取り決めが一致する。定数がまだ無い版なら飛ばす。"""
+    """収集係の themes.py の行の形の定数（T-101 差し戻し2回目。328ac7e で HEAD に入った）と、ledger の取り決めが一致する。
+    themes.py は ast で読むだけ（読み込まない）。"""
 
     def constants(self):
         with open(THEMES_PY, encoding="utf-8") as f:
@@ -230,8 +231,10 @@ class TestRowKeysSameAsThemes(unittest.TestCase):
 
     def test_same(self):
         c = self.constants()
-        if "MANIFEST_ROW_KEYS" not in c:
-            self.skipTest("themes.py に MANIFEST_ROW_KEYS がまだ無い")
+        for name in ("MANIFEST_ROW_KEYS", "MANIFEST_LEGACY_FAILED_KEYS", "FAILED_STAGES", "MAX_TOTAL_ATTEMPTS",
+                     "MANIFEST_NEXT"):
+            self.assertIn(name, c, "themes.py（T-101 の 328ac7e から）に %s が無い" % name)
+        self.assertEqual(c["MANIFEST_NEXT"], ledger.THEMES_NEXT)
         rows = c["MANIFEST_ROW_KEYS"]
         self.assertEqual(set(rows), set(ledger.THEMES_ROW_KEYS))
         for kind in ("attempt", "fetch", "result"):

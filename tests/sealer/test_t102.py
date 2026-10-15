@@ -59,12 +59,12 @@ class Retry(unittest.TestCase):
         a, f, fl = cls.attempt, cls.fetch, cls.failed
         cls.a2 = dict(a, attempted_at="2026-10-16T01:00:00Z", code_sha256="b" * 64)
         cls.f2 = dict(f, at="2026-10-16T02:00:00Z", code_sha256="b" * 64)
-        cls.fl2 = dict(fl, at="2026-10-16T02:00:01Z")
+        cls.fl2 = dict(fl, at="2026-10-16T02:00:01Z", stage="shape")
         cls.a3 = dict(a, attempted_at="2026-10-17T01:00:00Z", code_sha256="c" * 64)
         cls.f3 = dict(f, at="2026-10-17T02:00:00Z", code_sha256="c" * 64)
         cls.r3 = dict(cls.result, fetched_at="2026-10-17T02:00:01Z", attempted_at=cls.a3["attempted_at"],
                       code_sha256="c" * 64)
-        cls.fl3 = dict(fl, at="2026-10-17T02:00:01Z")
+        cls.fl3 = dict(fl, at="2026-10-17T02:00:01Z", stage="fetch")
 
     def test_honest_retries(self):
         a, f, fl = self.attempt, self.fetch, self.failed
@@ -81,6 +81,21 @@ class Retry(unittest.TestCase):
                 self.assertEqual(self.check([a, f, fl, self.a2, self.f2, dict(self.fl2, stage=st)]), 2)
         with self.assertRaisesRegex(ledger.LedgerError, "6 行目（failed）の stage が"):
             self.check([a, f, fl, self.a2, self.f2, dict(self.fl2, stage="人の名前")])
+
+    def test_failed_form_follows_attempt_code(self):
+        """T-103（T-101 の監査 軽-3）：stage の無い古い形の failed は、73877f10… の版の attempt のあとだけ。ほかの版の attempt の
+        あとは stage のある形を求め、73877f10… の版のあとに stage のある形も止める。"""
+        a, f, fl = self.attempt, self.fetch, self.failed
+        self.assertEqual(a["code_sha256"], ledger.THEMES_LEGACY_FAILED_CODE_SHA256)
+        legacy_after_new = {k: v for k, v in self.fl2.items() if k != "stage"}
+        with self.assertRaisesRegex(ledger.LedgerError, "6 行目（failed）の形が、直前の attempt のコードの版に合わない"):
+            self.check([a, f, fl, self.a2, self.f2, legacy_after_new])
+        with self.assertRaisesRegex(ledger.LedgerError, "3 行目（failed）の形が、直前の attempt のコードの版に合わない"):
+            self.check([a, f, dict(fl, stage="shape")])
+        # 取り直しで同じ古い版を使った attempt のあとなら、古い形を許す
+        a2_old = dict(self.a2, code_sha256=a["code_sha256"])
+        self.assertEqual(self.check([a, f, fl, a2_old, dict(self.f2, code_sha256=a["code_sha256"]),
+                                     dict(fl, at="2026-10-16T02:00:01Z")]), 2)
 
     def test_over_limit(self):
         a, f, fl = self.attempt, self.fetch, self.failed
