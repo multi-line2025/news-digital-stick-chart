@@ -996,7 +996,7 @@ rec, rel, ots_path = seal_stats.seal_order1b(project, files, approvals, now, ots
       |---|---|---|---|
       | `attempt` | 1段目。試行の行（通信しない） | `kind`・`attempted_at`・`code_path`・`code_sha256`・`source_url`・2つのキー | 求める |
       | `fetch` | 2段目。通信の直前 | `kind`・`at`・`code_sha256` | 求めない（書かない） |
-      | `failed` | 通信か形の誤りで止まったとき | `kind`・`at`・`reason`（例外の名前） | 求めない（書かない） |
+      | `failed` | 通信か形の誤りで止まったとき | `kind`・`at`・`reason`（例外の名前）。T-101 差し戻し1回目からの行は、これに `stage`（止まった段。`fetch`・`read`・`shape`・`write` のどれか。`ledger.THEMES_FAILED_STAGES`。themes.py の `FAILED_STAGES` と同じ）を足した形。どちらの形も受け付ける（本物の1回目の `failed` は `stage` を持たない） | 求めない（書かない） |
       | `result` | 成功したとき | `kind`・`file_name`・`sha256`・`rows`・`kept_columns`・`dropped_columns`・`fetched_at`・`attempted_at`・`sheet_names_replaced`・`headerless`・`source_url`・`code_path`・`code_sha256`・`store_location`・2つのキー | 求める |
     - 並び（`ledger.THEMES_NEXT`。themes.py の `MANIFEST_NEXT` と同じ）：`attempt` → `fetch` → `failed` か `result`。`failed` のあとは、取り直しの `attempt` だけ（T-102。収集係の T-101）。`result` のあとに行は無い。`attempt` で終わる形（2段目の前）と `fetch` で終わる形（通信の途中で止まった形）も、並びとしては通す。
     - **取り直しの取り決め（T-102）**：

@@ -44,6 +44,7 @@ class TestConstants(unittest.TestCase):
         self.assertEqual(ledger.THEMES_MAX_ATTEMPTS, th.MAX_TOTAL_ATTEMPTS)
         self.assertEqual(ledger.THEMES_MAX_ATTEMPTS, 3)
         self.assertEqual(ledger.THEMES_NEXT, th.MANIFEST_NEXT)
+        self.assertEqual(ledger.THEMES_FAILED_STAGES, th.FAILED_STAGES)
 
 
 class Retry(unittest.TestCase):
@@ -71,6 +72,15 @@ class Retry(unittest.TestCase):
         self.assertEqual(self.check([a, f, fl, self.a2, self.f2, self.fl2]), 2)
         self.assertEqual(self.check([a, f, fl, self.a2, self.f2, self.fl2, self.a3, self.f3, self.r3]), 4)
         self.assertEqual(self.check([a, f, fl, self.a2, self.f2, self.fl2, self.a3, self.f3, self.fl3]), 3)
+
+    def test_failed_with_stage(self):
+        """T-101 差し戻し1回目からの failed の行（stage を持つ）も、stage の無い1回目の行も受け付ける。決まった語でない stage は止まる。"""
+        a, f, fl = self.attempt, self.fetch, self.failed
+        for st in ledger.THEMES_FAILED_STAGES:
+            with self.subTest(stage=st):
+                self.assertEqual(self.check([a, f, fl, self.a2, self.f2, dict(self.fl2, stage=st)]), 2)
+        with self.assertRaisesRegex(ledger.LedgerError, "6 行目（failed）の stage が"):
+            self.check([a, f, fl, self.a2, self.f2, dict(self.fl2, stage="人の名前")])
 
     def test_over_limit(self):
         a, f, fl = self.attempt, self.fetch, self.failed

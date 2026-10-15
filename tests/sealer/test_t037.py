@@ -286,7 +286,12 @@ class TestThemesByGit(StatsCase):
     def test_honest_themes_after_order1_passes(self):
         self.base()
         self.order1()
-        self.write(seal_stats.THEMES_MANIFEST, self.themes_row())
+        # T-102：試行の行の code_sha256 は、その行をコミットした版の themes.py（テストの仮のもの）の sha256
+        stub = "# 区分表の取得のコード（テストの仮のもの）\n"
+        self.write("src/collector/themes.py", stub)
+        row = json.loads(self.themes_row())
+        row["code_sha256"] = hashlib.sha256(stub.encode("utf-8")).hexdigest()
+        self.write(seal_stats.THEMES_MANIFEST, json.dumps(row) + "\n")
         self.commit("区分表を取得した")
         out = self.verify_ok("stats-order")
         self.assertIn("行のある commit 1 件。どれも、親の sealed/ledger.jsonl に stats-order1 の行がある", out)

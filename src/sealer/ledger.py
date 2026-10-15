@@ -3428,6 +3428,10 @@ THEMES_ROW_KEYS = {
                "exclusion_rule_seq", "fetched_at", "file_name", "headerless", "kept_columns", "kind", "rows",
                "sheet_names_replaced", "sha256", "source_url", "store_location"),
 }
+# failed の行は、T-101 差し戻し1回目から stage（止まった段）も持つ。それより前の行（本物の1回目の failed）は持たない。
+# どちらの形も受け付ける。stage の語は themes.FAILED_STAGES と同じ（tests/sealer/test_t102.py が照らす）
+THEMES_FAILED_KEYS_WITH_STAGE = ("at", "kind", "reason", "stage")
+THEMES_FAILED_STAGES = ("fetch", "read", "shape", "write")
 THEMES_REF_KINDS = ("attempt", "result")
 THEMES_NEXT = {None: ("attempt",), "attempt": ("fetch",), "fetch": ("failed", "result"), "failed": ("attempt",),
                "result": ()}
@@ -3443,7 +3447,7 @@ def _themes_row_shape(row, i):
     kind = row.get("kind") if isinstance(row, dict) else None
     if kind not in THEMES_ROW_KEYS:
         raise LedgerError("%s の kind %r が、attempt・fetch・failed・result のどれでもない" % (where, kind))
-    if set(row) != set(THEMES_ROW_KEYS[kind]):
+    if set(row) != set(THEMES_ROW_KEYS[kind]) and not (kind == "failed" and set(row) == set(THEMES_FAILED_KEYS_WITH_STAGE)):
         raise LedgerError("%s（%s）のキーが、themes.py の書く形（%s）と一致しない"
                           % (where, kind, "、".join(THEMES_ROW_KEYS[kind])))
     for k in ("attempted_at", "at", "fetched_at"):
@@ -3455,6 +3459,8 @@ def _themes_row_shape(row, i):
         raise LedgerError("%s（%s）の code_path が %s でない" % (where, kind, THEMES_CODE_PATH))
     if kind == "failed" and not (isinstance(row["reason"], str) and THEMES_REASON_RE.match(row["reason"])):
         raise LedgerError("%s（failed）の reason が、例外の名前の形でない" % where)
+    if kind == "failed" and "stage" in row and row["stage"] not in THEMES_FAILED_STAGES:
+        raise LedgerError("%s（failed）の stage が、%s のどれでもない" % (where, "・".join(THEMES_FAILED_STAGES)))
     if kind == "result":
         _check_hex(row["sha256"], HEX64, "%s（result）の sha256" % where)
         if not (isinstance(row["file_name"], str) and THEMES_FILE_RE.match(row["file_name"])):
