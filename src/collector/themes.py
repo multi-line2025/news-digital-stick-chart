@@ -47,7 +47,7 @@ data/manifest/gdelt-themes.jsonl の行で決まる。実行の入口は5章（T
       2段目（試行の行をコミットしたあと）：作業ツリーのマニフェストが HEAD とちょうど同じで、
       中身がこのコードとこの除外の規則の記録の試行の行1行だけのときに限り、kind が fetch の
       行を書いてから通信する。止まれば failed の行、成功すれば result の行を書く。
-      それ以外（コミットしていない変更がある・ほかの行がある）なら、通信せずに止まる。
+      それ以外（コミットしていない変更がある・並びが違う）なら、通信せずに止まる。取り直しは 0.2章。
       1段目の前提（T-026 軽-3）：git log --all -- data/manifest/gdelt-themes.jsonl が空である
       こと（マニフェストを git mv で別の名前に移しても、元の名前の履歴が残るので止まる）と、
       保存先（~/Desktop/news-stick-data）に gdelt-themes- で始まるファイルが無いこと。
@@ -58,6 +58,25 @@ data/manifest/gdelt-themes.jsonl の行で決まる。実行の入口は5章（T
       コミットする。
     - 結果の行と試行の行には、除外の規則の関門が返した記録の seq と sha256
       （exclusion_rule_seq・exclusion_rule_record_sha256）を書く（差し戻し2回目 中-B）。
+
+------------------------------------------------------------------------
+0.2 取り直し（T-101。オーナーの承認：reviews/T-098.md の 2026-10-15 の発言「あと2回」）
+------------------------------------------------------------------------
+    - マニフェストは追記だけ。前の行は消さず、変えない。行の並び（MANIFEST_NEXT）：
+        attempt → fetch → failed か result。failed のあとは次の attempt だけ。result のあとは無し。
+      並びが違えば止まる（parse_manifest）。
+    - 回数は記録から数える：マニフェストの attempt の行の数。上限は MAX_TOTAL_ATTEMPTS（3。最初の
+      1回と承認の2回）。自分で番号を書くことはしない（取り直しの attempt の行は、最初の attempt と
+      同じキー：kind・attempted_at・code_path・code_sha256・source_url・exclusion_rule_seq・
+      exclusion_rule_record_sha256）。
+    - 作業ツリーのマニフェストが HEAD と同じことを、毎回はじめに求める（2段の手順は毎回同じ）。
+      最後の行で決める：
+        failed：取り直しの1段目。attempt の行がすでに上限の数なら、何も書かず、通信せずに止まる。
+                そうでなければ新しい attempt の行を追記して AttemptRecorded で止まる。
+        attempt：2段目。その行がこのコードとこの除外の規則のものなら、fetch の行を書いて通信する。
+        result：それ以上は取得しない。fetch：前の通信の途中で止まった跡なので止まる。
+    - 1段目と2段目の前に、保存先に gdelt-themes- で始まるファイルが無いことを確かめる（failed の
+      取得はファイルを書かないので、あれば別の跡）。
 
 ------------------------------------------------------------------------
 1. 取得元と通信
@@ -155,6 +174,22 @@ data/manifest/gdelt-themes.jsonl の行で決まる。実行の入口は5章（T
     - 表示するのは、ファイルの名前・行数・残した欄と捨てた欄の見出し・headerless・sha256・
       code_sha256・除外の規則の記録の seq と出典だけ。区分表の値（テーマの名前）は表示しない。
 
+------------------------------------------------------------------------
+6. 形の判定で止まったときの診断（diagnose_shape。T-101）
+------------------------------------------------------------------------
+    build_output（2章・2.1章の判定）で止まったとき、表の数と文字の種類だけを標準エラーに1行で
+    出す。ファイル・マニフェストには書かない。failed の行の reason は今までどおり例外の型の名前。
+    値・テーマの名前・その断片・長さの一覧は出さない。出すもの：
+      sheets（シートの数）、rows（行の数）、column_count_distribution（欄の数ごとの行の数）、
+      columns_not_shown（DIAG_MAX_COLUMNS を超えて数を出さなかった欄の数）、
+      first_row_numeric_columns（1行目で数字だけの値の欄の数）、
+      columns（先頭から DIAG_MAX_COLUMNS 欄まで、欄ごとに）：values・empty・theme_name_match・
+        theme_name_nonmatch・ascii_digits_only・nonmatch_first_char_not_upper・nonmatch_too_long
+        （161文字以上）・nonmatch_values_with（合わない値のうち、その種類の文字を含む値の数）・
+        nonmatch_chars（合わない値に含まれるその種類の文字の数）。文字の種類は upper・lower・
+        digit・underscore・space・symbol（そのほかの ASCII）・non_ascii。
+    読めなかった（UTF-8 でない・形式が違う）・通信の失敗のときは、表が無いので診断は出さない。
+
 外部のライブラリは使わない（Python 3 の標準ライブラリだけ）。
 """
 
@@ -185,7 +220,11 @@ _DOC_URL_RE = re.compile(
     r"\Ahttps://data\.gdeltproject\.org/api/v2/guides/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\Z")
 # 0章：除外の規則の封印の記録の種類。封印係の T-037 で決まった（ledger.ORDER1_KIND と同じ。T-032）
 EXCLUSION_RULE_KIND = "stats-order1"
-MAX_ATTEMPTS = 1
+MAX_ATTEMPTS = 1                 # 1回の取得（attempt 1つ）の中で送る要求の数。再試行しない
+# 0.2章：取得の試み（マニフェストの attempt の行）の合計の上限（T-101）。オーナーの承認：最初の1回と、
+# 2026-10-15 の「あと2回」（reviews/T-098.md）。回数はマニフェストの attempt の行の数で数える
+MAX_TOTAL_ATTEMPTS = 3
+DIAG_MAX_COLUMNS = 8             # 6章：診断で欄ごとの数を出す欄の数の上限
 REQUEST_TIMEOUT_SECONDS = 60
 TOTAL_DEADLINE_SECONDS = 300
 MAX_BYTES = 50 * 1024 * 1024
@@ -652,8 +691,117 @@ def _append_line(path, entry, what):
         os.close(fd)
 
 
+MANIFEST_NEXT = {None: ("attempt",), "attempt": ("fetch",), "fetch": ("failed", "result"),
+                 "failed": ("attempt",), "result": ()}
+
+
+def parse_manifest(data):
+    """0.2章。マニフェストのバイト列を行の一覧にする。並びは attempt → fetch → failed か result、
+    failed のあとは次の attempt だけ、result のあとは何も無い（MANIFEST_NEXT）。合わなければ止まる。"""
+    rows, prev = [], None
+    for raw in data.split(b"\n"):
+        if not raw.strip():
+            continue
+        try:
+            row = json.loads(raw.decode("ascii"))
+        except (UnicodeDecodeError, ValueError):
+            raise ThemesError("マニフェストの行が JSON として読めない（リードに報告）") from None
+        kind = row.get("kind") if isinstance(row, dict) else None
+        if kind not in MANIFEST_NEXT[prev]:
+            raise ThemesError("マニフェストの行の並びが違う（%s のあとに %s）。取得しない（リードに報告）"
+                              % (prev or "先頭", kind if kind in MANIFEST_NEXT else "知らない kind"))
+        rows.append(row)
+        prev = kind
+    if not rows:
+        raise ThemesError("マニフェストが空（コミットしたあとで消した跡）。取得しない（リードに報告）")
+    return rows
+
+
+def _check_store_empty(store):
+    if any(n.startswith("gdelt-themes-") for n in os.listdir(store)):
+        raise ThemesError("保存先に区分表のファイルが既にある。取得しない（リードに報告）")
+
+
+# ---------------------------------------------------------------------------
+# 6章：形の判定で止まったときの診断（T-101）
+# ---------------------------------------------------------------------------
+
+def _char_classes(v):
+    """値に含まれる文字の種類ごとの文字の数。名前の欄の規則 THEME_NAME_RE に照らすための分類。"""
+    c = {"upper": 0, "lower": 0, "digit": 0, "underscore": 0, "space": 0, "symbol": 0,
+         "non_ascii": 0}
+    for ch in v:
+        if ch.isascii():
+            if "A" <= ch <= "Z":
+                c["upper"] += 1
+            elif "a" <= ch <= "z":
+                c["lower"] += 1
+            elif "0" <= ch <= "9":
+                c["digit"] += 1
+            elif ch == "_":
+                c["underscore"] += 1
+            elif ch.isspace():
+                c["space"] += 1
+            else:
+                c["symbol"] += 1
+        else:
+            c["non_ascii"] += 1
+    return c
+
+
+def diagnose_shape(sheets):
+    """表の形の数と種類だけを数える（値・名前・断片は返さない）。返り値は数だけの dict。"""
+    out = {"sheets": len(sheets), "rows": 0, "column_count_distribution": {}, "columns": []}
+    cols = []
+    for _n, rows in sheets:
+        for r in rows:
+            out["rows"] += 1
+            k = str(len(r))
+            out["column_count_distribution"][k] = out["column_count_distribution"].get(k, 0) + 1
+            for i, v in enumerate(r[:DIAG_MAX_COLUMNS]):
+                while len(cols) <= i:
+                    cols.append({"values": 0, "empty": 0, "theme_name_match": 0,
+                                 "theme_name_nonmatch": 0, "ascii_digits_only": 0,
+                                 "nonmatch_first_char_not_upper": 0, "nonmatch_too_long": 0,
+                                 "nonmatch_values_with": {}, "nonmatch_chars": {}})
+                d = cols[i]
+                v = v.strip()
+                d["values"] += 1
+                if not v:
+                    d["empty"] += 1
+                if ASCII_DIGITS_RE.match(v):
+                    d["ascii_digits_only"] += 1
+                if THEME_NAME_RE.match(v):
+                    d["theme_name_match"] += 1
+                    continue
+                d["theme_name_nonmatch"] += 1
+                if v and not ("A" <= v[0] <= "Z"):
+                    d["nonmatch_first_char_not_upper"] += 1
+                if len(v) > 160:
+                    d["nonmatch_too_long"] += 1
+                for cls, n in _char_classes(v).items():
+                    if n:
+                        d["nonmatch_values_with"][cls] = d["nonmatch_values_with"].get(cls, 0) + 1
+                        d["nonmatch_chars"][cls] = d["nonmatch_chars"].get(cls, 0) + n
+    out["columns"] = cols
+    out["columns_not_shown"] = max(0, max((len(r) for _n, rows in sheets for r in rows), default=0)
+                                   - DIAG_MAX_COLUMNS)
+    out["first_row_numeric_columns"] = sum(
+        1 for _n, rows in sheets[:1] for v in (rows[0] if rows else []) if looks_like_number(v))
+    return out
+
+
+def format_diagnosis(d):
+    """診断を1行の文にする。中身は数と、固定の名前の鍵だけ（json の鍵は上のコードの定数）。"""
+    return "診断（数と種類だけ。値は出さない）: " + json.dumps(d, sort_keys=True, ensure_ascii=True)
+
+
+def _stderr_diag(text):
+    print(text, file=sys.stderr)
+
+
 def run(*, root, home, url=None, transport=urllib_transport, clock=time.monotonic,
-        now=lambda: datetime.datetime.now(datetime.timezone.utc)):
+        now=lambda: datetime.datetime.now(datetime.timezone.utc), diag=_stderr_diag):
     """1回だけ取得し、件数の欄を捨てて保存する（ThemesError で止まる）。2段で動く（0.1章）。
 
     1段目：マニフェストが作業ツリーにも HEAD にも無ければ、試行の行を書いて AttemptRecorded で
@@ -676,24 +824,42 @@ def run(*, root, home, url=None, transport=urllib_transport, clock=time.monotoni
         # 変えて残した場合も、元の名前の履歴が残る）と、保存先に区分表のファイルが無いこと
         if has_history:
             raise ThemesError("区分表のマニフェストの名前に Git の履歴がある（前に試みた跡）。"
-                              "2回目は取得しない（リードに報告）")
-        if any(n.startswith("gdelt-themes-") for n in os.listdir(store)):
-            raise ThemesError("保存先に区分表のファイルが既にある。2回目は取得しない（リードに報告）")
+                              "マニフェストが無いので取り直しもしない（リードに報告）")
+        _check_store_empty(store)
         _append_line(manifest, dict(attempt, attempted_at=_iso(now())), "マニフェストの行")
-        raise AttemptRecorded("試行の行を書いた（通信はしていない）。data/manifest/%s をコミット"
-                              "してから、同じコマンドでもう一度実行する" % MANIFEST_NAME)
+        raise AttemptRecorded("試行の行を書いた（1回目。通信はしていない）。data/manifest/%s を"
+                              "コミットしてから、同じコマンドでもう一度実行する" % MANIFEST_NAME)
     working = _read_manifest(manifest)
     if working != head_manifest:
         raise ThemesError("区分表のマニフェストに、コミットしていない変更がある（前の取得の途中か"
-                          "あとの跡。2回目は取得しない。リードに報告）")
-    lines = [l for l in working.splitlines() if l.strip()]
-    try:
-        only = json.loads(lines[0]) if len(lines) == 1 else None
-    except ValueError:
-        only = None
-    if only is None or {k: v for k, v in only.items() if k != "attempted_at"} != attempt:
-        raise ThemesError("区分表の取得は既に試みた（マニフェストが、このコードの試行の行1行だけ"
-                          "でない）。2回目は取得しない")
+                          "あとの跡。取得しない。リードに報告）")
+    rows = parse_manifest(working)                    # 0.2章。並びが違えば止まる
+    n_attempts = sum(1 for r in rows if r["kind"] == "attempt")
+    if n_attempts > MAX_TOTAL_ATTEMPTS:
+        raise ThemesError("マニフェストの attempt の行が %d 行あり、上限 %d を超えている。取得しない"
+                          "（リードに報告）" % (n_attempts, MAX_TOTAL_ATTEMPTS))
+    last = rows[-1]["kind"]
+    if last == "result":
+        raise ThemesError("区分表は既に取得した（result の行がある）。それ以上は取得しない")
+    if last == "fetch":
+        raise ThemesError("前の取得が fetch の行で終わっている（通信の途中で止まった跡）。取り直さない"
+                          "（リードに報告）")
+    if last == "failed":
+        # 0.2章：取り直しの1段目。上限に達していれば、何も書かずに止まる（通信もしない）
+        if n_attempts >= MAX_TOTAL_ATTEMPTS:
+            raise ThemesError("取得の試みは上限の %d 回に達した（attempt の行 %d 行）。取り直さない。"
+                              "それ以上はオーナーに聞く" % (MAX_TOTAL_ATTEMPTS, n_attempts))
+        _check_store_empty(store)
+        _append_line(manifest, dict(attempt, attempted_at=_iso(now())), "マニフェストの行")
+        raise AttemptRecorded("取り直しの試行の行を書いた（%d 回目。上限 %d 回。通信はしていない）。"
+                              "data/manifest/%s をコミットしてから、同じコマンドでもう一度実行する"
+                              % (n_attempts + 1, MAX_TOTAL_ATTEMPTS, MANIFEST_NAME))
+    # last == "attempt"：2段目。最後の attempt の行が、このコードとこの除外の規則のものであること
+    only = rows[-1]
+    if {k: v for k, v in only.items() if k != "attempted_at"} != attempt:
+        raise ThemesError("マニフェストの最後の試行の行が、このコードかこの除外の規則のものでない。"
+                          "取得しない（コードを変えたなら、試行の行を書く前に戻す。リードに報告）")
+    _check_store_empty(store)
     attempted_at = only.get("attempted_at")
     stamp = now().astimezone(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     file_name = "gdelt-themes-%s.tsv" % stamp
@@ -704,7 +870,7 @@ def run(*, root, home, url=None, transport=urllib_transport, clock=time.monotoni
                  "マニフェストの行")
     try:
         return _fetch_and_write(url, name, transport, clock, now, attempted_at, sha_code, excl,
-                                file_name, out_path, manifest)
+                                file_name, out_path, manifest, diag)
     except ThemesError as e:
         _append_line(manifest, {"kind": "failed", "at": _iso(now()),
                                 "reason": type(e).__name__}, "マニフェストの行")
@@ -712,12 +878,16 @@ def run(*, root, home, url=None, transport=urllib_transport, clock=time.monotoni
 
 
 def _fetch_and_write(url, name, transport, clock, now, attempted_at, sha_code, excl, file_name,
-                     out_path, manifest):
+                     out_path, manifest, diag):
     raw = fetch_once(url, transport, clock)
     fetched_at = _iso(now())
     sheets = read_table(raw, name)
     del raw                                           # 元の応答はここで手放す
-    data, nrows, kept, dropped, replaced, headerless = build_output(sheets)
+    try:
+        data, nrows, kept, dropped, replaced, headerless = build_output(sheets)
+    except ThemesError:
+        diag(format_diagnosis(diagnose_shape(sheets)))   # 6章：数と種類だけ。標準エラーだけ
+        raise
     del sheets
     entry = {"kind": "result", "file_name": file_name, "sha256": hashlib.sha256(data).hexdigest(),
              "rows": nrows, "kept_columns": kept, "dropped_columns": dropped,

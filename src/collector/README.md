@@ -10,7 +10,7 @@ Data: The GDELT Project (https://www.gdeltproject.org/). This project is not aff
 | `codegate.py` | 入口のスクリプトが共通に使う関門の部品（git を環境変数なしで動かす、未コミット・無視されるファイル・skip-worktree の検査、sealed/・data/manifest のリンクの検査）。T-018 |
 | `acquire_gkg.py` | 手順4の入口のスクリプト。最初に除外の規則の封印の関門（`themes.require_exclusion_rules_sealed()`。区分表の取得と同じ）を通し、次に `ledger.require_method_access()` を引数なしで呼び、関門のあとで gkg.py を動かす。`--trial` で試しの run。T-018・T-021。まだ実行していない |
 | `gkg.py` | 手法を作る期間の GKG 2.1 の取得、メモリの上での欄の破棄と集計、日ごとの集計の保存（外付けディスク LACIE SHARE。FAT32）、取得の記録とマニフェスト、試しの run。T-018・T-021 |
-| `themes.py` | テーマの区分表の取得（件数の欄を捨てる）。取得元は `https://data.gdeltproject.org/api/v2/guides/LOOKUP-GKGTHEMES.TXT` だけ（T-021）。除外の規則の封印の記録（kind `stats-order1`。統計係の順番1、seq 5）がちょうど1件でなければ通信の前に止まる。コミットしたコードでだけ動き、取得の試みは1回だけ（マニフェストに試行の行）。見出しの無い「名前・件数」の2欄なら名前の欄だけを残す（8章）。入口は `.venv/bin/python -B src/collector/themes.py`（T-098）。取得したかどうかは `data/manifest/gdelt-themes.jsonl` の行で決まる |
+| `themes.py` | テーマの区分表の取得（件数の欄を捨てる）。取得元は `https://data.gdeltproject.org/api/v2/guides/LOOKUP-GKGTHEMES.TXT` だけ（T-021）。除外の規則の封印の記録（kind `stats-order1`。統計係の順番1、seq 5）がちょうど1件でなければ通信の前に止まる。コミットしたコードでだけ動き、取得の試みはマニフェストの attempt の行で数えて合計3回まで（最初の1回と、2026-10-15 にオーナーが承認した取り直し2回。T-101）。形の判定で止まると、数と文字の種類だけの診断を標準エラーに出す。見出しの無い「名前・件数」の2欄なら名前の欄だけを残す（8章）。入口は `.venv/bin/python -B src/collector/themes.py`（T-098）。取得したかどうかは `data/manifest/gdelt-themes.jsonl` の行で決まる |
 | `privacy_scan.py` | メールアドレスの形の文字列の検査（filelist.py・gkg.py・themes.py が書く前に使う。コミットの前と後にも実行する） |
 
 細かい決まりは、各ファイルの docstring に書いてある。この文書は、実行の手順と限界をまとめる。
@@ -397,6 +397,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/collector -v
 - T-071：`test_gkg.py` の `TestT032.test_hook_receives_plan_equal_to_run_start_row`（start_hook に渡す `plan_sha256` が run-start の行と同じで、`ledger.gkg_plan_sha256(select_files(一覧))`（試しの run は `trial_plan` のあと）と同じ）・`test_trial_plan_sha256_is_after_trial_plan`（一覧に試しの run の日の外の日があるとき、試しの run の `plan_sha256` は `trial_plan` のあとの計画のもの）・`test_resume_with_other_plan_stops`（再開のときに計画が違えば要求0件で止まる）・`TestDayRecordsOfCallSites`。`test_acquire_gkg.py` の `test_full_run`・`test_trial_run_then_official`（記録と行の `plan_sha256` が、封印済みの合成の一覧から作り直した値と同じ）、`TestPlanSha256Verify`（一覧に試しの run の日の外の1日を足し、試しの run と正式な run の計画が違う形で流す。封印係の verify の作り直し `_check_plan_body` を、合成の一覧を渡して流すと通る。渡さなければ「照らさなかった」。記録の値を変えると止まる。hook が関門の一覧から作り直した計画と違えば記録を書かずに止まる）、`TestPlanRequiredSwitch.test_official_with_counts_but_without_plan_sha256_is_refused`。`*PlanRequired` に `TestPlanSha256VerifyPlanRequired` を足した。
 - T-064：プロジェクトの写し（`test_acquire_filelist.pristine_copy`）では、`data/manifest` も手順3より前の形（`.gitkeep` と空の `gdelt-filelist.jsonl` だけ）にし、試しの run（T-063）・正式な run・区分表のマニフェストなど、後から本物に足されたマニフェストを名前によらず外す。本物に試しの run の記録とマニフェストが入ったあと、写しの上のテスト（`test_acquire_gkg.py` の `TestEndToEnd`・`TestSealGkgRun`・`TestSealedRunCheck`・`TestT045`）が「この run_id の取得は完了している」で止まっていたため。`TestPristineCopy` が、写しの形と、後から足されうる記録・`.ots`・中身・マニフェストを外すことを確かめる。`TestProductionPath.test_test_seams_cannot_point_at_real_places` は、一時的なディレクトリの判定を差し替えて確かめ、プロジェクトの置き場所（一時的なディレクトリの下の clone など）に左右されない。`test_gkg.py` の `TestT057.test_make_sealed_project_refuses_inside_project_under_tmp` は、`PROJECT` を一時的なディレクトリの下に差し替えて、仮の封印の記録の道具の「このプロジェクトの中か」の判定を、本物のプロジェクトから流すときも確かめる。
 - T-098：`test_themes.py` の `TestMain`（入口のコマンド。引数があれば run を呼ばずに終わり値 2、root と home は固定（環境変数 HOME を見ない）、1段目は終わり値 3、止まれば 1、成功の表示に行数・sha256・headerless・出典があり、テーマの名前と件数が出ないこと、スクリプトとして動かしても引数があれば関門に進まないこと、「未定」の古い文言が残っていないこと）。
+- T-101：`test_themes.py` の `TestRetry`（失敗のあとの取り直しが追記だけで、前の行を変えないこと、最初の attempt と同じキー、2段の手順、上限の3回で通信の前に止まり何も書かないこと、記録の attempt が上限を超えれば止まること、並びの規則、fetch で終わる・result のあとは止まること、保存先にファイルがあれば止まること）と `TestDiagnosis`（診断は数と種類だけで、名前と件数の4文字の断片が出ないこと、標準エラーだけでファイルに書かないこと、reason は変わらないこと、通信の失敗では出さないこと、欄の数の上限）。`TestRun.test_only_one_attempt_ever` と `test_committed_attempt_must_match_code_and_rule` は、取り直しの形に合わせて改めた。
 - テストは、本物の `/Volumes/LACIE SHARE` を使わない。保存先のディスクは一時的なディレクトリで置き換え、マウントの検査だけを差し替える（本物の検査は `TestVolume` と、下の FAT32 のテストで確かめる）。
 
 ### 7.1 FAT32 のイメージの上でのテスト（T-021）
@@ -445,10 +446,29 @@ hdiutil detach "$SP/fatmnt/LACIE SHARE"
       commit -m "区分表の取得：結果の行" -- data/manifest/gdelt-themes.jsonl   # すぐにコミットする
   .venv/bin/python -B src/collector/privacy_scan.py
   ```
-  - 終わり値：0 取得して保存した、3 試行の行を書いて止まった（1段目）、1 関門か取得の失敗で止まった、2 引数があった。1 のときは、マニフェストに fetch・failed の行があればそのままコミットし、リードに報告する（2回目はしない）。
+  - 終わり値：0 取得して保存した、3 試行の行を書いて止まった（1段目）、1 関門か取得の失敗で止まった、2 引数があった。1 のときは、マニフェストに fetch・failed の行があればそのままコミットし、リードに報告する。取り直しは、下の「取り直し」のとおり、リードの指示があってから行う。
   - 表示は、ファイルの名前・行数・残した欄と捨てた欄の見出し・`headerless`・sha256・code_sha256・除外の規則の記録の seq と出典だけ。テーマの名前は表示しない。
-- 止めるもの：コミットの前に試行の行を消しても、まだ通信していないので、1段目からやり直すだけになる。通信のあと（fetch・failed・result の行がある）、コミットしていない変更があれば止まる。コミットしたあとで行を消したり空にしたりしても、HEAD と合わないので止まる。マニフェストに試行の行のほかの行があれば止まる（2回目はしない）。
+- 止めるもの：コミットの前に試行の行を消しても、まだ通信していないので、1段目からやり直すだけになる。通信のあと（fetch・failed・result の行がある）、コミットしていない変更があれば止まる。コミットしたあとで行を消したり空にしたりしても、HEAD と合わないので止まる。行の並びが下の「取り直し」の規則に合わなければ止まる。result の行があれば、それ以上は取得しない。
 - 1段目の前提（T-026 軽-3）：`git log --all -- data/manifest/gdelt-themes.jsonl` が空であること（マニフェストを `git mv` で別の名前に移してコミットしても、元の名前の履歴が残るので止まる）と、保存先（`~/Desktop/news-stick-data`）に `gdelt-themes-` で始まるファイルが無いこと。
+- **取り直し**（T-101。オーナーの承認は reviews/T-098.md の 2026-10-15 の発言「あと2回」）：
+  - マニフェストは追記だけ。前の行は消さず、変えない。行の並びは `attempt → fetch → failed か result`。`failed` のあとに来られるのは次の `attempt` だけで、`result` のあとには何も来ない。合わなければ止まる（`themes.parse_manifest`）。
+  - 回数は記録から数える。マニフェストの `attempt` の行の数で、上限は `themes.MAX_TOTAL_ATTEMPTS = 3`（最初の1回＋2回）。番号を自分で書くことはしない。
+  - 取り直しの `attempt` の行は、最初の行と同じキーを持つ：`kind`・`attempted_at`・`code_path`・`code_sha256`・`source_url`・`exclusion_rule_seq`・`exclusion_rule_record_sha256`。
+  - 手順は毎回同じ2段で、コマンドも上と同じ。マニフェストの最後の行が `failed` なら、1段目で新しい `attempt` の行を追記して終わり値 3 で止まる（通信しない）。それをコミットしてから、2段目で通信する。
+  - 上限に達したら止まる。`attempt` の行がすでに3行あり、最後が `failed` なら、何も書かず通信もせずに、終わり値 1 で止まる。`attempt` の行が上限を超えていても、通信の前に止まる。それ以上はオーナーに聞く。
+  - 最後の行が `fetch` のとき（通信の途中で止まった跡）は止まる。最後の `attempt` の行が今のコードや除外の規則のものでないときも止まる。
+  - 取り直しのためにコードを直したときは、直したコードをコミットしてから1段目を流す。`attempt` の行の `code_sha256` は、その回のコードのものになる。
+  - 封印係の照合（`ledger.check_themes_manifest_refs`）は、`failed` のあとの `attempt` をまだ受け付けない（T-102 で直す予定）。取り直しの行をコミットしたあとは、封印係が直すまで `verify all --rev auto` が止まる。
+- **形の判定で止まったときの診断**（T-101。themes.py 6章）：
+  - 判定（見出しの規則、または見出しの無い2欄の規則）で止まったときに、標準エラーへ1行だけ出す。ファイルにもマニフェストにも書かない。`failed` の行の `reason` は、今までどおり例外の型の名前。
+  - 出すのは数と種類だけで、テーマの名前・値・その断片は出さない。
+    - `sheets`・`rows`（行の数）
+    - `column_count_distribution`（欄の数ごとの行の数）
+    - `first_row_numeric_columns`（1行目で数字だけの値の欄の数）
+    - `columns_not_shown`（数を出さなかった欄の数）
+    - 先頭の8欄までの、欄ごとの数：`values`・`empty`・`theme_name_match` と `theme_name_nonmatch`（`THEME_NAME_RE` に合う値と合わない値の数）・`ascii_digits_only`・`nonmatch_first_char_not_upper`・`nonmatch_too_long`（161文字以上）
+    - 合わない値の文字の種類：`nonmatch_values_with`（その種類の文字を含む値の数）と `nonmatch_chars`（その種類の文字の数）。種類は `upper`・`lower`・`digit`・`underscore`・`space`・`symbol`（ほかの ASCII）・`non_ascii`。
+  - 通信の失敗や、表として読めなかったときは、表が無いので診断を出さない。
 - **止めないもの（限界）**：履歴そのものを書き換えること（`git reset --hard`・rebase・filter-branch などで、試行や結果のコミットを消すこと）は、手元の検査では見分けられない（テスト `test_reset_of_history_is_a_documented_limit`）。リモートが無いので、写しを持たない第三者にも見えない。前提：通信のあとの行（fetch・failed）は、コミットする前は作業ツリーにだけある。→ 結論：その行を消して作業ツリーを HEAD と同じ形（試行の行1行）に戻すと、もう一度通信できる。手元の検査では見分けられない（テスト `test_reverting_to_committed_attempt_allows_refetch_limit` で、この限界を確かめている）。2段目のあとすぐにコミットすることで、時間の幅を小さくする。
 - **見出しの無い「名前・件数」の2欄の表**（リードの判断。監査の条件 (1)〜(4)）：1行目に数字だけの値があるとき、どの行も欄がちょうど2つで、一方の欄の値がすべてテーマの名前の形、もう一方がすべて ASCII の数字だけ、という割り当てがちょうど1つに決まる場合に限り、名前の欄だけを残す。判定は欄の位置ではなく値の形で行う。両方の割り当てが合う場合、どちらも合わない場合は止まる。件数の欄はメモリの上で捨て、行を並べ替えてから書く。マニフェストに `headerless: true` と、捨てた欄の位置（`column_A` か `column_B`）を書く。この規則は取得の前にコミットし、試行の行の `code_sha256` で固定する。
 - **限界**：区分表は取得した時点の全テーマの一覧なので、2020-12-15 以降に生まれたテーマの名前も入る。名前があることは、そのテーマが後ろの期間に使われたことを示しうる。タグの一覧の規則は、手法を作る期間のデータでテーマの存在を確かめるので、名前だけでは一覧に入らない。

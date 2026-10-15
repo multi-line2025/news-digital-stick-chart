@@ -131,7 +131,7 @@ PINNED_SHA256 = (
     (FILELIST_REL, "afd7a9dd47bc052a691e1a4cd558b211f4d72cf1ce1f451fa9f3016540cd04a7"),
     (PRIVACY_SCAN_REL, "68d8836d56489ca5df9f2f55e24a2642ebf3aa14afdc2e0120577c7b6c6cb887"),
     (CODEGATE_REL, "d422be41dc59c4be50689a2426453db965be506a9981770ab3eb7557ed078769"),
-    (THEMES_REL, "73877f10b4bccaae4d66bd51ffee33f5dd3af8eda9d5aaa2eac469eddcc66d1c"),
+    (THEMES_REL, "f033d68d62029e83e3c94e5ad50199c6da00aceba69226e93be1482449421df3"),
 )
 CLEAN_PATHS = ("src/collector", "src/sealer")
 FILELIST_MANIFEST_REL = ("data", "manifest", "gdelt-filelist.jsonl")

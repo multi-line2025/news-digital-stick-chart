@@ -747,21 +747,25 @@ class TestRun(RunCase):
         self.attempt_only()
 
     def test_only_one_attempt_ever(self):
-        """差し戻し1回目 中3：失敗しても成功しても、2回目は通信せずに止まる。"""
+        """差し戻し1回目 中3（T-101 で改めた）：失敗のあとは、コミットしてから新しい attempt の行を書く
+        だけで通信しない。成功（result）のあとは、もう取得しない。"""
         with self.assertRaises(themes.ThemesError):
             self.run_themes(GOOD, status=503)
         with self.assertRaisesRegex(themes.ThemesError, "コミットしていない変更"):
             self.run_themes(GOOD)
         self.commit_all()
-        with self.assertRaisesRegex(themes.ThemesError, "既に試みた"):
+        with self.assertRaisesRegex(themes.AttemptRecorded, "取り直し"):
             self.run_themes(GOOD)
         self.assertEqual(self.tr.calls, [])
-        self.attempt_only()
+        files = self.written()
+        self.assertEqual(sorted(files), [themes.MANIFEST_NAME])
+        self.assertEqual([json.loads(l)["kind"] for l in files[themes.MANIFEST_NAME].splitlines()],
+                         ["attempt", "fetch", "failed", "attempt"])
         self.fresh()
         e = self.run_themes(GOOD)
         self.assertEqual(e["kind"], "result")
         self.commit_all()
-        with self.assertRaisesRegex(themes.ThemesError, "既に試みた"):
+        with self.assertRaisesRegex(themes.ThemesError, "既に取得した"):
             self.run_themes(GOOD)
         self.assertEqual(self.tr.calls, [])
         lines = [json.loads(l) for l in self.written()[themes.MANIFEST_NAME].splitlines()]
@@ -811,13 +815,13 @@ class TestRun(RunCase):
                        now=lambda: NOW)
         self.commit_all()
         with mock.patch.object(themes, "_code_gate", lambda root: ("cd" * 32, self.head, True)):
-            with self.assertRaisesRegex(themes.ThemesError, "既に試みた"):
+            with self.assertRaisesRegex(themes.ThemesError, "このコードかこの除外の規則のものでない"):
                 themes.run(root=self.root, home=self.home, transport=tr, clock=lambda: 0.0,
                            now=lambda: NOW)
         with mock.patch.object(themes, "_code_gate", lambda root: (CODE_SHA, self.head, bool(self.head))), \
                 mock.patch.object(themes, "_exclusion_gate",
                                   lambda root: {"seq": 8, "record_sha256": "e" * 64}):
-            with self.assertRaisesRegex(themes.ThemesError, "既に試みた"):
+            with self.assertRaisesRegex(themes.ThemesError, "このコードかこの除外の規則のものでない"):
                 themes.run(root=self.root, home=self.home, transport=tr, clock=lambda: 0.0,
                            now=lambda: NOW)
         self.assertEqual(tr.calls, [])
@@ -859,6 +863,232 @@ class TestRun(RunCase):
     def test_citation(self):
         self.assertIn("Data: The GDELT Project (https://www.gdeltproject.org/).",
                       " ".join(themes.__doc__.split()))
+
+
+class TestRetry(RunCase):
+    """T-101：取り直し（0.2章）。追記だけ、回数は attempt の行の数、上限 MAX_TOTAL_ATTEMPTS。"""
+
+    def call(self, body=GOOD, status=200, head=None):
+        self.tr = FakeTransport(body, status)
+        head = self.head if head is None else head
+        with mock.patch.object(themes, "_code_gate", lambda root: (CODE_SHA, head, True)):
+            return themes.run(root=self.root, home=self.home, url=URL, transport=self.tr,
+                              clock=lambda: 0.0, now=lambda: NOW, diag=lambda t: None)
+
+    def manifest(self):
+        with open(self.manifest_path(), "rb") as f:
+            return f.read()
+
+    def kinds(self):
+        return [json.loads(l)["kind"] for l in self.manifest().splitlines()]
+
+    def fail_once(self):
+        """1段目（試行の行）→ コミット → 2段目（503 で failed）→ コミット。"""
+        if os.path.lexists(self.manifest_path()):
+            with self.assertRaises(themes.AttemptRecorded):
+                self.call()
+            self.assertEqual(self.tr.calls, [])            # 1段目は通信しない
+        else:
+            with self.assertRaises(themes.ThemesError):
+                self.run_themes(GOOD, status=503)
+            self.commit_all()
+            return
+        self.commit_all()
+        with self.assertRaises(themes.ThemesError):
+            self.call(status=503)
+        self.assertEqual(len(self.tr.calls), 1)
+        self.commit_all()
+
+    def test_constant(self):
+        self.assertEqual(themes.MAX_TOTAL_ATTEMPTS, 3)
+        self.assertEqual(themes.MAX_ATTEMPTS, 1)
+
+    def test_retry_appends_only_and_succeeds(self):
+        self.fail_once()
+        before = self.manifest()
+        with self.assertRaisesRegex(themes.AttemptRecorded, "2 回目"):
+            self.call()
+        self.assertEqual(self.tr.calls, [])
+        self.assertTrue(self.manifest().startswith(before))   # 前の行は変えない
+        new = json.loads(self.manifest()[len(before):])
+        self.assertEqual(sorted(new), ["attempted_at", "code_path", "code_sha256",
+                                       "exclusion_rule_record_sha256", "exclusion_rule_seq",
+                                       "kind", "source_url"])
+        first = json.loads(before.splitlines()[0])
+        self.assertEqual(sorted(new), sorted(first))          # 最初の attempt と同じキー
+        self.commit_all()
+        e = self.call()
+        self.assertEqual(e["kind"], "result")
+        self.assertEqual(self.kinds(), ["attempt", "fetch", "failed", "attempt", "fetch", "result"])
+        self.assertTrue(self.manifest().startswith(before))
+        self.assertEqual(e["attempted_at"], new["attempted_at"])
+
+    def test_retry_attempt_must_be_committed_before_fetch(self):
+        self.fail_once()
+        with self.assertRaises(themes.AttemptRecorded):
+            self.call()
+        with self.assertRaisesRegex(themes.ThemesError, "コミットしていない変更"):
+            self.call()                                        # HEAD は failed で終わる版
+        self.assertEqual(self.tr.calls, [])
+
+    def test_cap_stops_before_network_and_writes_nothing(self):
+        for _ in range(themes.MAX_TOTAL_ATTEMPTS):
+            self.fail_once()
+        self.assertEqual(self.kinds().count("attempt"), 3)
+        before = self.manifest()
+        with self.assertRaisesRegex(themes.ThemesError, "上限の 3 回に達した"):
+            self.call()
+        self.assertEqual(self.tr.calls, [])
+        self.assertEqual(self.manifest(), before)
+
+    def test_too_many_attempts_in_record_stops_before_network(self):
+        self.fail_once()
+        a = self.manifest().splitlines()[0]
+        tail = b"\n".join([a, b'{"at": "2026-10-08T01:02:03Z", "code_sha256": "%s", "kind": "fetch"}'
+                           % CODE_SHA.encode(), b'{"at": "2026-10-08T01:02:03Z", "kind": "failed", '
+                           b'"reason": "ThemesError"}']) + b"\n"
+        with open(self.manifest_path(), "ab") as f:
+            f.write(tail + tail + a + b"\n")                   # attempt が4行（最後は attempt）
+        self.commit_all()
+        with self.assertRaisesRegex(themes.ThemesError, "上限 3 を超えている"):
+            self.call()
+        self.assertEqual(self.tr.calls, [])
+
+    def test_bad_orders_stop(self):
+        a = b'{"kind": "attempt"}'
+        fe = b'{"kind": "fetch"}'
+        fa = b'{"kind": "failed"}'
+        r = b'{"kind": "result"}'
+        cases = {"failed のあとに failed": [a, fe, fa, fa], "先頭が fetch": [fe],
+                 "attempt のあとに attempt": [a, a], "result のあと": [a, fe, r, a],
+                 "知らない kind": [a, b'{"kind": "other"}'], "JSON でない": [b"x"],
+                 "attempt のあとに failed": [a, fa]}
+        for what, lines in cases.items():
+            with self.subTest(what):
+                with self.assertRaises(themes.ThemesError):
+                    themes.parse_manifest(b"\n".join(lines) + b"\n")
+        with self.assertRaisesRegex(themes.ThemesError, "空"):
+            themes.parse_manifest(b"")
+        self.assertEqual(len(themes.parse_manifest(b"\n".join([a, fe, fa, a, fe, r]) + b"\n")), 6)
+
+    def test_manifest_ending_in_fetch_stops(self):
+        self.fail_once()
+        body = b"\n".join(self.manifest().splitlines()[:2]) + b"\n"    # attempt, fetch
+        with open(self.manifest_path(), "wb") as f:
+            f.write(body)
+        self.commit_all()
+        with self.assertRaisesRegex(themes.ThemesError, "fetch の行で終わっている"):
+            self.call()
+        self.assertEqual(self.tr.calls, [])
+
+    def test_result_stops_retry(self):
+        self.run_themes(GOOD)
+        self.commit_all()
+        before = self.manifest()
+        with self.assertRaisesRegex(themes.ThemesError, "既に取得した"):
+            self.call()
+        self.assertEqual((self.tr.calls, self.manifest()), ([], before))
+
+    def test_existing_store_file_stops_retry(self):
+        self.fail_once()
+        open(os.path.join(self.store, "gdelt-themes-x.tsv"), "w").close()
+        before = self.manifest()
+        with self.assertRaisesRegex(themes.ThemesError, "保存先に区分表のファイル"):
+            self.call()
+        self.assertEqual(self.manifest(), before)
+
+
+# 診断のテストに使う名前。どの4文字の断片も、診断の鍵（英小文字の語）に現れない形にする
+DIAG_NAMES = ["ZQXJ_Wvkq", "ZQXJ-PFFB", "ZQXJ PFFB", "\u00c4ZQXJ_K", "9ZQXJ_K", "ZQXJ_OK",
+              "QZXJ_" + "K" * 170]
+DIAG_COUNTS = ["7123457", "8123459", "91234x61", "1234", "5678", "9012", "3456"]
+
+
+def diag_table():
+    return ("\n".join("%s\t%s" % (a, b) for a, b in zip(DIAG_NAMES, DIAG_COUNTS)) + "\n").encode()
+
+
+class TestDiagnosis(RunCase):
+    """T-101：形の判定で止まったときの診断（6章）。数と種類だけ。値・名前の断片は出さない。"""
+
+    def run_diag(self, body, status=200):
+        got = []
+        self.tr = FakeTransport(body, status)
+
+        def call():
+            return themes.run(root=self.root, home=self.home, url=URL, transport=self.tr,
+                              clock=lambda: 0.0, now=lambda: NOW, diag=got.append)
+        with mock.patch.object(themes, "_code_gate", lambda root: (CODE_SHA, b"", False)):
+            with self.assertRaises(themes.AttemptRecorded):
+                call()
+        self.commit_all()
+        with mock.patch.object(themes, "_code_gate", lambda root: (CODE_SHA, self.head, True)):
+            with self.assertRaises(themes.ThemesError) as cm:
+                call()
+        return got, cm.exception
+
+    def assert_no_fragments(self, text, values):
+        for v in values:
+            for i in range(len(v) - 3):
+                self.assertNotIn(v[i:i + 4], text, "値の断片が診断に出た")
+
+    def test_headerless_shape_failure_emits_counts_only(self):
+        got, exc = self.run_diag(diag_table())
+        self.assertEqual(len(got), 1)
+        text = got[0]
+        self.assert_no_fragments(text, DIAG_NAMES + DIAG_COUNTS)
+        self.assertFalse(themes.privacy_scan.find_in_bytes(text.encode()))
+        d = json.loads(text.split(": ", 1)[1])
+        self.assertEqual((d["rows"], d["column_count_distribution"]), (7, {"2": 7}))
+        self.assertEqual(d["first_row_numeric_columns"], 1)
+        c0, c1 = d["columns"]
+        self.assertEqual((c0["theme_name_match"], c0["theme_name_nonmatch"]), (1, 6))
+        self.assertEqual(c0["nonmatch_values_with"],
+                         {"upper": 6, "lower": 1, "underscore": 4, "symbol": 1, "space": 1,
+                          "non_ascii": 1, "digit": 1})
+        self.assertEqual(c0["nonmatch_chars"]["lower"], 3)
+        self.assertEqual((c0["nonmatch_first_char_not_upper"], c0["nonmatch_too_long"]), (2, 1))
+        self.assertEqual((c1["ascii_digits_only"], c1["theme_name_nonmatch"]), (6, 7))
+        self.assertEqual(c1["nonmatch_values_with"]["lower"], 1)
+        # 失敗の行の reason は今までどおり。ファイルは書かない
+        lines = [json.loads(l) for l in self.written()[themes.MANIFEST_NAME].splitlines()]
+        self.assertEqual([l["kind"] for l in lines], ["attempt", "fetch", "failed"])
+        self.assertEqual(lines[2]["reason"], "ThemesError")
+        self.assertEqual(set(self.written()), {themes.MANIFEST_NAME})
+        self.assert_no_fragments(self.written()[themes.MANIFEST_NAME].decode(), DIAG_NAMES)
+
+    def test_header_shape_failure_also_emits(self):
+        body = tsv(["THEME", "COUNT"], [["ZQXJ_Wvkq", "1"], ["ZQXJ_OK", "2"]])
+        got, _e = self.run_diag(body)
+        self.assertEqual(len(got), 1)
+        self.assert_no_fragments(got[0], ["ZQXJ_Wvkq", "ZQXJ_OK"])
+
+    def test_no_diagnosis_for_network_failure(self):
+        got, _e = self.run_diag(GOOD, status=503)
+        self.assertEqual(got, [])
+
+    def test_many_columns_are_capped(self):
+        rows = [["1"] + ["ZQXJ_Wvkq"] * 11]
+        d = themes.diagnose_shape([("", rows)])
+        self.assertEqual((len(d["columns"]), d["columns_not_shown"]),
+                         (themes.DIAG_MAX_COLUMNS, 12 - themes.DIAG_MAX_COLUMNS))
+
+    def test_default_goes_to_stderr_only(self):
+        self.tr = FakeTransport(diag_table())
+        call = lambda: themes.run(root=self.root, home=self.home, url=URL, transport=self.tr,
+                                  clock=lambda: 0.0, now=lambda: NOW)
+        with mock.patch.object(themes, "_code_gate", lambda root: (CODE_SHA, b"", False)):
+            with self.assertRaises(themes.AttemptRecorded):
+                call()
+        self.commit_all()
+        err, out = io.StringIO(), io.StringIO()
+        with mock.patch.object(themes, "_code_gate", lambda root: (CODE_SHA, self.head, True)), \
+                mock.patch("sys.stderr", err), mock.patch("sys.stdout", out):
+            with self.assertRaises(themes.ThemesError):
+                call()
+        self.assertIn("診断", err.getvalue())
+        self.assertEqual(out.getvalue(), "")
+        self.assert_no_fragments(err.getvalue(), DIAG_NAMES + DIAG_COUNTS)
 
 
 class TestMain(unittest.TestCase):
