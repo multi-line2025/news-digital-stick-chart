@@ -234,6 +234,72 @@ class TestHeaderlessRule(unittest.TestCase):
         self.assertEqual((kept, dropped), (["THEME"], ["COUNT"]))
 
 
+class TestWidenedNameRule(unittest.TestCase):
+    """T-107：THEME_NAME_RE を広げた（先頭は英大文字、そのあとは空白と英小文字を除く印字できる
+    ASCII、長さ 1〜160）。行は捨てない。"""
+
+    OK_NAMES = ["TAX_A-B", "WB_1&2", "X.Y", "A", "Q!\"#$%&'()*+,-./0123456789:;<=>?@[\\]^_`{|}~",
+                "Z" * 160, "QQ_A:1234"]
+    BAD_NAMES = ["tax_a", "TAX_a", "TAX A", "TAX\tA", "TAX_\u00c4", "\u00c4BC", "_A", "1A", "-A",
+                 "A" + "B" * 160, "", "TAX\x7f", "TAX\x00A", "TAX_\uff21", "A B"]
+
+    def build(self, rows):
+        return themes.build_output([("", rows)])
+
+    def test_regex(self):
+        self.assertEqual(themes.THEME_NAME_RE.pattern, r"\A[A-Z][\x21-\x60\x7B-\x7E]{0,159}\Z")
+        for v in self.OK_NAMES:
+            with self.subTest(ok=v):
+                self.assertTrue(themes.THEME_NAME_RE.match(v))
+        for v in self.BAD_NAMES:
+            with self.subTest(bad=v):
+                self.assertIsNone(themes.THEME_NAME_RE.match(v))
+        # すべての印字できる ASCII の1文字について、許すのは \x21〜\x60 と \x7B〜\x7E だけ
+        for c in range(0x00, 0x80):
+            want = 0x21 <= c <= 0x60 or 0x7B <= c <= 0x7E
+            self.assertEqual(bool(themes.THEME_NAME_RE.match("A" + chr(c))), want, hex(c))
+
+    def test_symbol_names_pass_headerless(self):
+        rows = [["TAX_A-B", "12"], ["WB_1&2", "3"], ["X.Y", "45"], ["QQ_PLAIN", "6"]]
+        data, n, kept, dropped, _r, headerless = self.build(rows)
+        self.assertTrue(headerless)
+        self.assertEqual((n, kept, dropped), (4, ["THEME"], ["column_B"]))
+        self.assertEqual(data, b"THEME\nQQ_PLAIN\nTAX_A-B\nWB_1&2\nX.Y\n")
+        for count in (b"12", b"45"):
+            self.assertNotIn(count, data)
+
+    def test_symbol_names_pass_with_header(self):
+        rows = [["THEME", "COUNT"], ["TAX_A-B", "12"], ["WB_1&2", "3"], ["X.Y", "45"]]
+        data, n, kept, dropped, _r, headerless = self.build(rows)
+        self.assertFalse(headerless)
+        self.assertEqual((n, kept, dropped), (3, ["THEME"], ["COUNT"]))
+        self.assertEqual(data, b"THEME\nTAX_A-B\nWB_1&2\nX.Y\n")
+
+    def test_bad_names_still_stop_all_or_nothing(self):
+        for bad in ("tax_a", "TAX A", "TAX_\u00c4", "1A", "TAX\x7f"):
+            for rows in ([["QQ_A", "1"], [bad, "2"]],
+                         [["THEME", "COUNT"], ["QQ_A", "1"], [bad, "2"]]):
+                with self.subTest(bad=bad, header=rows[0][0]):
+                    with self.assertRaises(themes.ThemesError):
+                        self.build(rows)
+
+    def test_assignment_stays_unique(self):
+        """数字だけの値は先頭が英大文字でないので名前の形に合わない。名前の値は英大文字を含むので
+        数字だけの形に合わない。どちらの欄の位置でも、割り当てはちょうど1つ。"""
+        for v in ("0", "123", "0123456789" * 16):
+            self.assertIsNone(themes.THEME_NAME_RE.match(v))
+        for rows in ([["TAX_A-B", "1"], ["X.Y", "22"]], [["1", "TAX_A-B"], ["22", "X.Y"]],
+                     [["A1", "1"], ["B2", "2"]], [["1", "A1"], ["2", "B2"]]):
+            with self.subTest(rows=rows):
+                name_i, count_i = themes.headerless_name_count(rows)
+                self.assertEqual({name_i, count_i}, {0, 1})
+                self.assertTrue(rows[0][name_i][0].isupper())
+        with self.assertRaisesRegex(themes.ThemesError, "一つに決められない"):
+            themes.headerless_name_count([["1", "2"], ["3", "4"]])      # どちらも名前でない
+        with self.assertRaisesRegex(themes.ThemesError, "一つに決められない"):
+            themes.headerless_name_count([["A", "B"], ["1", "C"]])      # どちらも件数でない
+
+
 class TestCodeGate(unittest.TestCase):
     """差し戻し1回目 中3：区分表の取得は、コミットした themes.py のコードでだけ行う。"""
 
@@ -1188,9 +1254,10 @@ class TestDiagnosis(RunCase):
         self.assertEqual((d["rows"], d["column_count_distribution"]), (7, {"2": 7}))
         self.assertEqual(d["first_row_numeric_columns"], 1)
         c0, c1 = d["columns"]
-        self.assertEqual((c0["theme_name_match"], c0["theme_name_nonmatch"]), (1, 6))
+        # T-107：記号の入った名前（ZQXJ-PFFB）と長さ 160 以下の名前（ZQXJ_OK）は、広げた規則に合う
+        self.assertEqual((c0["theme_name_match"], c0["theme_name_nonmatch"]), (2, 5))
         self.assertEqual(c0["nonmatch_values_with"],
-                         {"upper": 6, "lower": 1, "underscore": 4, "symbol": 1, "space": 1,
+                         {"upper": 5, "lower": 1, "underscore": 4, "space": 1,
                           "non_ascii": 1, "digit": 1})
         self.assertEqual(c0["nonmatch_chars"]["lower"], 3)
         self.assertEqual((c0["nonmatch_first_char_not_upper"], c0["nonmatch_too_long"]), (2, 1))
@@ -1231,6 +1298,34 @@ class TestDiagnosis(RunCase):
                                  ("failed", stage, "ThemesError"))
                 self.assertIn(lines[-1]["stage"], themes.FAILED_STAGES)
         self.assertEqual(themes.FAILED_STAGES, ("fetch", "read", "shape", "write"))
+
+    def test_email_shape_in_widened_name_stops_at_write(self):
+        """T-107：広げた規則では @ を含む名前も名前の形に合う。書く前の検査（stage は write）で止まり、
+        区分表のファイルを書かない。"""
+        at = "@"                                              # このファイルにメールアドレスの形を書かない
+        for v in ("A" + at + "B.C", "TAX_A" + at + "EXAMPLE.ORG"):
+            with self.subTest(v=v):
+                self.fresh()
+                self.assertTrue(themes.THEME_NAME_RE.match(v))
+                body = ("QQ_A\t1\n%s\t2\n" % v).encode()
+                got, exc = self.run_diag(body)
+                self.assertIn("メールアドレスの形", str(exc))
+                lines = [json.loads(l) for l in self.written()[themes.MANIFEST_NAME].splitlines()]
+                self.assertEqual((lines[-1]["kind"], lines[-1]["stage"]), ("failed", "write"))
+                self.assertEqual(set(self.written()), {themes.MANIFEST_NAME})
+                self.assertEqual(got, [])                         # 形の判定は通るので診断は出ない
+                self.assertNotIn(b"@", self.written()[themes.MANIFEST_NAME])
+
+    def test_diagnosis_reflects_widened_rule(self):
+        """T-107：診断の theme_name_match・theme_name_nonmatch は、広げた規則で数える。"""
+        rows = [["TAX_A-B", "1"], ["WB_1&2", "2"], ["X.Y", "3"], ["tax_low", "4"], ["TAX B", "5"]]
+        d = themes.diagnose_shape([("", rows)])
+        c0 = d["columns"][0]
+        self.assertEqual((c0["theme_name_match"], c0["theme_name_nonmatch"]), (3, 2))
+        self.assertNotIn("symbol", c0["nonmatch_values_with"])   # 記号の名前は合うので内訳に無い
+        self.assertEqual(c0["nonmatch_values_with"], {"upper": 1, "lower": 1, "underscore": 1,
+                                                      "space": 1})
+        self.assertNotIn("TAX", themes.format_diagnosis(d))
 
     def test_diagnosis_failure_still_writes_failed_line(self):
         """軽-8：診断が落ちても failed の行を書き、もとの ThemesError で止まる。"""

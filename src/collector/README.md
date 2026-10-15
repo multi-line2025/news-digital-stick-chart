@@ -400,6 +400,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/collector -v
 - T-101：`test_themes.py` の `TestRetry`（失敗のあとの取り直しが追記だけで、前の行を変えないこと、最初の attempt と同じキー、2段の手順、上限の3回で通信の前に止まり何も書かないこと、記録の attempt が上限を超えれば止まること、並びの規則、fetch で終わる・result のあとは止まること、保存先にファイルがあれば止まること）と `TestDiagnosis`（診断は数と種類だけで、名前と件数の4文字の断片が出ないこと、標準エラーだけでファイルに書かないこと、reason は変わらないこと、通信の失敗では出さないこと、欄の数の上限）。`TestRun.test_only_one_attempt_ever` と `test_committed_attempt_must_match_code_and_rule` は、取り直しの形に合わせて改めた。
 - T-101 差し戻し1回目：`TestCodeGate` の本物の git の上のテスト。正直に追記した取り直しは通ること、3回失敗したあと6行を消してコミットし直すと止まること（監査の再現）、途中の1組だけを消すと止まること、過去の行を変えると止まること、ファイルを消して作り直すと止まること、回数を履歴の最大値で数えること（関門を外すと、消した場合の3件が落ちることを確かめた）。`TestDiagnosis` の `test_failed_line_stage`（fetch・read・shape・write）、診断の計算や出力が落ちても failed の行を書くこと、件数の欄らしい欄は values と ascii_digits_only だけを出すこと。
 - T-101 差し戻し2回目：`TestCodeGate` の `test_graft_file_stops`・`test_shallow_file_stops`・`test_orphan_branch_and_deleting_old_branch_stops_while_reflog_exists`、`test_reset_of_history_is_a_documented_limit`（reset は reflog がある間は止まり、reflog を消して gc すると通る限界）。関門を外す（graft と浅い clone の確かめ・`--reflog`）と、それぞれ2件ずつ落ちることを確かめた。`TestDiagnosis` の監査の再現2つ（小文字の名前の欄に数字が1つ、`1,234` の欄）と `test_number_shape_rule`。`TestRowShape`（定数、書いた行が定数どおり、形の違う行を書かない）。
+- T-107：`test_themes.py` の `TestWidenedNameRule`（正規表現と、ASCII の1文字ずつの許す・許さない、記号の入った名前（`TAX_A-B`・`WB_1&2`・`X.Y`）が見出しの無い形と見出しのある形の両方で通ること、小文字・空白・非 ASCII・数字で始まる名前で止まること、割り当てがちょうど1つに決まること）、`TestDiagnosis.test_email_shape_in_widened_name_stops_at_write`（`@` を含む名前は stage write で止まる）・`test_diagnosis_reflects_widened_rule`（診断の数が広げた規則で数えられる）。
 - テストは、本物の `/Volumes/LACIE SHARE` を使わない。保存先のディスクは一時的なディレクトリで置き換え、マウントの検査だけを差し替える（本物の検査は `TestVolume` と、下の FAT32 のテストで確かめる）。
 
 ### 7.1 FAT32 のイメージの上でのテスト（T-021）
@@ -499,5 +500,24 @@ hdiutil detach "$SP/fatmnt/LACIE SHARE"
   - 軽-7：`attempt` の行を書かずに通信する道は、手元では止められない。たとえば、`themes.fetch_once` を直接呼ぶこと、`run` の外で同じ URL を取ること（curl など）である。マニフェストの回数が縛るのは、`run` を通した取得だけである。
   - 過去の版を、履歴と reflog の両方から消すことは、追記だけの関門でも見分けられない。たとえば、reset・rebase・filter-branch・枝を消すこと（orphan で始め直し、元の枝を消す）のあとで、reflog を消すか期限切れにして gc する場合である（テスト `test_reset_of_history_is_a_documented_limit`）。
 - **止めないもの（限界）**：履歴そのものを書き換え（`git reset --hard`・rebase・filter-branch・枝を消すことなどで、試行や結果のコミットを消すこと）、さらに reflog も消すと、手元の検査では見分けられない（テスト `test_reset_of_history_is_a_documented_limit`。reflog が残っている間は、追記だけの関門が止める）。リモートが無いので、写しを持たない第三者にも見えない。前提：通信のあとの行（fetch・failed）は、コミットする前は作業ツリーにだけある。→ 結論：その行を消して作業ツリーを HEAD と同じ形（試行の行1行）に戻すと、もう一度通信できる。手元の検査では見分けられない（テスト `test_reverting_to_committed_attempt_allows_refetch_limit` で、この限界を確かめている）。2段目のあとすぐにコミットすることで、時間の幅を小さくする。
+- **テーマの名前の形**（`themes.THEME_NAME_RE`。T-107 で広げた）：
+  - 規則：先頭は英大文字 `[A-Z]`。そのあとは、空白と英小文字を除く印字できる ASCII（`\x21`〜`\x60` と `\x7B`〜`\x7E`）。長さは1〜160文字で、今までと同じ。
+  - 正規表現は `\A[A-Z][\x21-\x60\x7B-\x7E]{0,159}\Z`。前の形は `\A[A-Z][A-Z0-9_]{0,159}\Z`。
+  - 小文字・空白・非 ASCII・制御文字は、今までどおり許さない。
+  - 見出しの無い2欄の判定（2.1章）と、見出しのある形の名前の欄（`NAME_HEADER_RE` の欄。2章）の両方で、同じ規則を使う。
+  - 行は捨てない。合わない値が1つでもあれば、何も書かずに止まる（全部か無しかのまま。リードの判断 (a)・(b)。reviews/T-101.md）。
+  - 広げた理由は、T-106 の診断の数である（reviews/T-098.md）。
+    - 名前の欄の 59,315 個のうち 36 個が、前の形に合わなかった。
+    - その 36 個は、どれも英大文字で始まり、161文字以上のものは無かった。
+    - 記号（下線以外の ASCII の記号）をちょうど1文字ずつ含んでいた（記号の文字の合計が 36、記号を含む値が 36）。
+    - 小文字・空白・非 ASCII・数の形の値は 0 個だった。
+    - 件数の欄は、59,315 個すべてが ASCII の数字だけだった。
+    - どの記号かは診断に出していないので、ASCII の記号を、空白と英小文字を除いてすべて許す形にした。
+  - 割り当てが一つに決まることは、次の2つの前提から従う。
+    - 前提1：数字だけの値は、先頭が英大文字でないので、名前の形に合わない。
+    - 前提2：名前の値は、先頭が英大文字なので、ASCII の数字だけの形に合わない。
+    - 結論：広げたあとも、2欄の両方の割り当てが合うことはない（テスト `TestWidenedNameRule.test_assignment_stays_unique`）。
+  - `@` を含む値も名前の形に合いうる。しかし、書く前の privacy_scan の検査で止まる（`failed` の `stage` は `write`、ファイルは書かない。テスト `test_email_shape_in_widened_name_stops_at_write`）。
+  - 限界：空白を挟まずに、記号で件数をつないだ形（例：`QQ_A:1234`）は、名前の形に合うので見分けられない。空白を挟んだ形（例：`QQ_A (1234)`）は、今までどおり止まる。
 - **見出しの無い「名前・件数」の2欄の表**（リードの判断。監査の条件 (1)〜(4)）：1行目に数字だけの値があるとき、どの行も欄がちょうど2つで、一方の欄の値がすべてテーマの名前の形、もう一方がすべて ASCII の数字だけ、という割り当てがちょうど1つに決まる場合に限り、名前の欄だけを残す。判定は欄の位置ではなく値の形で行う。両方の割り当てが合う場合、どちらも合わない場合は止まる。件数の欄はメモリの上で捨て、行を並べ替えてから書く。マニフェストに `headerless: true` と、捨てた欄の位置（`column_A` か `column_B`）を書く。この規則は取得の前にコミットし、試行の行の `code_sha256` で固定する。
 - **限界**：区分表は取得した時点の全テーマの一覧なので、2020-12-15 以降に生まれたテーマの名前も入る。名前があることは、そのテーマが後ろの期間に使われたことを示しうる。タグの一覧の規則は、手法を作る期間のデータでテーマの存在を確かめるので、名前だけでは一覧に入らない。
