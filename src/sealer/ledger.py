@@ -3463,6 +3463,15 @@ def _themes_row_shape(row, i):
         raise LedgerError("%s（failed）の stage が、%s のどれでもない" % (where, "・".join(THEMES_FAILED_STAGES)))
     if kind == "result":
         _check_hex(row["sha256"], HEX64, "%s（result）の sha256" % where)
+        # T-103（T-099 の監査 軽-5）：result の値の型（themes.py の _fetch_and_write が書く型）
+        strs = lambda v: isinstance(v, list) and all(isinstance(x, str) for x in v)  # noqa: E731
+        if not (_nonneg(row["rows"]) and strs(row["kept_columns"]) and row["kept_columns"] and strs(row["dropped_columns"])
+                and isinstance(row["sheet_names_replaced"], bool) and isinstance(row["headerless"], bool)
+                and isinstance(row["store_location"], str) and row["store_location"]
+                and isinstance(row["source_url"], str) and row["source_url"]):
+            raise LedgerError("%s（result）の値の型が違う（rows は0以上の整数、kept_columns は空でない文字列の一覧、"
+                              "dropped_columns は文字列の一覧、sheet_names_replaced・headerless は真偽、store_location・"
+                              "source_url は空でない文字列）" % where)
         if not (isinstance(row["file_name"], str) and THEMES_FILE_RE.match(row["file_name"])):
             raise LedgerError("%s（result）の file_name が gdelt-themes-<時刻>.tsv の形でない" % where)
     return kind

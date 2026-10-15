@@ -1710,6 +1710,24 @@ def cmd_stats_order(st, a):
         with open(mpath, "rb") as f:
             body = f.read()
     rows = ledger.check_themes_manifest_refs(st.records, body)
+    # T-103（T-099 の監査 重大-1）：マニフェストが追記だけかを git の履歴で照らし、各版にも行の取り決めを当てる。回数は、
+    # 履歴に現れた attempt の行の数の最大値。作業ツリーの版も、HEAD の版を先頭に持つこと
+    head_body = _version_or_empty(repo, "HEAD", ledger.THEMES_MANIFEST)
+    if body is not None and not body.startswith(head_body):
+        raise ledger.LedgerError("作業ツリーの %s が、HEAD の版を先頭に持たない（コミットした行を消すか書き換えた）"
+                                 % ledger.THEMES_MANIFEST)
+
+    def themes_rules(v):
+        ledger.check_themes_manifest_refs(st.records, v)
+        return sum(1 for x in v.split(b"\n") if x.strip() and json.loads(x).get("kind") == "attempt")
+    n_versions, counts = check_manifest_append_only(repo, ledger.THEMES_MANIFEST, themes_rules)
+    if body is not None:
+        counts.append(themes_rules(body))
+    max_attempts = max(counts) if counts else 0
+    last_kind = None
+    for x in (body or b"").split(b"\n"):
+        if x.strip():
+            last_kind = json.loads(x).get("kind")
     n_code, code_notes = check_themes_attempt_code(repo, body)          # T-102
     for m in code_notes:
         st.unchecked.append(m)
@@ -1734,9 +1752,50 @@ def cmd_stats_order(st, a):
           "行の形と並び（attempt → fetch → failed か result）は themes.py の取り決めどおり（T-099）。"
           "attempt の行 %d 行の code_sha256 は、その行を初めて含んだコミットの版の themes.py と同じ（T-102）。"
           % (ledger.THEMES_MANIFEST, n, rows, n_code))
+    print("  追記だけ（T-103）：%s の版 %d 個（git log --all --reflog --full-history）は、どれも HEAD の版の先頭部分で、行の取り決めに通る。"
+          "取得の試みの回数（履歴に現れた attempt の行の数の最大値）は %d（上限 %d）。最後の行：%s%s"
+          % (ledger.THEMES_MANIFEST, n_versions, max_attempts, ledger.THEMES_MAX_ATTEMPTS, last_kind or "無し",
+             THEMES_LAST_NOTE.get(last_kind, "")))
 
 
 THEMES_CODE_REL = "src/collector/themes.py"
+
+
+# 区分表のマニフェストの最後の行の意味（T-103。T-099 の監査 軽-4）。fetch で終わる形は、通信の途中で止まった形と、結果を
+# 書く前に止まった形の区別がつかない。結果の行を書いたあとコミットの前に消した形も、コミットしていなければ同じに見える
+THEMES_LAST_NOTE = {
+    "attempt": "（試行の行まで。通信はまだ）",
+    "fetch": "（通信の直前の行で終わっている。通信の途中で止まったか、結果の行を書く前に止まった。どちらかは記録から分からない）",
+    "failed": "（取得は失敗で終わった。上限までなら取り直せる）",
+    "result": "（取得は終わった）",
+}
+
+
+def check_manifest_append_only(repo, rel, rules=None):
+    """マニフェスト rel が追記だけであることを、git の履歴で照らす（T-103。T-099 の監査 重大-1）。
+      - 版：`git log --all --reflog --full-history --format=%H -- rel` のすべての commit の版（その commit に rel が無ければ空）。
+        --reflog は、手元で枝を消した commit も見るため（収集係の関門と同じ。第三者の clone では、手元の reflog は無い）。
+      - どの版も、HEAD の版のバイト列の先頭部分であること。行を消す・書き換える・並べ替えるコミットがどこかの参照から辿れれば
+        止まる（あとで行を足し直しても、消す前の版が HEAD の先頭部分でないので止まる）。
+      - rules を渡せば、各版に当てる（返り値を集める）。
+    git は GIT_ の環境変数を固定して動かす（_rgit。GIT_NO_REPLACE_OBJECTS と、存在しないパスの GIT_GRAFT_FILE なので、
+    refs/replace/ と info/grafts は効かない）。浅い clone では、版を辿りきれないので LedgerError（呼ぶ側が止めるか
+    「照らさなかった」にする）。返り値: (版の数, [rules(版)...])。"""
+    if not _not_shallow(repo):
+        raise ledger.LedgerError("浅い clone なので、%s が追記だけかを git の履歴で照らせない" % rel)
+    head = _version_or_empty(repo, "HEAD", rel)
+    commits = _rgit(repo, "log", "--all", "--reflog", "--full-history", "--format=%H", "--", rel).decode().split()
+    got = []
+    for c in commits:
+        v = _version_or_empty(repo, c, rel)
+        if not head.startswith(v):
+            raise ledger.LedgerError("%s の commit %s の版が、HEAD の版の先頭部分でない（行を消すか書き換えたコミットが履歴にある。"
+                                     "マニフェストは追記だけ）" % (rel, c[:12]))
+        if rules is not None:
+            got.append(rules(v))
+    if rules is not None:
+        got.append(rules(head))
+    return len(commits), got
 
 
 def check_themes_attempt_code(repo, body):
@@ -2211,6 +2270,27 @@ def _check_day_files(st, rows, day_dirs):
         print("照らさなかった：置き場所に無い %d 件（%s）" % (len(missing), "、".join(missing)))
 
 
+def gkg_manifests_append_only(st):
+    """GKG の二つのマニフェストも、追記だけかを git の履歴で照らす（T-103）。gkg-run-result が縛る先頭は封印の記録と時刻証明で
+    固定されるが、封印の前（run の途中）と、封印した先頭のあとの行は縛られないため。git の履歴が無いとき・浅い clone の
+    ときは「照らさなかった」。"""
+    repo = Repo(st.root)
+    try:
+        repo.git("rev-parse", "--git-dir")
+    except (ledger.LedgerError, OSError):
+        st.unchecked.append("GKG のマニフェストが追記だけか（git の履歴が無い）")
+        print("照らさなかった：git の履歴が無いので、GKG のマニフェストが追記だけかを照らしていない")
+        return
+    if not _not_shallow(repo):
+        st.unchecked.append("GKG のマニフェストが追記だけか（浅い clone）")
+        print("照らさなかった：浅い clone なので、GKG のマニフェストが追記だけかを照らしていない")
+        return
+    for mode, rel in sorted(ledger.GKG_MANIFESTS.items()):
+        n, _ = check_manifest_append_only(repo, rel)
+        if n:
+            print("  %s（%s）：版 %d 個（git log --all --reflog --full-history）は、どれも HEAD の版の先頭部分（追記だけ。T-103）" % (rel, mode, n))
+
+
 def cmd_gkg_runs(st, a):
     """GKG の取得の run の開始（kind が gkg-run-start）の照合と一覧。T-031、T-041。T-066：マニフェストの行と
     gkg-run-result の照合。"""
@@ -2220,6 +2300,7 @@ def cmd_gkg_runs(st, a):
             ledger.check_gkg_result_doc(st.records, r, st.file_json(r, ledger.GKG_RESULT_KIND), st.file_json, st.data)
     gkg_manifests_check(st, [os.path.abspath(d) for d in getattr(a, "day_files", None) or []],
                         read_filelists(getattr(a, "filelist", None) or []))
+    gkg_manifests_append_only(st)                                       # T-103
     if not runs:
         print("gkg-run-start の記録：なし")
         return

@@ -171,7 +171,8 @@ def write_content(store):
       - 作業ツリーの変更が、sealed/ledger.jsonl と、その seq の .ots だけ。
       - 最後の1行を除いた記録と、すべての .ots の照合（その seq の .ots があれば、それも）に通る。
     中身は決まった値だけから作られる（HEAD・記録・置き場所の日の集計・Python の版）。どれかが書いた時と違えば、バイト列が
-    sha256 と合わずに止まる。中身の照合（check_new）は、同じバイト列なので、書いた時に通ったものと同じである。
+    sha256 と合わずに止まる。書く前に、書く仕組みと同じ照合（seal_records.check_new。置き場所で C7 の分母を数え直す）を
+    流し直す（T-103）。
     返り値: コミットの40桁。"""
     root = ledger.check_sealed_inside(ledger.PROJECT_ROOT)
     repo = verify.Repo(root)
@@ -207,6 +208,8 @@ def write_content(store):
         raise ledger.LedgerError("流し直した中身の sha256 %s が、記録 seq %d の targets の sha256 %s と違う（HEAD・置き場所・"
                                  "Python の版のどれかが、書いた時と違う）。書かない。リードに報告する"
                                  % (ledger.sha256_hex(content), last["seq"], t["sha256"]))
+    # T-103（T-100 の監査 軽-1）：書く前に、書く仕組みと同じ照合（check_new。C7 の分母の数え直しを含む）を流し直す
+    seal_records.check_new(root, data, records, last, doc, order4_store=store)
     ledger.write_once(os.path.join(root, t["path"]), content)
     return seal_order2.commit_record(repo, root, last, ots if os.path.isfile(ots) else None, ORDER4_MESSAGE)
 

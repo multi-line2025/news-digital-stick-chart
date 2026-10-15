@@ -45,7 +45,7 @@ class Unit(unittest.TestCase):
         o1 = ledger.first_order1(cls.records)
         cls.result = {"kind": "result", "file_name": "gdelt-themes-20261015T001727Z.tsv", "sha256": "a" * 64, "rows": 10,
                       "kept_columns": ["theme"], "dropped_columns": ["count"], "fetched_at": "2026-10-15T00:17:27Z",
-                      "attempted_at": cls.attempt["attempted_at"], "sheet_names_replaced": 0, "headerless": False,
+                      "attempted_at": cls.attempt["attempted_at"], "sheet_names_replaced": False, "headerless": False,
                       "source_url": cls.attempt["source_url"], "code_path": cls.attempt["code_path"],
                       "code_sha256": cls.attempt["code_sha256"], "exclusion_rule_seq": o1["seq"],
                       "exclusion_rule_record_sha256": ledger.sha256_hex(ledger.canonical_line(o1)),
@@ -122,6 +122,19 @@ class Unit(unittest.TestCase):
                                       "attempted_at・除外の規則の参照が、直前の attempt の行と違う"),
             "result の file_name": ([self.attempt, self.fetch, dict(self.result, file_name="../x.tsv")], "file_name が"),
             "attempt の code_path": ([dict(self.attempt, code_path="src/collector/other.py")], "code_path が"),
+            # T-103（T-099 の監査 中-3 の M9・M10、軽-5）
+            "result の sha256 の形": ([self.attempt, self.fetch, dict(self.result, sha256="x" * 64)], "（result）の sha256 の形"),
+            "result の source_url": ([self.attempt, self.fetch, dict(self.result, source_url="https://example.org/a.txt")],
+                                    "code_path・source_url・attempted_at"),
+            "failed の reason が文字列でない": ([self.attempt, self.fetch, dict(self.failed, reason=3)], "reason が"),
+            "result の rows が文字列": ([self.attempt, self.fetch, dict(self.result, rows="10")], "値の型が違う"),
+            "result の rows が真偽": ([self.attempt, self.fetch, dict(self.result, rows=True)], "値の型が違う"),
+            "result の kept_columns が空": ([self.attempt, self.fetch, dict(self.result, kept_columns=[])], "値の型が違う"),
+            "result の dropped_columns に数": ([self.attempt, self.fetch, dict(self.result, dropped_columns=[1])], "値の型が違う"),
+            "result の headerless が数": ([self.attempt, self.fetch, dict(self.result, headerless=0)], "値の型が違う"),
+            "result の sheet_names_replaced が数": ([self.attempt, self.fetch, dict(self.result, sheet_names_replaced=0)],
+                                                 "値の型が違う"),
+            "result の store_location が空": ([self.attempt, self.fetch, dict(self.result, store_location="")], "値の型が違う"),
         }
         for name, (rows, text) in cases.items():
             with self.subTest(name=name), self.assertRaisesRegex(ledger.LedgerError, text):
