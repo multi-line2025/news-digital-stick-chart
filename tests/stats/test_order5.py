@@ -190,8 +190,8 @@ class TestRules(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.fx = Fixture(standard_spec())
-        cls.main, cls.extra = cls.fx.build()
-        cls.off = cls.main["official"]["result"]
+        cls.main, cls.detail, cls.extra = cls.fx.build()
+        cls.off = cls.detail["official_result"]
         cls.rows = {r["name"]: r for r in cls.off["themes"]}
 
     def test_a_is_k_over_median_of_usable_c7_denominators(self):
@@ -199,6 +199,8 @@ class TestRules(unittest.TestCase):
         self.assertEqual(self.fx.denom, {"2015-03-30": 49, "2015-03-31": 49, "2015-04-01": 57, "2015-04-02": 37})
         self.assertEqual(self.off["n_med"], "49/1")
         self.assertEqual(self.off["a"], "10/49")
+        summ = self.main["official"]["result"]
+        self.assertEqual((summ["n_med"], summ["a"], summ["usable_day_count"]), ("49/1", "10/49", 3))
         self.assertTrue(self.off["v_equals_a"])
         self.assertTrue(self.main["a_equals_v"])
         self.assertEqual(self.off["usable_day_count"], 3)
@@ -226,9 +228,10 @@ class TestRules(unittest.TestCase):
         self.assertFalse(self.rows["ZZ_WAR"]["in_list"])
         # オーナーの選択（病名の区分は使わない）では ZZ_EBOLA は残り、すべて有効の設定では外れる
         self.assertEqual(self.off["tag_list"], ["ZZ_ALPHA", "ZZ_EBOLA"])
-        self.assertEqual(self.main["settings"]["allset_result"]["tag_list"], ["ZZ_ALPHA"])
-        self.assertEqual(self.main["settings"]["compare"]["only_in_new"], ["ZZ_EBOLA"])
-        self.assertEqual(self.main["settings"]["compare"]["only_in_old"], [])
+        self.assertEqual(self.main["official"]["result"]["tag_list"], ["ZZ_ALPHA", "ZZ_EBOLA"])
+        self.assertEqual(self.detail["allset_result"]["tag_list"], ["ZZ_ALPHA"])
+        cmp_ = self.main["comparisons"]["allset"]
+        self.assertEqual((cmp_["only_in_new"], cmp_["only_in_old"], cmp_["diff_count"]), (["ZZ_EBOLA"], [], 1))
         self.assertEqual(self.off["enabled_optional_categories"], ["ethnic_religious_group"])
 
     def test_translated_not_counted_and_universe(self):
@@ -247,8 +250,8 @@ class TestRules(unittest.TestCase):
         fx = Fixture(standard_spec(), missing=())
         for r in fx.rows:
             r["files_ok"] = 10                    # 72本未満でも、一覧に無ければ欠けた日にしない
-        main, _x = fx.build()
-        off = main["official"]["result"]
+        _m, detail, _x = fx.build()
+        off = detail["official_result"]
         self.assertEqual(off["usable_day_count"], 4)
         self.assertEqual(off["n_med"], "49/1")       # 37・49・49・57 の中央値
         rows = {r["name"]: r for r in off["themes"]}
@@ -279,48 +282,66 @@ class TestRules(unittest.TestCase):
         self.assertTrue(self.main["official"]["official"])
         for c in cands:
             self.assertEqual(c["note"], None if c["official"] else o5.REF_NOTE)
-        for part in (self.main["settings"], self.main["reference_criteria"], self.main["versions"]["1cb463a"]):
+        for part in (self.main["comparisons"]["allset"], self.main["reference_criteria"],
+                     self.main["comparisons"]["1cb463a"]):
             self.assertIs(part["official"], False)
             self.assertEqual(part["note"], o5.REF_NOTE)
         self.assertEqual(sorted(self.main["reference_criteria"]["computed"]["results"]), list(counting.CRITERIA_IDS))
         c7 = cands[-1]
-        self.assertEqual((c7["n_med"], c7["a"], c7["tag_list"]), ("49/1", "10/49", ["ZZ_ALPHA", "ZZ_EBOLA"]))
+        self.assertEqual((c7["n_med"], c7["a"], c7["tag_count"]), ("49/1", "10/49", 2))
+        self.assertEqual(self.detail["candidate_lists"][-1], {"id": "C7", "official": True,
+                                                              "tag_list": ["ZZ_ALPHA", "ZZ_EBOLA"]})
+        self.assertEqual(self.main["official"]["result"]["reason_counts"],
+                         {"all_themes": 8, "in_list": 2, "not_present_throughout": 4, "mean_below_a": 5, "excluded": 1})
 
-    def test_versions_split_between_main_and_extra(self):
-        self.assertEqual(sorted(self.main["versions"]), ["1cb463a"])
+    def test_split_between_main_detail_and_extra(self):
+        """main には要約だけ。一覧の全体（テーマごとの行）は detail、0e14f3b・247fc1d は extra。main は両方の sha256 を持つ。"""
+        self.assertEqual(sorted(self.main["comparisons"]), ["1cb463a", "allset"])
+        self.assertNotIn("themes", o5._keys(self.main, set()))
+        self.assertNotIn("tag_list", json.dumps(self.main["candidates"]))
+        self.assertEqual(sorted(self.detail["versions"]), ["1cb463a"])
         self.assertEqual(sorted(self.extra["versions"]), ["0e14f3b", "247fc1d"])
         self.assertIs(self.extra["sealed"], False)
-        self.assertEqual(self.extra["main_sha256"], o5.sha256_of(self.main))
-        v = self.main["versions"]["1cb463a"]
-        self.assertIsNone(v["compare_with_official"]["enabled_optional_categories"]["old"])
-        self.assertNotIn("ZZ_WAR", v["result"]["tag_list"])
+        self.assertEqual(self.main["outside"], {
+            "detail": {"file_name": o5.DETAIL_NAME, "sha256": o5.sha256_of(self.detail)},
+            "extra": {"file_name": o5.EXTRA_NAME, "sha256": o5.sha256_of(self.extra)}})
+        c = self.main["comparisons"]["1cb463a"]
+        self.assertIsNone(c["enabled_optional_categories"]["old"])
+        self.assertEqual(c["diff_count"], len(c["only_in_old"]) + len(c["only_in_new"]))
+        self.assertNotIn("ZZ_WAR", self.detail["versions"]["1cb463a"]["tag_list"])
+        # 正式な一覧の要約は、detail の正式な結果からテーマごとの行を除いたものと同じ
+        summ = dict(self.main["official"]["result"])
+        for k in ("tag_count", "reason_counts"):
+            summ.pop(k)
+        self.assertEqual(summ, {k: v for k, v in self.off.items() if k != "themes"})
 
 
 class TestFaithful(unittest.TestCase):
     """DayStore と DaySeries で作った結果が、素直な dict の入力で build_tag_list を呼んだ結果と同じ。"""
 
     def check(self, fx):
-        main, extra = fx.build()
+        main, detail, extra = fx.build()
         miss = missing_dates(fx)
         themes = {n: None for n in sorted(fx.table()["unique"])}
         counts7, totals7 = plain_inputs(fx, "C7")
-        self.assertEqual(main["official"]["result"],
+        self.assertEqual(detail["official_result"],
                          tagrules.build_tag_list(themes, counts7, totals7, miss, *BLOCK))
-        self.assertEqual(main["settings"]["allset_result"],
+        self.assertEqual(detail["allset_result"],
                          tagrules.build_tag_list(themes, counts7, totals7, miss, *BLOCK,
                                                  optional=tagrules.OPTIONAL_CATEGORIES))
         for name in ("1cb463a", "0e14f3b", "247fc1d"):
-            part = main["versions"] if name == "1cb463a" else extra["versions"]
-            self.assertEqual(part[name]["result"],
+            got = detail["versions"][name] if name == "1cb463a" else extra["versions"][name]["result"]
+            self.assertEqual(got,
                              VERSIONS[name].build_tag_list(themes, counts7, totals7, miss, *BLOCK))
+        lists = {x["id"]: x["tag_list"] for x in detail["candidate_lists"]}
         for c in main["candidates"]:
             if c["status"] != "ok":
                 continue
             counts, totals = plain_inputs(fx, c["id"])
             r = tagrules.build_tag_list(themes, counts, totals, miss, *BLOCK)
-            self.assertEqual((c["n_med"], c["a"], c["tag_list"], c["usable_day_count"]),
-                             (r["n_med"], r["a"], r["tag_list"], r["usable_day_count"]), c["id"])
-        return main
+            self.assertEqual((c["n_med"], c["a"], lists[c["id"]], c["usable_day_count"], c["tag_count"]),
+                             (r["n_med"], r["a"], r["tag_list"], r["usable_day_count"], len(r["tag_list"])), c["id"])
+        return main, detail
 
     def test_standard(self):
         self.check(Fixture(standard_spec()))
@@ -328,8 +349,8 @@ class TestFaithful(unittest.TestCase):
     def test_v1_and_v2_differ(self):
         spec = standard_spec()
         spec["2015-03-31"] = spec["2015-03-31"] + [("1", "ZZ_V1ONLY", "ZZ_V2ONLY,5;ZZ_V2ONLY,9", False)] * 15
-        main = self.check(Fixture(spec))
-        lists = {c["id"]: c["tag_list"] for c in main["candidates"]}
+        _main, detail = self.check(Fixture(spec))
+        lists = {c["id"]: c["tag_list"] for c in detail["candidate_lists"]}
         self.assertTrue(all(lists[c] is not None for c in lists))
 
     def test_dayseries_is_a_mapping(self):
@@ -353,12 +374,13 @@ class TestStatuses(unittest.TestCase):
 
     def test_reference_candidate_not_computable_does_not_stop(self):
         fx = Fixture(standard_spec(v1_empty_day="2015-04-02"))
-        main, extra = fx.build()
+        main, detail, extra = fx.build()
         st = {c["id"]: c for c in main["candidates"]}
         self.assertEqual(main["status"], "ok")
         self.assertEqual(st["C2"]["status"], "not_computable")
         self.assertEqual(st["C2"]["zero_days"], ["2015-04-02"])
-        self.assertIsNone(st["C2"]["tag_list"])
+        self.assertIsNone(st["C2"]["n_med"])
+        self.assertIsNone([x for x in detail["candidate_lists"] if x["id"] == "C2"][0]["tag_list"])
         self.assertEqual(st["C1"]["status"], "ok")             # 分母は記事の数なので0にならない
         self.assertEqual(st["C7"]["status"], "ok")
         self.assertIsNotNone(extra)
@@ -367,13 +389,15 @@ class TestStatuses(unittest.TestCase):
         spec = standard_spec()
         spec["2015-04-02"] = [("2", "", "", False)] * 3       # テーマの付いた文書が無い
         fx = Fixture(spec)
-        main, extra = fx.build()
+        main, detail, extra = fx.build()
         self.assertEqual(main["status"], "stopped")
         self.assertIsNone(extra)
+        self.assertIsNone(detail)
+        self.assertIsNone(main["outside"])
         st = {c["id"]: c for c in main["candidates"]}
         self.assertEqual((st["C7"]["status"], st["C7"]["zero_days"]), ("stop", ["2015-04-02"]))
         self.assertNotIn("official", main)
-        self.assertTrue(all(c["tag_list"] is None for c in main["candidates"]))
+        self.assertTrue(all(c["tag_count"] is None for c in main["candidates"]))
 
 
 class TestChecks(unittest.TestCase):
@@ -530,16 +554,17 @@ class TestOutput(unittest.TestCase):
 
     def test_canonical_bytes_and_keys(self):
         fx = Fixture(standard_spec())
-        main, extra = fx.build()
+        main, detail, extra = fx.build()
         data = o5.canonical_bytes(main)
         self.assertTrue(data.endswith(b"}\n") and data.count(b"\n") == 1)
         self.assertEqual(json.loads(data.decode("utf-8")), main)
         self.assertEqual(o5.sha256_of(main), hashlib.sha256(data).hexdigest())
         # 同じ入力から同じバイト列
-        main2, _x = Fixture(standard_spec()).build()
+        main2, _d, _x = Fixture(standard_spec()).build()
         self.assertEqual(o5.canonical_bytes(main2), data)
         self.assertTrue(o5._keys(main, set()) <= o5.ALLOWED_KEYS)
         self.assertTrue(o5._keys(extra, set()) <= o5.ALLOWED_KEYS)
+        self.assertTrue(o5._keys(detail, set()) <= o5.ALLOWED_KEYS)
         self.assertIn(o5.CITATION[0], main["citation"])
         self.assertEqual(main["label"], o5.LABEL)
 
@@ -574,9 +599,19 @@ class TestOutput(unittest.TestCase):
             self.assertIn(str(v) if not isinstance(v, int) or v > 1000 else "seq %d" % v, text)
 
     def test_main_rejects_bad_args(self):
+        import io
+        err = io.StringIO()
+        self.enterContext(mock.patch.object(sys, "stderr", err))
         for argv in ([], ["--store", "x"], ["--store", "a", "--themes-store", "b", "--x", "c"],
-                     ["--store", "a", "--store", "b", "--out-dir", "c"]):
+                     ["--store", "a", "--store", "b", "--out-dir", "c"],
+                     ["--store", "a", "--themes-store", "b", "--out-dir", "c", "--repo"],
+                     ["--store", "a", "--themes-store", "b", "--out-dir", "c", "--repo", "d", "--repo", "e"],
+                     ["--store", "a", "--themes-store", "b", "--out-dir", "c", "--x", "d"]):
             self.assertEqual(o5.main(argv), 2, argv)
+        self.assertEqual(o5._parse_args(["--out-dir", "c", "--repo", "d", "--store", "a", "--themes-store", "b"]),
+                         ("a", "b", "c", "d"))
+        self.assertEqual(o5._parse_args(["--out-dir", "c", "--store", "a", "--themes-store", "b"]),
+                         ("a", "b", "c", None))
 
     def test_source_shape(self):
         with open(SCRIPT, encoding="utf-8") as f:
@@ -590,6 +625,139 @@ class TestOutput(unittest.TestCase):
                  "themes_result_row(", "parse_themes_table(", "build("]
         pos = [rec.index(x) for x in order]
         self.assertEqual(pos, sorted(pos))
+
+
+class TestOrder2Criteria(unittest.TestCase):
+    """軽-1：順番2の記録の参考の基準の結果は、基準の案の識別子（B1〜B5）とちょうど同じで、どれも official が false。"""
+
+    def run_with(self, change):
+        L = o5._ledger()
+        recs = L.verify_chain(L.read_ledger(os.path.join(PROJECT, "sealed", "ledger.jsonl")))
+
+        def read(r, role):
+            doc = L.read_target_json(PROJECT, r, role)
+            if role == L.ORDER2_KIND:
+                change(doc["counting_output"]["results"])
+            return doc
+        return o5.context_from_records(L, recs, read)
+
+    def test_real_passes(self):
+        self.assertEqual(sorted(self.run_with(lambda res: None)["criteria"]["results"]), list(counting.CRITERIA_IDS))
+
+    def test_ids_must_match(self):
+        for change in (lambda res: res.pop("B5"),
+                       lambda res: res.update(B6=dict(res["B1"])),
+                       lambda res: res.update(B5=dict(res["B5"], official=True)),
+                       lambda res: res["B1"].pop("official")):
+            with self.assertRaisesRegex(o5.Order5Error, "参考の基準の結果が、基準の案の一覧と合わない"):
+                self.run_with(change)
+
+
+class TestWriteOutputs(unittest.TestCase):
+    """軽-2：extra・detail の書く前の確かめと、書き出し（O_EXCL、一時の名前、順、終わり値）。"""
+
+    def setUp(self):
+        self.out = tempfile.mkdtemp(prefix="o5-out-")
+        self.addCleanup(shutil.rmtree, self.out, True)
+        self.main, self.detail, self.extra = Fixture(standard_spec()).build()
+
+    def parts(self):
+        return [(o5.DETAIL_NAME, self.detail), (o5.EXTRA_NAME, self.extra), (o5.MAIN_NAME, self.main)]
+
+    def test_extra_checked_before_returning(self):
+        bad = dict(VERSIONS)
+        real = VERSIONS["247fc1d"]
+
+        class Odd:
+            @staticmethod
+            def build_tag_list(*a, **k):
+                r = real.build_tag_list(*a, **k)
+                r["V1PERSONS"] = []
+                return r
+        bad["247fc1d"] = Odd
+        with self.assertRaisesRegex(o5.Order5Error, "決めていないキー"):
+            Fixture(standard_spec()).build(versions=bad)
+
+    def test_write_order_and_bytes(self):
+        renames = []
+        real_rename = os.rename
+
+        def rec(a, b):
+            renames.append(os.path.basename(b))
+            return real_rename(a, b)
+        with mock.patch.object(os, "rename", rec):
+            got = o5.write_outputs(self.out, self.parts())
+        self.assertEqual(renames, [o5.DETAIL_NAME, o5.EXTRA_NAME, o5.MAIN_NAME])     # main を最後に
+        self.assertEqual(sorted(os.listdir(self.out)), sorted(o5.OUT_NAMES))
+        for name, sha in got:
+            with open(os.path.join(self.out, name), "rb") as f:
+                self.assertEqual(hashlib.sha256(f.read()).hexdigest(), sha)
+        with open(os.path.join(self.out, o5.MAIN_NAME), "rb") as f:
+            main = json.loads(f.read())
+        self.assertEqual(main["outside"]["detail"]["sha256"], dict(got)[o5.DETAIL_NAME])
+        self.assertEqual(main["outside"]["extra"]["sha256"], dict(got)[o5.EXTRA_NAME])
+        # 2回目は、同じ名前があるので書かない
+        with self.assertRaisesRegex(o5.Order5Error, "同じ名前"):
+            o5.write_outputs(self.out, self.parts())
+
+    def test_failure_in_writing_leaves_no_final_file(self):
+        real = o5._write_new
+        calls = []
+
+        def fail_on_second(path, data):
+            calls.append(os.path.basename(path))
+            if len(calls) == 2:
+                raise OSError("見本の書き込みの失敗")
+            return real(path, data)
+        with mock.patch.object(o5, "_write_new", fail_on_second):
+            with self.assertRaises(OSError):
+                o5.write_outputs(self.out, self.parts())
+        self.assertEqual(calls, [o5.DETAIL_NAME + ".partial", o5.EXTRA_NAME + ".partial"])
+        self.assertFalse(any(os.path.lexists(os.path.join(self.out, n)) for n in o5.OUT_NAMES))
+
+    def test_existing_partial_refused(self):
+        with open(os.path.join(self.out, o5.EXTRA_NAME + ".partial"), "wb") as f:
+            f.write(b"x")
+        with self.assertRaisesRegex(o5.Order5Error, "同じ名前"):
+            o5.write_outputs(self.out, self.parts())
+        self.assertEqual(os.listdir(self.out), [o5.EXTRA_NAME + ".partial"])
+
+    def run_main(self, ret=None, exc=None):
+        def fake(*a, **k):
+            if exc:
+                raise exc
+            return ret
+        import io
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(o5, "official_record", side_effect=fake) as m, \
+                mock.patch.object(sys, "stdout", out), mock.patch.object(sys, "stderr", err):
+            code = o5.main(["--store", "s", "--themes-store", "t", "--out-dir", self.out, "--repo", "r"])
+        # 標準出力には、書いたファイルの名前と sha256 だけ
+        for line in out.getvalue().splitlines():
+            self.assertRegex(line, r"\A[0-9a-f]{64}  order5-(main|detail|extra)\.json\Z")
+        return code, m
+
+    def test_main_exit_codes(self):
+        code, m = self.run_main(ret=(self.main, self.detail, self.extra))
+        self.assertEqual(code, 0)
+        self.assertEqual(m.call_args.kwargs["repo"], "r")
+        self.assertEqual(sorted(os.listdir(self.out)), sorted(o5.OUT_NAMES))
+        # 同じ名前があれば、作らずに 2
+        code, m = self.run_main(ret=(self.main, self.detail, self.extra))
+        self.assertEqual(code, 2)
+        m.assert_not_called()
+
+    def test_main_stopped_and_error(self):
+        stopped, d, x = Fixture(dict(standard_spec(), **{"2015-04-02": [("2", "", "", False)] * 3})).build()
+        code, _m = self.run_main(ret=(stopped, d, x))
+        self.assertEqual(code, 3)
+        self.assertEqual(os.listdir(self.out), [o5.MAIN_NAME])
+        out2 = tempfile.mkdtemp(prefix="o5-out-")
+        self.addCleanup(shutil.rmtree, out2, True)
+        self.out = out2
+        code, _m = self.run_main(exc=o5.Order5Error("見本"))
+        self.assertEqual(code, 1)
+        self.assertEqual(os.listdir(out2), [])
 
 
 class TestStalePycIgnored(unittest.TestCase):
@@ -780,7 +948,7 @@ class TestGateEndToEnd(tag.E2ECase):
         only_periods = tuple(x for x in o5.SEALED_CODE if x[0] == "src/stats/periods.py")
         with mock.patch.object(o5, "SEALED_CODE", only_periods), mock.patch.dict(o5.PINS, self.pins), \
                 OpenRecorder() as rec:
-            main, extra = self.entry(opened)
+            main, detail, extra = self.entry(opened)
         names = [counting.day_file_name("official", run_id, d) for d in DAYS3]
         self.assertEqual(opened, [TABLE_FILE] + names)
         in_vol = [p for p in rec.paths if os.path.abspath(p).startswith(self.volume)]
@@ -791,7 +959,8 @@ class TestGateEndToEnd(tag.E2ECase):
         self.assertEqual(main["refs"]["order4"]["seq"], o4["seq"])
         self.assertEqual(main["missing_days"]["days"], ["2015-03-03"])
         self.assertEqual(main["official"]["result"]["usable_day_count"], 2)
-        rows = {r["name"]: r for r in main["official"]["result"]["themes"]}
+        self.assertEqual(main["outside"]["detail"]["sha256"], o5.sha256_of(detail))
+        rows = {r["name"]: r for r in detail["official_result"]["themes"]}
         self.assertTrue(rows["QQ_EXTRA"]["in_category_table"])
         self.assertEqual(main["themes_table"]["unique_names"], 2)
         self.assertIsNotNone(extra)
@@ -816,7 +985,7 @@ class TestGateEndToEnd(tag.E2ECase):
         with open(path, "wb") as f:
             f.write(body)
         with mock.patch.object(o5, "SEALED_CODE", only_periods), mock.patch.dict(o5.PINS, self.pins):
-            again, _x = self.entry()
+            again, _d, _x = self.entry()
         self.assertEqual(o5.sha256_of(again), o5.sha256_of(main))
 
 
