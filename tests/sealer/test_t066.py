@@ -234,7 +234,15 @@ class TestGkgRunResult(Clone):
 
 
 class TestDayFiles(Clone):
-    """--day-files：仮の置き場所の日の集計（と取得の記録）の sha256 を照らす。"""
+    """--day-files：仮の置き場所の日の集計（と取得の記録）の sha256 を照らす。
+    T-104：このテストは、作業ツリーのマニフェストの day の行の sha256 を仮の値に書き換えて使う。書き換えた作業ツリーの版は、
+    コミットした版との鎖に乗らない（GKG のマニフェストの「追記だけ」の照合が止める。それは tests/sealer/test_t103.py・
+    test_t104.py で確かめている）。ここでは日の集計の照合だけを見るので、追記だけの照合（verify.gkg_manifests_append_only）は
+    差し替えて流す。"""
+
+    def verify(self, *extra):
+        with mock.patch.object(tl.verify, "gkg_manifests_append_only", lambda st: None):
+            return super().verify(*extra)
 
     def test_day_files(self):
         rows = rows_of(self.body)
