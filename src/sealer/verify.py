@@ -1647,6 +1647,233 @@ def check_order4_entries(st, recs, store):
               "一覧の分母と欠けた日と同じ（%s は流していない。流した Python：%s）" % (n, ledger.ORDER4_SCRIPT, sys.version.split()[0]))
 
 
+# ---- T-111：順番5（タグの一覧の結果）の試みと記録の、git を使う照合と、order5.py に頼らない計算し直し
+
+# order5.py を流す時間の上限と、計算し直しの時間の上限（秒）。見込みはどちらも2〜4時間（order5-tag-list.md 7章）
+ORDER5_TIMEOUT_SECONDS = 8 * 3600
+ORDER5_RECOMPUTE = os.path.join(HERE, "order5_recompute.py")
+
+
+def order5_code(repo, commit, tree, sealed):
+    """順番5の試み・記録の code の欄を、commit の版から作る：script（order5.py）・docs（文書とテスト）・tree（order4_tree と同じ
+    取り出し方の sha256）・sealed（封印済みのコードの名前と sha256。記録から決まる値）。"""
+    by = {p: s for p, s, _d in tree}
+    if ledger.ORDER5_SCRIPT not in by:
+        raise ledger.LedgerError("commit %s の版に %s が無い" % (commit[:12], ledger.ORDER5_SCRIPT))
+    docs = []
+    for rel in ledger.ORDER5_DOC_FILES:
+        if not _git_ok(repo, "cat-file", "-e", "%s:%s" % (commit, rel)):
+            raise ledger.LedgerError("commit %s の版に %s が無い" % (commit[:12], rel))
+        docs.append({"path": rel, "sha256": ledger.sha256_hex(_rgit(repo, "cat-file", "blob", "%s:%s" % (commit, rel)))})
+    return {"script": {"path": ledger.ORDER5_SCRIPT, "sha256": by[ledger.ORDER5_SCRIPT]}, "docs": docs,
+            "tree": {"prefixes": list(ledger.ORDER4_TREE_PREFIXES), "files": len(tree), "sha256": order4_tree_sha256(tree)},
+            "sealed": [{"name": n, "sha256": sealed[n]} for n, _k, _f in ledger.ORDER5_SEALED]}
+
+
+def check_order5_git(repo, data, records, rec, doc, base, read_json):
+    """順番5の試み・記録の、git を使う照合（書く仕組み（base は HEAD）と verify（base は記録を最初に含んだコミット））：
+    head の commit があり、その版の sealed/ledger.jsonl がこの記録を足す直前の記録と同じ、head が base の祖先、code を head の
+    版から作り直したものが記録と同じ。違えば LedgerError。"""
+    what = "seq %d の %s" % (rec["seq"], rec["kind"])
+    head = doc["head"]
+    if not _git_ok(repo, "cat-file", "-e", head + "^{commit}"):
+        raise ledger.LedgerError("%s の head %s の commit が、このリポジトリに無い" % (what, head[:12]))
+    if _version_or_empty(repo, head, LEDGER_REL) != ledger.prefix_bytes(data, rec["seq"] - 1):
+        raise ledger.LedgerError("%s の head %s の版の sealed/ledger.jsonl が、この記録を足す直前の記録（先頭 %d 行）と"
+                                 "一致しない" % (what, head[:12], rec["seq"] - 1))
+    if base != head and not _git_ok(repo, "merge-base", "--is-ancestor", head, base):
+        raise ledger.LedgerError("%s の head %s が、%s の祖先でない" % (what, head[:12], base[:12]))
+    got = order5_code(repo, head, order4_tree(repo, head), ledger.order5_sealed_code(records, read_json))
+    if got != doc["code"]:
+        raise ledger.LedgerError("%s の code が、head %s の版のファイルから作り直したものと違う（順番5を流したコードの版を"
+                                 "偽っている）" % (what, head[:12]))
+    return []
+
+
+def run_order5(tree, store, themes_store, out_dir, repo_root, tmp, what):
+    """tree（固定した版のファイル）だけを空のフォルダに書き出し、その中の order5.py を -I・-B・空の pycache_prefix の Python で
+    流す（--store・--themes-store・--out-dir・--repo）。返り値：終了コード（0 できた、3 C7 で止まった）。それ以外は
+    LedgerError（標準エラーの最後の行を添える）。Python を起動できなければ Unchecked。"""
+    bound = _BoundDir(None, None, [(p, s) for p, s, _d in tree], tmp, what, blobs={p: d for p, _s, d in tree})
+    with tempfile.TemporaryDirectory(dir=tmp) as pycache:
+        cmd = [sys.executable, "-I", "-B", "-X", "pycache_prefix=" + pycache, ledger.ORDER5_SCRIPT, "--store", store,
+               "--themes-store", themes_store, "--out-dir", out_dir, "--repo", repo_root]
+        try:
+            r = subprocess.run(cmd, cwd=bound.dir, capture_output=True, env=_child_env(), timeout=ORDER5_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            raise ledger.LedgerError("%s：%s が %d 秒の上限の中に終わらなかった" % (what, ledger.ORDER5_SCRIPT,
+                                                                     ORDER5_TIMEOUT_SECONDS)) from None
+        except OSError as e:
+            raise Unchecked("%s：Python を起動できない（%s）" % (what, e.__class__.__name__)) from None
+    if r.returncode not in (0, 3):
+        last = (r.stderr.decode("utf-8", "replace").strip().splitlines() or [""])[-1][:300]
+        raise ledger.LedgerError("%s：固定した版の %s が終了コード %d で終わった（%s）" % (what, ledger.ORDER5_SCRIPT, r.returncode,
+                                                                          last))
+    return r.returncode
+
+
+def order5_themes_row(root):
+    """区分表のマニフェストの最後の result の行（区分表のファイルの名前・sha256・行数）。無ければ LedgerError。
+    行の形と並びと履歴は、stats-order の照合（check_themes_manifest_refs と追記だけの照合）が照らす。"""
+    path = os.path.join(root, ledger.THEMES_MANIFEST)
+    if os.path.islink(path) or not os.path.isfile(path):
+        raise ledger.LedgerError("%s が無い" % ledger.THEMES_MANIFEST)
+    with open(path, "rb") as f:
+        rows = [json.loads(x) for x in f.read().split(b"\n") if x.strip()]
+    if not rows or rows[-1].get("kind") != "result":
+        raise ledger.LedgerError("%s の最後の行が result でない（区分表を取得していない）" % ledger.THEMES_MANIFEST)
+    return rows[-1]
+
+
+def recompute_order5(root, records, rec, doc, read_json, store, themes_store, tmp):
+    """順番5の記録の main を、order5.py に頼らずに計算し直して照らす（order5-tag-list.md 5章。tags-naive.md 428行）。
+      - 封印済みのコード（ledger.order5_sealed_code の sha256。periods・exclusion・tagrules・counting は作業ツリーか git の
+        履歴から、1cb463a の版は git から）と、この verify の order5_recompute.py だけを空のフォルダに置いて流す。
+      - 入力：seq 12 が縛るマニフェストの day の行（ledger.order4_day_rows）、seq 15 の欠けた日、区分表のマニフェストの
+        result の行のファイル（themes_store の下。sha256 を照らす）、日の集計（store の下。sha256 を照らしてから開く）。
+      - 照らすもの：status、区分表の数、C1〜C7 の要約、正式な一覧（themes を除いた値と tag_count・reason_counts）、二つの比較、
+        欄の手厚さ（order5_recompute.compare_with_main）。
+    違えば LedgerError。封印済みの版が手元に無い・Python を起動できなければ Unchecked。返り値：開いた日の集計の数。"""
+    what = "seq %d の %s（順番5）の計算し直し" % (rec["seq"], ledger.ORDER5_KIND)
+    refs = ledger.order5_refs(records, rec["seq"], read_json)
+    sealed = ledger.order5_sealed_code(records, read_json)
+    gdoc = read_json([r for r in records if r["seq"] == refs["gkg_run_result"]["seq"]][0], ledger.GKG_RESULT_KIND)
+    mpath = os.path.join(root, *gdoc["manifest_path"].split("/"))
+    with open(mpath, "rb") as f:
+        body = f.read()
+    b = doc["main"]["block"]
+    rows = ledger.order4_day_rows(body, gdoc, ledger._block_days(b["start"], b["end"]))
+    o4 = [r for r in records if r["seq"] == refs["order4"]["seq"]][0]
+    missing = sorted(m["day"] for m in read_json(o4, ledger.ORDER4_KIND)["list"]["missing_days"])
+    trow = order5_themes_row(root)
+    tpath = os.path.join(themes_store, trow["file_name"])
+    if os.path.islink(tpath) or not os.path.isfile(tpath):
+        raise ledger.LedgerError("%s：区分表のファイル %s が置き場所に無い" % (what, trow["file_name"]))
+    code = order4_sealed_bytes(root, {k: sealed[k] for k in ("src/stats/periods.py", "src/stats/exclusion.py",
+                                                             "src/stats/tagrules.py", "src/stats/counting.py")})
+    repo = Repo(root)
+    if not _git_ok(repo, "cat-file", "-e", "%s:src/stats/tagrules.py" % ledger.ORDER5_1CB463A_COMMIT):
+        raise Unchecked("1cb463a の版の tagrules.py が git に無い")
+    v1 = _rgit(repo, "cat-file", "blob", "%s:src/stats/tagrules.py" % ledger.ORDER5_1CB463A_COMMIT)
+    if ledger.sha256_hex(v1) != sealed["1cb463a:src/stats/tagrules.py"]:
+        raise ledger.LedgerError("%s：1cb463a の版の tagrules.py の sha256 が、stats-order1 の値と違う" % what)
+    with open(ORDER5_RECOMPUTE, "rb") as f:
+        runner = f.read()
+    code.update({"v1cb463a/tagrules.py": v1, "order5_recompute.py": runner})
+    inp = {"block": [b["start"], b["end"]], "missing_days": missing,
+           "rows": [{"day": d, "file_name": rows[d]["file_name"], "sha256": rows[d]["sha256"]} for d in sorted(rows)],
+           "themes_sha256": trow["sha256"], "themes_rows": trow["rows"]}
+    bound = _BoundDir(None, None, [(p, ledger.sha256_hex(x)) for p, x in code.items()], tmp, what, blobs=code)
+    with tempfile.TemporaryDirectory(dir=tmp) as pycache:
+        cmd = [sys.executable, "-I", "-B", "-X", "pycache_prefix=" + pycache, "order5_recompute.py", bound.dir,
+               _json_arg(tmp, inp), store, tpath]
+        try:
+            r = subprocess.run(cmd, cwd=bound.dir, capture_output=True, env=_child_env(), timeout=ORDER5_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            raise ledger.LedgerError("%s：%d 秒の上限の中に終わらなかった" % (what, ORDER5_TIMEOUT_SECONDS)) from None
+        except OSError as e:
+            raise Unchecked("%s：Python を起動できない（%s）" % (what, e.__class__.__name__)) from None
+    if r.returncode != 0:
+        last = (r.stderr.decode("utf-8", "replace").strip().splitlines() or [""])[-1][:300]
+        raise ledger.LedgerError("%s：計算し直しが終了コード %d で終わった（%s）" % (what, r.returncode, last))
+    got = json.loads(r.stdout.decode("utf-8"))
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("order5_recompute_for_verify", ORDER5_RECOMPUTE)
+    rc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rc)
+    bad = rc.compare_with_main(doc["main"], got)
+    if bad:
+        raise ledger.LedgerError("%s：main の値が、封印済みのコードで計算し直した値と違う（%s）" % (what, "、".join(bad[:10])))
+    return len(rows)
+
+
+def check_order5_outside(doc, outside_dir, what):
+    """Git の外の detail・extra のファイルが outside_dir にあれば、sha256 を記録の outside と照らす。返り値：照らしたファイルの
+    名前の一覧と、無かったものの一覧。違えば LedgerError。"""
+    done, absent = [], []
+    for part in ("detail", "extra"):
+        v = doc["outside"][part]
+        path = os.path.join(outside_dir, v["file_name"])
+        if os.path.islink(path) or not os.path.isfile(path):
+            absent.append(v["file_name"])
+            continue
+        if ledger.sha256_file(path) != v["sha256"]:
+            raise ledger.LedgerError("%s：%s の sha256 が、記録の outside.%s と違う" % (what, v["file_name"], part))
+        done.append(v["file_name"])
+    return done, absent
+
+
+def check_order5_entries(st, attempts, recs, store, themes_store, outside_dir):
+    """順番5の試みと記録ごとに、ledger_head を照らし、行を出す（T-111）。git の照合（check_order5_git）。順番5の記録は、
+    --store と --themes-store を渡したときだけ計算し直す（recompute_order5）。--order5-outside を渡したときだけ detail・extra の
+    sha256 を照らす。渡さないとき・git の履歴が無いときは「照らさなかった」。"""
+    repo = Repo(st.root)
+    why = None
+    try:
+        repo.git("rev-parse", "--git-dir")
+    except (ledger.LedgerError, OSError):
+        why = "git の履歴が無い"
+    if why is None and not _not_shallow(repo):
+        why = "浅い clone"
+    commits = None
+    for r in sorted(attempts + recs, key=lambda x: x["seq"]):
+        doc = st.file_json(r, r["kind"])
+        ledger.check_ledger_head(st.data, r, doc)
+        if r["kind"] == ledger.ORDER5_ATTEMPT_KIND:
+            print("  %s seq %d（順番5の試み）: head %s、%s の sha256 %s" % (r["kind"], r["seq"], doc["head"], ledger.ORDER5_SCRIPT,
+                                                                   doc["code"]["script"]["sha256"]))
+        else:
+            print("  %s seq %d（順番5）: status %s、main の sha256 %s、試み seq %d、順番4 seq %d、正式な一覧 %s 件"
+                  % (r["kind"], r["seq"], doc["status"], doc["main_sha256"], doc["attempt"]["seq"], doc["refs"]["order4"]["seq"],
+                     ((doc["main"].get("official") or {}).get("result") or {}).get("tag_count", "—")))
+        c = None
+        if why is None:
+            if commits is None:
+                commits = repo.commit_for_seq(st.data, partial=True)
+            c = commits.get(r["seq"])
+        if c is None:
+            reason = why or "記録がまだコミットされていない"
+            st.unchecked.append("seq %d の順番5の記録の git からの照合（%s）" % (r["seq"], reason))
+            print("照らさなかった：%s なので、seq %d のコードの版を git から照らしていない" % (reason, r["seq"]))
+        else:
+            check_order5_git(repo, st.data, st.records, r, doc, c, st.file_json)
+            print("    head %s の版の記録と、%s・文書とテスト・流すフォルダのファイル %d 件を git から照らした。記録と同じ"
+                  % (doc["head"][:12], ledger.ORDER5_SCRIPT, doc["code"]["tree"]["files"]))
+        if r["kind"] != ledger.ORDER5_KIND:
+            continue
+        if not (store and themes_store):
+            st.unchecked.append("seq %d の順番5の一覧と要約の計算し直し（--store と --themes-store を渡していない）" % r["seq"])
+            print("照らさなかった：日の集計と区分表の置き場所（--store・--themes-store）を渡していないので、seq %d の一覧と要約を"
+                  "計算し直していない" % r["seq"])
+        else:
+            for p in (store, themes_store):
+                if not os.path.isdir(p):
+                    raise ledger.LedgerError("置き場所 %s がフォルダでない" % p)
+            try:
+                with tempfile.TemporaryDirectory() as tmp:
+                    n = recompute_order5(st.root, st.records, r, doc, st.file_json, os.path.realpath(store),
+                                         os.path.realpath(themes_store), tmp)
+                print("    封印済みの tagrules.py・counting.py で、日の集計 %d 個と区分表から、正式な一覧と要約を計算し直した。main と"
+                      "同じ（order5.py は流していない。流した Python：%s）" % (n, sys.version.split()[0]))
+            except Unchecked as e:
+                st.unchecked.append("seq %d の順番5の計算し直し（%s）" % (r["seq"], e))
+                print("照らさなかった：seq %d の順番5の計算し直し（%s）" % (r["seq"], e))
+        if doc["status"] != "ok":
+            continue
+        if not outside_dir:
+            st.unchecked.append("seq %d の順番5の Git の外のファイル（detail・extra）の sha256（--order5-outside を渡していない）"
+                                % r["seq"])
+            print("照らさなかった：Git の外のファイルの置き場所（--order5-outside）を渡していないので、detail・extra の sha256 を"
+                  "照らしていない")
+            continue
+        done, absent = check_order5_outside(doc, outside_dir, "seq %d の順番5" % r["seq"])
+        if done:
+            print("    Git の外のファイル %s の sha256 は、記録の outside と同じ" % "・".join(done))
+        for a_ in absent:
+            st.unchecked.append("seq %d の順番5の %s の sha256（置き場所に無い）" % (r["seq"], a_))
+            print("照らさなかった：%s が置き場所に無い" % a_)
+
+
 def cmd_stats_order(st, a):
     """統計係の順番1・順番1b の記録の照合と一覧。T-037（差し戻し1回目で改めた）、T-056。"""
     got = ledger.check_stats_order(st.records, st.file_json)
@@ -1683,6 +1910,9 @@ def cmd_stats_order(st, a):
         check_order3_entries(st, got["order3_attempt"], got["order3"])          # T-090
     if got["order4"]:
         check_order4_entries(st, got["order4"], getattr(a, "store", None))       # T-095
+    if got["order5_attempt"] or got["order5"]:
+        check_order5_entries(st, got["order5_attempt"], got["order5"], getattr(a, "store", None),
+                             getattr(a, "themes_store", None), getattr(a, "order5_outside", None))   # T-111
     o1 = ledger.first_order1(st.records)
     print("除外の規則の kind（%s）の記録：%s（1 件だけ）。順番1・1b は最初の method-access より前、"
           "最初の gkg-run-start の前に順番1b。" % (ledger.ORDER1_KIND, "無し" if o1 is None else "seq %d" % o1["seq"]))
@@ -2535,6 +2765,9 @@ def main(argv=None):
     # T-095：正式な run の日の集計の置き場所。渡したときだけ、封印済みの counting.py で順番4の C7 の分母を数え直す（60〜100分）
     for name in ("stats-order", "all"):
         parsers[name].add_argument("--store")
+        # T-111：区分表のファイルの置き場所（順番5の計算し直し）と、Git の外の detail・extra の置き場所
+        parsers[name].add_argument("--themes-store")
+        parsers[name].add_argument("--order5-outside")
     for name in ("gkg-runs", "all"):
         # T-066：日の集計（と取得の記録）の置き場所。渡したときだけ sha256 を照らす（第三者はディスクを持たない）。
         # all では、順番2の decide() の流し直しにも使う（T-078）

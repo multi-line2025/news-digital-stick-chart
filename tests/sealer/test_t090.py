@@ -904,7 +904,7 @@ class TestAllowedAndDoc(unittest.TestCase):
         for k in (A3, O3):
             self.assertIn(k, ledger.ALLOWED_KINDS)
             self.assertIn(k, seal_records.WRITTEN_KINDS)
-        self.assertEqual(len(ledger.ALLOWED_KINDS), 15)          # T-095 で順番4を加えた
+        self.assertEqual(len(ledger.ALLOWED_KINDS), 17)          # T-095 で順番4を加えた
 
     def test_gate_keys_match_sealed(self):
         """ledger の gate のキーは、封印した版の order3_gate() の record のキーと同じ。"""

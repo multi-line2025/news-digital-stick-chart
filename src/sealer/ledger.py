@@ -7,8 +7,8 @@
 1 行の形（キーはこの 6 つだけ。ほかのキーがあれば検証で失敗にする）
     seq          通し番号。1 から始まり、行の順に 1 ずつ増える。
     prev_hash    直前の行のバイト列（末尾の改行を含めない）の sha256。1 行目は 0 が 64 個。
-    kind         種類。許可リスト（ALLOWED_KINDS）の 15 だけ（T-066 で gkg-run-result、T-078 で stats-order2、T-090 で
-                 stats-order3-attempt・stats-order3、T-095 で stats-order4 を加えた）。
+    kind         種類。許可リスト（ALLOWED_KINDS）の 17 だけ（T-066 で gkg-run-result、T-078 で stats-order2、T-090 で
+                 stats-order3-attempt・stats-order3、T-095 で stats-order4、T-111 で stats-order5-attempt・stats-order5 を加えた）。
                  それ以外は検証で失敗にする。
                  gkg-run-start（GKG の取得の run の開始。T-031）、stats-order1・stats-order1b
                  （統計係の順番1・順番1b の事前の封印。T-037）を加えた。
@@ -158,10 +158,13 @@ ORDER3_ATTEMPT_KIND = "stats-order3-attempt"
 ORDER3_KIND = "stats-order3"
 # T-095：統計係の順番4（手法を作る期間の区画の、欠けた日の一覧。docs/stats/missing-days-method.md）。1件だけ
 ORDER4_KIND = "stats-order4"
+# T-111：統計係の順番5（タグの一覧の結果）の試みと、順番5の記録
+ORDER5_ATTEMPT_KIND = "stats-order5-attempt"
+ORDER5_KIND = "stats-order5"
 ALLOWED_KINDS = (PERIODS_KIND, TRIGGERS_KIND, THRESHOLD_ACCESS_KIND, ACQ_START_KIND,
                  ACQ_RESULT_KIND, CANDIDATES_KIND, METHOD_ACCESS_KIND, GKG_RUN_KIND,
                  ORDER1_KIND, ORDER1B_KIND, GKG_RESULT_KIND, ORDER2_KIND,
-                 ORDER3_ATTEMPT_KIND, ORDER3_KIND, ORDER4_KIND)
+                 ORDER3_ATTEMPT_KIND, ORDER3_KIND, ORDER4_KIND, ORDER5_ATTEMPT_KIND, ORDER5_KIND)
 
 # stamp で使う公開カレンダー（ots の既定と同じ 4 つ）と、その集約先が返す Pending の宛先
 # （実体のカレンダー）。stamp.py はこの左側に送る。.ots の Pending の宛先は右側に限る。
@@ -1963,9 +1966,10 @@ def check_stats_order(records, read_json):
         check_order2_doc(records, r, doc, read_json)          # T-078
     o3 = check_order3_records(records, read_json)              # T-090
     o4 = check_order4_records(records, read_json)              # T-095
+    o5 = check_order5_records(records, read_json)              # T-111
     check_threshold_access_after_order4(records, read_json)    # T-100（T-097）
     return {"order1": o1, "order1b": o1b, "order2": o2, "order3_attempt": o3["attempt"], "order3": o3["order3"],
-            "order4": o4}
+            "order4": o4, "order5_attempt": o5["attempt"], "order5": o5["order5"]}
 
 
 # ---- T-073：順番2の前の関門と、順番2の記録の照合
@@ -2985,7 +2989,7 @@ ORDER4_DOC_FILES = ("docs/stats/missing-days-method.md", "tests/stats/test_missi
 # 流すフォルダに取り出すもの：コード、関門が読む封印の記録、マニフェスト（HEAD の版のこの下のファイルすべて）
 ORDER4_TREE_PREFIXES = ("data/manifest/", "sealed/", "src/")
 # 順番4の記録より後にだけ置ける kind。順番5とモデルの kind を作るときは、ここに足す（missing-days-method.md 5章）
-ORDER4_BEFORE_KINDS = (THRESHOLD_ACCESS_KIND,)
+ORDER4_BEFORE_KINDS = (THRESHOLD_ACCESS_KIND, ORDER5_ATTEMPT_KIND, ORDER5_KIND)   # T-111 で順番5を足した
 ORDER4_DOC_KEYS = ("code", "head", "kind", "ledger_head", "list", "list_sha256", "python", "refs")
 ORDER4_REF_KEYS = ("candidates", "gkg_run_result", "order1b", "order3", "periods")
 ORDER4_CODE_KEYS = ("docs", "imports", "script", "tree")
@@ -3360,6 +3364,227 @@ def check_ref_order4(records, record, ref, read_json, what=None):
     if ref != want:
         raise LedgerError("%s の順番4への参照 %r が、それより前の順番4の記録（seq %d）の seq・行の sha256・一覧の sha256 と違う"
                           % (what, ref, want["seq"]))
+
+
+# ---- T-111：順番5（タグの一覧の結果。docs/stats/order5-tag-list.md、tags-naive.md 370・423〜428行、seal-order1.md 143行）
+#
+# 二つの kind：
+#   stats-order5-attempt：試み。書く入口が order5.py を流す前に、HEAD の commit と流すコードの版（order5.py とそれが照らす
+#     ファイル）と参照を記録してコミットする。流した回数は、この kind の記録の数で数える（T-110 の監査 中-1 の申し送り）。
+#     何度でも書いてよい（ただし順番5の記録のあとは書かない）。
+#   stats-order5：順番5の記録。直前の記録が試みで、その試みで流した order5.py の出力の main（Git に入れる本体）を中身に
+#     そのまま入れる。1件だけ。detail・extra（Git の外）は sha256 だけ。main の status が stopped（C7 の分母が 0 の日。
+#     seal-order1.md 143行）なら、それは止まった事実の記録で、正式な一覧ではない。
+# どちらも、順番4（stats-order4）より後で、threshold-access より前（ORDER4_BEFORE_KINDS に入れる。モデルの kind を作るときは
+# ORDER5_BEFORE_KINDS に足す）。
+ORDER5_SCRIPT = "src/stats/order5.py"
+ORDER5_DOC_FILES = ("docs/stats/order5-tag-list.md", "tests/stats/test_order5.py")
+ORDER5_BEFORE_KINDS = (THRESHOLD_ACCESS_KIND,)
+ORDER5_OUT_NAMES = {"main": "order5-main.json", "detail": "order5-detail.json", "extra": "order5-extra.json"}
+# 順番5の main の refs のキー（order5.py の出力と同じ）と、記録の refs のキー（試みを足したもの）
+ORDER5_REF_KEYS = ("gkg_run_result", "order1", "order1b", "order2", "order3", "order4")
+ORDER5_ATTEMPT_KEYS = ("code", "head", "kind", "ledger_head", "python", "refs")
+ORDER5_DOC_KEYS = ("attempt", "code", "head", "kind", "ledger_head", "main", "main_sha256", "outside", "python", "refs",
+                   "status")
+# 封印済みのコード（順番5が照らす）と、その出どころ：(名前, 記録の kind, 欄)
+ORDER5_SEALED = (("src/stats/periods.py", "periods", "targets:code"),
+                 ("src/stats/exclusion.py", "stats-order1", "order1:targets"),
+                 ("src/stats/tagrules.py", "stats-order1", "order1:targets"),
+                 ("src/stats/counting.py", "stats-order1b", "files"),
+                 ("1cb463a:src/stats/tagrules.py", "stats-order1", "order1:targets"))
+ORDER5_1CB463A_COMMIT = "1cb463acfcf15ba315e6c454625ad681e86bbc2a"
+
+
+def order5_main_bytes(main):
+    """main のバイト列（order5.canonical_bytes と同じ形：UTF-8、sort_keys、区切りに空白なし、末尾に改行1つ）。"""
+    return (json.dumps(main, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode(
+        "utf-8")
+
+
+def order5_refs(records, seq, read_json):
+    """seq の順番5の記録（と試み）が参照する記録の {seq, record_sha256}（順番4は list_sha256 も）。記録だけから決まる。
+      order3：seq より前の stats-order3 の最後。order1・order1b・order2：その順番3の ref_order1・ref_1b・ref_order2 が指す記録。
+      order4：order4_ref（ちょうど1件）。gkg_run_result：正式な run の gkg-run-result（ちょうど1件）。
+    決まらなければ LedgerError。"""
+    before = [r for r in records if r["seq"] < seq]
+    o3 = [r for r in before if r["kind"] == ORDER3_KIND]
+    if not o3:
+        raise LedgerError("seq %d より前に順番3（stats-order3）の記録が無い" % seq)
+    d3 = read_json(o3[-1], ORDER3_KIND)
+    by = {r["seq"]: r for r in before}
+    out = {"order3": record_ref(o3[-1])}
+    for key, field, kind in (("order1", "ref_order1", ORDER1_KIND), ("order1b", "ref_1b", ORDER1B_KIND),
+                             ("order2", "ref_order2", ORDER2_KIND)):
+        ref = d3.get(field) or {}
+        r = by.get(ref.get("seq"))
+        if r is None or r["kind"] != kind or record_ref(r) != ref:
+            raise LedgerError("順番3の記録の %s が、%s の記録と合わない" % (field, kind))
+        out[key] = ref
+    out["order4"] = order4_ref(records, seq, read_json)
+    off = [r for r in before if r["kind"] == GKG_RESULT_KIND and read_json(r, GKG_RESULT_KIND).get("mode") == "official"]
+    if len(off) != 1:
+        raise LedgerError("seq %d より前に、正式な run の gkg-run-result がちょうど1件ない" % seq)
+    out["gkg_run_result"] = record_ref(off[0])
+    return out
+
+
+def order5_sealed_code(records, read_json):
+    """順番5が照らす封印済みのコードの {名前: sha256}（ORDER5_SEALED の出どころの記録から。最初の periods、stats-order1、
+    seq の最も大きい stats-order1b）。決まらなければ LedgerError。"""
+    p = _first_of_kind(records, PERIODS_KIND)
+    o1 = first_order1(records)
+    o1b = [r for r in records if r["kind"] == ORDER1B_KIND]
+    if p is None or o1 is None or not o1b:
+        raise LedgerError("periods・stats-order1・stats-order1b の記録が無い")
+    t1 = {t.get("name"): t.get("sha256") for t in read_json(o1, ORDER1_KIND).get("targets", [])}
+    f1b = {f.get("path"): f.get("sha256") for f in read_json(o1b[-1], ORDER1B_KIND).get("files", [])}
+    out = {}
+    for name, kind, field in ORDER5_SEALED:
+        if field == "targets:code":
+            v = _target_sha(p, "code", name)
+        elif field == "order1:targets":
+            v = t1.get(name)
+        else:
+            v = f1b.get(name)
+        if not (isinstance(v, str) and HEX64.match(v)):
+            raise LedgerError("%s の sha256 が、%s の記録から決まらない" % (name, kind))
+        out[name] = v
+    return out
+
+
+def check_order5_position(records, record):
+    """順番5の試み・記録の位置：順番4の記録が前にちょうど1件、threshold-access（と ORDER5_BEFORE_KINDS）が前に無い、
+    順番5の記録が前に無い（試みも、順番5の記録のあとには書かない。順番5の記録は1件だけ）。順番5の記録は、直前の記録が試み。"""
+    seq = record["seq"]
+    before = [r for r in records if r["seq"] < seq]
+    if sum(1 for r in before if r["kind"] == ORDER4_KIND) != 1:
+        raise LedgerError("seq %d の %s より前に、順番4（stats-order4）の記録がちょうど1件ない（順番5は順番4のあと。"
+                          "tags-naive.md 369行）" % (seq, record["kind"]))
+    late = [r for r in before if r["kind"] in ORDER5_BEFORE_KINDS]
+    if late:
+        raise LedgerError("%s の記録（seq %d）より後に、順番5の %s は置けない（モデルより前、threshold-access より前）"
+                          % (late[0]["kind"], late[0]["seq"], record["kind"]))
+    o5 = [r for r in before if r["kind"] == ORDER5_KIND]
+    if o5:
+        raise LedgerError("順番5（%s）の記録は、もう seq %d にある（1件だけ。そのあとに試みも書かない）" % (ORDER5_KIND, o5[0]["seq"]))
+    if record["kind"] == ORDER5_KIND and (not before or before[-1]["kind"] != ORDER5_ATTEMPT_KIND):
+        raise LedgerError("順番5の記録（seq %d）の直前の記録が、試み（%s）でない" % (seq, ORDER5_ATTEMPT_KIND))
+
+
+def _check_order5_code(code, sealed, what):
+    if not isinstance(code, dict) or set(code) != {"script", "docs", "tree", "sealed"}:
+        raise LedgerError("%s の code が {script, docs, tree, sealed} でない" % what)
+    s = code["script"]
+    if not isinstance(s, dict) or sorted(s) != ["path", "sha256"] or s["path"] != ORDER5_SCRIPT:
+        raise LedgerError("%s の code.script が {path: %s, sha256} でない" % (what, ORDER5_SCRIPT))
+    _check_hex(s["sha256"], HEX64, what + " の code.script.sha256")
+    _file_list(code["docs"], ORDER5_DOC_FILES, what, "docs")
+    t = code["tree"]
+    if not isinstance(t, dict) or sorted(t) != ["files", "prefixes", "sha256"] or t["prefixes"] != list(ORDER4_TREE_PREFIXES) \
+            or type(t["files"]) is not int or t["files"] < 1:
+        raise LedgerError("%s の code.tree の形が違う" % what)
+    _check_hex(t["sha256"], HEX64, what + " の code.tree.sha256")
+    if code["sealed"] != [{"name": n, "sha256": sealed[n]} for n, _k, _f in ORDER5_SEALED]:
+        raise LedgerError("%s の code.sealed が、封印の記録（periods・stats-order1・stats-order1b）の値と違う" % what)
+
+
+def check_order5_attempt_doc(records, record, doc, read_json):
+    """順番5の試みの記録の、git を使わない照合：targets、キー、kind、head、python、位置、refs（order5_refs）、code の形と
+    封印済みのコードの値。コードの版が head の版と同じことは verify.check_order5_git が照らす。"""
+    what = "seq %d の %s（順番5の試み）" % (record["seq"], ORDER5_ATTEMPT_KIND)
+    check_single_target(record, what)
+    _check_doc_kind(record, doc)
+    if set(doc) != set(ORDER5_ATTEMPT_KEYS):
+        raise LedgerError("%s の中身のキーが、決まったもの（%s）と一致しない" % (what, "、".join(ORDER5_ATTEMPT_KEYS)))
+    _check_hex(doc["head"], HEX40, what + " の head")
+    if not isinstance(doc["python"], str) or not doc["python"]:
+        raise LedgerError("%s の python が文字列でない" % what)
+    check_order5_position(records, record)
+    if doc["refs"] != order5_refs(records, record["seq"], read_json):
+        raise LedgerError("%s の refs が、記録から決まる参照と違う" % what)
+    _check_order5_code(doc["code"], order5_sealed_code(records, read_json), what)
+
+
+def check_order5_doc(records, record, doc, read_json):
+    """順番5の記録の、git と日の集計を使わない照合：
+      - targets、キー、kind、head、python、位置（直前が試み）。attempt が直前の試みの {seq, record_sha256}。
+      - refs が order5_refs と同じに試みの参照を足したもの。main の refs が order5_refs と同じ。
+      - code が試みの code と、script・docs・sealed で同じ（tree は試みの記録の分だけ違う）。形と封印済みのコードの値。
+      - main_sha256 が order5_main_bytes(main) の sha256。status が main の status（ok か stopped）。
+      - outside が main の outside と同じで、ok なら detail・extra の {file_name, sha256}、stopped なら null。
+      - main の block が periods の1件目の method の区画、missing_days の日が順番4の一覧の欠けた日、code の sealed の
+        sha256 が封印済みのコードの値、1cb463a の版の sha256 が stats-order1 の値。
+    main の一覧と要約の値は、verify.recompute_order5（日の集計と区分表が要る）が照らす。"""
+    what = "seq %d の %s（順番5）" % (record["seq"], ORDER5_KIND)
+    check_single_target(record, what)
+    _check_doc_kind(record, doc)
+    if set(doc) != set(ORDER5_DOC_KEYS):
+        raise LedgerError("%s の中身のキーが、決まったもの（%s）と一致しない" % (what, "、".join(ORDER5_DOC_KEYS)))
+    _check_hex(doc["head"], HEX40, what + " の head")
+    if not isinstance(doc["python"], str) or not doc["python"]:
+        raise LedgerError("%s の python が文字列でない" % what)
+    check_order5_position(records, record)
+    by = {r["seq"]: r for r in records}
+    att = by[record["seq"] - 1]
+    if doc["attempt"] != record_ref(att):
+        raise LedgerError("%s の attempt が、直前の試みの記録の seq・行の sha256 でない" % what)
+    adoc = read_json(att, ORDER5_ATTEMPT_KIND)
+    refs = order5_refs(records, record["seq"], read_json)
+    if doc["refs"] != refs:
+        raise LedgerError("%s の refs が、記録から決まる参照と違う" % what)
+    sealed = order5_sealed_code(records, read_json)
+    _check_order5_code(doc["code"], sealed, what)
+    if {k: doc["code"][k] for k in ("script", "docs", "sealed")} != {k: adoc["code"][k] for k in ("script", "docs", "sealed")}:
+        raise LedgerError("%s の code（order5.py・文書とテスト・封印済みのコード）が、直前の試みの記録と違う" % what)
+    main = doc["main"]
+    if not isinstance(main, dict) or not isinstance(doc["main_sha256"], str) \
+            or sha256_hex(order5_main_bytes(main)) != doc["main_sha256"]:
+        raise LedgerError("%s の main_sha256 が、main の JSON（order5.py の出力の形）の sha256 と違う" % what)
+    if main.get("status") not in ("ok", "stopped") or doc["status"] != main.get("status"):
+        raise LedgerError("%s の status が main の status（ok か stopped）と違う" % what)
+    if main.get("refs") != refs:
+        raise LedgerError("%s の main.refs が、記録から決まる参照と違う" % what)
+    out = doc["outside"]
+    if out != main.get("outside"):
+        raise LedgerError("%s の outside が main の outside と違う" % what)
+    if doc["status"] == "ok":
+        if not isinstance(out, dict) or sorted(out) != ["detail", "extra"]:
+            raise LedgerError("%s の outside が {detail, extra} でない" % what)
+        for part in ("detail", "extra"):
+            v = out[part]
+            if not isinstance(v, dict) or sorted(v) != ["file_name", "sha256"] or v["file_name"] != ORDER5_OUT_NAMES[part]:
+                raise LedgerError("%s の outside.%s が {file_name: %s, sha256} でない" % (what, part, ORDER5_OUT_NAMES[part]))
+            _check_hex(v["sha256"], HEX64, "%s の outside.%s.sha256" % (what, part))
+    elif out is not None:
+        raise LedgerError("%s は stopped なのに outside が null でない" % what)
+    p = _first_of_kind(records, PERIODS_KIND)
+    block = blocks_of(read_json(p, "output")).get(METHOD_BLOCK)
+    if main.get("block") != {"name": METHOD_BLOCK, "start": block[0], "end": block[1]}:
+        raise LedgerError("%s の main.block が、periods の1件目の method の区画と違う" % what)
+    o4 = by[refs["order4"]["seq"]]
+    days = sorted(m["day"] for m in read_json(o4, ORDER4_KIND)["list"]["missing_days"])
+    md = main.get("missing_days") or {}
+    if md.get("days") != days or md.get("count") != len(days):
+        raise LedgerError("%s の main.missing_days が、順番4の一覧の欠けた日と違う" % what)
+    code5 = main.get("code") or {}
+    got = {c.get("name"): c.get("sha256") for c in code5.get("sealed") or []}
+    if any(got.get(n) != sealed[n] for n in sealed):
+        raise LedgerError("%s の main.code.sealed の sha256 が、封印済みのコードの値と違う" % what)
+    v1 = [v for v in code5.get("versions") or [] if v.get("name") == "1cb463a"]
+    if len(v1) != 1 or v1[0].get("sha256") != sealed["1cb463a:src/stats/tagrules.py"] \
+            or v1[0].get("commit") != ORDER5_1CB463A_COMMIT:
+        raise LedgerError("%s の main.code.versions の 1cb463a の版が、stats-order1 の値と違う" % what)
+
+
+def check_order5_records(records, read_json):
+    """順番5の試みと記録をすべて照らす（check_stats_order から）。返り値：{"attempt": [記録], "order5": [記録]}。"""
+    att = [r for r in records if r["kind"] == ORDER5_ATTEMPT_KIND]
+    o5 = [r for r in records if r["kind"] == ORDER5_KIND]
+    for r in att:
+        check_order5_attempt_doc(records, r, read_json(r, ORDER5_ATTEMPT_KIND), read_json)
+    for r in o5:
+        check_order5_doc(records, r, read_json(r, ORDER5_KIND), read_json)
+    return {"attempt": att, "order5": o5}
 
 
 def themes_manifest_commits(git):

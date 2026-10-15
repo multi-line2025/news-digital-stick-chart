@@ -14,6 +14,7 @@
 10. 統計係の順番2の試み（`stats-order2`）の記録と、その照合（14章・16章。T-073・T-078）
 11. 統計係の順番3の試み（`stats-order3-attempt`）と順番3の記録（`stats-order3`）、その照合（17章。T-090）
 12. 統計係の順番4（手法を作る期間の区画の、欠けた日の一覧。`stats-order4`）の記録と、その照合・作り直し（18章。T-095）
+13. 統計係の順番5（タグの一覧の結果。`stats-order5-attempt`・`stats-order5`）の記録と、その照合・order5.py に頼らない計算し直し（19章。T-111）
 
 封印したことは、現時点では公開していない（オーナーの決定）。公開するかどうかは、試運転のあとでオーナーが判断する。オーナーは、封印のハッシュを公開する前に手順3（ファイル一覧の取得）へ進むと決めた（案B。reviews/T-013.md の末尾）。そのため、別の系列が無いことは示せない（7章の「示せないこと」）。
 
@@ -37,7 +38,7 @@
 |---|---|
 | `seq` | 通し番号。1 から始まり、行の順に 1 ずつ増える |
 | `prev_hash` | 直前の行のバイト列（末尾の改行を含めない）の sha256。1 行目は 0 が 64 個 |
-| `kind` | 種類。下の表の15だけ（許可リスト。T-066 で `gkg-run-result`、T-078 で `stats-order2`、T-090 で `stats-order3-attempt`・`stats-order3`、T-095 で `stats-order4` を加えた）。それ以外の `kind` があれば、鎖の検証（`chain`）で失敗になる |
+| `kind` | 種類。下の表の17だけ（許可リスト。T-066 で `gkg-run-result`、T-078 で `stats-order2`、T-090 で `stats-order3-attempt`・`stats-order3`、T-095 で `stats-order4`、T-111 で `stats-order5-attempt`・`stats-order5` を加えた）。それ以外の `kind` があれば、鎖の検証（`chain`）で失敗になる |
 | `targets` | 対象のファイル。各要素は `path`（ルートからの相対パス）、`role`、`sha256` |
 | `recorded_at` | 記録した日時（UTC）。記録した機械の時計による申告で、証明ではない |
 | `note` | 注記 |
@@ -59,6 +60,8 @@
 | `stats-order3-attempt` | 統計係の順番3の試み。関門のコードを動かすたびに、通っても止まっても1件（通った・止まった・関門の結果を出さずに止まったは、中身の `gate` と `halt` で区別する。形は 17章。T-090） | stats-order3-attempt | `src/sealer/seal_order3.py` の `seal` |
 | `stats-order3` | 統計係の順番3（数え方とのつながり）。関門を通った試みのすぐあとに、一つの順番1b に1件だけ（形は 17章。T-090） | stats-order3 | `src/sealer/seal_order3.py` の `seal` |
 | `stats-order4` | 統計係の順番4（手法を作る期間の区画の、欠けた日の一覧）。1件だけ。順番3の記録より後、threshold-access より前（形は 18章。T-095） | stats-order4 | `src/sealer/seal_order4.py` の `seal` |
+| `stats-order5-attempt` | 統計係の順番5の試み。order5.py を流す前に書く。何度でも（順番5の記録のあとは書かない）。順番4のあと、threshold-access より前（形は 19章。T-111） | stats-order5-attempt | `src/sealer/seal_order5.py` の `seal` |
+| `stats-order5` | 統計係の順番5（タグの一覧の結果）。直前が試みのときだけ、1件だけ（形は 19章。T-111） | stats-order5 | `src/sealer/seal_order5.py` の `seal` |
 
 - T-007 の案にあった `acquisition` は、二つ（`acquisition-start` と `acquisition-result`）に分けたので、許可リストに無い。今の記録にも無い。
 - 許可リストに限る理由：決めていない名前の `kind` を受け付けると、正式な取得や閾値の期間への接触を別の名前で記録して、規則の区切りから外せてしまうため。
@@ -1864,3 +1867,114 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py stats-order --store "$
    - 置き場所のパスの名前。ボリューム名を含むので、公開物には入れない。
 5. `PYTHONDONTWRITEBYTECODE=1 python3 -B src/collector/privacy_scan.py --all-history` が 0 なら push する。記録の時刻から24時間以内に、記録のハッシュと時刻を投稿する（投稿はリード。docs/verify/x-post.md）。
 6. 統計係の報告した値（T-093・T-096 の一覧の sha256）と、記録の `list_sha256` を比べ、結果をリードに渡す。違えば、どちらの値も消さずにリードに報告する。
+
+## 19. 順番5の封印（stats-order5-attempt・stats-order5。T-111）
+
+順番5は、タグの一覧の結果を封印する段である。計算のコードは統計係の `src/stats/order5.py`、文書は docs/stats/order5-tag-list.md。決まりは次のとおり（どれも封印済みで、この章では変えない）。
+- tags-naive.md 370行（順番5の中身と時機：3・4 のあと、モデルより前）、423〜428行（二つの版と二つの設定の比べ方）。
+- seal-order1.md 143行（参照、候補のすべての数え方、正式な結果はちょうど一つ、欄の手厚さ、C7 の分母が 0 の日があれば止まる）。
+- missing-days-method.md 6章（参照に順番4）。reviews/T-109.md・T-110.md のリードの判断（手で流さない。封印係の入口の中で HEAD の版を空のフォルダに出して流し、コミットするまで結果を表示しない。第三者は order5.py を通さずに計算し直す。流す前に試みの記録を封印する）。
+
+T-111 で、次を足した。
+- 二つの kind（許可リストに入れた）。`stats-order5-attempt` は試みで、入口が order5.py を流す**前に**書いてコミットする。流した回数は、この kind の記録の数で数える。`stats-order5` は順番5の記録で、直前の記録が試みであるときだけ、1件だけ書く。どちらも順番4のあとで、threshold-access より前（`ledger.check_order5_position`。`ledger.ORDER4_BEFORE_KINDS` にも入れたので、順番5のあとに順番4は置けない）。
+- 書く入口 `src/sealer/seal_order5.py`。
+- 照合（`ledger.check_order5_records`、`verify.check_order5_git`）と、order5.py に頼らない計算し直し（`verify.recompute_order5`、`src/sealer/order5_recompute.py`）。
+
+### 書く入口と、1回の実行の順
+
+```sh
+STORE="/Volumes/LACIE SHARE/news-stick-data/gkg-method"
+THEMES="<区分表のファイルの置き場所>"
+OUTSIDE="/Volumes/LACIE SHARE/news-stick-data/order5"
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_order5.py --store "$STORE" --themes-store "$THEMES" --outside-dir "$OUTSIDE"
+```
+
+- `--outside-dir` は、プロジェクトと Git の外の、もうあるフォルダ。入口はその中に `order5-seq<試みの seq>` を新しく作り、order5.py の出力（main・detail・extra）をそこに書かせる。detail と extra は Git に入れない（置き場所はリードとオーナーが決める。上の値は案）。main は、順番5の記録の中身にそのまま入る（sealed/ の中）。
+- 終了コード：書いてコミットしたら 0。何も書かずに止まったら 1（「失敗（順番5の記録は書いていない）」）。試みを書いたあとで止まったら 1（「止まった（順番5の試みの記録は書いた）」）。引数の誤りは 2。
+
+1回の実行は、次の順で進む。
+0. 鎖とすべての `.ots` を検証する。作業ツリーがきれいで、HEAD（A）を40桁で決める。
+1. 書く前の確かめ（どれも結果に依らない）：位置、参照（`ledger.order5_refs`：順番1・1b・2・3・4（`list_sha256` も）・正式な run の gkg-run-result）、封印済みのコードの値（`ledger.order5_sealed_code`：periods.py は seq 1、exclusion.py・tagrules.py・1cb463a の版の tagrules.py は seq 5、counting.py は seq 6 の値）、HEAD の版から作った code（`verify.order5_code`：order5.py・文書とテスト・取り出すファイルの sha256・封印済みのコード）、置き場所がフォルダであること、`--outside-dir` がプロジェクトと Git の外にあること。
+2. **試みの記録を書いてコミットする**（`.ots` も作る。HEAD は B になる）。結果はまだ無い。
+3. HEAD（B）の版の `src/`・`sealed/`・`data/manifest/` の下のファイルを空のフォルダに取り出し、その中の order5.py を `-I`・`-B`・空の `pycache_prefix` の Python で流す（`verify.run_order5`。`--store`・`--themes-store`・`--out-dir`・`--repo <プロジェクト>`）。終了コード 0（できた）と 3（C7 で止まった。main だけ）のほかは止まる。止まっても試みの記録は残る（流した回数に数える）。
+4. main のバイト列が決まった形の JSON であること（`ledger.order5_main_bytes`。order5.py の `canonical_bytes` と同じ形）、HEAD が B のままであること、流したコードの版が試みの記録と同じであること。
+5. 順番5の記録を書く。書く前の照合（`seal_records.check_new`）で、下の (1)〜(3) をすべて行う（(2) は2〜4時間）。中身のファイルは追記のあとで書き、`recorded_at` は追記の直前に取る（T-112）。`.ots` を作り、パス指定でコミットする。
+6. 結果（status と正式な一覧の件数）は、コミットのあとで画面に出す。
+
+### 記録の中身
+
+`stats-order5-attempt`（`ledger.ORDER5_ATTEMPT_KEYS`）：`kind`・`ledger_head`・`head`（A）・`refs`（上の参照）・`code`（`script`・`docs`・`tree`・`sealed`）・`python`。
+
+`stats-order5`（`ledger.ORDER5_DOC_KEYS`）：
+
+| キー | 中身 |
+|---|---|
+| `kind`・`ledger_head`・`head` | いつもの形。`head` は流した版（B。試みをコミットしたあとの HEAD） |
+| `attempt` | 直前の試みの記録の `{seq, record_sha256}` |
+| `refs` | 順番1・1b・2・3 の `{seq, record_sha256}`、順番4 の `{seq, record_sha256, list_sha256}`、gkg-run-result の `{seq, record_sha256}`。main の `refs` と同じ |
+| `code` | 流したコードの版。`script`（order5.py の sha256）・`docs`（docs/stats/order5-tag-list.md・tests/stats/test_order5.py）・`tree`（取り出したファイルの数と sha256）・`sealed`（封印済みのコードの名前と sha256）。`script`・`docs`・`sealed` は試みの記録と同じ |
+| `main` | order5.py の出力の main をそのまま |
+| `main_sha256` | main のバイト列（order5.py が書いたもの）の sha256 |
+| `status` | main の `status`（`ok` か `stopped`） |
+| `outside` | main の `outside`（detail・extra の `{file_name, sha256}`。stopped なら null） |
+| `python` | 流した Python の版（申告） |
+
+### 照合（書く仕組みと verify が同じ関数を使う）
+
+- (1) 形とつじつま（`ledger.check_order5_records`。`check_stats_order` から呼ぶので、どの記録を書くときにも流れる）：位置、`attempt`、`refs`、`code`（試みと同じ。封印済みのコードの値）、`main_sha256`、`status`・`outside` と main の一致、main の `block`・`missing_days`（順番4の一覧の欠けた日）・`code.sealed`・1cb463a の版の sha256。git（`verify.check_order5_git`）：`head` の版の記録、祖先、`code` を `head` の版から作り直したものと同じ。
+- (2) **order5.py に頼らない計算し直し**（`verify.recompute_order5`。docs/stats/order5-tag-list.md 5章、tags-naive.md 428行）：
+  - 封印済みのコード（上の5つ。sha256 で探す。1cb463a の版は git から）と、封印係の `src/sealer/order5_recompute.py` だけを空のフォルダに置き、`-I`・`-B` で流す。order5.py は読まない。
+  - 入力は、seq 12 が縛るマニフェストの day の行（sha256 を照らしてから日の集計を開く）、seq 15 の欠けた日、区分表のマニフェストの最後の result の行のファイル（sha256 と行数を照らす）。
+  - 計算するもの：区分表の数（名前の数・重なった行・日の集計の名前の形に合わない名前・データにあって区分表に無い名前の数）、C1〜C7 の状態と要約、正式な一覧（`build_tag_list` の出力から `themes` を除いた値、`tag_count`、`reason_counts`）、比較（すべて有効の設定と 1cb463a の版の `compare_lists` と差の件数）、欄の手厚さ（四半期ごとと全体の4つの数・日の数・割合）。
+  - main の同じ欄と一つでも違えば止まる（`order5_recompute.compare_with_main`）。main の `status` が stopped なら、区分表の数と候補の状態だけを照らす。
+- (3) Git の外のファイル：書く仕組みは、`--outside-dir` の中の detail・extra の sha256 が `outside` と同じことを求める（無ければ書かない）。verify は `--order5-outside <フォルダ>` を渡したときだけ照らす（無いファイルは「照らさなかった」）。
+- verify は、(2) を `--store` と `--themes-store` を渡したときだけ行う。渡さないときは「照らさなかった」と出す（終了コードは 0 のまま）。
+
+テストは `tests/sealer/test_t111.py`。本物の記録の固定したコミット（`fixed_records.ORDER5_CODE_COMMIT`。seq 1〜15）の clone で、order5.py をテストの仮のコード（合成の日の集計と合成の区分表から、本物と同じ名前・形のファイルを書く）に置き換えて確かめる。合成のファイルの sha256 は本物の day の行・区分表の result の行と違うので、計算し直しの入力のその値だけを置き換える。また verify の `--store` は順番4（seq 15）の C7 の分母の数え直しにも使われるが、合成の日の集計は本物の seq 15 と合わないので、このテストの中では順番4の数え直しを差し替える（順番4の数え直しは test_t095 で確かめている）。
+- 書く → コミット → verify（`TestWrite`）。計算し直しと Git の外のファイルの照合が通り、detail を1バイト変えると止まる。order5.py が止まったときは試みだけが残り、もう一度流すと新しい試みとして記録される。順番5のあとは試みも書かない。
+- C7 で止まった形（`TestStopped`）：stopped の記録が書かれ、outside は null。
+- 偽り（`TestForgeries`）：一覧にテーマを足す版の order5.py は、書く仕組みの計算し直しが止める。照合を飛ばして足すと `--store` の verify が止める。`main_sha256`・`refs`・`attempt`・`code`・`status`・`outside`・main の欠けた日・参照・封印済みのコード・置き場所なし・一覧の件数・Git の外のファイルの欠け、を偽った中身は書かない。
+- 位置の単体のテスト（`TestOrderUnit`）、照らし方の単体のテスト（`TestRecomputeUnit`）。
+
+### 判断が要った点
+
+- **stopped の記録**：seal-order1.md 143行は「C7 の分母が 0 の日があれば、順番5を封印せず、止まった事実を記録して公開する」とする。この仕組みでは、order5.py が stopped の main だけを出したとき、それを中身に入れた `stats-order5` の記録を書く（`status: stopped`、`outside: null`）。これは正式な一覧ではなく、止まった事実の記録である。順番5の記録は1件だけなので、そのあとに順番5を書き直すことはできない（扱いはオーナーが決める。リードに報告する）。
+- **計算し直しで照らす範囲**：上の (2) の欄だけ。`reference_criteria`（順番2の記録から写した値）、`input` の `day_files_digest`、`limits`・`citation`・`label` は照らさない。detail の中身は sha256 だけを照らす。
+- **入口の中での計算し直し**：書く仕組みの照合として一度だけ行う（2〜4時間）。order5.py を流す時間と合わせて、入口の所要時間は4〜8時間と見込む（order5-tag-list.md 7章の見込みの2倍。実測ではない）。
+
+### 本番の実行の手順（T-111）
+
+日の集計と区分表のファイルを持つ運営が、プロジェクトのルートで、この順に行う。途中で止まったら、それより後のことはしない。
+
+1. `verify.py all --rev auto` が 0 で、順番4（seq 15）があり、threshold-access が無い。統計係の order5.py と文書が HEAD にコミットしてある（値は統計係の最後の報告と比べる：`git show HEAD:src/stats/order5.py | shasum -a 256`）。作業ツリーがきれいで、流しているあいだ（4〜8時間）にコミットや checkout をしない。
+2. 書く（上のコマンド）。0 で終われば、試みと順番5の記録がコミットされている。画面の記録の行、main の sha256、コミットの40桁、Git の外のフォルダの名前を控える。1 で終わったら、記録は消さずにリードに報告する。
+3. 書いたあとの照合（どれも 0 で終わること。2つ目は順番4の数え直しと順番5の計算し直しを行うので、3〜5時間）：
+   ```sh
+   PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py all --rev auto
+   OUT="${TMPDIR:-/tmp}/order5-verify-store.txt"
+   PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py stats-order --store "$STORE" --themes-store "$THEMES" --order5-outside "$OUTSIDE/order5-seq<試みの seq>" > "$OUT"
+   ```
+   `$OUT` に「正式な一覧と要約を計算し直した。main と同じ」と「Git の外のファイル order5-detail.json・order5-extra.json の sha256 は、記録の outside と同じ」の2行があること。
+4. 結果を記録する：`$OUT` の順番5の行と、使った Python の版、Git の外のフォルダの場所（ボリューム名を含むので公開物には入れない）を、リードに渡す。リードが `reviews/` に記録する。
+5. `privacy_scan.py --all-history` が 0 なら push する。記録の時刻から24時間以内に、二つの記録（試みと順番5）のハッシュと時刻を投稿する（投稿はリード）。detail を公開するか、extra を公開するかは、オーナーが決める。
+
+### 第三者の確かめ方
+
+<!-- test:order5 -->
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py all --rev auto
+PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py stats-order | grep -F '（順番5）'
+```
+
+- 1行目が 0 で終わり、2行目に順番5の記録の行（status、main の sha256、試み、順番4、正式な一覧の件数）が出る。日の集計と区分表のファイルを持たない第三者が照らせるのは、(1) までである。
+- 日の集計と区分表のファイルを持っていれば、`verify.py stats-order --store <日の集計> --themes-store <区分表>` で (2) を照らせる（order5.py は使わない）。detail・extra を手に入れれば、`--order5-outside <フォルダ>` で sha256 を照らせる。
+
+### 限界
+
+- **order5.py は順番5の前に封じられていない**。結果を見てから直す道は、入口の中でだけ流すこと（試みの記録が流した回数を残す）と、order5.py に頼らない計算し直し（(2)）で塞ぐ。ただし、入口を通さずに手で order5.py を流すことはコードでは止められず、流したことは記録に残らない（order5-tag-list.md 6章と同じ）。(2) が照らすのは決まった欄の値で、order5.py が書く文（`limits` など）や `reference_criteria` は照らさない。
+- **(2) を照らせるのは、日の集計と区分表のファイルを持つ者だけ**である。どちらも Git の外にある。持たない第三者は (1) までしか照らせない。
+- **計算し直しのコードは封印係が書いた**（`order5_recompute.py`）。使う規則のコード（tagrules.py・counting.py）は封印済みだが、入力の組み立て方（文書5章の手順の読み方）は、封印係と統計係が別々に書いたものが一致することに頼る。二つが同じ読み違いをすれば、見つからない。
+- **detail・extra は Git の外**にあり、記録は sha256 だけを縛る。失えば中身は計算し直すしかない。extra は封印の対象にしない（tags-naive.md 426行）が、sha256 は main に入るので、書いた時点の中身は縛られる。
+- stopped の記録のあとは、順番5を書き直せない（上の判断）。
+- 書いたあとで中身を書けなかった形の戻し方（順番4の `--write-content` に当たるもの）は、この入口には無い。起きたら記録を消さずにリードに報告する。
+- 16章の限界のうち、コミットと投稿の前に手で捨てる形、`python` が申告であること、`.pth` のことは、順番5にも当てはまる。試みの記録を手で捨てれば、流した回数は少なく見える（push と投稿の前なら跡は残らない）。

@@ -44,6 +44,10 @@ ORDER3_COMMIT = "d74f27be28168521bf12e5f67ce3d00b325409d5"
 # attempt・fetch・failed の3行。記録は seq 1〜14。tests/sealer/test_t099.py が使う。
 THEMES_FAILED_COMMIT = "e3784c29ee2bc8500be467ede043635e10cd0064"
 
+# 6つ目の固定コミット（T-111）。統計係の T-110 のコミット：記録は seq 1〜15（seq 15 が順番4）、区分表のマニフェストの最後が
+# result の行、src/stats/order5.py は v2。順番5の試みと記録を、本物の記録の clone に足して確かめるのに使う（test_t111.py）。
+ORDER5_CODE_COMMIT = "c4139b27210dd702757e983b628c9000f87de0e6"
+
 # checkout(code="head") で HEAD の版にそろえるのは、封印係のコードと手順書（テストする側）だけ。ほかのファイル
 # （src/stats・src/collector・docs/stats・data・sealed・reviews など）は固定のコミットの版のまま使う。
 # この中でも、固定した記録が縛るパス（記録の targets と、targets の中身の JSON に書かれたパス）は固定の版のまま

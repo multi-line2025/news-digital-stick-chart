@@ -110,7 +110,8 @@ def check_privacy(rec, doc):
 WRITTEN_KINDS = (ledger.THRESHOLD_ACCESS_KIND, ledger.ACQ_START_KIND, ledger.ACQ_RESULT_KIND,
                  ledger.METHOD_ACCESS_KIND, ledger.GKG_RUN_KIND, ledger.ORDER1_KIND,
                  ledger.ORDER1B_KIND, ledger.GKG_RESULT_KIND, ledger.ORDER2_KIND,
-                 ledger.ORDER3_ATTEMPT_KIND, ledger.ORDER3_KIND, ledger.ORDER4_KIND)
+                 ledger.ORDER3_ATTEMPT_KIND, ledger.ORDER3_KIND, ledger.ORDER4_KIND,
+                 ledger.ORDER5_ATTEMPT_KIND, ledger.ORDER5_KIND)
 
 
 def _paths(project):
@@ -183,7 +184,7 @@ def head_manifest(project, rel):
     return r.stdout
 
 
-def check_new(project, data_after, records_after, rec, doc, order4_store=None):
+def check_new(project, data_after, records_after, rec, doc, order4_store=None, order5_inputs=None):
     """手順 3。追記した後の記録に対して、新しい記録の照合をする。"""
     kind = rec["kind"]
     if kind not in WRITTEN_KINDS:
@@ -260,6 +261,33 @@ def check_new(project, data_after, records_after, rec, doc, order4_store=None):
             except verify.Unchecked as e:
                 raise ledger.LedgerError("%s の記録の C7 の分母を数え直せない（%s）。書かない" % (kind, e)) from None
         return
+    if kind in (ledger.ORDER5_ATTEMPT_KIND, ledger.ORDER5_KIND):
+        # T-111：順番5の試みと記録。形・位置・参照・code・main のつじつま（ledger.check_order5_records。check_stats_order の
+        # 中）に加えて、privacy_scan と同じ検査、ledger_head、head が今の HEAD、コードの版（verify.check_order5_git）。
+        # 順番5の記録は、日の集計と区分表で、order5.py に頼らずに計算し直して main と照らし（verify.recompute_order5）、
+        # Git の外の detail・extra の sha256 を照らす。置き場所が無ければ書かない
+        check_privacy(rec, doc)
+        ledger.check_ledger_head(data_after, rec, doc)
+        repo = verify.Repo(project)
+        head = verify._rgit(repo, "rev-parse", "--verify", "HEAD^{commit}").decode().strip()
+        if doc["head"] != head:
+            raise ledger.LedgerError("%s の記録の head %s が、今の HEAD %s と違う。書かない" % (kind, doc["head"][:12], head[:12]))
+        verify.check_order5_git(repo, data_after, records_after, rec, doc, head, read)
+        if kind == ledger.ORDER5_ATTEMPT_KIND:
+            return
+        if not order5_inputs:
+            raise ledger.LedgerError("%s の記録は、日の集計と区分表の置き場所で計算し直してからでなければ書かない" % kind)
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                verify.recompute_order5(project, records_after, rec, doc, read, order5_inputs["store"],
+                                        order5_inputs["themes_store"], tmp)
+            except verify.Unchecked as e:
+                raise ledger.LedgerError("%s の記録を計算し直せない（%s）。書かない" % (kind, e)) from None
+        if doc["status"] == "ok":
+            _done, absent = verify.check_order5_outside(doc, order5_inputs["outside_dir"], kind)
+            if absent:
+                raise ledger.LedgerError("%s の記録の Git の外のファイル（%s）が置き場所に無い。書かない" % (kind, "・".join(absent)))
+        return
     if kind == ledger.GKG_RESULT_KIND:
         # T-066：中身の形・ledger_head・指す gkg-run-start、マニフェストの先頭と run-complete の行
         ledger.check_gkg_result_doc(records_after, rec, doc, read, data_after)
@@ -317,7 +345,7 @@ def utc_now():
 
 
 def write_doc_record(project, kind, doc, data, note, now, ots_cmd, runner=subprocess.run, content_after_append=False,
-                     order4_store=None):
+                     order4_store=None, order5_inputs=None):
     """手順 3〜6。返り値: (記録, 中身のパス, .ots のパス か None)。
     content_after_append（T-095 差し戻し1回目 軽-1。順番4の入口が使う）：真なら、中身のファイルを記録に追記したあとで書く。
     追記の前で止まったときに、中身（一覧）の入ったファイルが作業ツリーに残らないようにするため。追記のあとで中身を書けな
@@ -336,7 +364,7 @@ def write_doc_record(project, kind, doc, data, note, now, ots_cmd, runner=subpro
     _records, rec, line = ledger.build_next_record(data, kind, targets, note, utc_now() if late else now)
     data_after = data + line
     records_after = ledger.verify_chain(data_after)
-    check_new(project, data_after, records_after, rec, doc, order4_store=order4_store)
+    check_new(project, data_after, records_after, rec, doc, order4_store=order4_store, order5_inputs=order5_inputs)
     if late:
         # 追記の直前の時刻で作り直す。recorded_at のほかは照合した記録と同じであること
         now = utc_now()
