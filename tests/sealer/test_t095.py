@@ -657,7 +657,8 @@ class TestPositionUnit(unittest.TestCase):
         ledger.check_order4_position(self.recs(ok + [O4, ledger.THRESHOLD_ACCESS_KIND]), 5)
 
     def test_before_kinds(self):
-        self.assertEqual(ledger.ORDER4_BEFORE_KINDS, (ledger.THRESHOLD_ACCESS_KIND,))
+        self.assertEqual(ledger.ORDER4_BEFORE_KINDS, (ledger.THRESHOLD_ACCESS_KIND, ledger.ORDER5_ATTEMPT_KIND,
+                                                     ledger.ORDER5_KIND))     # T-111 で順番5の二つを足した
         self.assertIn(O4, ledger.ALLOWED_KINDS)
         self.assertIn(O4, seal_records.WRITTEN_KINDS)
 
