@@ -1003,8 +1003,15 @@ rec, rel, ots_path = seal_stats.seal_order1b(project, files, approvals, now, ots
       - 回数は、マニフェストの `attempt` の行の数で数える（自己申告の欄は使わない）。上限は3（`ledger.THEMES_MAX_ATTEMPTS`。themes.py の `MAX_TOTAL_ATTEMPTS` と同じ値であることを `tests/sealer/test_t102.py` が照らす）。オーナーの承認は reviews/T-098.md の最後（あと2回まで。合計3回）。4行目の `attempt` があれば止まる。
       - 取り直しの `attempt` の行は、最初の `attempt` と同じキーを持つ。`code_sha256` はその回のコードの値で、最初と違ってよい。除外の規則の2つのキーは、各 `attempt` ごとに `stats-order1` の記録と照らす。
       - `fetch`・`result` の `code_sha256`、`result` の `code_path`・`source_url`・`attempted_at`・除外の規則の2つのキーは、**直前の** `attempt` の値と照らす（最初の `attempt` ではない）。時刻は行の順に後ろへ戻らない。
-      - **各 `attempt` の `code_sha256` と git の履歴**（`verify.check_themes_attempt_code`。git の履歴があるときの `verify.py stats-order`・`all`）：その `attempt` の行を初めて含んだコミット C（`git log --reverse -- data/manifest/gdelt-themes.jsonl` で、その版にその行のバイト列があるもの）の版か、C の親の版の `src/collector/themes.py` の sha256 と同じでなければ止まる。themes.py は、HEAD にコミットした中身で動くことを確かめてから試行の行を書くので、正直な行はこの照合に通る。まだコミットしていない `attempt` の行は「照らさなかった」と出す（終了コードは 0 のまま）。
-      - 限界：照らせるのは、行を**コミットした時点**の themes.py の版との一致だけである。その版で実際に試行の行を書いたこと（手で同じ値の行を書いていないこと）は、記録からは分からない。C と親の両方に同じ版があるので、行を書いたあとに themes.py を変えて同じコミットに入れた形は、親の版で通る。git の履歴を書き換えた形は、13章のほかの限界(1)と同じく見つけられない。
+      - **行と git の履歴**（`verify.check_themes_attempt_code`。git の履歴があるときの `verify.py stats-order`・`all`。T-102、T-104 で改めた）：各行を、何行目かで、その行を初めて含んだコミット C（`git log --reverse --full-history HEAD -- data/manifest/gdelt-themes.jsonl` の順で、その版の同じ位置の行がその行のバイト列と同じ最初のもの）と結びつける。同じバイト列の行が2つあっても、位置で別々に結びつく（T-104 軽-2）。
+        - `attempt`：C の版の `src/collector/themes.py` の sha256 が、行の `code_sha256` と同じ。C の親の版は使わない（T-104 中-1）。themes.py は HEAD にコミットした中身で動くことを確かめてから試行の行を書くので、正直な流れでは、試行の行だけを足したコミット C の themes.py はその版のままである。親の版で初めて合うのは、試行の行と themes.py の変更を同じコミットに入れた形だけで、それは止める。
+        - `fetch`：C の第一の親の版で、マニフェストがちょうど直前の `attempt` の行までで終わり、themes.py の sha256 が `fetch` の行の `code_sha256` と同じ（T-104 中-3）。themes.py は、作業ツリーのマニフェストが HEAD と同じで、最後が自分の試行の行のときだけ `fetch` を書くため。試行の行をコミットせずに通信した形と、試行の行をコミットしたあとで themes.py を変えて通信した形は止まる。
+        - `failed`・`result`：直前の `fetch` の行と同じコミットで初めて入った（themes.py は、`fetch` を書いた同じ実行の中で `failed` か `result` を書き、そのあとでコミットする）。`fetch` だけを先にコミットした形は止まる。
+        - まだコミットしていない行は「照らさなかった」と出し、`verify.py all` の最後の一覧にも入れる（終了コードは 0 のまま。T-104 軽-4）。
+      - 限界：
+        - 照らせるのは、行を**コミットした**版との関係だけである。その版のコードが実際にその行を書いたこと（手で同じ値の行を書いていないこと）、`fetch` の行のあとで実際に通信したこと、`failed` の理由が本当であることは、記録からは分からない。
+        - `fetch` の第一の親の版と同じ themes.py で通信したことは、作業ツリーのファイルがその版だった（themes.py の code gate が確かめる）ことに頼る。コミットしていない変更で動かした形は、git の履歴に残らない。
+        - git の履歴を書き換えた形と、どの参照からも辿れない commit は、ほかの限界と同じく見つけられない。
     - 形：時刻（`attempted_at`・`at`・`fetched_at`）は `YYYY-MM-DDTHH:MM:SSZ` で、行の順に後ろへ戻らない。`code_sha256` は64桁の16進で、`fetch`・`result` の値は `attempt` と同じ。`code_path` は `src/collector/themes.py`。`failed` の `reason` は例外の名前の形。`result` の `file_name` は `gdelt-themes-<時刻>.tsv`、`attempted_at`・`source_url`・`code_path` は `attempt` と同じ。
     - `attempt` と `result` の2つのキーが、`stats-order1` の記録の seq と行の sha256 と一致する。
     - **追記だけかを git の履歴で照らす**（T-103。T-099 の監査 重大-1。`verify.check_manifest_append_only`。git の履歴があるときの `verify.py stats-order`・`all`）：

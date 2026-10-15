@@ -38,6 +38,12 @@ def load_themes():
 
 
 class TestConstants(unittest.TestCase):
+    """収集係の themes.py は、作業ツリーのファイルを読む（HEAD の版を git から読むのではない。T-104 軽-3）。
+    理由：tests/sealer の規則（15章。tests/sealer/test_t077.py の TestRuleScan）は、プロジェクトの HEAD を git で読むことを、
+    許可した数か所だけに限っている。コード（src/ の下）は作業ツリーのファイルとして読んでよい。そのため、収集係がコミットの前に
+    themes.py を変えている間は、まだコミットしていない版と照らすことになる。合否は、コミットしたあと（作業ツリーが HEAD と
+    同じとき）に流した結果で判断する。"""
+
     def test_same_as_themes(self):
         """上限と並びが、収集係の themes.py の値（MAX_TOTAL_ATTEMPTS・MANIFEST_NEXT）とちょうど同じ。"""
         th = load_themes()
@@ -209,7 +215,9 @@ class RetryClone(unittest.TestCase):
             more += [dict(a, attempted_at="2026-10-%sT01:00:00Z" % d, code_sha256=sha),
                      {"kind": "fetch", "at": "2026-10-%sT02:00:00Z" % d, "code_sha256": sha},
                      {"kind": "failed", "at": "2026-10-%sT02:00:01Z" % d, "reason": "ThemesError"}]
-        self.append(*more[:6])
+        # T-104：試行の行と、fetch・failed の組を、themes.py と同じく別々のコミットにする
+        for rows in (more[0:1], more[1:3], more[3:4], more[4:6]):
+            self.append(*rows)
         rc, _out, err = self.verify("stats-order")
         self.assertEqual(rc, 0, err)
         self.append(more[6])

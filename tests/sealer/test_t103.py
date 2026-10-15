@@ -215,7 +215,9 @@ for _name in [n for n in dir(t100.TestWriteContent) if n.startswith("test_")]:
 
 class TestRowKeysSameAsThemes(unittest.TestCase):
     """収集係の themes.py の行の形の定数（T-101 差し戻し2回目。328ac7e で HEAD に入った）と、ledger の取り決めが一致する。
-    themes.py は ast で読むだけ（読み込まない）。"""
+    themes.py は ast で読むだけ（読み込まない）。読むのは作業ツリーのファイルで、HEAD の版ではない（T-104 軽-3）。理由は
+    tests/sealer/test_t102.py の TestConstants の説明と同じ（HEAD を git で読むことは、tests/sealer の規則で限っている）。
+    合否は、コミットしたあと（作業ツリーが HEAD と同じとき）に流した結果で判断する。"""
 
     def constants(self):
         with open(THEMES_PY, encoding="utf-8") as f:
