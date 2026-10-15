@@ -3410,12 +3410,14 @@ def check_order1_before_themes(records, git):
     return len(f)
 
 
-# 区分表のマニフェスト（data/manifest/gdelt-themes.jsonl）の行の取り決め（T-099）。収集係の src/collector/themes.py の run が
-# 書く形と同じにする（themes.py は変えない）。行は次の並びだけ：
-#   attempt（1段目。試行の行。1行だけ）
+# 区分表のマニフェスト（data/manifest/gdelt-themes.jsonl）の行の取り決め（T-099、T-102 で取り直しを入れた）。収集係の
+# src/collector/themes.py の run が書く形と同じにする（themes.py は変えない）。行は次の並びだけ（themes.MANIFEST_NEXT と同じ）：
+#   attempt（1段目。試行の行）
 #   → fetch（2段目。通信の直前）
-#   → failed（通信か形の誤りで止まった）か result（成功）。どちらかで終わり、そのあとに行は無い
-# fetch で終わる形（通信の途中で止まった・まだ終わっていない）も、並びとしては通す。
+#   → failed（通信か形の誤りで止まった）か result（成功）
+#   failed のあとは、次の attempt（取り直し）だけ。result のあとに行は無い。
+#   attempt の行の数（取得の試みの回数）は THEMES_MAX_ATTEMPTS（themes.MAX_TOTAL_ATTEMPTS と同じ 3）まで。
+# attempt・fetch で終わる形（2段目の前・通信の途中で止まった）も、並びとしては通す。
 # exclusion_rule_seq・exclusion_rule_record_sha256 を書くのは attempt と result だけ（themes.py の設計。fetch・failed には無い）。
 THEMES_ROW_KEYS = {
     "attempt": ("attempted_at", "code_path", "code_sha256", "exclusion_rule_record_sha256", "exclusion_rule_seq", "kind",
@@ -3427,7 +3429,9 @@ THEMES_ROW_KEYS = {
                "sheet_names_replaced", "sha256", "source_url", "store_location"),
 }
 THEMES_REF_KINDS = ("attempt", "result")
-THEMES_NEXT = {None: ("attempt",), "attempt": ("fetch",), "fetch": ("failed", "result"), "failed": (), "result": ()}
+THEMES_NEXT = {None: ("attempt",), "attempt": ("fetch",), "fetch": ("failed", "result"), "failed": ("attempt",),
+               "result": ()}
+THEMES_MAX_ATTEMPTS = 3          # themes.MAX_TOTAL_ATTEMPTS と同じ（tests/sealer/test_t102.py が照らす。オーナーの承認は reviews/T-098.md）
 THEMES_CODE_PATH = "src/collector/themes.py"
 THEMES_FILE_RE = re.compile(r"\Agdelt-themes-\d{8}T\d{6}Z\.tsv\Z")
 THEMES_REASON_RE = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]{0,63}\Z")
@@ -3462,16 +3466,19 @@ def check_themes_manifest_refs(records, manifest_bytes):
     """区分表のマニフェストの行を、themes.py の行の取り決め（上の THEMES_ROW_KEYS・THEMES_NEXT）で照らす（T-037 の差し戻し
     1回目 中1、T-099 で行の kind ごとに分けた）。
       - 各行の形（_themes_row_shape）。
-      - 並び：attempt → fetch → failed か result。attempt は1行目だけ、failed・result のあとに行は無い。
+      - 並び：attempt → fetch → failed か result。failed のあとは次の attempt（取り直し）だけ、result のあとに行は無い。
+        attempt の行は THEMES_MAX_ATTEMPTS 行まで（T-102）。
       - attempt と result の行の exclusion_rule_seq・exclusion_rule_record_sha256 が、stats-order1 の記録の seq と行の
         sha256 と一致する。fetch・failed の行には、この2つのキーを求めない（themes.py は書かない）。
-      - fetch と result の code_sha256、result の code_path・source_url・attempted_at が attempt と同じ。時刻
+      - fetch と result の code_sha256、result の code_path・source_url・attempted_at が、直前の attempt と同じ。各 attempt の
+        code_sha256 が、その行をコミットした時点の themes.py の版であることは、git の履歴で verify が照らす
+        （verify.check_themes_attempt_code）。時刻
         （attempted_at → fetch の at → failed の at・result の fetched_at）が後ろに戻らない。
     manifest_bytes は作業ツリーのマニフェストのバイト列（無ければ None）。返り値: 2つのキーを照らした行の数。"""
     if manifest_bytes is None:
         return 0
     o1 = first_order1(records)
-    n, prev, attempt, last_time = 0, None, None, None
+    n, prev, attempt, last_time, n_attempts = 0, None, None, None, 0
     for i, raw in enumerate(manifest_bytes.split(b"\n"), 1):
         if not raw.strip():
             continue
@@ -3480,6 +3487,9 @@ def check_themes_manifest_refs(records, manifest_bytes):
         except (UnicodeDecodeError, ValueError):
             raise LedgerError("%s の %d 行目が JSON として読めない" % (THEMES_MANIFEST, i)) from None
         kind = _themes_row_shape(row, i)
+        if kind == "attempt" and n_attempts >= THEMES_MAX_ATTEMPTS:
+            raise LedgerError("%s の %d 行目：attempt の行が上限の %d 行を超える（取得の試みは %d 回まで。reviews/T-098.md）"
+                              % (THEMES_MANIFEST, i, THEMES_MAX_ATTEMPTS, THEMES_MAX_ATTEMPTS))
         if kind not in THEMES_NEXT[prev]:
             raise LedgerError("%s の %d 行目（%s）の並びが違う（%s のあとに来られるのは %s）"
                               % (THEMES_MANIFEST, i, kind, prev or "先頭",
@@ -3493,11 +3503,13 @@ def check_themes_manifest_refs(records, manifest_bytes):
             n += 1
         if kind == "attempt":
             attempt = row
+            n_attempts += 1
         elif kind in ("fetch", "result") and row["code_sha256"] != attempt["code_sha256"]:
-            raise LedgerError("%s の %d 行目（%s）の code_sha256 が、attempt の行と違う" % (THEMES_MANIFEST, i, kind))
-        if kind == "result" and any(row[k] != attempt[k] for k in ("code_path", "source_url", "attempted_at")):
-            raise LedgerError("%s の %d 行目（result）の code_path・source_url・attempted_at が、attempt の行と違う"
-                              % (THEMES_MANIFEST, i))
+            raise LedgerError("%s の %d 行目（%s）の code_sha256 が、直前の attempt の行と違う" % (THEMES_MANIFEST, i, kind))
+        if kind == "result" and any(row[k] != attempt[k] for k in ("code_path", "source_url", "attempted_at",
+                                                                   "exclusion_rule_seq", "exclusion_rule_record_sha256")):
+            raise LedgerError("%s の %d 行目（result）の code_path・source_url・attempted_at・除外の規則の参照が、直前の attempt の"
+                              "行と違う" % (THEMES_MANIFEST, i))
         t = {"attempt": "attempted_at", "fetch": "at", "failed": "at", "result": "fetched_at"}[kind]
         if last_time is not None and row[t] < last_time:
             raise LedgerError("%s の %d 行目（%s）の %s が、前の行の時刻より前" % (THEMES_MANIFEST, i, kind, t))

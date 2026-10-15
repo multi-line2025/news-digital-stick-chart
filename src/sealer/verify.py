@@ -1710,6 +1710,10 @@ def cmd_stats_order(st, a):
         with open(mpath, "rb") as f:
             body = f.read()
     rows = ledger.check_themes_manifest_refs(st.records, body)
+    n_code, code_notes = check_themes_attempt_code(repo, body)          # T-102
+    for m in code_notes:
+        st.unchecked.append(m)
+        print("照らさなかった：%s" % m)
     # T-056：順番1・1b の値を、記録の head の版から計算し直す（--rev auto か <コミット> のとき）
     if got["order1"] or got["order1b"]:
         if getattr(a, "rev", "working") == "working":
@@ -1728,7 +1732,49 @@ def cmd_stats_order(st, a):
     print("区分表の取得（%s）：行のある commit %d 件。どれも、親の sealed/ledger.jsonl に stats-order1 の行がある。"
           "作業ツリーのマニフェストの %d 行の exclusion_rule_seq と sha256 は stats-order1 の記録と一致する。"
           "行の形と並び（attempt → fetch → failed か result）は themes.py の取り決めどおり（T-099）。"
-          % (ledger.THEMES_MANIFEST, n, rows))
+          "attempt の行 %d 行の code_sha256 は、その行を初めて含んだコミットの版の themes.py と同じ（T-102）。"
+          % (ledger.THEMES_MANIFEST, n, rows, n_code))
+
+
+THEMES_CODE_REL = "src/collector/themes.py"
+
+
+def check_themes_attempt_code(repo, body):
+    """区分表のマニフェストの各 attempt の行の code_sha256 が、その行を初めて含んだコミット（`git log --reverse` で、その版の
+    マニフェストにその行のバイト列があるもの。以下 C）の版の themes.py か、C の親の版の themes.py の sha256 と同じこと
+    （T-102）。themes.py の code gate は、HEAD にコミットした中身で動くことを求めるので、正直な試行の行は、その時点の HEAD の
+    themes.py の値を持ち、それをコミットした C（か、その親）に同じ版がある。
+    body は作業ツリーのマニフェスト（無ければ None）。返り値: (照らした行の数, 照らさなかったことの一覧)。違えば LedgerError。"""
+    if not body:
+        return 0, []
+    attempts = []
+    for raw in body.split(b"\n"):
+        if raw.strip():
+            row = json.loads(raw.decode("utf-8"))
+            if row.get("kind") == "attempt":
+                attempts.append((raw, row))
+    if not attempts:
+        return 0, []
+    commits = _rgit(repo, "log", "--reverse", "--full-history", "--format=%H", "HEAD", "--",
+                    ledger.THEMES_MANIFEST).decode().split()
+    versions = [(c, _version_or_empty(repo, c, ledger.THEMES_MANIFEST).split(b"\n")) for c in commits]
+    n, notes = 0, []
+    for raw, row in attempts:
+        first = next((c for c, lines in versions if raw in lines), None)
+        if first is None:
+            notes.append("区分表のマニフェストの attempt の行（attempted_at %s）の code_sha256（その行がまだコミットされていない）"
+                         % row.get("attempted_at"))
+            continue
+        cands = [first] + _rgit(repo, "rev-parse", first + "^@").decode().split()
+        shas = {ledger.sha256_hex(_version_or_empty(repo, c, THEMES_CODE_REL)) for c in cands
+                if _git_ok(repo, "cat-file", "-e", "%s:%s" % (c, THEMES_CODE_REL))}
+        if row.get("code_sha256") not in shas:
+            raise ledger.LedgerError("%s の attempt の行（attempted_at %s）の code_sha256 %s が、その行を初めて含んだコミット %s（と"
+                                     "その親）の版の %s の sha256 と違う" % (ledger.THEMES_MANIFEST, row.get("attempted_at"),
+                                                                       str(row.get("code_sha256"))[:12], first[:12],
+                                                                       THEMES_CODE_REL))
+        n += 1
+    return n, notes
 
 
 def cmd_method(st, _a):
