@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GKG のテーマの区分表（名前と説明の一覧）を取得し、件数の欄を捨てて保存する（T-018・T-021。コードだけ）。
+"""GKG のテーマの区分表（名前と説明の一覧）を取得し、件数の欄を捨てて保存する（T-018・T-021・T-098）。
 
 データ出典
     Data: The GDELT Project (https://www.gdeltproject.org/). This project is not
@@ -7,9 +7,10 @@
     データ出典：GDELT Project（https://www.gdeltproject.org/）。本プロジェクトは
     GDELT Project と提携・承認の関係にありません。
 
-まだ一度も取得していない。区分表の取得は、統計係の除外の規則の封印のあとの別のタスクで行う
-（オーナーの決定。reviews/T-016.md の 2026-10-08 の発言：「件数の欄を捨てる条件で、区分表を
-1回取得してよい」。取得元は同じサーバーの /api/v2/guides/）。
+区分表は、統計係の除外の規則の封印（stats-order1）のあとで1回だけ取得する（オーナーの決定。
+reviews/T-016.md の 2026-10-08 の発言：「件数の欄を捨てる条件で、区分表を1回取得してよい」。
+取得元は同じサーバーの /api/v2/guides/）。取得したかどうかは、このファイルではなく、マニフェスト
+data/manifest/gdelt-themes.jsonl の行で決まる。実行の入口は5章（T-098）。
 
 ------------------------------------------------------------------------
 0. 取得の前の関門（require_exclusion_rules_sealed。T-021）
@@ -139,6 +140,20 @@
     kept_columns、dropped_columns、fetched_at、source_url、code_path、code_sha256、
     store_location）。
     書く前に privacy_scan.find_in_bytes で調べ、メールアドレスの形があれば書かずに止まる。
+
+------------------------------------------------------------------------
+5. 入口のコマンド（main。T-098）
+------------------------------------------------------------------------
+    プロジェクトのルートで、1段目と2段目とも同じコマンドを使う：
+        .venv/bin/python -B src/collector/themes.py
+    - 引数は受け付けない（取得元・保存先・時計は固定。引数があれば何もせずに終わり値 2）。
+    - root はこのファイルの場所から決まるプロジェクトのルート（PROJECT）、home は環境変数 HOME
+      ではなく利用者のデータベース（pwd.getpwuid(os.getuid())）から決める。
+    - 終わり値：0 は取得して保存した（2段目）。3 は試行の行を書いて止まった（1段目。通信して
+      いない。マニフェストをコミットしてから、同じコマンドをもう一度）。1 は関門や取得の失敗で
+      止まった。2 は引数があった。
+    - 表示するのは、ファイルの名前・行数・残した欄と捨てた欄の見出し・headerless・sha256・
+      code_sha256・除外の規則の記録の seq と出典だけ。区分表の値（テーマの名前）は表示しない。
 
 外部のライブラリは使わない（Python 3 の標準ライブラリだけ）。
 """
@@ -729,7 +744,46 @@ def _fetch_and_write(url, name, transport, clock, now, attempted_at, sha_code, e
     return entry
 
 
+# ---------------------------------------------------------------------------
+# 5章：入口のコマンド（T-098）
+# ---------------------------------------------------------------------------
+
+PROJECT = os.path.dirname(os.path.dirname(HERE))
+EXIT_OK, EXIT_STOPPED, EXIT_USAGE, EXIT_ATTEMPT_RECORDED = 0, 1, 2, 3
+
+
+def production_home():
+    """利用者のホーム。環境変数 HOME ではなく、利用者のデータベースから決める。"""
+    import pwd
+    return pwd.getpwuid(os.getuid()).pw_dir
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv:
+        print("引数は受け付けない（取得元・保存先・時計は固定）。手順は src/collector/README.md 8章",
+              file=sys.stderr)
+        return EXIT_USAGE
+    try:
+        entry = run(root=PROJECT, home=production_home())
+    except AttemptRecorded as e:
+        print("1段目：%s" % e, file=sys.stderr)
+        return EXIT_ATTEMPT_RECORDED
+    except ThemesError as e:
+        print("止まった（%s）: %s" % (type(e).__name__, e), file=sys.stderr)
+        return EXIT_STOPPED
+    print("2段目：取得して保存した")
+    print("本体: %s（%s の下）" % (entry["file_name"], entry["store_location"]))
+    print("行数: %d" % entry["rows"])
+    print("残した欄: %s" % ", ".join(entry["kept_columns"]))
+    print("捨てた欄: %s" % ", ".join(entry["dropped_columns"]))
+    print("headerless: %s" % json.dumps(entry["headerless"]))
+    print("sha256: %s" % entry["sha256"])
+    print("code_sha256（%s）: %s" % (entry["code_path"], entry["code_sha256"]))
+    print("除外の規則の記録: seq %d" % entry["exclusion_rule_seq"])
+    print("データ出典：GDELT Project（https://www.gdeltproject.org/）")
+    return EXIT_OK
+
+
 if __name__ == "__main__":
-    print("区分表の取得は、統計係の除外の規則の封印のあとの別のタスクで行う（除外の規則の封印の"
-          "記録の種類は未定）。", file=sys.stderr)
-    sys.exit(2)
+    sys.exit(main())

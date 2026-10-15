@@ -861,5 +861,103 @@ class TestRun(RunCase):
                       " ".join(themes.__doc__.split()))
 
 
+class TestMain(unittest.TestCase):
+    """T-098：入口のコマンド（5章）。本物の run は呼ばない（差し替える）。"""
+
+    ENTRY = {"kind": "result", "file_name": "gdelt-themes-20261008T010203Z.tsv",
+             "sha256": "c" * 64, "rows": 3, "kept_columns": ["THEME"],
+             "dropped_columns": ["column_B"], "headerless": True,
+             "store_location": themes.STORE_LOCATION_NAME, "code_path": themes.CODE_REL,
+             "code_sha256": CODE_SHA, "exclusion_rule_seq": 5}
+
+    def call(self, argv, run):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(themes, "run", run), \
+                mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+            code = themes.main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_arguments_refused_without_running(self):
+        run = mock.Mock()
+        code, _o, err = self.call(["--url", URL], run)
+        self.assertEqual(code, themes.EXIT_USAGE)
+        run.assert_not_called()
+        self.assertIn("README.md 8章", err)
+
+    def test_root_and_home_are_fixed(self):
+        run = mock.Mock(return_value=dict(self.ENTRY))
+        with mock.patch.dict(os.environ, {"HOME": "/nonexistent-home"}):
+            code, _o, _e = self.call([], run)
+        self.assertEqual(code, themes.EXIT_OK)
+        kw = run.call_args.kwargs
+        self.assertEqual(set(kw), {"root", "home"})       # url・transport・時計は既定のまま
+        self.assertEqual(os.path.realpath(kw["root"]), os.path.realpath(PROJECT))
+        import pwd
+        self.assertEqual(kw["home"], pwd.getpwuid(os.getuid()).pw_dir)
+
+    def test_first_phase_exit_code(self):
+        def run(**kw):
+            raise themes.AttemptRecorded("試行の行を書いた")
+        code, out, err = self.call([], run)
+        self.assertEqual((code, out), (themes.EXIT_ATTEMPT_RECORDED, ""))
+        self.assertIn("1段目", err)
+
+    def test_stopped_exit_code(self):
+        for exc in (themes.ThemesError("x"), themes.ExclusionRulesNotSealed("y")):
+            def run(**kw):
+                raise exc
+            code, out, _err = self.call([], run)
+            self.assertEqual((code, out), (themes.EXIT_STOPPED, ""))
+
+    def test_success_prints_summary_and_citation_only(self):
+        code, out, _e = self.call([], mock.Mock(return_value=dict(self.ENTRY)))
+        self.assertEqual(code, themes.EXIT_OK)
+        for want in ("行数: 3", "sha256: " + "c" * 64, "headerless: true",
+                     "捨てた欄: column_B", "seq 5", "https://www.gdeltproject.org/"):
+            self.assertIn(want, out)
+        self.assertFalse(themes.privacy_scan.find_in_bytes(out.encode()))
+
+    def test_success_with_real_run_prints_no_theme_names(self):
+        """差し替えの通信で本物の run を2段で動かし、表示にテーマの名前と件数が出ないこと。"""
+        tmp = tempfile.mkdtemp(prefix="themes-main-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root, home = os.path.join(tmp, "proj"), os.path.join(tmp, "home")
+        os.makedirs(os.path.join(root, "data", "manifest"))
+        os.makedirs(os.path.join(home, *themes.STORE_PARTS))
+        real_run = themes.run
+        tr = FakeTransport(GOOD)
+
+        def run(**kw):
+            return real_run(root=root, home=home, transport=tr, clock=lambda: 0.0,
+                            now=lambda: NOW)
+        mp = os.path.join(root, "data", "manifest", themes.MANIFEST_NAME)
+        with mock.patch.object(themes, "_exclusion_gate", no_gate):
+            with mock.patch.object(themes, "_code_gate", lambda r: (CODE_SHA, b"", False)):
+                code1, out1, _e = self.call([], run)
+            with open(mp, "rb") as f:
+                head = f.read()
+            with mock.patch.object(themes, "_code_gate", lambda r: (CODE_SHA, head, True)):
+                code2, out2, _e = self.call([], run)
+        self.assertEqual((code1, out1), (themes.EXIT_ATTEMPT_RECORDED, ""))
+        self.assertEqual(code2, themes.EXIT_OK)
+        self.assertEqual(len(tr.calls), 1)
+        for v in ["QQ_ALPHA", "QQ_BETA_TWO", "QQ_7_GAMMA"] + COUNT_MARKS:
+            self.assertNotIn(v, out2)
+
+    def test_script_refuses_arguments_in_subprocess(self):
+        """スクリプトとして動かしても、引数があれば関門にも通信にも進まない（終わり値 2）。"""
+        import subprocess
+        r = subprocess.run([sys.executable, "-B", os.path.join(SRC, "themes.py"), "x"],
+                           capture_output=True, env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(r.stdout, b"")
+
+    def test_no_stale_wording(self):
+        with open(os.path.join(SRC, "themes.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertNotIn("未定", src.split('if __name__ == "__main__":')[-1])
+        self.assertNotIn("まだ一度も取得していない", src)
+
+
 if __name__ == "__main__":
     unittest.main()
