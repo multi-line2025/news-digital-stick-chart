@@ -77,6 +77,20 @@ data/manifest/gdelt-themes.jsonl の行で決まる。実行の入口は5章（T
         result：それ以上は取得しない。fetch：前の通信の途中で止まった跡なので止まる。
     - 1段目と2段目の前に、保存先に gdelt-themes- で始まるファイルが無いことを確かめる（failed の
       取得はファイルを書かないので、あれば別の跡）。
+    - failed の行の形（T-101 差し戻し1回目 中-3）：キーは at・kind・reason・stage。stage は止まった
+      段を FAILED_STAGES の固定の語で書く（fetch：通信、read：表として読む、shape：欄の判定、
+      write：書く前のメールアドレスの形の検査）。reason は今までどおり例外の型の名前。
+
+------------------------------------------------------------------------
+0.3 追記だけであることの関門（T-101 差し戻し1回目 重大-1）
+------------------------------------------------------------------------
+    - コードの関門のすぐあとで、git log --all --full-history に現れるマニフェストの各版
+      （_manifest_versions。その commit で消した版は空）が、どれも HEAD の版の先頭部分であることを
+      求める（check_append_only）。行を消して普通にコミットし直した跡、途中の1組だけを消した跡、
+      行を変えた跡があれば、通信の前に止まる。
+    - 回数は、履歴の各版の attempt の行の数の最大値と、HEAD の版の数のうち大きい方で数える。
+    - 限界：履歴そのものを書き換えて過去の版を消すこと（reset・rebase・filter-branch、reflog の
+      期限切れのあとの gc など）は見分けられない（0.1章と同じ）。
 
 ------------------------------------------------------------------------
 1. 取得元と通信
@@ -178,7 +192,13 @@ data/manifest/gdelt-themes.jsonl の行で決まる。実行の入口は5章（T
 6. 形の判定で止まったときの診断（diagnose_shape。T-101）
 ------------------------------------------------------------------------
     build_output（2章・2.1章の判定）で止まったとき、表の数と文字の種類だけを標準エラーに1行で
-    出す。ファイル・マニフェストには書かない。failed の行の reason は今までどおり例外の型の名前。
+    出す。ファイル・マニフェストには書かない。failed の行の reason は今までどおり例外の型の名前で、
+    stage は shape。診断の計算や出力が落ちても、failed の行は書く（軽-8）。
+    件数の欄らしい欄（ASCII の数字だけの値が1つ以上で、名前の形に合う値の数以上）は、
+    count_like: true と values・ascii_digits_only だけを出す（捨てる欄から導いた数を出さない。軽-5）。
+    そのほかの欄は count_like: false と下の数を出す。
+    限界：エージェントが流すと、標準エラーの出力は会話の記録に残る（軽-6）。合わない値が1つだけの
+    ときは、その長さの範囲と文字の種類ごとの数が分かる（テーマの名前は個人情報ではない）。
     値・テーマの名前・その断片・長さの一覧は出さない。出すもの：
       sheets（シートの数）、rows（行の数）、column_count_distribution（欄の数ごとの行の数）、
       columns_not_shown（DIAG_MAX_COLUMNS を超えて数を出さなかった欄の数）、
@@ -224,6 +244,9 @@ MAX_ATTEMPTS = 1                 # 1回の取得（attempt 1つ）の中で送�
 # 0.2章：取得の試み（マニフェストの attempt の行）の合計の上限（T-101）。オーナーの承認：最初の1回と、
 # 2026-10-15 の「あと2回」（reviews/T-098.md）。回数はマニフェストの attempt の行の数で数える
 MAX_TOTAL_ATTEMPTS = 3
+# 0.2章：failed の行の stage（止まった段。T-101 差し戻し1回目 中-3）。fetch：通信（HTTP・時間・長さ・
+# 通信の失敗）、read：表として読む（UTF-8・形式）、shape：欄の判定（2章・2.1章）、write：書く前の検査
+FAILED_STAGES = ("fetch", "read", "shape", "write")
 DIAG_MAX_COLUMNS = 8             # 6章：診断で欄ごとの数を出す欄の数の上限
 REQUEST_TIMEOUT_SECONDS = 60
 TOTAL_DEADLINE_SECONDS = 300
@@ -691,6 +714,55 @@ def _append_line(path, entry, what):
         os.close(fd)
 
 
+def _count_attempts(data):
+    n = 0
+    for raw in data.split(b"\n"):
+        try:
+            row = json.loads(raw.decode("ascii")) if raw.strip() else None
+        except (UnicodeDecodeError, ValueError):
+            continue
+        if isinstance(row, dict) and row.get("kind") == "attempt":
+            n += 1
+    return n
+
+
+def _manifest_versions(root):
+    """0.3章。git log --all --full-history に現れるマニフェストの各版のバイト列（その commit に
+    ファイルが無い版は空のバイト列）。git を動かせなければ ThemesError。"""
+    import subprocess
+    cg = _load_codegate()
+    rel = "/".join(MANIFEST_DIR_PARTS + (MANIFEST_NAME,))
+    try:
+        code, out = cg.run_git(root, "log", "--all", "--full-history", "--format=%H", "--", rel)
+        if code != 0:
+            raise ThemesError("履歴の関門：git log を実行できない")
+        versions = []
+        for c in out.decode("ascii").split():
+            code, _o = cg.run_git(root, "cat-file", "-e", "%s:%s" % (c, rel))
+            if code != 0:
+                versions.append(b"")                  # その commit で消した版
+                continue
+            code, body = cg.run_git(root, "cat-file", "blob", "%s:%s" % (c, rel))
+            if code != 0:
+                raise ThemesError("履歴の関門：マニフェストの過去の版を読めない")
+            versions.append(body)
+    except cg.CodeGateError as e:
+        raise ThemesError("履歴の関門：%s" % e) from None
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
+        raise ThemesError("履歴の関門：git の実行に失敗した") from None
+    return versions
+
+
+def check_append_only(versions, head_manifest):
+    """0.3章。履歴の各版が HEAD の版の先頭部分（追記だけ）であることを求める。返り値：各版の
+    attempt の行の数の最大値。行を消した・変えた・並べ替えた版があれば ThemesError。"""
+    for v in versions:
+        if not head_manifest.startswith(v):
+            raise ThemesError("区分表のマニフェストの過去の版が、今の版の先頭部分でない（行を消した・"
+                              "変えた跡）。取得しない（リードに報告）")
+    return max((_count_attempts(v) for v in versions), default=0)
+
+
 MANIFEST_NEXT = {None: ("attempt",), "attempt": ("fetch",), "fetch": ("failed", "result"),
                  "failed": ("attempt",), "result": ()}
 
@@ -783,7 +855,12 @@ def diagnose_shape(sheets):
                     if n:
                         d["nonmatch_values_with"][cls] = d["nonmatch_values_with"].get(cls, 0) + 1
                         d["nonmatch_chars"][cls] = d["nonmatch_chars"].get(cls, 0) + n
-    out["columns"] = cols
+    # 軽-5：件数の欄らしい欄（ASCII の数字だけの値が、名前の形に合う値以上で1つ以上）は、捨てる欄から
+    # 導いた数を出さない。出すのは values と ascii_digits_only だけ
+    out["columns"] = [{"count_like": True, "values": d["values"],
+                       "ascii_digits_only": d["ascii_digits_only"]}
+                      if d["ascii_digits_only"] and d["ascii_digits_only"] >= d["theme_name_match"]
+                      else dict(d, count_like=False) for d in cols]
     out["columns_not_shown"] = max(0, max((len(r) for _n, rows in sheets for r in rows), default=0)
                                    - DIAG_MAX_COLUMNS)
     out["first_row_numeric_columns"] = sum(
@@ -814,6 +891,7 @@ def run(*, root, home, url=None, transport=urllib_transport, clock=time.monotoni
     url = THEMES_URL if url is None else url
     name = validate_doc_url(url)
     sha_code, head_manifest, has_history = _code_gate(root)   # 0.1章。固定したコードで動くことを先に
+    hist_attempts = check_append_only(_manifest_versions(root), head_manifest)   # 0.3章
     excl = _exclusion_gate(root)                      # 0章。通信の前に確かめる
     store, manifest = _resolve(root, home)
     attempt = {"kind": "attempt", "source_url": url, "code_path": CODE_REL,
@@ -834,7 +912,8 @@ def run(*, root, home, url=None, transport=urllib_transport, clock=time.monotoni
         raise ThemesError("区分表のマニフェストに、コミットしていない変更がある（前の取得の途中か"
                           "あとの跡。取得しない。リードに報告）")
     rows = parse_manifest(working)                    # 0.2章。並びが違えば止まる
-    n_attempts = sum(1 for r in rows if r["kind"] == "attempt")
+    # 0.3章：回数は、履歴の各版と HEAD の attempt の行の数のうち、いちばん大きいもの
+    n_attempts = max(hist_attempts, sum(1 for r in rows if r["kind"] == "attempt"))
     if n_attempts > MAX_TOTAL_ATTEMPTS:
         raise ThemesError("マニフェストの attempt の行が %d 行あり、上限 %d を超えている。取得しない"
                           "（リードに報告）" % (n_attempts, MAX_TOTAL_ATTEMPTS))
@@ -872,21 +951,37 @@ def run(*, root, home, url=None, transport=urllib_transport, clock=time.monotoni
         return _fetch_and_write(url, name, transport, clock, now, attempted_at, sha_code, excl,
                                 file_name, out_path, manifest, diag)
     except ThemesError as e:
-        _append_line(manifest, {"kind": "failed", "at": _iso(now()),
+        stage = getattr(e, "stage", "fetch")
+        if stage not in FAILED_STAGES:
+            stage = "fetch"
+        _append_line(manifest, {"kind": "failed", "at": _iso(now()), "stage": stage,
                                 "reason": type(e).__name__}, "マニフェストの行")
         raise
 
 
 def _fetch_and_write(url, name, transport, clock, now, attempted_at, sha_code, excl, file_name,
                      out_path, manifest, diag):
-    raw = fetch_once(url, transport, clock)
+    def at(stage, fn, *a):
+        try:
+            return fn(*a)
+        except ThemesError as e:
+            e.stage = stage                           # failed の行の stage（FAILED_STAGES）
+            raise
+    raw = at("fetch", fetch_once, url, transport, clock)
     fetched_at = _iso(now())
-    sheets = read_table(raw, name)
+    sheets = at("read", read_table, raw, name)
     del raw                                           # 元の応答はここで手放す
     try:
         data, nrows, kept, dropped, replaced, headerless = build_output(sheets)
-    except ThemesError:
-        diag(format_diagnosis(diagnose_shape(sheets)))   # 6章：数と種類だけ。標準エラーだけ
+    except ThemesError as e:
+        e.stage = "shape"
+        try:                                          # 軽-8：診断が落ちても failed の行は書く
+            diag(format_diagnosis(diagnose_shape(sheets)))   # 6章：数と種類だけ。標準エラーだけ
+        except Exception:
+            try:
+                diag("診断を出せなかった")
+            except Exception:
+                pass
         raise
     del sheets
     entry = {"kind": "result", "file_name": file_name, "sha256": hashlib.sha256(data).hexdigest(),
@@ -900,7 +995,9 @@ def _fetch_and_write(url, name, transport, clock, now, attempted_at, sha_code, e
     line = (json.dumps(entry, sort_keys=True, ensure_ascii=True) + "\n").encode("ascii")
     for what, b in (("区分表", data), ("マニフェストの行", line)):
         if privacy_scan.find_in_bytes(b):
-            raise ThemesError("%s にメールアドレスの形の文字列があるので書かずに止まる" % what)
+            e = ThemesError("%s にメールアドレスの形の文字列があるので書かずに止まる" % what)
+            e.stage = "write"
+            raise e
     fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
                  0o644)
     try:

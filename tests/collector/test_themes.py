@@ -52,7 +52,10 @@ def _blocked(*a, **k):
 
 _patches = [mock.patch.object(socket.socket, "connect", _blocked),
             mock.patch.object(socket, "create_connection", _blocked),
-            mock.patch.object(socket, "getaddrinfo", _blocked)]
+            mock.patch.object(socket, "getaddrinfo", _blocked),
+            # 0.3章の履歴の関門は、git の無い一時のフォルダでは差し替える（本物の git で確かめるのは
+            # TestCodeGate・TestAppendOnly。そちらは themes.py の写しのモジュールを使う）
+            mock.patch.object(themes, "_manifest_versions", lambda root: [])]
 
 
 def setUpModule():
@@ -319,6 +322,96 @@ class TestCodeGate(unittest.TestCase):
         return self.mod.run(root=self.root, home=self.home, transport=tr, clock=lambda: 0.0,
                             now=lambda: NOW)
 
+    # ---- T-101 差し戻し1回目 重大-1：追記だけの関門（0.3章）を本物の git で確かめる
+
+    def _mp(self):
+        return os.path.join(self.root, "data", "manifest", themes.MANIFEST_NAME)
+
+    def _commit(self, msg):
+        self.taf.git(self.root, "add", "data/manifest")
+        self.taf.git(self.root, "commit", "-q", "-m", msg)
+
+    def _fail_cycle(self):
+        """1段目（試行の行）→ コミット → 2段目（503 で failed）→ コミット。"""
+        tr = FakeTransport(GOOD, status=503)
+        with self.assertRaises(self.mod.AttemptRecorded):
+            self.run_mod(tr)
+        self.assertEqual(tr.calls, [])
+        self._commit("試行の行")
+        with self.assertRaises(self.mod.ThemesError):
+            self.run_mod(tr)
+        self.assertEqual(len(tr.calls), 1)
+        self._commit("失敗の行")
+
+    def _rewrite(self, lines):
+        with open(self._mp(), "wb") as f:
+            f.write(b"".join(l + b"\n" for l in lines))
+        self._commit("行を消してコミットし直す")
+
+    def _assert_stops_without_network(self, pattern):
+        before = open(self._mp(), "rb").read()
+        tr = FakeTransport(GOOD)
+        with self.assertRaisesRegex(self.mod.ThemesError, pattern):
+            self.run_mod(tr)
+        self.assertEqual(tr.calls, [])
+        self.assertEqual(open(self._mp(), "rb").read(), before)
+
+    def test_honest_appends_pass_append_only_gate(self):
+        self._prep_run()
+        self._fail_cycle()
+        self._fail_cycle()
+        self.assertEqual(len(self.mod._manifest_versions(self.root)), 4)
+        with self.assertRaisesRegex(self.mod.AttemptRecorded, "3 回目"):
+            self.run_mod(FakeTransport(GOOD))
+        self._commit("3回目の試行の行")
+        e = self.run_mod(FakeTransport(GOOD))
+        self.assertEqual(e["kind"], "result")
+
+    def test_deleting_lines_and_recommitting_cannot_reset_the_count(self):
+        """監査の再現：3回失敗したあと、6行を消して普通にコミットし直しても、通信できない。"""
+        self._prep_run()
+        for _ in range(3):
+            self._fail_cycle()
+        lines = open(self._mp(), "rb").read().splitlines()
+        self.assertEqual(len(lines), 9)
+        self._rewrite(lines[:3])
+        self._assert_stops_without_network("先頭部分でない")
+
+    def test_deleting_one_middle_set_stops(self):
+        self._prep_run()
+        for _ in range(3):
+            self._fail_cycle()
+        lines = open(self._mp(), "rb").read().splitlines()
+        self._rewrite(lines[:3] + lines[6:])                   # 2回目の1組（3行）だけを消す
+        self._assert_stops_without_network("先頭部分でない")
+
+    def test_changing_a_past_line_stops(self):
+        self._prep_run()
+        self._fail_cycle()
+        lines = open(self._mp(), "rb").read().splitlines()
+        self._rewrite(lines[:2] + [lines[2].replace(b"ThemesError", b"OtherError")])
+        self._assert_stops_without_network("先頭部分でない")
+
+    def test_deleting_the_file_and_starting_over_stops(self):
+        self._prep_run()
+        self._fail_cycle()
+        self.taf.git(self.root, "rm", "-q", "data/manifest/" + themes.MANIFEST_NAME)
+        self.taf.git(self.root, "commit", "-q", "-m", "消す")
+        tr = FakeTransport(GOOD)
+        with self.assertRaisesRegex(self.mod.ThemesError, "Git の履歴がある|先頭部分でない"):
+            self.run_mod(tr)
+        self.assertEqual(tr.calls, [])
+        self.assertFalse(os.path.exists(self._mp()))
+
+    def test_count_uses_history_maximum(self):
+        a = b'{"kind": "attempt"}\n'
+        f = b'{"kind": "fetch"}\n{"kind": "failed"}\n'
+        head = (a + f) * 2
+        self.assertEqual(self.mod.check_append_only([b"", a, a + f, head], head), 2)
+        self.assertEqual(self.mod.check_append_only([], head), 0)
+        with self.assertRaises(self.mod.ThemesError):
+            self.mod.check_append_only([(a + f) * 3], head)
+
     def test_git_mv_after_fetch_stops(self):
         """T-026 軽-3 (b)：マニフェストを git mv で別の名前に移してコミットしても、2回目はできない。"""
         self._prep_run()
@@ -336,7 +429,9 @@ class TestCodeGate(unittest.TestCase):
         for n in os.listdir(os.path.join(self.home, *themes.STORE_PARTS)):
             os.rename(os.path.join(self.home, *themes.STORE_PARTS, n), os.path.join(self.tmp, n))
         tr2 = FakeTransport(GOOD)
-        with self.assertRaisesRegex(self.mod.ThemesError, "Git の履歴がある"):
+        # T-101 差し戻し1回目：今は 0.3章の追記だけの関門が先に止める（消した版は空で、過去の版は
+        # その先頭部分でない）。どちらでも、通信の前に止まる
+        with self.assertRaisesRegex(self.mod.ThemesError, "Git の履歴がある|先頭部分でない"):
             self.run_mod(tr2)
         self.assertEqual(tr2.calls, [])
         self.assertFalse(os.path.exists(os.path.join(self.root, "data", "manifest",
@@ -512,7 +607,9 @@ class TestExclusionGate(unittest.TestCase):
         lines = [l.strip() for l in body.splitlines() if l.strip()]
         self.assertTrue(lines[2].startswith("sha_code, head_manifest, has_history = _code_gate(root)"),
                         lines[:4])
-        self.assertTrue(lines[3].startswith("excl = _exclusion_gate(root)"), lines[:4])
+        self.assertTrue(lines[3].startswith(
+            "hist_attempts = check_append_only(_manifest_versions(root), head_manifest)"), lines[:5])
+        self.assertTrue(lines[4].startswith("excl = _exclusion_gate(root)"), lines[:5])
 
 
 class TestClassify(unittest.TestCase):
@@ -1048,12 +1145,14 @@ class TestDiagnosis(RunCase):
                           "non_ascii": 1, "digit": 1})
         self.assertEqual(c0["nonmatch_chars"]["lower"], 3)
         self.assertEqual((c0["nonmatch_first_char_not_upper"], c0["nonmatch_too_long"]), (2, 1))
-        self.assertEqual((c1["ascii_digits_only"], c1["theme_name_nonmatch"]), (6, 7))
-        self.assertEqual(c1["nonmatch_values_with"]["lower"], 1)
+        # 軽-5：件数の欄らしい欄は values と ascii_digits_only だけ（digit などの数を出さない）
+        self.assertEqual(c1, {"count_like": True, "values": 7, "ascii_digits_only": 6})
+        self.assertFalse(c0["count_like"])
         # 失敗の行の reason は今までどおり。ファイルは書かない
         lines = [json.loads(l) for l in self.written()[themes.MANIFEST_NAME].splitlines()]
         self.assertEqual([l["kind"] for l in lines], ["attempt", "fetch", "failed"])
-        self.assertEqual(lines[2]["reason"], "ThemesError")
+        self.assertEqual(lines[2], {"at": "2026-10-08T01:02:03Z", "kind": "failed",
+                                    "reason": "ThemesError", "stage": "shape"})
         self.assertEqual(set(self.written()), {themes.MANIFEST_NAME})
         self.assert_no_fragments(self.written()[themes.MANIFEST_NAME].decode(), DIAG_NAMES)
 
@@ -1066,6 +1165,54 @@ class TestDiagnosis(RunCase):
     def test_no_diagnosis_for_network_failure(self):
         got, _e = self.run_diag(GOOD, status=503)
         self.assertEqual(got, [])
+
+    def test_failed_line_stage(self):
+        """中-3：failed の行に止まった段（stage）を固定の語で書く。"""
+        cases = [("fetch", GOOD, 503), ("read", b"\xff\xfe broken", 200),
+                 ("shape", diag_table(), 200),
+                 ("write", GOOD.replace(b"Alpha desc", b"see a" + b"@" + b"b.org"), 200)]
+        for stage, body, status in cases:
+            with self.subTest(stage):
+                self.fresh()
+                self.run_diag(body, status)
+                lines = [json.loads(l) for l in self.written()[themes.MANIFEST_NAME].splitlines()]
+                self.assertEqual(sorted(lines[-1]), ["at", "kind", "reason", "stage"])
+                self.assertEqual((lines[-1]["kind"], lines[-1]["stage"], lines[-1]["reason"]),
+                                 ("failed", stage, "ThemesError"))
+                self.assertIn(lines[-1]["stage"], themes.FAILED_STAGES)
+        self.assertEqual(themes.FAILED_STAGES, ("fetch", "read", "shape", "write"))
+
+    def test_diagnosis_failure_still_writes_failed_line(self):
+        """軽-8：診断が落ちても failed の行を書き、もとの ThemesError で止まる。"""
+        def boom(sheets):
+            raise RuntimeError("x")
+        with mock.patch.object(themes, "diagnose_shape", boom):
+            got, exc = self.run_diag(diag_table())
+        self.assertIsInstance(exc, themes.ThemesError)
+        self.assertEqual(got, ["診断を出せなかった"])
+        lines = [json.loads(l) for l in self.written()[themes.MANIFEST_NAME].splitlines()]
+        self.assertEqual((lines[-1]["kind"], lines[-1]["stage"]), ("failed", "shape"))
+
+    def test_diag_sink_failure_still_writes_failed_line(self):
+        self.tr = FakeTransport(diag_table())
+
+        def sink(text):
+            raise OSError("標準エラーに書けない")
+        call = lambda: themes.run(root=self.root, home=self.home, url=URL, transport=self.tr,
+                                  clock=lambda: 0.0, now=lambda: NOW, diag=sink)
+        with mock.patch.object(themes, "_code_gate", lambda root: (CODE_SHA, b"", False)):
+            with self.assertRaises(themes.AttemptRecorded):
+                call()
+        self.commit_all()
+        with mock.patch.object(themes, "_code_gate", lambda root: (CODE_SHA, self.head, True)):
+            with self.assertRaises(themes.ThemesError):
+                call()
+        lines = [json.loads(l) for l in self.written()[themes.MANIFEST_NAME].splitlines()]
+        self.assertEqual([l["kind"] for l in lines], ["attempt", "fetch", "failed"])
+
+    def fresh(self):
+        shutil.rmtree(self.tmp, True)
+        self.setUp()
 
     def test_many_columns_are_capped(self):
         rows = [["1"] + ["ZQXJ_Wvkq"] * 11]

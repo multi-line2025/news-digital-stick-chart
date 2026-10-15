@@ -398,6 +398,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests/collector -v
 - T-064：プロジェクトの写し（`test_acquire_filelist.pristine_copy`）では、`data/manifest` も手順3より前の形（`.gitkeep` と空の `gdelt-filelist.jsonl` だけ）にし、試しの run（T-063）・正式な run・区分表のマニフェストなど、後から本物に足されたマニフェストを名前によらず外す。本物に試しの run の記録とマニフェストが入ったあと、写しの上のテスト（`test_acquire_gkg.py` の `TestEndToEnd`・`TestSealGkgRun`・`TestSealedRunCheck`・`TestT045`）が「この run_id の取得は完了している」で止まっていたため。`TestPristineCopy` が、写しの形と、後から足されうる記録・`.ots`・中身・マニフェストを外すことを確かめる。`TestProductionPath.test_test_seams_cannot_point_at_real_places` は、一時的なディレクトリの判定を差し替えて確かめ、プロジェクトの置き場所（一時的なディレクトリの下の clone など）に左右されない。`test_gkg.py` の `TestT057.test_make_sealed_project_refuses_inside_project_under_tmp` は、`PROJECT` を一時的なディレクトリの下に差し替えて、仮の封印の記録の道具の「このプロジェクトの中か」の判定を、本物のプロジェクトから流すときも確かめる。
 - T-098：`test_themes.py` の `TestMain`（入口のコマンド。引数があれば run を呼ばずに終わり値 2、root と home は固定（環境変数 HOME を見ない）、1段目は終わり値 3、止まれば 1、成功の表示に行数・sha256・headerless・出典があり、テーマの名前と件数が出ないこと、スクリプトとして動かしても引数があれば関門に進まないこと、「未定」の古い文言が残っていないこと）。
 - T-101：`test_themes.py` の `TestRetry`（失敗のあとの取り直しが追記だけで、前の行を変えないこと、最初の attempt と同じキー、2段の手順、上限の3回で通信の前に止まり何も書かないこと、記録の attempt が上限を超えれば止まること、並びの規則、fetch で終わる・result のあとは止まること、保存先にファイルがあれば止まること）と `TestDiagnosis`（診断は数と種類だけで、名前と件数の4文字の断片が出ないこと、標準エラーだけでファイルに書かないこと、reason は変わらないこと、通信の失敗では出さないこと、欄の数の上限）。`TestRun.test_only_one_attempt_ever` と `test_committed_attempt_must_match_code_and_rule` は、取り直しの形に合わせて改めた。
+- T-101 差し戻し1回目：`TestCodeGate` の本物の git の上のテスト。正直に追記した取り直しは通ること、3回失敗したあと6行を消してコミットし直すと止まること（監査の再現）、途中の1組だけを消すと止まること、過去の行を変えると止まること、ファイルを消して作り直すと止まること、回数を履歴の最大値で数えること（関門を外すと、消した場合の3件が落ちることを確かめた）。`TestDiagnosis` の `test_failed_line_stage`（fetch・read・shape・write）、診断の計算や出力が落ちても failed の行を書くこと、件数の欄らしい欄は values と ascii_digits_only だけを出すこと。
 - テストは、本物の `/Volumes/LACIE SHARE` を使わない。保存先のディスクは一時的なディレクトリで置き換え、マウントの検査だけを差し替える（本物の検査は `TestVolume` と、下の FAT32 のテストで確かめる）。
 
 ### 7.1 FAT32 のイメージの上でのテスト（T-021）
@@ -452,7 +453,18 @@ hdiutil detach "$SP/fatmnt/LACIE SHARE"
 - 1段目の前提（T-026 軽-3）：`git log --all -- data/manifest/gdelt-themes.jsonl` が空であること（マニフェストを `git mv` で別の名前に移してコミットしても、元の名前の履歴が残るので止まる）と、保存先（`~/Desktop/news-stick-data`）に `gdelt-themes-` で始まるファイルが無いこと。
 - **取り直し**（T-101。オーナーの承認は reviews/T-098.md の 2026-10-15 の発言「あと2回」）：
   - マニフェストは追記だけ。前の行は消さず、変えない。行の並びは `attempt → fetch → failed か result`。`failed` のあとに来られるのは次の `attempt` だけで、`result` のあとには何も来ない。合わなければ止まる（`themes.parse_manifest`）。
-  - 回数は記録から数える。マニフェストの `attempt` の行の数で、上限は `themes.MAX_TOTAL_ATTEMPTS = 3`（最初の1回＋2回）。番号を自分で書くことはしない。
+  - 回数は記録から数える。上限は `themes.MAX_TOTAL_ATTEMPTS = 3`（最初の1回＋2回）。数えるのは、`git log --all --full-history` に現れるマニフェストの各版の `attempt` の行の数の最大値と、HEAD の版の数のうち、大きい方。番号を自分で書くことはしない。
+  - **追記だけの関門**（T-101 差し戻し1回目 重大-1。themes.py 0.3章）：コードの関門のすぐあとで、履歴にあるマニフェストの各版が、どれも HEAD の版の先頭部分であることを求める。その commit でファイルを消した版は、空として扱う。次の跡があれば、通信の前に止まる。
+    - 行を消してから、普通にコミットし直した跡
+    - 途中の1組だけを消した跡
+    - 行を変えた跡
+    - ファイルを消して作り直した跡
+  - `failed` の行の形：キーは `at`・`kind`・`reason`・`stage`。`stage` は止まった段を表す固定の語（`themes.FAILED_STAGES`）。
+    - `fetch`：通信（HTTP の状態・時間・長さ・通信の失敗）
+    - `read`：表として読む（UTF-8・形式）
+    - `shape`：欄の判定
+    - `write`：書く前のメールアドレスの形の検査
+    - `reason` は今までどおり、例外の型の名前。最初の取得（e3784c2）の `failed` の行には `stage` が無い。その行は書き換えない。
   - 取り直しの `attempt` の行は、最初の行と同じキーを持つ：`kind`・`attempted_at`・`code_path`・`code_sha256`・`source_url`・`exclusion_rule_seq`・`exclusion_rule_record_sha256`。
   - 手順は毎回同じ2段で、コマンドも上と同じ。マニフェストの最後の行が `failed` なら、1段目で新しい `attempt` の行を追記して終わり値 3 で止まる（通信しない）。それをコミットしてから、2段目で通信する。
   - 上限に達したら止まる。`attempt` の行がすでに3行あり、最後が `failed` なら、何も書かず通信もせずに、終わり値 1 で止まる。`attempt` の行が上限を超えていても、通信の前に止まる。それ以上はオーナーに聞く。
@@ -460,7 +472,9 @@ hdiutil detach "$SP/fatmnt/LACIE SHARE"
   - 取り直しのためにコードを直したときは、直したコードをコミットしてから1段目を流す。`attempt` の行の `code_sha256` は、その回のコードのものになる。
   - 封印係の照合（`ledger.check_themes_manifest_refs`）は、`failed` のあとの `attempt` をまだ受け付けない（T-102 で直す予定）。取り直しの行をコミットしたあとは、封印係が直すまで `verify all --rev auto` が止まる。
 - **形の判定で止まったときの診断**（T-101。themes.py 6章）：
-  - 判定（見出しの規則、または見出しの無い2欄の規則）で止まったときに、標準エラーへ1行だけ出す。ファイルにもマニフェストにも書かない。`failed` の行の `reason` は、今までどおり例外の型の名前。
+  - 判定（見出しの規則、または見出しの無い2欄の規則）で止まったときに、標準エラーへ1行だけ出す。ファイルにもマニフェストにも書かない。`failed` の行の `reason` は、今までどおり例外の型の名前で、`stage` は `shape`。
+  - 診断の計算や出力が落ちても、`failed` の行は書く（軽-8）。
+  - 件数の欄らしい欄（ASCII の数字だけの値が1つ以上あり、その数が名前の形に合う値の数以上の欄）は、`count_like: true`・`values`・`ascii_digits_only` だけを出す（捨てる欄から導いた数を出さない。軽-5）。下の欄ごとの数は、ほかの欄（`count_like: false`）についてだけ出す。
   - 出すのは数と種類だけで、テーマの名前・値・その断片は出さない。
     - `sheets`・`rows`（行の数）
     - `column_count_distribution`（欄の数ごとの行の数）
@@ -469,6 +483,10 @@ hdiutil detach "$SP/fatmnt/LACIE SHARE"
     - 先頭の8欄までの、欄ごとの数：`values`・`empty`・`theme_name_match` と `theme_name_nonmatch`（`THEME_NAME_RE` に合う値と合わない値の数）・`ascii_digits_only`・`nonmatch_first_char_not_upper`・`nonmatch_too_long`（161文字以上）
     - 合わない値の文字の種類：`nonmatch_values_with`（その種類の文字を含む値の数）と `nonmatch_chars`（その種類の文字の数）。種類は `upper`・`lower`・`digit`・`underscore`・`space`・`symbol`（ほかの ASCII）・`non_ascii`。
   - 通信の失敗や、表として読めなかったときは、表が無いので診断を出さない。
+- **限界（取り直しと診断）**：
+  - 軽-6：エージェントがコマンドを流すと、標準エラーの診断は会話の記録に残る。診断は数と種類だけだが、合わない値が1つだけのときは、その長さの範囲と文字の種類ごとの数が分かる。テーマの名前は個人情報ではない。
+  - 軽-7：`attempt` の行を書かずに通信する道は、手元では止められない。たとえば、`themes.fetch_once` を直接呼ぶこと、`run` の外で同じ URL を取ること（curl など）である。マニフェストの回数が縛るのは、`run` を通した取得だけである。
+  - 履歴そのものを書き換えて過去の版を消すこと（reset・rebase・filter-branch、reflog の期限が切れたあとの gc など）は、追記だけの関門でも見分けられない（上の「止めないもの」と同じ）。
 - **止めないもの（限界）**：履歴そのものを書き換えること（`git reset --hard`・rebase・filter-branch などで、試行や結果のコミットを消すこと）は、手元の検査では見分けられない（テスト `test_reset_of_history_is_a_documented_limit`）。リモートが無いので、写しを持たない第三者にも見えない。前提：通信のあとの行（fetch・failed）は、コミットする前は作業ツリーにだけある。→ 結論：その行を消して作業ツリーを HEAD と同じ形（試行の行1行）に戻すと、もう一度通信できる。手元の検査では見分けられない（テスト `test_reverting_to_committed_attempt_allows_refetch_limit` で、この限界を確かめている）。2段目のあとすぐにコミットすることで、時間の幅を小さくする。
 - **見出しの無い「名前・件数」の2欄の表**（リードの判断。監査の条件 (1)〜(4)）：1行目に数字だけの値があるとき、どの行も欄がちょうど2つで、一方の欄の値がすべてテーマの名前の形、もう一方がすべて ASCII の数字だけ、という割り当てがちょうど1つに決まる場合に限り、名前の欄だけを残す。判定は欄の位置ではなく値の形で行う。両方の割り当てが合う場合、どちらも合わない場合は止まる。件数の欄はメモリの上で捨て、行を並べ替えてから書く。マニフェストに `headerless: true` と、捨てた欄の位置（`column_A` か `column_B`）を書く。この規則は取得の前にコミットし、試行の行の `code_sha256` で固定する。
 - **限界**：区分表は取得した時点の全テーマの一覧なので、2020-12-15 以降に生まれたテーマの名前も入る。名前があることは、そのテーマが後ろの期間に使われたことを示しうる。タグの一覧の規則は、手法を作る期間のデータでテーマの存在を確かめるので、名前だけでは一覧に入らない。
