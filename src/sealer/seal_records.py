@@ -279,15 +279,16 @@ def check_new(project, data_after, records_after, rec, doc, order4_store=None, o
         verify.check_order5_inputs(project, records_after, rec, doc, read)
         if not order5_inputs:
             raise ledger.LedgerError("%s の記録は、日の集計と区分表の置き場所で計算し直してからでなければ書かない" % kind)
+        blobs = {}
         if doc["status"] == "ok":
-            _done, absent = verify.check_order5_outside(doc, order5_inputs["outside_dir"], kind)
+            _done, absent, blobs = verify.check_order5_outside(doc, order5_inputs["outside_dir"], kind)
             if absent:
                 raise ledger.LedgerError("%s の記録の Git の外のファイル（%s）が置き場所に無い。書かない" % (kind, "・".join(absent)))
         with tempfile.TemporaryDirectory() as tmp:
             try:
                 # 中-2：detail の中身も計算し直した値と照らす（ok なら detail は必ずある。上で確かめた）
                 verify.recompute_order5(project, records_after, rec, doc, read, order5_inputs["store"],
-                                        order5_inputs["themes_store"], tmp, outside_dir=order5_inputs["outside_dir"])
+                                        order5_inputs["themes_store"], tmp, detail_bytes=blobs.get("detail"))
             except verify.Unchecked as e:
                 raise ledger.LedgerError("%s の記録を計算し直せない（%s）。書かない" % (kind, e)) from None
         return

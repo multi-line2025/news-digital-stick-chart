@@ -3430,6 +3430,64 @@ ORDER5_LIMITS = (
 )
 
 
+# T-111 差し戻し2回目 中-1：main のすべての辞書のキーの集合（order5-tag-list.md 5章 (4)）。足したキーも、欠けたキーも止める
+ORDER5_MAIN_KEYS_STOPPED = ("a_equals_v", "block", "candidates", "citation", "code", "input", "label", "limits",
+                            "missing_days", "outside", "reference_criteria", "refs", "status", "themes_table")
+ORDER5_MAIN_KEYS_OK = ORDER5_MAIN_KEYS_STOPPED + ("comparisons", "coverage", "official")
+ORDER5_THEMES_TABLE_KEYS = ("description_column", "duplicate_rows", "file_name", "headerless", "kept_columns",
+                            "names_not_in_day_aggregate_form", "official_data_themes_not_in_table", "rows", "sha256",
+                            "unique_names")
+ORDER5_OFFICIAL_KEYS = ("candidate", "official", "result", "setting", "version")
+ORDER5_RESULT_KEYS = ("a", "a_float", "block_end", "block_start", "enabled_optional_categories", "n_med", "proposed_label",
+                      "quarters", "quarters_without_usable_days", "reason_counts", "tag_count", "tag_list",
+                      "usable_day_count", "v_equals_a")
+ORDER5_REASON_KEYS = ("all_themes", "excluded", "in_list", "mean_below_a", "not_present_throughout")
+ORDER5_CANDIDATE_KEYS = ("a", "a_float", "denominator_kind", "id", "n_med", "note", "numerator_column", "official", "reason",
+                         "status", "tag_count", "usable_day_count", "zero_days")
+ORDER5_COMPARISON_KEYS = ("diff_count", "enabled_optional_categories", "in_both", "note", "official", "only_in_new",
+                          "only_in_old")
+ORDER5_COVERAGE_TOTAL_KEYS = ("docs_all_groups", "docs_without_any_theme", "docs_without_v1_theme", "docs_without_v2_theme",
+                              "ratios", "usable_days")
+ORDER5_COVERAGE_QUARTER_KEYS = ORDER5_COVERAGE_TOTAL_KEYS + ("end", "index", "start")
+ORDER5_RATIO_KEYS = ("docs_without_any_theme", "docs_without_v1_theme", "docs_without_v2_theme")
+
+
+def check_order5_main_keys(main, what):
+    """main のすべての辞書のキーの集合が、決まった集合とちょうど同じこと（T-111 差し戻し2回目 中-1）。値は、記録・マニフェストから
+    決まるもの（check_order5_main_fixed など）と、計算し直した値（verify.recompute_order5）で照らす。違えば LedgerError。"""
+    def keys(obj, want, where):
+        if not isinstance(obj, dict) or set(obj) != set(want):
+            got = sorted(obj) if isinstance(obj, dict) else type(obj).__name__
+            raise LedgerError("%s の %s のキー（%s）が、決まった集合（%s）と違う" % (what, where, got, "・".join(sorted(want))))
+    keys(main, ORDER5_MAIN_KEYS_OK if main.get("status") == "ok" else ORDER5_MAIN_KEYS_STOPPED, "main")
+    keys(main["block"], ("end", "name", "start"), "main.block")
+    keys(main["missing_days"], ("count", "days", "source"), "main.missing_days")
+    keys(main["themes_table"], ORDER5_THEMES_TABLE_KEYS, "main.themes_table")
+    keys(main["themes_table"]["names_not_in_day_aggregate_form"], ("count", "names"),
+         "main.themes_table.names_not_in_day_aggregate_form")
+    if not isinstance(main["candidates"], list):
+        raise LedgerError("%s の main.candidates が一覧でない" % what)
+    for i, x in enumerate(main["candidates"]):
+        keys(x, ORDER5_CANDIDATE_KEYS, "main.candidates[%d]" % i)
+    if main.get("status") != "ok":
+        return
+    keys(main["official"], ORDER5_OFFICIAL_KEYS, "main.official")
+    keys(main["official"]["result"], ORDER5_RESULT_KEYS, "main.official.result")
+    keys(main["official"]["result"]["reason_counts"], ORDER5_REASON_KEYS, "main.official.result.reason_counts")
+    keys(main["comparisons"], ("1cb463a", "allset"), "main.comparisons")
+    for k, v in main["comparisons"].items():
+        keys(v, ORDER5_COMPARISON_KEYS, "main.comparisons.%s" % k)
+        keys(v["enabled_optional_categories"], ("new", "old"), "main.comparisons.%s.enabled_optional_categories" % k)
+    keys(main["coverage"], ("quarters", "total"), "main.coverage")
+    keys(main["coverage"]["total"], ORDER5_COVERAGE_TOTAL_KEYS, "main.coverage.total")
+    keys(main["coverage"]["total"]["ratios"], ORDER5_RATIO_KEYS, "main.coverage.total.ratios")
+    if not isinstance(main["coverage"]["quarters"], list):
+        raise LedgerError("%s の main.coverage.quarters が一覧でない" % what)
+    for i, q in enumerate(main["coverage"]["quarters"]):
+        keys(q, ORDER5_COVERAGE_QUARTER_KEYS, "main.coverage.quarters[%d]" % i)
+        keys(q["ratios"], ORDER5_RATIO_KEYS, "main.coverage.quarters[%d].ratios" % i)
+
+
 def order5_reference_criteria(refs, order2_doc, criteria_ids):
     """main の reference_criteria の決まった値（order5-tag-list.md 5章 (4)）：seq 10（順番3が参照した順番2）の記録の中身から。"""
     out2 = order2_doc.get("counting_output") or {}
@@ -3657,11 +3715,11 @@ def check_order5_doc(records, record, doc, read_json):
     block = blocks_of(read_json(p, "output")).get(METHOD_BLOCK)
     if main.get("block") != {"name": METHOD_BLOCK, "start": block[0], "end": block[1]}:
         raise LedgerError("%s の main.block が、periods の1件目の method の区画と違う" % what)
+    check_order5_main_keys(main, what)                       # T-111 差し戻し2回目 中-1
     o4 = by[refs["order4"]["seq"]]
     days = sorted(m["day"] for m in read_json(o4, ORDER4_KIND)["list"]["missing_days"])
-    md = main.get("missing_days") or {}
-    if md.get("days") != days or md.get("count") != len(days):
-        raise LedgerError("%s の main.missing_days が、順番4の一覧の欠けた日と違う" % what)
+    if main.get("missing_days") != {"source": "order4", "count": len(days), "days": days}:
+        raise LedgerError("%s の main.missing_days が、順番4の一覧の欠けた日（source は order4）と違う" % what)
     check_order5_main_fixed(records, refs, main, read_json, what)
     code5 = main.get("code") or {}
     got = {c.get("name"): c.get("sha256") for c in code5.get("sealed") or []}

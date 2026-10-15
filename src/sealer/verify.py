@@ -1761,7 +1761,7 @@ def order5_day_rows(root, gdoc, block):
     return ledger.order4_day_rows(body, gdoc, ledger._block_days(block["start"], block["end"]))
 
 
-def recompute_order5(root, records, rec, doc, read_json, store, themes_store, tmp, outside_dir=None):
+def recompute_order5(root, records, rec, doc, read_json, store, themes_store, tmp, detail_bytes=None):
     """順番5の記録の main を、order5.py に頼らずに計算し直して照らす（order5-tag-list.md 5章。tags-naive.md 428行）。
       - 封印済みのコード（ledger.order5_sealed_code の sha256。periods・exclusion・tagrules・counting は作業ツリーか git の
         履歴から、1cb463a の版は git から）と、この verify の order5_recompute.py だけを空のフォルダに置いて流す。
@@ -1818,33 +1818,37 @@ def recompute_order5(root, records, rec, doc, read_json, store, themes_store, tm
     if bad:
         raise ledger.LedgerError("%s：main の値が、封印済みのコードで計算し直した値と違う（%s）" % (what, "、".join(bad[:10])))
     detail_checked = False
-    if outside_dir is not None and doc["status"] == "ok":
-        # T-111 差し戻し1回目 中-2：Git の外の detail の中身も、計算し直した値と照らす（ファイルが無ければ照らさない）
-        path = os.path.join(outside_dir, doc["outside"]["detail"]["file_name"])
-        if os.path.isfile(path) and not os.path.islink(path):
-            with open(path, "rb") as f:
-                detail = json.loads(f.read().decode("utf-8"))
-            bad = rc.compare_with_detail(detail, got, ledger.ORDER5_LABEL, ledger.ORDER5_DETAIL_NOTE, ledger.ORDER5_CITATION)
-            if bad:
-                raise ledger.LedgerError("%s：detail の値が、封印済みのコードで計算し直した値と違う（%s）" % (what, "、".join(bad[:10])))
-            detail_checked = True
+    if detail_bytes is not None and doc["status"] == "ok":
+        # T-111 差し戻し1回目 中-2：Git の外の detail の中身も、計算し直した値と照らす。T-111 差し戻し2回目 軽-2：sha256 を
+        # 照らしたのと同じバイト列（check_order5_outside が一度だけ読んだもの）を使う
+        detail = json.loads(detail_bytes.decode("utf-8"))
+        bad = rc.compare_with_detail(detail, got, ledger.ORDER5_LABEL, ledger.ORDER5_DETAIL_NOTE, ledger.ORDER5_CITATION)
+        if bad:
+            raise ledger.LedgerError("%s：detail の値が、封印済みのコードで計算し直した値と違う（%s）" % (what, "、".join(bad[:10])))
+        detail_checked = True
     return len(rows), detail_checked
 
 
 def check_order5_outside(doc, outside_dir, what):
-    """Git の外の detail・extra のファイルが outside_dir にあれば、sha256 を記録の outside と照らす。返り値：照らしたファイルの
-    名前の一覧と、無かったものの一覧。違えば LedgerError。"""
-    done, absent = [], []
+    """Git の外の detail・extra のファイルが outside_dir にあれば、一度だけ読んで sha256 を記録の outside と照らす（リンクは
+    開かない）。返り値：(照らしたファイルの名前の一覧, 無かったものの一覧, {part: 読んだバイト列})。照らしたバイト列は、
+    detail の中身の照合（recompute_order5 の detail_bytes）にそのまま渡す（T-111 差し戻し2回目 軽-2）。違えば LedgerError。"""
+    done, absent, blobs = [], [], {}
     for part in ("detail", "extra"):
         v = doc["outside"][part]
         path = os.path.join(outside_dir, v["file_name"])
-        if os.path.islink(path) or not os.path.isfile(path):
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError:
             absent.append(v["file_name"])
             continue
-        if ledger.sha256_file(path) != v["sha256"]:
+        with os.fdopen(fd, "rb") as f:
+            data = f.read()
+        if ledger.sha256_hex(data) != v["sha256"]:
             raise ledger.LedgerError("%s：%s の sha256 が、記録の outside.%s と違う" % (what, v["file_name"], part))
         done.append(v["file_name"])
-    return done, absent
+        blobs[part] = data
+    return done, absent, blobs
 
 
 def check_order5_entries(st, attempts, recs, store, themes_store, outside_dir):
@@ -1888,6 +1892,9 @@ def check_order5_entries(st, attempts, recs, store, themes_store, outside_dir):
         check_order5_inputs(st.root, st.records, r, doc, st.file_json)        # T-111 差し戻し1回目 中-1
         print("    main の input.day_files_digest と themes_table の file_name・sha256・rows は、マニフェストから決まる値と同じ")
         detail_checked = False
+        blobs, done, absent = {}, [], []
+        if doc["status"] == "ok" and outside_dir:
+            done, absent, blobs = check_order5_outside(doc, outside_dir, "seq %d の順番5" % r["seq"])
         if not (store and themes_store):
             st.unchecked.append("seq %d の順番5の一覧と要約の計算し直し（--store と --themes-store を渡していない）" % r["seq"])
             print("照らさなかった：日の集計と区分表の置き場所（--store・--themes-store）を渡していないので、seq %d の一覧と要約を"
@@ -1899,7 +1906,8 @@ def check_order5_entries(st, attempts, recs, store, themes_store, outside_dir):
             try:
                 with tempfile.TemporaryDirectory() as tmp:
                     n, detail_checked = recompute_order5(st.root, st.records, r, doc, st.file_json, os.path.realpath(store),
-                                                         os.path.realpath(themes_store), tmp, outside_dir=outside_dir)
+                                                         os.path.realpath(themes_store), tmp,
+                                                         detail_bytes=blobs.get("detail"))
                 print("    封印済みの tagrules.py・counting.py で、日の集計 %d 個と区分表から、正式な一覧と要約を計算し直した。main と"
                       "同じ（order5.py は流していない。流した Python：%s）" % (n, sys.version.split()[0]))
                 if detail_checked:
@@ -1916,7 +1924,6 @@ def check_order5_entries(st, attempts, recs, store, themes_store, outside_dir):
             print("照らさなかった：Git の外のファイルの置き場所（--order5-outside）を渡していないので、detail・extra の sha256 を"
                   "照らしていない")
             continue
-        done, absent = check_order5_outside(doc, outside_dir, "seq %d の順番5" % r["seq"])
         if done:
             print("    Git の外のファイル %s の sha256 は、記録の outside と同じ" % "・".join(done))
         if "order5-detail.json" in done and not detail_checked:

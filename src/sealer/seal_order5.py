@@ -76,14 +76,23 @@ def check_outside(root, path):
 PROBE_NAMES = (".link-probe", ".link-probe-2")
 
 
-def prepare_out_dir(outside, seq):
+def prepare_out_dir(root, outside, seq):
     """試みを書く前に、Git の外のフォルダの中に出力のフォルダ order5-seq<seq> を作り、そこでハードリンクを作れることを
     確かめる（T-111 差し戻し1回目 軽-4。order5.py は書き出しに os.link を使うので、作れないと流しても書けず、試みだけが
     残る）。確かめに使った2つのファイル（PROBE_NAMES。同じ中身の2つの名前）は消さずに残す（削除はしない決まり）。
     前の実行が確かめの途中で止まったフォルダ（中身が PROBE_NAMES だけ）は、そのまま使う。ほかのファイルがあれば止まる。
+    出力のフォルダがリンクのとき・実体が outside の中に無いとき・プロジェクトか Git の中にあるときも止まる（check_outside と
+    同じ確かめ。T-111 差し戻し2回目 軽-3）。
     作れなければ LedgerError（試みを書かない）。返り値：出力のフォルダ。"""
+    check_outside(root, outside)                              # 作る前に、置く場所そのものを確かめる
     out_dir = os.path.join(outside, "order5-seq%d" % seq)
+    if os.path.islink(out_dir):
+        raise ledger.LedgerError("出力のフォルダ %s がリンクである。試みを書かない" % out_dir)
     os.makedirs(out_dir, exist_ok=True)
+    # T-111 差し戻し2回目 軽-3：出力のフォルダにも check_outside と同じ確かめ（リンクでない、プロジェクトと Git の外）
+    if os.path.islink(out_dir) or os.path.realpath(out_dir) != os.path.join(os.path.realpath(outside), "order5-seq%d" % seq):
+        raise ledger.LedgerError("出力のフォルダ %s の実体が、Git の外のフォルダの中に無い。試みを書かない" % out_dir)
+    check_outside(root, out_dir)
     other = sorted(set(os.listdir(out_dir)) - set(PROBE_NAMES))
     if other:
         raise ledger.LedgerError("出力のフォルダ %s に、ほかのファイル（%s）がある。試みを書かない" % (out_dir, "・".join(other[:3])))
@@ -191,7 +200,7 @@ def seal(store, themes_store, outside_dir, now, ots_cmd, runner=subprocess.run):
     outside = check_outside(root, outside_dir)
     data, records = seal_records.load_checked(root, ots_cmd, runner=runner)
     adoc = build_attempt(root, data, records)
-    out_dir = prepare_out_dir(outside, len(records) + 1)          # 軽-4：試みを書く前にハードリンクを確かめる
+    out_dir = prepare_out_dir(root, outside, len(records) + 1)          # 軽-4：試みを書く前にハードリンクを確かめる
     note = ("統計係の順番5の試み（docs/stats/order5-tag-list.md）。stats-order5-attempt の %d 件目。order5.py を流す前に書いた。"
             "採用の区切りには使わない。" % (sum(1 for r in records if r["kind"] == ledger.ORDER5_ATTEMPT_KIND) + 1))
     arec, arel, aots, acommit = _write(root, ledger.ORDER5_ATTEMPT_KIND, adoc, data, records, note, now, ots_cmd, runner)

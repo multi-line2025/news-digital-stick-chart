@@ -384,7 +384,7 @@ class TestForgeries(Case):
         records = ledger.verify_chain(data)
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(ledger, "PROJECT_ROOT", self.c):
             doc, out_dir = seal_order5.run_and_build(self.c, data, records, records[-1], self.store5, self.tstore,
-                                                     seal_order5.prepare_out_dir(self.outside_new(), records[-1]["seq"]), tmp)
+                                                     seal_order5.prepare_out_dir(self.c, self.outside_new(), records[-1]["seq"]), tmp)
         self.raw5(O5, doc)
         self.verify_zero("all", "--rev", "auto")
         self.verify_stops("official.result.tag_count", *self.full())
@@ -405,7 +405,7 @@ class TestForgeries(Case):
         records = ledger.verify_chain(data)
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(ledger, "PROJECT_ROOT", self.c), self.synthetic():
             return seal_order5.run_and_build(self.c, data, records, records[-1], self.store5, self.tstore,
-                                             seal_order5.prepare_out_dir(self.outside_new(), records[-1]["seq"]), tmp)
+                                             seal_order5.prepare_out_dir(self.c, self.outside_new(), records[-1]["seq"]), tmp)
 
     def test_forgeries_refused(self):
         doc, out_dir = self.honest()
@@ -460,6 +460,34 @@ class TestForgeries(Case):
                                       "themes_table の sha256"),
             "themes_table の rows": (self.resha(doc, dict(main, themes_table=dict(main["themes_table"], rows=1))),
                                     "themes_table の rows"),
+            # T-111 差し戻し2回目 中-1：決まっていないキーを足した版・値を書き換えた版（監査の例）
+            "main にキーを足す": (self.resha(doc, dict(main, official_alt=main["official"])), "main のキー"),
+            "official.result にキーを足す": (self.resha(doc, dict(main, official=dict(main["official"], result=dict(
+                main["official"]["result"], tag_list_corrected=["ZZ_A"])))), "main.official.result のキー"),
+            "official にキーを足す": (self.resha(doc, dict(main, official=dict(main["official"], extra=1))), "main.official のキー"),
+            "candidates[0] にキーを足す": (self.resha(doc, dict(main, candidates=[dict(main["candidates"][0], tag_list=["ZZ_A"])]
+                                                             + main["candidates"][1:])), r"main.candidates\[0\] のキー"),
+            "comparisons.allset にキーを足す": (self.resha(doc, dict(main, comparisons=dict(
+                main["comparisons"], allset=dict(main["comparisons"]["allset"], extra_note="x")))),
+                "main.comparisons.allset のキー"),
+            "comparisons にキーを足す": (self.resha(doc, dict(main, comparisons=dict(main["comparisons"], v2=main["comparisons"]["allset"]))),
+                                     "main.comparisons のキー"),
+            "themes_table にキーを足す": (self.resha(doc, dict(main, themes_table=dict(main["themes_table"], note="x"))),
+                                      "main.themes_table のキー"),
+            "coverage の四半期にキーを足す": (self.resha(doc, dict(main, coverage=dict(main["coverage"], quarters=[
+                dict(main["coverage"]["quarters"][0], note="x")] + main["coverage"]["quarters"][1:]))),
+                r"main.coverage.quarters\[0\] のキー"),
+            "coverage.total の ratios にキーを足す": (self.resha(doc, dict(main, coverage=dict(main["coverage"], total=dict(
+                main["coverage"]["total"], ratios=dict(main["coverage"]["total"]["ratios"], x=None))))),
+                "main.coverage.total.ratios のキー"),
+            "reason_counts にキーを足す": (self.resha(doc, dict(main, official=dict(main["official"], result=dict(
+                main["official"]["result"], reason_counts=dict(main["official"]["result"]["reason_counts"], x=0))))),
+                "reason_counts のキー"),
+            "missing_days.source": (self.resha(doc, dict(main, missing_days=dict(main["missing_days"], source="recount"))),
+                                    "main.missing_days が"),
+            "missing_days にキーを足す": (self.resha(doc, dict(main, missing_days=dict(main["missing_days"], note="x"))),
+                                      "main.missing_days のキー"),
+            "main からキーを除く": (self.resha(doc, {k: v for k, v in main.items() if k != "a_equals_v"}), "main のキー"),
             # 流したコードの版を偽る（試みと同じに保つ欄は変えず、取り出したファイルの数だけ変える）：git の照合が止める
             "code の tree": (dict(doc, code=dict(doc["code"], tree=dict(doc["code"]["tree"],
                                                                        files=doc["code"]["tree"]["files"] + 1))),
@@ -486,7 +514,7 @@ class TestForgeries(Case):
         records = ledger.verify_chain(data)
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(ledger, "PROJECT_ROOT", self.c):
             doc, out_dir = seal_order5.run_and_build(self.c, data, records, records[-1], self.store5, self.tstore,
-                                                     seal_order5.prepare_out_dir(self.outside_new(), records[-1]["seq"]), tmp)
+                                                     seal_order5.prepare_out_dir(self.c, self.outside_new(), records[-1]["seq"]), tmp)
         self.raw5(O5, doc)
         out_v = self.verify_zero("all", "--rev", "auto", "--order5-outside", out_dir)
         self.assertIn("detail の中身は、--store と --themes-store も渡したときだけ", out_v)
@@ -504,6 +532,28 @@ class TestForgeries(Case):
         # 確かめの途中で止まったフォルダ（確かめのファイルだけ）は、次の実行でそのまま使う
         out = self.seal5()
         self.assertEqual(out["order5"][0]["kind"], O5)
+
+    def test_added_key_forged_stops_verify(self):
+        """キーを足した main（監査の例：main["official_alt"]）は、照合を飛ばして足すと、--store なしの verify が止める。"""
+        doc, _out_dir = self.honest()
+        main = doc["main"]
+        self.raw5(O5, self.resha(doc, dict(main, official_alt=main["official"])))
+        self.verify_stops("main のキー", "all", "--rev", "auto")
+
+    def test_out_dir_link(self):
+        """T-111 差し戻し2回目 軽-3：出力のフォルダ order5-seq<N> がリンクなら、試みを書かずに止まる。"""
+        target = os.path.join(self.c, "linked-out")
+        os.makedirs(target)
+        os.symlink(target, os.path.join(self.outside, "order5-seq16"))
+        before = self.ledger_bytes()
+        with self.assertRaisesRegex(ledger.LedgerError, "order5-seq16 がリンクである"):
+            self.seal5()
+        self.assertEqual(self.ledger_bytes(), before)
+
+    def test_out_dir_inside_project(self):
+        """出力のフォルダの実体がプロジェクトの中（Git の外のフォルダそのものが、プロジェクトの中のフォルダへのリンクの下）なら止まる。"""
+        with self.assertRaisesRegex(ledger.LedgerError, "プロジェクトの中にある"):
+            seal_order5.prepare_out_dir(self.c, os.path.join(self.c, "sealed"), 99)
 
     def test_attempt_code_forged(self):
         """試みの記録の order5.py の sha256 を偽ると、書く仕組み（git の照合）が書かず、照合を飛ばして足すと verify が止める。"""
@@ -633,6 +683,8 @@ class TestRealOrder5Build(unittest.TestCase):
                                                         "day_files_digest"]))
         rc = main["reference_criteria"]
         self.assertEqual(sorted(rc), ["computed", "criteria_ids", "note", "official", "order2_status", "source"])
+        # 本物の main のすべての辞書のキーの集合が、ledger の決まった集合と同じ（T-111 差し戻し2回目 中-1）
+        ledger.check_order5_main_keys(main, "本物の order5.py の main")
 
     def test_c2_not_computable(self):
         main, _got = self.check(self.to5.Fixture(self.to5.standard_spec(v1_empty_day="2015-03-31")), "ok")
@@ -641,7 +693,8 @@ class TestRealOrder5Build(unittest.TestCase):
     def test_c7_stopped(self):
         spec = self.to5.standard_spec()
         spec["2015-03-31"] = [("2", "", "", False)] * 2           # 欠けた日でない日に、テーマの付いた文書が無い
-        self.check(self.to5.Fixture(spec), "stopped")
+        main, _got = self.check(self.to5.Fixture(spec), "stopped")
+        ledger.check_order5_main_keys(main, "本物の order5.py の main（stopped）")
 
 
 class TestRecomputeUnit(unittest.TestCase):
