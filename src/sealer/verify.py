@@ -1712,10 +1712,6 @@ def cmd_stats_order(st, a):
     rows = ledger.check_themes_manifest_refs(st.records, body)
     # T-103（T-099 の監査 重大-1）：マニフェストが追記だけかを git の履歴で照らし、各版にも行の取り決めを当てる。回数は、
     # 履歴に現れた attempt の行の数の最大値。作業ツリーの版も、HEAD の版を先頭に持つこと
-    head_body = _version_or_empty(repo, "HEAD", ledger.THEMES_MANIFEST)
-    if body is not None and not body.startswith(head_body):
-        raise ledger.LedgerError("作業ツリーの %s が、HEAD の版を先頭に持たない（コミットした行を消すか書き換えた）"
-                                 % ledger.THEMES_MANIFEST)
 
     def themes_rules(v):
         ledger.check_themes_manifest_refs(st.records, v)
@@ -1783,6 +1779,7 @@ def check_manifest_append_only(repo, rel, rules=None, working=None):
         消す前の版と足し直した版のどちらも、もう一方の先頭部分にならない）。
       - どの commit の版も、その親の版を先頭に持つこと（行を消すコミットが無い）。最後の行を消しただけの版は鎖からは外れない
         ので、こちらで見つける。ファイルを消したコミットの版は空として扱うので、ここで止まる。
+      - working（作業ツリーの版）を渡したときは、HEAD の版を先頭に持たなければ止まる（作業ツリーで行を消した形）。
       - rules を渡せば、各版に当てる（返り値を集める）。
     この照合の git は GIT_ の環境変数を固定して動かす（_rgit。GIT_NO_REPLACE_OBJECTS と、存在しないパスの GIT_GRAFT_FILE
     なので、refs/replace/ と info/grafts は、この照合の版の辿り方を変えない。verify のほかの照合の git がそうとは限らない。
@@ -1790,6 +1787,10 @@ def check_manifest_append_only(repo, rel, rules=None, working=None):
     返り値: (commit の版の数, [rules(版)...], 鎖の上で最も長い版)。"""
     if not _not_shallow(repo):
         raise ledger.LedgerError("浅い clone なので、%s が追記だけかを git の履歴で照らせない" % rel)
+    head = _version_or_empty(repo, "HEAD", rel)
+    if working is not None and not working.startswith(head):
+        # 作業ツリーで行を消した形（鎖の上にはあっても、短い作業ツリーの版は止める。T-112：GKG にも同じく当てる）
+        raise ledger.LedgerError("作業ツリーの %s が、HEAD の版を先頭に持たない（コミットした行を消すか書き換えた）" % rel)
     commits = _rgit(repo, "log", "--all", "--reflog", "--full-history", "--format=%H", "--", rel).decode().split()
     entries = [("commit %s" % c[:12], _version_or_empty(repo, c, rel)) for c in commits]
     entries.append(("HEAD", _version_or_empty(repo, "HEAD", rel)))

@@ -244,9 +244,9 @@ def main(argv=None):
         return 0
     if not a.store:
         p.error("--store が要る")
-    now = datetime.datetime.now(datetime.timezone.utc)
     try:
-        rec, rel, ots_path, doc, commit = seal(a.store, now, a.ots)
+        # T-112：recorded_at は、書く前の照合のあと、追記の直前に取る（now に None を渡す。seal_records.write_doc_record）
+        rec, rel, ots_path, doc, commit = seal(a.store, None, a.ots)
     except Order4Written as e:
         print("止まった（順番4の記録は書いた）: %s" % e, file=sys.stderr)
         return 1

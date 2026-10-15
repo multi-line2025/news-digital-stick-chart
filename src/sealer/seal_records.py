@@ -310,23 +310,40 @@ def check_new(project, data_after, records_after, rec, doc, order4_store=None):
                                        result_refs(project, records_after, extra=(rec, doc)))
 
 
+def utc_now():
+    """今の時刻（UTC）。テストが差し替える。"""
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
 def write_doc_record(project, kind, doc, data, note, now, ots_cmd, runner=subprocess.run, content_after_append=False,
                      order4_store=None):
     """手順 3〜6。返り値: (記録, 中身のパス, .ots のパス か None)。
     content_after_append（T-095 差し戻し1回目 軽-1。順番4の入口が使う）：真なら、中身のファイルを記録に追記したあとで書く。
     追記の前で止まったときに、中身（一覧）の入ったファイルが作業ツリーに残らないようにするため。追記のあとで中身を書けな
     かったときは LedgerError（記録は鎖に残る。呼ぶ側が「書いた」と知らせる）。
-    order4_store（T-100）：順番4の記録を書くときの日の集計の置き場所（check_new が C7 の分母を数え直すのに使う）。"""
+    order4_store（T-100）：順番4の記録を書くときの日の集計の置き場所（check_new が C7 の分母を数え直すのに使う）。
+    now（T-112。T-105 の監査 軽-1）：None なら、記録の recorded_at は、書く前の照合（check_new。順番4では60〜100分かかる）の
+    あと、追記の直前に取った時刻（utc_now()）にする。照合には仮の時刻の記録を使い、追記する記録は recorded_at だけが違う。
+    書く入口（seal_order2・3・4 の main）は None を渡す。テストは決まった時刻を渡す。"""
     ledger.check_sealed_inside(project)    # T-017：入口を飛ばして直接呼んでも、リンクなら止まる
     _sealed, ledger_path = _paths(project)
     content = ledger.canonical_line(doc) + b"\n"
     sha = ledger.sha256_hex(content)
     rel = "sealed/%s-%s.json" % (kind, sha)
     targets = [{"path": rel, "role": kind, "sha256": sha}]
-    _records, rec, line = ledger.build_next_record(data, kind, targets, note, now)
+    late = now is None
+    _records, rec, line = ledger.build_next_record(data, kind, targets, note, utc_now() if late else now)
     data_after = data + line
     records_after = ledger.verify_chain(data_after)
     check_new(project, data_after, records_after, rec, doc, order4_store=order4_store)
+    if late:
+        # 追記の直前の時刻で作り直す。recorded_at のほかは照合した記録と同じであること
+        now = utc_now()
+        _records, rec2, _line = ledger.build_next_record(data, kind, targets, note, now)
+        if {k: v for k, v in rec2.items() if k != "recorded_at"} != {k: v for k, v in rec.items() if k != "recorded_at"}:
+            raise ledger.LedgerError("追記の直前に作り直した記録が、照合した記録と recorded_at のほかで違う。書かない")
+        rec = rec2
     if not content_after_append:
         ledger.write_once(os.path.join(project, rel), content)
     after = ledger.append_record(ledger_path, kind, targets, note, now, expected_data=data)

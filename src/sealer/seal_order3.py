@@ -272,9 +272,9 @@ def main(argv=None):
         return 0
     if not a.bundle_out:
         p.error("--bundle-out が要る")
-    now = datetime.datetime.now(datetime.timezone.utc)
     try:
-        out = seal(a.bundle_out, now, a.ots)
+        # T-112：recorded_at は、記録ごとに追記の直前に取る（now に None を渡す。試みと順番3の記録で別々の時刻になる）
+        out = seal(a.bundle_out, None, a.ots)
     except Order3Written as e:
         print("止まった（順番3の試みの記録は書いた）: %s" % e, file=sys.stderr)
         return 1

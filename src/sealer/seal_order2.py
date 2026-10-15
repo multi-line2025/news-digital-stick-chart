@@ -414,7 +414,7 @@ def main(argv=None):
         return 0
     if not a.bundle_out:
         p.error("--bundle-out が要る")
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = None          # T-112：recorded_at は、書く前の照合のあと、追記の直前に取る（seal_records.write_doc_record）
     try:
         rec, rel, ots_path, doc, commit = seal({"trial": a.trial_store, "official": a.official_store}, a.bundle_out, now,
                                                a.ots)
