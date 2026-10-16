@@ -63,7 +63,7 @@ NAIVE_SHA256 = "859947f442b6843a332922d5ee1159403e36e38394bfa99f64594b229c35373a
 naive = ei._load_verified("naive", "src/stats/naive.py", NAIVE_SHA256,
                           deps=(("candidates", candidates), ("periods", periods), ("scoring", scoring)))
 
-LABEL = "explore-signals-t117-v1"
+LABEL = "explore-signals-t117-v2"
 PHASE1_LABEL = "explore-signals-phase1-v1"
 
 ONE_DAY = datetime.timedelta(days=1)
@@ -102,6 +102,15 @@ GAP_KINDS = ("gap", "expect")             # gap：自分の上がり − 隣の�
 # 評価
 TRAIN_LAST = datetime.date(2018, 12, 3)   # 学習：予言日がこれ以前（判定期間が 2018 年の中で終わる）
 TEST_FIRST = datetime.date(2019, 1, 7)    # 検証：予言日がこれ以降
+
+
+def split_of(t):
+    """予言日 t が学習（"train"）・検証（"test"）・どちらでもない（None）のどれか。"""
+    if t <= TRAIN_LAST:
+        return "train"
+    if t >= TEST_FIRST:
+        return "test"
+    return None
 TOP_K = 10
 BLOCK_WEEKS = 4                           # 束ねる単位（判定期間 28 日の重なりに合わせた4週）
 BOOT_N = 2000
@@ -118,6 +127,31 @@ if ITEMSIZE != 4:
 
 class SignalError(Exception):
     pass
+
+
+def own_code_shas():
+    """このファイルと explore_islands.py の sha256（流した時点のファイルの中身）。"""
+    out = {}
+    for rel, path in (("src/stats/explore_signals.py", os.path.abspath(__file__)),
+                      ("src/stats/explore_islands.py", os.path.abspath(ei.__file__))):
+        with open(path, "rb") as f:
+            out[rel] = hashlib.sha256(f.read()).hexdigest()
+    return out
+
+
+# T-117 で作ったキャッシュ（run1・run2）を作ったコードの版について、確かめられたことと、記録が無いこと。
+# phase1.json の sha256 がこの値のときだけ、run.json と要約に写す。
+KNOWN_CACHE_PHASE1_SHA256 = "3c71b39e14ed657365ed538ac912e971ac66c47c6a0ed79aceb336af0a36caa5"
+KNOWN_CACHE_PROVENANCE = (
+    "phase1.json には、作ったコード（explore_signals.py・explore_islands.py）の sha256 の記録が無い（この版の phase1 の前に作った）。",
+    "run1（phase1.json の時刻 2026-10-16 17:46）：作った版の記録は無い。直後の試しの phase2（try1、17:56）の run.json には "
+    "explore_signals.py の sha256 fb841994b1c20bf1d8cdc99d40ad28641a7c723d4d32d669d981ebb662302fc8 が記録されているが、"
+    "run1 の phase1 がこれと同じ版で流れたことを示す記録は無い。",
+    "run2（phase1.json の時刻 18:22）：コミット d23f0e2（17:57）のあと、phase1 と phase2 を一続きのコマンドで流した。"
+    "そのときの phase2 の run.json（explore-t117）の explore_signals.py の sha256 は e69ecd9e59dfdea25ca487243f716d7b28b57825d3c97bd72842b6505abfa737"
+    "で、d23f0e2 の版と一致する。phase1 の版そのものの記録は無い。",
+    "run1 と run2 の74ファイルの sha256 はすべて同じ。",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -435,7 +469,7 @@ def phase1(root, store, cache_dir, workers, log):
         "missing": sorted(d.isoformat() for d in missing), "weeks": nweeks, "weeknc": weeknc,
         "months": months, "pair_files": {str(k): v for k, v in sorted(pair_files.items())}, "files": files,
         "lang_rows_not_dash": lang_rows, "refs": ctx["refs"], "v": "%d/%d" % (ctx["v"].numerator, ctx["v"].denominator),
-        "code": dict(ei._LOADED_SHA), "itemsize": ITEMSIZE, "byteorder": sys.byteorder,
+        "code": dict(ei._LOADED_SHA, **own_code_shas()), "itemsize": ITEMSIZE, "byteorder": sys.byteorder,
         "country_rule": "top %d by NC docs (non-T groups) over non-missing days %s..%s" % (
             TOP_COUNTRIES, ei.BLOCK_START, COUNTRY_RULE_END),
     }
@@ -912,10 +946,9 @@ def phase2(root, cache_dir, out_dir, workers, log):
             table["tag"].append(tags[i])
             table["week"].append(ti)
             r = len(table["t"]) - 1
-            if t <= TRAIN_LAST:
-                table["train"].append(r)
-            elif t >= TEST_FIRST:
-                table["test"].append(r)
+            sp = split_of(t)
+            if sp is not None:
+                table[sp].append(r)
             for m, y in zip(MULTIPLIERS, js):
                 table["y%d" % m].append(1 if y else 0)
                 for k, x in enumerate(naive.features_from_levels(lv, m, v)):
@@ -1087,8 +1120,6 @@ def build_outputs(meta, ctx, table, specs, fits, mondays, netstat, lo, hi, net_o
         y = table["y%d" % m]
         split["train_islands_m%d" % m] = sum(y[r] for r in table["train"])
         split["test_islands_m%d" % m] = sum(y[r] for r in table["test"])
-    with open(os.path.abspath(__file__), "rb") as f:
-        own = hashlib.sha256(f.read()).hexdigest()
     run = {
         "label": LABEL, "phase1_sha256": meta["phase1_sha256"], "phase1_label": meta["label"],
         "refs": ctx["refs"], "v": meta["v"], "tag_count": len(meta["tags"]), "countries": len(meta["countries"]),
@@ -1104,7 +1135,10 @@ def build_outputs(meta, ctx, table, specs, fits, mondays, netstat, lo, hi, net_o
                     "lead_base_weeks": LEAD_BASE_WEEKS, "gap_kinds": GAP_KINDS, "multipliers": MULTIPLIERS,
                     "horizon": HORIZON, "top_k": TOP_K, "boot_n": BOOT_N, "boot_seed": BOOT_SEED,
                     "block_weeks": BLOCK_WEEKS},
-        "code": dict(ei._LOADED_SHA, **{"src/stats/explore_signals.py": own}),
+        "code": dict(ei._LOADED_SHA, **own_code_shas()),
+        "cache_code_provenance": (list(KNOWN_CACHE_PROVENANCE) if meta["phase1_sha256"] == KNOWN_CACHE_PHASE1_SHA256
+                                  else meta.get("code") or "記録が無い"),
+        "comparisons_per_multiplier": len(specs) - 1, "comparisons_total": (len(specs) - 1) * len(MULTIPLIERS),
         "python": sys.version.split()[0], "citation": [ei.CITATION_EN, ei.CITATION_JA],
     }
     files = {
@@ -1167,18 +1201,26 @@ def summary_md(run, evrows, specs, sig, netstat):
     a("- 隣（未決事項2）：組の文書の数が %d 以上の相手のうち、lift10＝lift の上位10、share30＝n_ij / n_i の上位30。"
       "重みはどちらも n_ij / n_i。1歩先だけ。" % MIN_PAIR_DOCS)
     a("- 先に届く波の単位（未決事項3）：国（最初の予言日より前の NC の上位 %d か国。C の行の max(v1_docs, v2_docs)）。"
+      "**ここでの「国」は、記事が言及した場所（V1LOCATIONS の国の符号）で、報道した媒体の国ではない。**"
       "まとめ方は max（国ごとの上がりの最大 − 上位の国の合計の上がり）と frac2（直近の週の割合が過去52週の2倍を超えた国の割合）。"
       % TOP_COUNTRIES)
     if run["language_unit_computed"]:
         a("- 言語の単位も計算した。")
     else:
         a("- **言語の単位は計算できなかった**：日の集計の L・NL の行の言語の欄が、すべて「-」だった（言語が「-」でない行の数 %d）。"
-          "翻訳の記事を使わない決定（案a）で、言語の別が日の集計に入っていないため。" % run["lang_rows_not_dash"])
+          "翻訳の記事を使わない決定（案a）で、翻訳ストリームを読まないので、言語の別が日の集計に入っていないため。"
+          "今のデータでは言語を単位にして測れない。" % run["lang_rows_not_dash"])
+    a("- **そのため、2.2（s22）の結果は、方針書 2.2 の仮説（一部の国・言語の報道が先に扱い、全体が後から追う）を試したことにならない。**"
+      "試したのは「記事が言及した場所ごとの報道量の上がり方の違い」である。")
     a("- 2.1 隣の波：隣の上がり（log((c+V)/(B+V)) の重み付き平均）と、隣の勢い（直近7日の平均とその前の7日の平均の比の対数の重み付き平均）。")
     a("- 2.3 空白の形：gap＝自分の上がり − 隣の上がり。expect＝log((c_i+V)/(期待値+V))、期待値 = 網の期間の自分の平均 × "
       "Σ s_ji c_j / Σ s_ji（網の期間の隣の平均）、s_ji = n_ij / n_j。")
     a("- 三つすべて（all）：網と隣ごとに、2.1 と、2.2 の国・max と、2.3 の gap を足したもの。")
-    a("- この選択肢は、phase1（日の集計の集計）を流す前にコードに書いた。結果を見たあとで足した選択肢は無い。")
+    a("- 選択肢と結果を見た順（記録で確かめられることだけ）：コードの sha256 fb841994… の版で試しの phase2（try1）を流し、"
+      "その結果を見たあとで、選択肢は変えずに、要約の文（「選択肢は phase1 の前にコードに書き、結果を見たあとで足したものは無い」という文と、"
+      "網の周辺の数の一致の文）だけを足してコミットした"
+      "（d23f0e2、sha256 e69ecd9e…）。本番の数字は try1 と同じだった。phase1 の前に、日の集計2日分の行の種類の数（L の言語がすべて「-」"
+      "であることを含む）と、1か月のうち3日分の phase1 の時間を見た。それより前に試しがあったかどうかは、記録に無い。")
     if run.get("v1_docs_equal_c7_numerator_all_days") is True:
         a("- 網の周辺の数（テーマごとの V1 の文書の数）は、一覧のタグでは、すべての日で C7 の分子（v1_or_v2_docs）と一致した"
           "（V2 にだけ付く文書が、一覧のタグには無かった）。")
@@ -1198,10 +1240,22 @@ def summary_md(run, evrows, specs, sig, netstat):
               "%s〜%s" % (f6(r["ll_b4"][0]), f6(r["ll_b4"][1])), "%s〜%s" % (f6(r["ll_b1"][0]), f6(r["ll_b1"][1])),
               r["d_topk"], "%.1f〜%.1f" % r["tk_b4"]) for r in rows]))
         a("")
-        better = [r["name"] for r in rows if r["name"] != "naive" and r["ll_b4"][1] < 0]
-        worse = [r["name"] for r in rows if r["name"] != "naive" and r["ll_b4"][0] > 0]
-        a("- 対数損失の差の範囲（4週束ね）が0より下に収まったモデル：%s。" % ("、".join(better) if better else "無い"))
+        base = [r for r in rows if r["name"] == "naive"][0]["logloss"]
+
+        def rel(r):
+            return "%s（%+.2f%%）" % (r["name"], 100.0 * r["d_logloss"] / base)
+        better = [rel(r) for r in rows if r["name"] != "naive" and r["ll_b4"][1] < 0]
+        worse = [rel(r) for r in rows if r["name"] != "naive" and r["ll_b4"][0] > 0]
+        best = min((r for r in rows if r["name"] != "naive"), key=lambda r: (r["d_logloss"], r["name"]))
+        a("- 対数損失の差の範囲（4週束ね）が0より下に収まったモデル（カッコは素朴な予測の対数損失に対する差の割合）：%s。"
+          % ("、".join(better) if better else "無い"))
         a("- 0より上に収まったモデル（素朴な予測より悪い）：%s。" % ("、".join(worse) if worse else "無い"))
+        a("- 差の大きさ：最も下がったモデル（%s）でも、素朴な予測の対数損失の %.2f%%。" % (
+            best["name"], 100.0 * -best["d_logloss"] / base))
+        a("- この一覧の読み方：比べた数はこの倍率で %d（素朴な予測を除く）、3つの倍率で計 %d で、多重比較の補正をしていない。"
+          "4週の束どうしは独立でない（判定期間 %d 日が隣の束に重なる。最後の束は %d 週）。範囲が0を含まないことは、"
+          "信号が効くことの確かめにはならない。" % (len(rows) - 1, (len(rows) - 1) * len(MULTIPLIERS), HORIZON,
+                                                   run["test_weeks"] - BLOCK_WEEKS * (run["test_blocks_4w"] - 1)))
         nc = [r["name"] for r in rows if not r["conv"]]
         if nc:
             a("- 収まらなかった推定：%s（naive.fit_logistic の100回で収まらなかった。結果は参考）。" % "、".join(nc))
@@ -1232,8 +1286,11 @@ def summary_md(run, evrows, specs, sig, netstat):
       "テーマが一覧に残っている（オーナーの決定 2026-10-16、(a) このまま進める）。網の隣にもこれらが入る。この要約にはテーマの名前を載せていない。")
     a("- **WB のテーマの段のような上昇**：2016年4月から WB のテーマの一部が段のように上がり、2017年に戻る（T-116 の要約 6章）。"
       "学習の期間（2016〜2018年）に入り、網と信号にも入る。報道かテーマの付け方の変化かは区別できない。")
-    a("- 検証は1回の前後の分け方だけで、選択肢が多い（%d 個のモデル × %d つの倍率）。一番良く見えるものを選ぶと、"
-      "偶然の良さを拾う。ここでは選ばない。" % (len(specs), len(MULTIPLIERS)))
+    a("- 検証は1回の前後の分け方だけで、選択肢が多い（素朴な予測を除く %d 個のモデル × %d つの倍率 = %d の比べ方）。"
+      "このほかに、組の文書の数の下限（%d）・国の数（%d）・国別の過去の週の数（%d）・学習と検証の区切りの日・指標の種類"
+      "（対数損失・AUC・上位 %d）も選びうるもので、この数に入っていない。一番良く見えるものを選ぶと、偶然の良さを拾う。ここでは選ばない。"
+      % (len(specs) - 1, len(MULTIPLIERS), (len(specs) - 1) * len(MULTIPLIERS), MIN_PAIR_DOCS, TOP_COUNTRIES,
+         LEAD_BASE_WEEKS, TOP_K))
     a("- 網は月の単位でまとめたので、更新は月の初め（四半期の初め）だけで、予言日の前の数週は網に入らない。")
     a("- 国別の数は、テーマ×国の行の max(v1_docs, v2_docs) で、V1 と V2 の両方に付いた文書を1回と数える C7 とは数え方が違う。")
     a("")
@@ -1245,6 +1302,14 @@ def summary_md(run, evrows, specs, sig, netstat):
     for k in sorted(run["code"]):
         a("- %s：sha256 %s" % (k, run["code"][k]))
     a("- キャッシュ phase1.json：sha256 %s" % run["phase1_sha256"])
+    prov = run["cache_code_provenance"]
+    if isinstance(prov, list):
+        a("- キャッシュを作ったコードの版：")
+        for x in prov:
+            a("  - " + x)
+    else:
+        a("- キャッシュを作ったコードの版：%s" % (json.dumps(prov, ensure_ascii=False, sort_keys=True)
+                                         if isinstance(prov, dict) else prov))
     a("")
     a("## 引用")
     a(ei.CITATION_EN)

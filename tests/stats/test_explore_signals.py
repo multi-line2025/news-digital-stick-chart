@@ -388,8 +388,14 @@ class TestModels(unittest.TestCase):
         self.assertEqual(sorted(files), sorted(es.OUT_NAMES))
         s = files["summary.md"].decode("utf-8")
         for phrase in ("言語の単位は計算できなかった", "一覧と V の先読み", "除外の規則の漏れ", "WB のテーマの段",
-                       ei.CITATION_JA):
+                       ei.CITATION_JA, "報道した媒体の国ではない", "仮説", "多重比較の補正をしていない",
+                       "独立でない", "それより前に試しがあったかどうかは、記録に無い", "記録が無い"):
             self.assertIn(phrase, s)
+        self.assertNotIn("結果を見たあとで足した選択肢は無い。", s)
+        run = json.loads(files["run.json"])
+        self.assertIn("src/stats/explore_signals.py", run["code"])
+        self.assertIn("src/stats/explore_islands.py", run["code"])
+        self.assertEqual(run["comparisons_total"], 78)
         for n, d in files.items():
             self.assertIsNone(ei.EMAIL_RE.search(d), n)
 
@@ -399,6 +405,29 @@ class TestModels(unittest.TestCase):
             with self.assertRaises(es.SignalError):
                 es.write_outputs("/nonexistent", {n: b"" for n in es.OUT_NAMES})
             op.assert_not_called()
+
+
+class TestSplit(unittest.TestCase):
+    def test_train_and_test_do_not_overlap(self):
+        """学習の最後の予言日の判定期間の終わり < 検証の最初の予言日の判定期間の始まり。"""
+        last_judged = es.TRAIN_LAST + datetime.timedelta(days=es.HORIZON)
+        first_test_judged = es.TEST_FIRST + DAY
+        self.assertLess(last_judged, first_test_judged)
+        ms = ei.prediction_mondays()
+        train = [t for t in ms if es.split_of(t) == "train"]
+        test = [t for t in ms if es.split_of(t) == "test"]
+        self.assertEqual(max(train), es.TRAIN_LAST)
+        self.assertEqual(min(test), es.TEST_FIRST)
+        self.assertLess(max(train) + datetime.timedelta(days=es.HORIZON), min(test) + DAY)
+        self.assertTrue(all(es.split_of(t) is None for t in ms if es.TRAIN_LAST < t < es.TEST_FIRST))
+
+
+class TestProvenance(unittest.TestCase):
+    def test_own_code_shas(self):
+        got = es.own_code_shas()
+        for rel in ("src/stats/explore_signals.py", "src/stats/explore_islands.py"):
+            with open(os.path.join(PROJECT, *rel.split("/")), "rb") as f:
+                self.assertEqual(got[rel], hashlib.sha256(f.read()).hexdigest())
 
 
 if __name__ == "__main__":
