@@ -55,7 +55,7 @@ ei = eg.ei
 naive = em.naive
 counting = ei.counting
 
-LABEL = "explore-denominator-t122-v1"
+LABEL = "explore-denominator-t122-v2"   # v2：T-122 の申し送り（要約の補い。数字と表は同じ）
 PHASE1_LABEL = "explore-denominator-phase1-v1"
 MULTIPLIERS = em.MULTIPLIERS
 HORIZON = em.HORIZON
@@ -437,6 +437,7 @@ def phase2(root, cache_dir, t117_cache, out_dir, workers, log):
     n = len(tags)
     days = ctx["days"]
     mondays = ei.prediction_mondays()
+    meta.update(data_facts(meta))
     log("キャッシュを読んだ")
     rows = {}
     lo_hi = {}
@@ -503,6 +504,14 @@ def pct(a, b):
     return "-" if not b else "%.2f" % (100.0 * a / b)
 
 
+def data_facts(meta):
+    """要約の補いのための事実：一覧のタグで v1 と v12 が全日で同じか、数え方ごとの最大の分母。"""
+    missing = set(meta["missing"])
+    keep = [i for i, d in enumerate(meta["days"]) if d not in missing]
+    return {"v1_equals_v12": meta["v1"] == meta["v12"],
+            "max_denominator": {"C7": max(meta["c7_totals"][i] for i in keep), "docs": max(meta["docs"][i] for i in keep)}}
+
+
 def build_outputs(meta, ctx, rows, mondays, naive_res, cent, checks):
     years = sorted({t.year for t in mondays})
     rate_rows = []
@@ -561,6 +570,8 @@ def build_outputs(meta, ctx, rows, mondays, naive_res, cent, checks):
            "v_tiny": "%d/%d" % (V_TINY.numerator, V_TINY.denominator), "checks_vs_t117_cache": checks,
            "variants": VARIANTS, "splits": {k: [str(x) for x in s] for k, s in SPLITS.items()},
            "centrality": CENTRALITY, "volume_features": VOLUME_FEATURES,
+           "v1_equals_v12_all_days": meta.get("v1_equals_v12"),
+           "max_denominator": meta.get("max_denominator"),
            "citation": [ei.CITATION_EN, ei.CITATION_JA]}
     files["run.json"] = (json.dumps(run, ensure_ascii=False, sort_keys=True, indent=1) + "\n").encode("utf-8")
     files["summary.md"] = summary_md(run, rt, ov, naive_res, cent, years)
@@ -586,6 +597,15 @@ def summary_md(run, rt, ov, naive_res, cent, years):
         a("  - %s" % COUNTING_JA[c])
     a("- V は C7 の比率の値なので、ほかの数え方では大きさの意味が違う。そのため、どの数え方でも「V を使った場合」（_V）と"
       "「倍率の条件だけの場合」（_m。V の代わりに %s を使う）を並べる。C7_V が T-115 と同じ。" % run["v_tiny"])
+    md_ = run.get("max_denominator")
+    if md_:
+        a("- V_TINY（%s）の大きさ：比率の最小の非零の値は、1件 ÷ その日の分母で、欠けた日でない日の分母の最大は C7 で %d、"
+          "記事の数（docs）で %d なので、最小の非零の比率はそれぞれ 1/%d・1/%d 以上である。V_TINY はそれよりずっと小さく、"
+          "条件として効かない大きさ。" % (run["v_tiny"], md_["C7"], md_["docs"], md_["C7"], md_["docs"]))
+    if run.get("v1_equals_v12_all_days") is True:
+        a("- X と C1 が同じになる理由：一覧のタグでは、V2 にだけ付く記事が無い（V2 のテーマ ⊆ V1 のテーマ。T-117 の係の発見と、"
+          "T-122 の監査で日の集計7日を直接確かめたこと）。この探索のキャッシュでも、一覧のタグの v1_or_v2_docs と v1_docs は"
+          "すべての日で一致した。そのため X の分子は C1 の分子と同じで、X と C1 の表の数字はすべて同じになる。")
     a("- 日の集計から数え直した C7 の分子・V1 の文書の数・記事の数は、T-117 のキャッシュとすべての日で一致した（%s）。" % (
         "、".join("%s=%s" % kv for kv in sorted(run["checks_vs_t117_cache"].items()))))
     a("- 素朴な予測：naive.py の特徴量のロジスティック回帰（リッジ 1）。分け方 A は T-117 と同じ（学習 〜%s、検証 %s〜）、"
@@ -681,6 +701,7 @@ def summary_md(run, rt, ov, naive_res, cent, years):
     a("- 除外の規則の漏れ（民族・人物の姓・宗教・犯罪・紛争・政治に当たる名前のテーマが一覧に残っている。オーナーの決定 2026-10-16、"
       "(a) このまま進める）。要約にはテーマの名前を載せていない。")
     a("- WB のテーマの段のような上昇（T-116 の要約 6章）は、どの数え方にも入る。")
+    a("- 中心性の確かめの報道量（vol_ratio・vol_level）は、比率ではなく V1 の文書の生の数で、収集元の数の増減も入る。")
     a("- 中心性の確かめは、報道量と次数の一次の回帰で差し引いたもので、ほかの形（非線形・交互作用）で説明できる分は残りに入る。"
       "媒介中心性は始点256個の近似（T-119 と同じ）。")
     a("")

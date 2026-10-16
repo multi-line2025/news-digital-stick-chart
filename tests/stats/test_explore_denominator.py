@@ -84,6 +84,15 @@ class TestCounting(unittest.TestCase):
         self.assertIn(ed.BASE_VARIANT, ed.VARIANTS)
 
 
+class TestFacts(unittest.TestCase):
+    def test_data_facts(self):
+        meta = {"missing": ["d2"], "days": ["d1", "d2", "d3"], "v1": array.array("I", [1, 2]),
+                "v12": array.array("I", [1, 2]), "c7_totals": [5, 99, 7], "docs": [3, 99, 2]}
+        f = ed.data_facts(meta)
+        self.assertTrue(f["v1_equals_v12"])
+        self.assertEqual(f["max_denominator"], {"C7": 7, "docs": 3})
+
+
 class TestSplits(unittest.TestCase):
     def test_splits_do_not_overlap(self):
         ms = ei.prediction_mondays()
@@ -179,7 +188,7 @@ class TestOutputs(unittest.TestCase):
         rng = random.Random(9)
         vals = {c: {k: rng.gauss(0, 1) for k in base} for c in ed.CENTRALITY + ed.VOLUME_FEATURES}
         cent = ed.centrality_eval(base, vals, ms, tags, V)
-        meta = {"phase1_sha256": "0" * 64}
+        meta = {"phase1_sha256": "0" * 64, "v1_equals_v12": True, "max_denominator": {"C7": 7000000, "docs": 300000}}
         ctx = {"refs": {}, "v": V}
         f1 = ed.build_outputs(meta, ctx, rows, ms, naive_res, cent, {"v12_equals_t117_c7": True})
         f2 = ed.build_outputs(meta, ctx, rows, ms, naive_res, cent, {"v12_equals_t117_c7": True})
@@ -188,7 +197,8 @@ class TestOutputs(unittest.TestCase):
         s = f1["summary.md"].decode("utf-8")
         self.assertNotIn("**", s)
         self.assertNotIn("T00", s)
-        for phrase in ("検証の期間の再利用", "封印された候補ではない", "多重比較の補正をしていない", ei.CITATION_JA):
+        for phrase in ("検証の期間の再利用", "封印された候補ではない", "多重比較の補正をしていない", ei.CITATION_JA,
+                       "X と C1 が同じになる理由", "条件として効かない大きさ", "V1 の文書の生の数"):
             self.assertIn(phrase, s)
         run = json.loads(f1["run.json"])
         self.assertIn("src/stats/explore_denominator.py", run["code"])
