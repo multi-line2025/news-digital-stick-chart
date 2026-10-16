@@ -100,6 +100,22 @@ class TestGraphFunctions(unittest.TestCase):
         self.assertAlmostEqual(h1, 2.0)
         self.assertAlmostEqual(h2, 10.0)                # 2歩先は 3 だけ（0 と 1・2 は除く）
 
+    def test_hop1_same_as_t117_neighbor_signal(self):
+        """D_hop1 は T-117 の隣の波（es.neighbor_signal の上がり）と同じ値になる。"""
+        rng = random.Random(11)
+        n = 30
+        mat = array.array("I", [0] * (n * n))
+        for i in range(n):
+            for j in range(i + 1, n):
+                x = rng.choice([0, 0, 25, 40, 100])
+                mat[i * n + j] = x
+                mat[j * n + i] = x
+        marg = [sum(mat[i * n:(i + 1) * n]) + 10 for i in range(n)]
+        nb = es.neighbors_from_matrix(mat, n, marg, sum(marg))["lift10"]
+        rises = [rng.gauss(0, 1) if rng.random() > 0.1 else None for _ in range(n)]
+        for i in range(n):
+            self.assertEqual(eg.hop_signals(i, nb, rises)[0], es.neighbor_signal(nb.get(i), rises, [None] * n)[0])
+
     def test_union_graph(self):
         nb = es.Nbrs([[(1, 0.5, 0.1)], [], []])
         mat = array.array("I", [0, 7, 0, 7, 0, 0, 0, 0, 0])
@@ -203,12 +219,37 @@ class TestOutputs(unittest.TestCase):
                        "WB のテーマの段", ei.CITATION_JA, "出した差の範囲"):
             self.assertIn(phrase, s)
         self.assertNotIn("T00", s)                    # 要約にテーマの名前を載せない
+        self.assertNotIn("群れの見方を試したことにならない", s)   # 群れが1つにならない場合は注記しない
+        self.assertIn("(n−1)(n−2)/2", s)
+        self.assertIn("nb_rise_w12m_lift10", s)
         run = json.loads(f1["run.json"])
         self.assertEqual(run["models_total"], 36)
         self.assertEqual(run["ranges_total"], 39)
         self.assertIn("src/stats/explore_graph.py", run["code"])
         for n, d in f1.items():
             self.assertIsNone(ei.EMAIL_RE.search(d), n)
+
+    def test_collapsed_note(self):
+        tb = tiny_table()
+        eg._init_fit(tb)
+        res = {}
+        with mock.patch.dict(em.GBDT, {"trees": 2, "min_leaf": 20}):
+            for m in em.MULTIPLIERS:
+                for name, _k, _c, _r in eg.MODELS:
+                    args, out = eg._fit_task((m, name))
+                    res[args] = out
+            info = {"daily_min_read": "2015-03-09", "daily_max_read": "2020-10-12",
+                    "network_last_day_minus_t_max_days": -1, "phase1_sha256": "0" * 64, "phase1_label": "x",
+                    "refs": {}, "v": "1/543539", "graph_months": [201603]}
+            cstats = [(201603, "lift10", {"n_comm": 5, "singletons": 1, "max_size": 9, "median_size": 2,
+                                          "n_size_ge5": 1, "nmi_prev": None, "sweeps": 3}),
+                      (201603, "share30", {"n_comm": 1, "singletons": 0, "max_size": 3587, "median_size": 3587,
+                                           "n_size_ge5": 1, "nmi_prev": None, "sweeps": 3})]
+            s = eg.build_outputs(tb, info, cstats, res)["summary.md"].decode("utf-8")
+        self.assertEqual(s.count("B_comm_share30 は群れの見方を試したことにならない"), 3)
+        self.assertIn("全部のタグの上がりの平均", s)
+        self.assertIn("材料には、share30 のグラフの群れはならない", s)
+        self.assertIn("share30 のグラフでは群れが1つにまとまり", s)
 
     def test_write_refuses_existing(self):
         with mock.patch.object(eg.os, "makedirs"), mock.patch.object(eg.os.path, "lexists", return_value=True), \

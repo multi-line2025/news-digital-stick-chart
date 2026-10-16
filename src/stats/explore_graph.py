@@ -57,7 +57,7 @@ ei = em.ei
 naive = em.naive
 candidates = em.candidates
 
-LABEL = "explore-graph-t119-v1"
+LABEL = "explore-graph-t119-v2"   # v2：T-120 で要約の文を手直し（数字・作り方・表は同じ）
 MULTIPLIERS = em.MULTIPLIERS
 HORIZON = em.HORIZON
 
@@ -656,7 +656,20 @@ def build_outputs(tb, info, cstats, res):
     return files
 
 
+def collapsed_variants(cstats):
+    """全月で群れが1つだったグラフの種類と、そのときの点の数。"""
+    out = []
+    n_nodes = None
+    for cv in COMM_VARIANTS:
+        ss = [s for _mk, c, s in cstats if c == cv]
+        if ss and all(s["n_comm"] == 1 for s in ss):
+            out.append(cv)
+            n_nodes = ss[0]["max_size"]
+    return out, n_nodes
+
+
 def summary_md(run, rows, sig, cstats):
+    collapsed, n_nodes = collapsed_variants(cstats)
     L = []
     a = L.append
     md = ei.md_table
@@ -677,10 +690,11 @@ def summary_md(run, rows, sig, cstats):
     a("- 2 群れ（B_comm_*）：重み付きのラベル伝播（番号の順に更新、同じ重みなら小さいラベル、最大 %d 回）。同じ群れの他のタグの上がりの平均、"
       "群れの大きさの log、前の月の群れとの入れ替わり（1 − Jaccard）。" % LPA_MAX_SWEEPS)
     a("- 3 橋渡しの位置（C_btw）：媒介中心性（重みなし、lift10 のグラフ）。**近似**：始点を %d 個だけ乱数の種 %d で選び（どの月も同じ始点）、"
-      "Brandes の方法で足して n / %d 倍した。12か月のグラフでの値の log と、直近3か月（M-3〜M-1）のグラフとの比の log。"
-      % (BTW_SOURCES, BTW_SEED, BTW_SOURCES))
+      "Brandes の方法で足して n / %d 倍し、無向なので 2 で割り、(n−1)(n−2)/2 で正規化した。12か月のグラフでの値の log と、"
+      "直近3か月（M-3〜M-1）のグラフとの比の log。" % (BTW_SOURCES, BTW_SEED, BTW_SOURCES))
     a("- 4 2歩先の隣（D_hop*）：1歩の隣（lift10、重み n_ij/n_i）の上がりの重み付き平均と、2歩先（1歩の隣と自分を除く。重みは2つの積）の上がり"
-      "の重み付き平均。上がりは log((c+V)/(B+V))。")
+      "の重み付き平均。上がりは log((c+V)/(B+V))。D_hop1 は T-117 の nb_rise_w12m_lift10（2.1 隣の波、網 w12m・隣 lift10）と"
+      "同じ作り方（同じ網・同じ隣・同じ重み付き平均。テストで確かめた）。")
     a("- 5 中心性の変化（E_*）：直近3か月の lift10 グラフと12か月の lift10 グラフでの、次数の比の log（E_deg）と PageRank（減衰 %g、%d 回）"
       "の比の log（E_pr）。" % (PR_DAMPING, PR_ITERS))
     a("- all：A・B_comm_lift10・C・D_hop12・E_deg・E_pr の列すべて。gbdt_graph：all の列を T-118 と同じ設定の GBDT で足したもの。")
@@ -717,6 +731,10 @@ def summary_md(run, rows, sig, cstats):
         a("- naive との対数損失の差の範囲が0より下に収まったモデル：%s。0より上に収まったモデル：%s。" % (
             "、".join(below) if below else "無い", "、".join(above) if above else "無い"))
         by = {r["name"]: r for r in rs}
+        for cv in collapsed:
+            a("- 注記：%s のグラフは全月で群れが1つ（%d 点すべて）だった。B_comm_%s は群れの見方を試したことにならない。"
+              "comm_rise_%s は自分以外の全部のタグの上がりの平均で、その週の全体の上がりを足したものに当たる"
+              "（群れの大きさは一定、入れ替わりは 0）。" % (cv, n_nodes, cv, cv))
         if by["gbdt_naive"]["mn"]["d_logloss"] > 0:
             a("- 注記：基準の gbdt_naive は naive より %+.2f%% 悪い。gbdt_graph の「相手との差」は、基準が下がった分を差し引いて読む"
               "（naive との差は %+.2f%%、範囲 %s〜%s）。この倍率では、GBDT を上限の目安と読めない。" % (
@@ -748,6 +766,11 @@ def summary_md(run, rows, sig, cstats):
               statistics.median([s["n_size_ge5"] for s in ss]), statistics.median([s["max_size"] for s in ss]),
               f6(statistics.median(nm)) if nm else "-", f6(min(nm)) if nm else "-", f6(max(nm)) if nm else "-",
               max(s["sweeps"] for s in ss)))
+    for cv in collapsed:
+        a("- %s のグラフで群れが1つにまとまったのは、グラフの作り方の結果である：各点の上位30の隣を双方向にまとめると、ほぼ全点と"
+          "つながる点ができ、ラベル伝播の順番・重み・同点の扱いによらず一つにまとまる（T-119 の監査で、月 201807 について作り直し、"
+          "重み・順番・同点の扱いを変えても1つになることを再現した）。採点計画の「出来事のまとまりで束ねる」単位の材料には、%s のグラフの"
+          "群れはならない。" % (cv, cv))
     a("- 月ごとの値は communities.tsv。群れの中のテーマの名前は載せていない。")
     a("")
     a("## 4. 予言の時点のデータだけを使ったことの確かめ")
@@ -766,7 +789,9 @@ def summary_md(run, rows, sig, cstats):
       "学習の期間のグラフ（組の文書の数、群れ、中心性）にも入る。")
     a("- **近似**：媒介中心性は始点 %d 個の近似で、乱数の種を変えれば値は変わる。ラベル伝播は更新の順番に依る（番号の順に固定）。" % BTW_SOURCES)
     a("- グラフは月ごとにまとめた網なので、予言日の前の数週は入らない。グラフの作り方（隣の数、組の文書の数の下限、無向にまとめること）"
-      "も選びうるもので、比べた数に入っていない。")
+      "も選びうるもので、比べた数に入っていない。%s" % (
+          ("作り方で結果が大きく変わる例として、%s のグラフでは群れが1つにまとまり、群れの見方を試せなかった（1章・3章）。"
+           % "・".join(collapsed)) if collapsed else ""))
     a("")
     a("## 6. 本番の前に流したもの")
     a("- 本物のデータでは、検証の結果を出さない時間の見積もり（1か月分のグラフの計算）だけを流した（係の申告）。")
