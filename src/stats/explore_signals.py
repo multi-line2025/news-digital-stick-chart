@@ -63,7 +63,7 @@ NAIVE_SHA256 = "859947f442b6843a332922d5ee1159403e36e38394bfa99f64594b229c35373a
 naive = ei._load_verified("naive", "src/stats/naive.py", NAIVE_SHA256,
                           deps=(("candidates", candidates), ("periods", periods), ("scoring", scoring)))
 
-LABEL = "explore-signals-t117-v2"
+LABEL = "explore-signals-t117-v3"
 PHASE1_LABEL = "explore-signals-phase1-v2"   # v2：phase1.json の code に explore_signals.py・explore_islands.py を入れた
 # 読んでよいキャッシュの版。v1 は T-117 の run1・run2（code にこの2つの sha256 が無い。形のほかの部分は同じ）
 ACCEPTED_PHASE1_LABELS = ("explore-signals-phase1-v1", PHASE1_LABEL)

@@ -316,6 +316,7 @@ class TestFree(unittest.TestCase):
 
 class TestLoadCache(unittest.TestCase):
     def test_labels(self):
+        self.assertEqual(es.LABEL, "explore-signals-t117-v3")
         self.assertEqual(es.PHASE1_LABEL, "explore-signals-phase1-v2")
         self.assertIn("explore-signals-phase1-v1", es.ACCEPTED_PHASE1_LABELS)
 

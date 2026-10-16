@@ -46,7 +46,7 @@ naive = es.naive
 candidates = es.candidates
 scoring = es.scoring
 
-LABEL = "explore-models-t118-v1"
+LABEL = "explore-models-t118-v2"   # v2：T-118 の申し送り（要約の注記）
 
 MULTIPLIERS = es.MULTIPLIERS
 HORIZON = es.HORIZON
@@ -739,6 +739,8 @@ def build_outputs(tb, info, res, chosen, last_inner, first_val):
     with open(os.path.abspath(__file__), "rb") as f:
         code["src/stats/explore_models.py"] = hashlib.sha256(f.read()).hexdigest()
     n_models = len(MODELS) - 1
+    # 範囲の数：素朴な予測以外のモデルごとに naive との差の範囲が1つ、比べる相手が naive でなければ相手との差の範囲がもう1つ
+    n_ranges = sum(1 + (1 if ref not in (None, "naive") else 0) for _n, _k, _f, ref in MODELS if ref is not None)
     run_json = dict(info, **{
         "label": LABEL, "code": code, "python": sys.version.split()[0],
         "rows": {"all": len(tb["t"]), "train": len(tb["train"]), "test": len(tb["test"]),
@@ -751,6 +753,7 @@ def build_outputs(tb, info, res, chosen, last_inner, first_val):
                     "gbdt": GBDT, "families": FAMILIES, "models": MODELS, "family_fits": FAMILY_FITS,
                     "boot_n": es.BOOT_N, "boot_seed": es.BOOT_SEED, "block_weeks": es.BLOCK_WEEKS},
         "comparisons_per_multiplier": n_models, "comparisons_total": n_models * len(MULTIPLIERS),
+        "ranges_per_multiplier": n_ranges, "ranges_total": n_ranges * len(MULTIPLIERS),
         "test_weeks": len(weeks_all), "test_blocks_4w": len(es.blocks_of(weeks_all, es.BLOCK_WEEKS)),
         "citation": [ei.CITATION_EN, ei.CITATION_JA]})
     files = {"models.tsv": models_tsv, "families.tsv": families_tsv, "ridge.tsv": ridge_tsv, "coefs.tsv": coefs_tsv,
@@ -785,6 +788,30 @@ NAME_JA = {
     "gbdt_first": "GBDT：＋信号 first",
     "gbdt_all": "GBDT：＋T-117 の全部の信号",
 }
+
+
+def base_notes(rows, nv):
+    """基準（ridge_naive・gbdt_naive）が naive より悪い倍率の注記。rows はその倍率のモデルの行。"""
+    by = {r["name"]: r for r in rows}
+    out = []
+    for base, members in (("ridge_naive", ("ridge_first", "ridge_all", "ridge_int_first")),
+                          ("gbdt_naive", ("gbdt_first", "gbdt_all"))):
+        b = by[base]
+        if b["mn"]["d_logloss"] <= 0:
+            continue
+        lams = sorted({"%g" % by[x]["lam"] for x in members if by[x]["lam"] is not None})
+        extra = ""
+        if base == "ridge_naive":
+            extra = "比べる2つで強さが違う（基準 %g、比べるもの %s）。" % (b["lam"], "・".join(lams))
+        else:
+            extra = "この倍率では、GBDT を上限の目安と読めない。"
+        out.append("- 注記：基準の %s は naive より %+.2f%% 悪い。%s%s の「相手との差」は、基準が下がった分を差し引いて読む。"
+                   "naive との差は %s。" % (
+                       base, 100 * b["mn"]["d_logloss"] / nv["logloss"], extra, "・".join(members),
+                       "、".join("%s %+.2f%%（%s〜%s）" % (x, 100 * by[x]["mn"]["d_logloss"] / nv["logloss"],
+                                                          f6(by[x]["mn"]["d_ll_ci"][0]), f6(by[x]["mn"]["d_ll_ci"][1]))
+                                for x in members)))
+    return out
 
 
 def summary_md(run, mrows, frows, rrows):
@@ -848,10 +875,13 @@ def summary_md(run, mrows, frows, rrows):
         nc = [r["name"] for r in rows if not r["conv"]]
         if nc:
             a("- 収まらなかった推定：%s（結果は参考）。" % "、".join(nc))
-        a("- この一覧の読み方：比べた数はこの倍率で %d（素朴な予測を除く）、3つの倍率で計 %d で、多重比較の補正をしていない。"
-          "4週の束どうしは独立でない（判定期間 %d 日が隣の束に重なる。最後の束は %d 週）。範囲が0を含まないことは、"
-          "形や信号が効くことの確かめにはならない。" % (run["comparisons_per_multiplier"], run["comparisons_total"], HORIZON,
-                                                     run["test_weeks"] - es.BLOCK_WEEKS * (run["test_blocks_4w"] - 1)))
+        a("- この一覧の読み方：比べたモデルはこの倍率で %d（素朴な予測を除く）、3つの倍率で計 %d。出した差の範囲は、この倍率で %d、"
+          "計 %d で、多重比較の補正をしていない。4週の束どうしは独立でない（判定期間 %d 日が隣の束に重なる。最後の束は %d 週）。"
+          "範囲が0を含まないことは、形や信号が効くことの確かめにはならない。" % (
+              run["comparisons_per_multiplier"], run["comparisons_total"], run["ranges_per_multiplier"],
+              run["ranges_total"], HORIZON, run["test_weeks"] - es.BLOCK_WEEKS * (run["test_blocks_4w"] - 1)))
+        for line in base_notes(rows, nv):
+            a(line)
         a("")
     a("比べる相手：lin_first・naive_int は naive、int_first は lin_first、int_both は naive_int、ridge_* は ridge_naive、"
       "gbdt_first・gbdt_all は gbdt_naive、ridge_naive・gbdt_naive は naive。")
@@ -877,6 +907,13 @@ def summary_md(run, mrows, frows, rrows):
                "-" if not r["ref"] else r["x"]["d_topk"]) for r in frows if r["m"] == m]))
         a("")
     a("系統ごとの比べ方も、多重比較の補正をしていない（系統4 × 比べ方4 × 倍率3）。系統の検証の行は少ないものがあり、束ねた範囲は粗い。")
+    for m in MULTIPLIERS:
+        cnt = {}
+        for r in frows:
+            if r["m"] == m and r["name"] == "naive":
+                cnt[r["fam"]] = (r["x"]["n"], r["x"]["pos"])
+        a("- 倍率 %d の系統ごとの検証の行と島の数：%s。" % (m, "、".join("%s %d 行・島 %d" % (f, cnt[f][0], cnt[f][1])
+                                                              for f in FAMILIES if f in cnt)))
     a("")
     a("## 4. 読み方の手がかり（事実だけ）")
     for m in MULTIPLIERS:
@@ -888,6 +925,12 @@ def summary_md(run, mrows, frows, rrows):
               100 * rows["lin_first"]["mr"]["d_logloss"] / rows["lin_first"]["mr"]["ref_logloss"],
               100 * rows["ridge_first"]["mr"]["d_logloss"] / rows["ridge_first"]["mr"]["ref_logloss"],
               100 * rows["gbdt_first"]["mr"]["d_logloss"] / rows["gbdt_first"]["mr"]["ref_logloss"]))
+        if rows["ridge_naive"]["mn"]["d_logloss"] > 0 or rows["gbdt_naive"]["mn"]["d_logloss"] > 0:
+            a("  - 倍率 %d では、比べる相手（基準）の ridge_naive か gbdt_naive が naive より悪い。相手との差は、基準が下がった分を"
+              "差し引いて読む。naive との差（割合、範囲）：%s。" % (m, "、".join(
+                  "%s %+.2f%%（%s〜%s）" % (r["name"], 100 * r["mn"]["d_logloss"] / rows["naive"]["mn"]["logloss"],
+                                           f6(r["mn"]["d_ll_ci"][0]), f6(r["mn"]["d_ll_ci"][1]))
+                  for r in (rows[x] for x in ("ridge_first", "ridge_all", "ridge_int_first", "gbdt_first", "gbdt_all")))))
     a("")
     a("## 5. 予言の時点のデータだけを使ったことの確かめ（T-117 の関数で表を作った）")
     a("- 日の比率：実際に読んだ日は %s〜%s（予言日 t の入力は t-399〜t-1、判定は t+1〜t+28 の外を読むと止まる）。" % (
@@ -908,7 +951,10 @@ def summary_md(run, mrows, frows, rrows):
     a("- **2.2 の「国」**：記事が言及した場所で、報道した媒体の国ではない。言語は今のデータでは測れない。2.2 は方針書の仮説を試していない（T-117）。")
     a("- 検証は1回の前後の分け方だけ。比べた数（%d）のほかに、掛け合わせの選び方・強さの候補・GBDT の設定・系統の分け方・"
       "信号の組の選び方も選びうるもので、この数に入っていない。" % run["comparisons_total"])
-    a("- GBDT は上限の目安で、設定を一つに固定した。設定を変えれば数字は変わる。")
+    a("- GBDT は上限の目安として測ったが、設定を一つに固定した。設定を変えれば数字は変わる。gbdt_naive が naive より悪い倍率では、"
+      "GBDT を上限の目安と読めない（1章の注記）。")
+    a("- **検証の期間の再利用**：検証の期間（2019〜2020年）は、T-117 でオーナーとリードと係が結果を見たあとの再利用で、"
+      "T-118 の試す形は、その後に書いた。未見のデータでの確かめにはならない。")
     a("")
     a("## 7. 再計算")
     a("```")

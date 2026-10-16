@@ -240,8 +240,26 @@ class TestOutputs(unittest.TestCase):
         self.assertIn("src/stats/explore_models.py", run["code"])
         self.assertIn("src/stats/explore_signals.py", run["code"])
         self.assertEqual(run["comparisons_total"], 33)
+        self.assertEqual(run["ranges_total"], 54)
+        self.assertIn("検証の期間の再利用", s)
+        self.assertIn("出した差の範囲は", s)
         for n, d in f1.items():
             self.assertIsNone(ei.EMAIL_RE.search(d), n)
+
+    def test_base_notes(self):
+        def row(name, d, lam=None):
+            return {"name": name, "lam": lam, "mn": {"d_logloss": d, "d_ll_ci": (d - 1e-4, d + 1e-4)}}
+        nv = {"logloss": 0.03}
+        rows = [row("ridge_naive", 0.0003, 100.0), row("ridge_first", 0.0001, 10.0), row("ridge_all", -0.0001, 10.0),
+                row("ridge_int_first", 0.0, 10.0), row("gbdt_naive", 0.0005), row("gbdt_first", 0.0006),
+                row("gbdt_all", 0.0004)]
+        notes = em.base_notes(rows, nv)
+        self.assertEqual(len(notes), 2)
+        self.assertIn("強さが違う（基準 100、比べるもの 10）", notes[0])
+        self.assertIn("上限の目安と読めない", notes[1])
+        rows[0]["mn"]["d_logloss"] = -0.0001
+        rows[4]["mn"]["d_logloss"] = -0.0001
+        self.assertEqual(em.base_notes(rows, nv), [])
 
     def test_write_refuses_existing(self):
         with mock.patch.object(em.os, "makedirs"), mock.patch.object(em.os.path, "lexists", return_value=True), \
