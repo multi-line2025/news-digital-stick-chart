@@ -429,5 +429,184 @@ class TestLoadRatios(unittest.TestCase):
                 ex.load_ratios(ctx, "/store", 1)
 
 
+class SyntheticSealed:
+    """合成の封印の記録（seq 1〜17）と、その中身・マニフェストを {相対パス: バイト列} で作る。ファイルは書かない。"""
+
+    RUN = "0123456789abcdef"
+
+    def __init__(self, tags=("AAA", "BBB"), a="1/543539", tamper=None):
+        self.files = {}
+        days = ex.block_days()
+        self.days = days
+        missing = [D(2015, 5, 29), D(2020, 10, 3)]
+        # マニフェスト
+        rows = [{"kind": "run-start", "run_id": self.RUN}]
+        for d in days:
+            k = d.isoformat()
+            rows.append({"kind": "day", "mode": "official", "run_id": self.RUN, "day": k,
+                         "file_name": ex.counting.day_file_name("official", self.RUN, k), "sha256": "a" * 64})
+        mpath = "data/manifest/gdelt-gkg-method.jsonl"
+        body = b"".join(json.dumps(r, sort_keys=True).encode() + b"\n" for r in rows)
+        self.files[mpath] = body
+        n = len(rows)
+        lines = []
+        prev = "0" * 64
+        hashes = []
+
+        def put(name, obj):
+            data = json.dumps(obj, sort_keys=True).encode("utf-8")
+            path = "sealed/%s-%s.json" % (name, sha(data))
+            self.files[path] = data
+            return {"path": path, "sha256": sha(data)}
+
+        def record(kind, targets):
+            nonlocal prev
+            rec = {"kind": kind, "seq": len(lines) + 1, "prev_hash": prev, "targets": targets,
+                   "recorded_at": "2026-10-15T00:00:00Z"}
+            line = ex.canonical_line(rec)
+            lines.append(line)
+            prev = sha(line)
+            hashes.append(prev)
+
+        for i in range(1, 18):
+            if i == 2:
+                record("candidates", [
+                    {"path": "src/stats/candidates.py", "role": "code", "sha256": ex.CANDIDATES_SHA256},
+                    {"path": "src/stats/periods.py", "role": "import", "sha256": ex.PERIODS_SHA256}])
+            elif i == 6:
+                t = put("stats-order1b", {"files": [{"path": "src/stats/counting.py", "sha256": ex.COUNTING_SHA256}]})
+                record("stats-order1b", [dict(t, role="stats-order1b")])
+            elif i == 12:
+                self.gkg = {"mode": "official", "run_id": self.RUN, "manifest_path": mpath, "manifest_lines": n,
+                            "manifest_sha256": sha(body)}
+                t = put("gkg-run-result", self.gkg)
+                record("gkg-run-result", [dict(t, role="gkg-run-result")])
+            elif i == 15:
+                lst = {"block": {"name": "method", "start": "2015-03-02", "end": "2020-12-14"},
+                       "input": {"run_id": self.RUN, "gkg_run_result_seq": 12, "manifest_sha256": sha(body)},
+                       "missing_days": [{"day": d.isoformat()} for d in missing], "missing_count": len(missing),
+                       "partial_days_count": 4, "c7_denominator_by_day": {d.isoformat(): 100 for d in days}}
+                self.list_sha = sha(ex.order4_list_bytes(lst))
+                t = put("stats-order4", {"list": lst, "list_sha256": self.list_sha})
+                record("stats-order4", [dict(t, role="stats-order4")])
+            elif i == 17:
+                main = {"a_equals_v": True,
+                        "missing_days": {"count": len(missing), "days": [d.isoformat() for d in missing]},
+                        "refs": {"gkg_run_result": {"seq": 12, "record_sha256": hashes[11]},
+                                 "order4": {"seq": 15, "record_sha256": hashes[14], "list_sha256": self.list_sha}},
+                        "official": {"official": True, "candidate": "C7",
+                                     "result": {"a": a, "v_equals_a": True, "tag_list": list(tags),
+                                                "tag_count": len(tags)}}}
+                if tamper:
+                    tamper(main)
+                t = put("stats-order5", {"main": main, "main_sha256": sha(ex.order5_main_bytes(main))})
+                record("stats-order5", [dict(t, role="stats-order5")])
+            else:
+                record("other", [])
+        self.files["sealed/ledger.jsonl"] = b"\n".join(lines) + b"\n"
+        self.missing = set(missing)
+
+    def reader(self, root):
+        def read(path):
+            rel = os.path.relpath(path, root).replace(os.sep, "/")
+            if rel not in self.files:
+                raise ex.ExploreError("合成に無いファイル：%s" % rel)
+            return self.files[rel]
+        return read
+
+
+class TestLoadContextEndToEnd(unittest.TestCase):
+    ROOT = "/synthetic-root"
+
+    def load(self, s):
+        with mock.patch.object(ex, "read_nofollow", side_effect=s.reader(self.ROOT)):
+            return ex.load_context(self.ROOT)
+
+    def test_ok(self):
+        s = SyntheticSealed()
+        ctx = self.load(s)
+        self.assertEqual(ctx["tags"], ["AAA", "BBB"])
+        self.assertEqual(ctx["v"], F(1, 543539))
+        self.assertEqual(ctx["missing"], s.missing)
+        self.assertEqual(len(ctx["rows"]), 2115)
+        self.assertEqual(ctx["partial_days_count"], 4)
+        self.assertEqual(ctx["refs"]["ledger_records"], 17)
+        self.assertEqual(ctx["refs"]["seq15"]["list_sha256"], s.list_sha)
+
+    def test_tampered_sealed_file_stops(self):
+        s = SyntheticSealed()
+        path = [p for p in s.files if p.startswith("sealed/stats-order4-")][0]
+        s.files[path] = s.files[path].replace(b'"partial_days_count": 4', b'"partial_days_count": 5')
+        with self.assertRaises(ex.ExploreError):
+            self.load(s)
+
+    def test_tampered_ledger_stops(self):
+        s = SyntheticSealed()
+        s.files["sealed/ledger.jsonl"] = s.files["sealed/ledger.jsonl"].replace(b'"other"', b'"othr"', 1)
+        with self.assertRaises(ex.ExploreError):
+            self.load(s)
+
+    def test_manifest_prefix_changed_stops(self):
+        s = SyntheticSealed()
+        m = "data/manifest/gdelt-gkg-method.jsonl"
+        s.files[m] = s.files[m].replace(b"a" * 64, b"b" * 64, 1)
+        with self.assertRaises(ex.ExploreError):
+            self.load(s)
+
+    def test_manifest_appended_after_prefix_is_ignored(self):
+        """封印したのは先頭 manifest_lines 行だけ。後ろに追記された行は読まない。"""
+        s = SyntheticSealed()
+        m = "data/manifest/gdelt-gkg-method.jsonl"
+        s.files[m] += b'{"kind": "day", "day": "2020-12-15"}\n'
+        self.assertEqual(len(self.load(s)["rows"]), 2115)
+
+    def test_order5_ref_mismatch_stops(self):
+        def bad(main):
+            main["refs"]["order4"]["record_sha256"] = "0" * 64
+        with self.assertRaises(ex.ExploreError):
+            self.load(SyntheticSealed(tamper=bad))
+
+    def test_unsorted_tag_list_stops(self):
+        with self.assertRaises(ex.ExploreError):
+            self.load(SyntheticSealed(tags=("BBB", "AAA")))
+
+    def test_v_not_a_stops(self):
+        def bad(main):
+            main["a_equals_v"] = False
+        with self.assertRaises(ex.ExploreError):
+            self.load(SyntheticSealed(tamper=bad))
+
+
+class TestStepRows(unittest.TestCase):
+    def test_half_year_means(self):
+        days = ex.block_days()
+        ms = ex.prediction_mondays()[:2]
+        nc = len(ex.COMBOS)
+        js = tuple(m <= 8 for m, h in ex.COMBOS)
+        tags = ["AFFECT", "WB_1_X", "WB_2_Y"]
+        res = [[("target", 1e-5, js, 9e-5), ("above_baseline", None, None, None)],
+               [("target", 1e-5, js, 5e-4), ("above_baseline", None, None, None)],
+               [("target", 1e-5, tuple([False] * nc), 1e-5), ("above_baseline", None, None, None)]]
+        agg = ex.aggregate(tags, res, ms)
+        series = [[1e-5] * len(days) for _ in tags]
+        series[1] = [(2e-4 if d >= D(2016, 4, 1) else 1e-5) for d in days]
+        series[1][days.index(D(2015, 5, 29))] = None
+        names, rows = ex.step_rows(agg, ms, tags, days, series)
+        self.assertEqual(names[0], "2015H1")
+        self.assertEqual(names[-1], "2020H2")
+        self.assertEqual([r[0] for r in rows], ["WB_1_X"])       # WB の島だけ。AFFECT は WB でない、WB_2_Y は島でない
+        self.assertAlmostEqual(rows[0][1][0], 1e-5)
+        self.assertAlmostEqual(rows[0][1][3], 2e-4)               # 2016H2
+
+    def test_summary_mentions_limits(self):
+        tags, res, ms = handmade_results()
+        c = {"tags": tags, "v": V, "missing": set(), "partial_days_count": 0, "refs": {}}
+        out = ex.build_outputs(c, res, ms, D(2015, 4, 6), D(2017, 2, 27), 2115)["summary.md"].decode("utf-8")
+        for phrase in ("一覧と V の先読み", "除外の規則の漏れ", "scoring.py は封印の記録に無い", "跳ねの大きさ",
+                       "定義どおり島になりにくい"):
+            self.assertIn(phrase, out)
+        self.assertNotIn("封印済みの関数をそのまま", out)
+
+
 if __name__ == "__main__":
     unittest.main()

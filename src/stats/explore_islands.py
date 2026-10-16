@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
-"""T-115：手法を作る期間の島を見る、記述の探索（試運転の手順4の最初の探索）。
+"""T-115：手法を作る期間の島を見る、記述の探索（試運転の手順4の最初の探索）。T-116 で要約の文言と限界を手直しした
+（表のファイルの中身は変えていない）。
 
 封印済みの判定の定義（docs/stats/candidates.md 3章）と、封印済みのタグの一覧（封印の記録の seq 17、
 stats-order5 の main.official.result）を、そのまま手法を作る期間（2015-03-02〜2020-12-14）に当てはめ、
 予言日（2016-04-11〜2020-09-14 の月曜、232回）ごとに、対象のタグと、21の組み合わせ（倍率 7 × 判定期間 3）
 それぞれの島を数える。閾値・判定期間・V を選んだり勧めたりはしない。
 
-使う封印済みの関数（変えない。ファイルを1回だけ読み、sha256 を照らしてから、そのバイト列を compile して使う）
+使う関数（変えない。ファイルを1回だけ読み、sha256 を照らしてから、そのバイト列を compile して使う。scoring.py 以外は封印済み）
 - src/stats/candidates.py：baseline_level・judge・smoothing_window_ends・_block_mean・combinations
 - src/stats/scoring.py：target_status（中で current_level と recently_jumped を使う）・week_summary
 - src/stats/counting.py：parse_day・candidate_counts（正式な数え方 C7）・day_file_name
 - src/stats/periods.py：FROZEN_BLOCKS・compute_periods・prediction_dates
 scoring.py は、封印の記録にまだ sha256 が載っていない（封印は順番6〜8の予定。naive-scoring.md）。
-ここでは T-115 の割り振りの時点の版の sha256 を SCORING_SHA256 として固定して照らす。
+ここでは Git の履歴の版（82e0424 から変わっていない。T-115 の割り振りのコミット 5252d32 の時点）の sha256 を
+SCORING_SHA256 として固定して照らす。
+
+語：「倍率」は閾値の倍率 m（candidates.py の THRESHOLD_MULTIPLIERS）だけに使う。判定期間の中の最大の7日の平均 ÷ B(t)
+は「跳ねの大きさ」と呼ぶ（表のファイルの欄の名前は ratio のまま）。
 
 入力（どれも照らしてから使う）
 - 封印の記録 sealed/ledger.jsonl：鎖（正規の形・seq・prev_hash）を自分のコードで確かめる。
@@ -61,7 +66,7 @@ import types
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT = os.path.dirname(os.path.dirname(HERE))
 
-LABEL = "explore-islands-t115-v1"
+LABEL = "explore-islands-t116-v2"
 
 # 封印の記録で照らす sha256（periods・candidates は seq 2 の targets、counting は seq 6 の中身の files）
 PERIODS_SHA256 = "81de229d065196a26e15d90c5a80eb1043ca534a6eaf66cdebd36285ae087605"
@@ -564,7 +569,7 @@ def evaluate_all(series, days, mondays, v, workers, log=None):
 # ---------------------------------------------------------------------------
 
 def ratio_of(b, mx):
-    """倍率（最大の7日の平均 ÷ B(t)）。B(t) = 0 なら None。"""
+    """跳ねの大きさ（最大の7日の平均 ÷ B(t)）。B(t) = 0 なら None。"""
     if mx is None or b is None or b == 0:
         return None
     return mx / b
@@ -707,7 +712,7 @@ def cluster_rows(agg, mondays):
 
 
 def theme_order_key(item):
-    """週の中のテーマの並び：倍率の大きい順（B(t) = 0 は先頭で、最大の7日の平均の大きい順）、同じなら名前。"""
+    """週の中のテーマの並び：跳ねの大きさの大きい順（B(t) = 0 は先頭で、最大の7日の平均の大きい順）、同じなら名前。"""
     tag, b, mx = item
     r = ratio_of(b, mx)
     return (0, -mx, tag) if r is None else (1, -r, tag)
@@ -742,7 +747,7 @@ def fmt_float(x):
 
 
 def example_rows(agg, mondays):
-    """examples.tsv：例の組み合わせ・年ごとに、倍率の大きい順の上位10（B(t) > 0 のもの）。
+    """examples.tsv：例の組み合わせ・年ごとに、跳ねの大きさの大きい順の上位10（B(t) > 0 のもの）。
     examples-zero-baseline.tsv：B(t) = 0 の島の、組み合わせ・年ごとの件数と、最大の7日の平均の大きい順の上位10。"""
     ex, zero = [], []
     for m in EXAMPLE_MS:
@@ -798,10 +803,43 @@ def md_table(header, rows):
     return "\n".join(out)
 
 
-def summary_md(meta, crow, clus, topw, ex, zero, wstat, mondays, years, frows, wmiss):
+STEP_WEEK_M = 8          # 段のような上昇を見るテーマを選ぶ組み合わせ（倍率 8、判定期間 EXAMPLE_H）
+STEP_MAX_THEMES = 5
+
+
+def half_years(days):
+    """区画の日を暦の半年ごとに分ける：[(名前, [日])]。"""
+    out = {}
+    for d in days:
+        out.setdefault("%dH%d" % (d.year, 1 if d.month <= 6 else 2), []).append(d)
+    return sorted(out.items())
+
+
+def step_rows(agg, mondays, tags, days, series):
+    """最初の予言日に倍率 STEP_WEEK_M・判定期間 EXAMPLE_H で島になった WB のテーマ（跳ねの大きさの大きい順に最大5件）の、
+    暦の半年ごとの比率の平均（欠けた日を除く）。区画の中の日だけを使う記述で、判定には使わない。
+    戻り値：(半年の名前の list, [(テーマ, [平均または None])])"""
+    c = COMBOS.index((STEP_WEEK_M, EXAMPLE_H))
+    items = sorted((x for x in agg["week_islands"]["cooldown"].get(c, {}).get(0, []) if family(x[0]) == "WB"),
+                   key=theme_order_key)[:STEP_MAX_THEMES]
+    halves = half_years(days)
+    pos = {d: i for i, d in enumerate(days)}
+    idx = {t: j for j, t in enumerate(tags)}
+    rows = []
+    for tag, _b, _mx in items:
+        vals = series[idx[tag]]
+        means = []
+        for _n, ds in halves:
+            xs = [vals[pos[d]] for d in ds if vals[pos[d]] is not None]
+            means.append(sum(xs) / len(xs) if xs else None)
+        rows.append((tag, means))
+    return [n for n, _ds in halves], rows
+
+
+def summary_md(meta, crow, clus, topw, ex, zero, wstat, mondays, years, frows, wmiss, step=None):
     L = []
     a = L.append
-    a("# 手法を作る期間の島（T-115、記述の探索）")
+    a("# 手法を作る期間の島（T-115、記述の探索。T-116 で文言と限界を手直し）")
     a("")
     a("この文書は `src/stats/explore_islands.py` が出力したもので、手で書き足していない。数字はすべて、"
       "手法を作る期間の区画（%s〜%s）のデータだけから計算した。閾値・判定期間・V を選んだり勧めたりはしない"
@@ -812,10 +850,17 @@ def summary_md(meta, crow, clus, topw, ex, zero, wstat, mondays, years, frows, w
         meta["tag_count"], meta["v"], float(F(meta["v"]))))
     a("- 比率：正式な数え方 C7（分子はテーマの v1_or_v2_docs、分母は同じ欄の全テーマの和）。欠けた日（seq 15、%d 日）は値なし。"
       % meta["missing_days"])
-    a("- 予言日：%s〜%s の月曜 %d 回。予言日 t の入力は t-1 以前だけ、判定は t+1〜t+H（candidates.md 2章・3章）。"
-      % (mondays[0], mondays[-1], len(mondays)))
-    a("- 計算は封印済みの関数をそのまま使った：candidates.py の baseline_level・judge、scoring.py の target_status"
-      "（中で current_level と、一度跳ねたタグの扱い recently_jumped を使う）。")
+    a("- 予言日：%s〜%s の月曜 %d 回。予言日 t の入力（B(t)・予言の時点の報道量・一度跳ねたタグの扱い）は t-1 以前だけ、"
+      "判定は t+1〜t+H（candidates.md 2章・3章）。" % (mondays[0], mondays[-1], len(mondays)))
+    a("- **ただし、タグの一覧と V（= A）は、手法を作る期間の区画全体（%s〜%s）のデータで決まった（seq 17）。** "
+      "そのため、この期間の予言では、予言の対象の範囲（どのテーマが一覧に入るか）と V が、予言日 t より後のデータに依る。"
+      "閾値を決める期間では、一覧と V は前の期間で決まった値なので、この依存は無い。"
+      "この期間の割合を、閾値を決める期間の割合とそのまま比べることはできない（6章）。" % (BLOCK_START, BLOCK_END))
+    a("- 計算に使った関数（変えずに使った）：candidates.py の baseline_level・judge（封印の記録 seq 2 の sha256 と照らした）、"
+      "scoring.py の target_status（中で current_level と、一度跳ねたタグの扱い recently_jumped を使う）。"
+      "**scoring.py は封印の記録に無い**（封印は順番6〜8の予定）。Git の履歴の版（82e0424 から変わっていない）の sha256 を"
+      "コードに固定して照らした（7章）。")
+    a("- 語：「倍率」は閾値の倍率 m だけに使う。判定期間の中の最大の7日の平均 ÷ B(t) は「跳ねの大きさ」と呼ぶ。")
     a("- 対象：target_status が target のタグ（一度跳ねたタグの扱いあり）。参考として、cooldown も含めた場合"
       "（扱いなし。対象の条件は is_target と同じ）も並べる。**正式な扱いは「あり」で、「なし」は参考。**")
     a("- 判定不能（判定期間の中の7日のまとまりがすべて欠けた日を含む）は、対象の数にも島の数にも入れず、別に数える。")
@@ -867,7 +912,7 @@ def summary_md(meta, crow, clus, topw, ex, zero, wstat, mondays, years, frows, w
     first = [r for r in clus if r[8] == mondays[0].isoformat()]
     a("- 島の数が最大の週が最初の予言日（%s）である組み合わせ：21組のうち %d 組。" % (mondays[0], len(first)))
     a("")
-    a("島の数の多かった週の上位10（判定期間 %d 日）。テーマは、その週の島のうち倍率の大きい順の最大 %d 件"
+    a("島の数の多かった週の上位10（判定期間 %d 日）。テーマは、その週の島のうち跳ねの大きさの大きい順の最大 %d 件"
       "（B(t) = 0 のものは先頭）。" % (EXAMPLE_H, TOP_WEEK_THEMES))
     a("")
     for m in EXAMPLE_MS:
@@ -908,15 +953,15 @@ def summary_md(meta, crow, clus, topw, ex, zero, wstat, mondays, years, frows, w
     a("")
     a("## 4. 代表的な島の例（一度跳ねたタグの扱いあり、判定期間 %d 日）" % EXAMPLE_H)
     a("")
-    a("倍率 = 判定期間の中の最大の7日の平均 ÷ B(t)。B(t) > 0 の島だけを並べる（B(t) = 0 の島は倍率が決まらないので、"
-      "件数を別に示す）。同じタグが続く週に何度も出るのは、判定期間が重なるため。")
+    a("跳ねの大きさ = 判定期間の中の最大の7日の平均 ÷ B(t)。跳ねの大きさの大きい順に並べる。B(t) > 0 の島だけを並べる"
+      "（B(t) = 0 の島は跳ねの大きさが決まらないので、件数を別に示す）。同じタグが続く週に何度も出るのは、判定期間が重なるため。")
     a("")
     for m in EXAMPLE_MS[1:]:
         same = all([r[3:] for r in ex if r[0] == m and r[2] == y] ==
                    [r[3:] for r in ex if r[0] == EXAMPLE_MS[0] and r[2] == y] for y in years)
         rs = [float(r[8]) for r in ex if r[0] == EXAMPLE_MS[0]]
         a("- 倍率 %d の表は、倍率 %d の表と%s。" % (
-            m, EXAMPLE_MS[0], "すべての年で同じ（倍率 %d の表に並ぶ倍率の最小は %.2f）" % (EXAMPLE_MS[0], min(rs))
+            m, EXAMPLE_MS[0], "すべての年で同じ（倍率 %d の表に並ぶ跳ねの大きさの最小は %.2f）" % (EXAMPLE_MS[0], min(rs))
             if same and rs else "違う年がある"))
     a("")
     for m in EXAMPLE_MS:
@@ -926,7 +971,7 @@ def summary_md(meta, crow, clus, topw, ex, zero, wstat, mondays, years, frows, w
             a("倍率 %d、%d年（B(t) = 0 の島 %d 件）：" % (m, y, zc))
             a("")
             if rows:
-                a(md_table(["順位", "テーマ", "予言日", "B(t)", "最大の7日の平均", "倍率"],
+                a(md_table(["順位", "テーマ", "予言日", "B(t)", "最大の7日の平均", "跳ねの大きさ"],
                            [(r[3], r[4], r[5], r[6], r[7], r[8]) for r in rows]))
             else:
                 a("（なし）")
@@ -950,7 +995,8 @@ def summary_md(meta, crow, clus, topw, ex, zero, wstat, mondays, years, frows, w
         rs = by_h.get(h, [])
         if rs:
             a("- 判定期間 %d 日：判定期間に欠けた日がかかる予言日 %d 回（%s〜%s）。使える7日のまとまりの数の最小は %d / %d"
-              "（判定不能は、使えるまとまりが0の予言だけ）。一覧は judgment-windows.tsv。"
+              "（判定不能は、使えるまとまりが0の予言だけ。使えるまとまりが少ない予言は、定義どおり島になりにくい）。"
+              "一覧は judgment-windows.tsv。"
               % (h, len(rs), rs[0][0], rs[-1][0], min(r[1] for r in rs), rs[0][2]))
         else:
             a("- 判定期間 %d 日：判定期間に欠けた日がかかる予言日は無い。" % h)
@@ -965,6 +1011,30 @@ def summary_md(meta, crow, clus, topw, ex, zero, wstat, mondays, years, frows, w
       "このデータからは確かめていない。")
     a("- V は比率で固定されている。全体の報道量が年によって違えば、同じ V が別の件数に当たる（tags-naive.md 1章 (2)）。")
     a("- 一覧は手法を作る期間の全体にわたって存在するテーマだけで、期間の途中で生まれたテーマは入っていない。")
+    a("- **一覧と V の先読み**：タグの一覧と V（= A）は、手法を作る期間の区画全体（%s〜%s）のデータで決まった（seq 17）。"
+      "この期間の予言日 t では、予言の対象の範囲（一覧に入るか）と V が t より後のデータに依る。"
+      "閾値を決める期間と前向きの予言では、一覧と V は前の期間で決まった値で、この依存は無い。"
+      "そのため、この期間の割合は、閾値を決める期間の割合とそのまま比べられない。" % (BLOCK_START, BLOCK_END))
+    a("- **除外の規則の漏れ**：除外の規則（seq 5）は名前と説明の一般の語で照合する。そのため、TAX_WORLDLANGUAGES_*・"
+      "TAX_FNCACT_* などの名前で、民族・人物の姓・宗教・犯罪・紛争・政治に当たるテーマが一覧（seq 17）に残り、"
+      "この要約の表にも島として出ている。オーナーの決定（2026-10-16、(a) このまま進める。reviews/T-115.md）により、"
+      "一覧は変えずに進める。公開するときにこれらのテーマを伏せる規則は、まだ決めていない（公開の前に決めて記録する）。")
+    a("- **判定期間の一部が欠けた予言日**：使える7日のまとまりが少ないので、定義どおり島になりにくい（5章）。")
+    if step is not None:
+        names, rows = step
+        tw = [r for r in topw if r[0] == STEP_WEEK_M and r[3] == mondays[0].isoformat()]
+        link = ""
+        if tw:
+            listed = [x for x in tw[0][7].split(",") if x]
+            link = ("2章の「島の数の多かった週」の倍率 %d の表で、最初の予言日の行に並ぶテーマ %d 件のうち %d 件が WB のテーマ。"
+                    % (STEP_WEEK_M, len(listed), sum(1 for x in listed if family(x) == "WB")))
+        a("- **WB のテーマの段のような上昇**：最初の予言日（%s）に倍率 %d・判定期間 %d 日で島になった WB のテーマには、"
+          "2016年4月の前後で、半年ごとの平均の水準が大きく変わるものがある（下の表。欠けた日を除いた日次の比率の平均）。"
+          "報道の変化か、データ源のテーマの付け方の変化かは、このデータからは区別できない。"
+          "%s" % (mondays[0], STEP_WEEK_M, EXAMPLE_H, link))
+        a("")
+        a(md_table(["テーマ"] + names, [[t] + [("%.2e" % x if x is not None else "-") for x in ms] for t, ms in rows]))
+        a("")
     a("- これは記述の探索で、どの組み合わせを使うかの判断の材料にはしない。")
     a("")
     a("## 7. 再計算")
@@ -996,8 +1066,9 @@ def check_public(name, data):
             raise ExploreError("%s に引用以外の URL がある" % name)
 
 
-def build_outputs(ctx, results, mondays, min_read, max_read, day_files_read):
+def build_outputs(ctx, results, mondays, min_read, max_read, day_files_read, series=None):
     agg = aggregate(ctx["tags"], results, mondays)
+    step = step_rows(agg, mondays, ctx["tags"], ctx["days"], series) if series is not None else None
     crow = combo_rows(agg, mondays)
     clus = cluster_rows(agg, mondays)
     topw = top_week_rows(agg, mondays)
@@ -1040,7 +1111,8 @@ def build_outputs(ctx, results, mondays, min_read, max_read, day_files_read):
         "families.tsv": tsv(("family", "tags_in_list", "multiplier", "horizon_days", "targets", "islands",
                              "island_rate_percent", "distinct_island_tags"), frows),
         "judgment-windows.tsv": tsv(("horizon_days", "monday", "usable_blocks", "blocks"), wmiss),
-        "summary.md": summary_md(meta, crow, clus, topw, ex, zero, wstat, mondays, agg["years"], frows, wmiss),
+        "summary.md": summary_md(meta, crow, clus, topw, ex, zero, wstat, mondays, agg["years"], frows, wmiss,
+                                 step),
     }
     if sorted(files) != sorted(OUT_NAMES):
         raise ExploreError("出力の名前が決めた一覧と違う")
@@ -1068,7 +1140,7 @@ def run(root, store, out_dir, workers, log=None):
     ctx = load_context(root)
     series, nread = load_ratios(ctx, store, workers, log)
     results, lo, hi = evaluate_all(series, ctx["days"], mondays, ctx["v"], workers, log)
-    files = build_outputs(ctx, results, mondays, lo, hi, nread)
+    files = build_outputs(ctx, results, mondays, lo, hi, nread, series)
     return write_outputs(out_dir, files)
 
 
