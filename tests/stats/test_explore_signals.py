@@ -315,6 +315,15 @@ class TestFree(unittest.TestCase):
 
 
 class TestLoadCache(unittest.TestCase):
+    def test_labels(self):
+        self.assertEqual(es.PHASE1_LABEL, "explore-signals-phase1-v2")
+        self.assertIn("explore-signals-phase1-v1", es.ACCEPTED_PHASE1_LABELS)
+
+    def test_unknown_label_stops(self):
+        with mock.patch.object(ei, "read_nofollow", return_value=json.dumps({"label": "x"}).encode()):
+            with self.assertRaises(es.SignalError):
+                es.load_cache("/c", {})
+
     def test_mismatch_stops(self):
         meta = {"label": es.PHASE1_LABEL, "tags": ["AAA"], "refs": {}, "days": [], "missing": [],
                 "itemsize": 4, "byteorder": sys.byteorder, "totals": []}

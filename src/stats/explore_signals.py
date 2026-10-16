@@ -64,7 +64,9 @@ naive = ei._load_verified("naive", "src/stats/naive.py", NAIVE_SHA256,
                           deps=(("candidates", candidates), ("periods", periods), ("scoring", scoring)))
 
 LABEL = "explore-signals-t117-v2"
-PHASE1_LABEL = "explore-signals-phase1-v1"
+PHASE1_LABEL = "explore-signals-phase1-v2"   # v2：phase1.json の code に explore_signals.py・explore_islands.py を入れた
+# 読んでよいキャッシュの版。v1 は T-117 の run1・run2（code にこの2つの sha256 が無い。形のほかの部分は同じ）
+ACCEPTED_PHASE1_LABELS = ("explore-signals-phase1-v1", PHASE1_LABEL)
 
 ONE_DAY = datetime.timedelta(days=1)
 DAYS = datetime.timedelta
@@ -147,7 +149,8 @@ KNOWN_CACHE_PROVENANCE = (
     "run1（phase1.json の時刻 2026-10-16 17:46）：作った版の記録は無い。直後の試しの phase2（try1、17:56）の run.json には "
     "explore_signals.py の sha256 fb841994b1c20bf1d8cdc99d40ad28641a7c723d4d32d669d981ebb662302fc8 が記録されているが、"
     "run1 の phase1 がこれと同じ版で流れたことを示す記録は無い。",
-    "run2（phase1.json の時刻 18:22）：コミット d23f0e2（17:57）のあと、phase1 と phase2 を一続きのコマンドで流した。"
+    "run2（phase1.json の時刻 18:22）：コミット d23f0e2（17:57）のあと、phase1 と phase2 を一続きのコマンドで流した（係の申告。"
+    "記録では確かめられないが、ファイルの時刻とは矛盾しない）。"
     "そのときの phase2 の run.json（explore-t117）の explore_signals.py の sha256 は e69ecd9e59dfdea25ca487243f716d7b28b57825d3c97bd72842b6505abfa737"
     "で、d23f0e2 の版と一致する。phase1 の版そのものの記録は無い。",
     "run1 と run2 の74ファイルの sha256 はすべて同じ。",
@@ -492,7 +495,7 @@ def read_cache_file(cache_dir, name, want_sha):
 def load_cache(cache_dir, ctx):
     raw = ei.read_nofollow(os.path.join(cache_dir, "phase1.json"))
     meta = json.loads(raw.decode("utf-8"))
-    if meta.get("label") != PHASE1_LABEL:
+    if meta.get("label") not in ACCEPTED_PHASE1_LABELS:
         raise SignalError("キャッシュの版が違う")
     if meta["tags"] != ctx["tags"] or meta["refs"] != ctx["refs"] or \
             meta["days"] != [d.isoformat() for d in ctx["days"]] or \
@@ -1218,7 +1221,7 @@ def summary_md(run, evrows, specs, sig, netstat):
     a("- 三つすべて（all）：網と隣ごとに、2.1 と、2.2 の国・max と、2.3 の gap を足したもの。")
     a("- 選択肢と結果を見た順（記録で確かめられることだけ）：コードの sha256 fb841994… の版で試しの phase2（try1）を流し、"
       "その結果を見たあとで、選択肢は変えずに、要約の文（「選択肢は phase1 の前にコードに書き、結果を見たあとで足したものは無い」という文と、"
-      "網の周辺の数の一致の文）だけを足してコミットした"
+      "網の周辺の数の一致の文）と、その文のための一致の数え（run.json の項目 v1_docs_equal_c7_numerator_all_days）を足してコミットした"
       "（d23f0e2、sha256 e69ecd9e…）。本番の数字は try1 と同じだった。phase1 の前に、日の集計2日分の行の種類の数（L の言語がすべて「-」"
       "であることを含む）と、1か月のうち3日分の phase1 の時間を見た。それより前に試しがあったかどうかは、記録に無い。")
     if run.get("v1_docs_equal_c7_numerator_all_days") is True:
