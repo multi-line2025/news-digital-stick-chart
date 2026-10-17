@@ -364,11 +364,34 @@ class TestOutputs(unittest.TestCase):
         self.assertIn(ei.CITATION_EN, s)
         self.assertLess(s.index("やさしい説明"), s.index("作り方"))
         self.assertIn("2020年の連鎖は、分け方 A の検証の期間", s)
+        # T-128
+        self.assertEqual(ch.LABEL, "explore-chain-t127-v2")
+        self.assertIn("この版（v2）の変更点", s)
+        self.assertIn("表の sha256 は v1 と同じ", s)
+        self.assertIn("1〜3週後（判定期間が重なる）比 ", s)
+        self.assertIn("4〜12週後（判定期間が重ならない）比 ", s)
+        self.assertIn("偶然の中央値", s)
+        self.assertIn("21・14・7 日重なる", s)
+        self.assertIn("範囲の外に出た組", s)
+        self.assertIn("向きの差は小さい", s)
+        self.assertIn("設定ごとの範囲の外の組の数：倍率 2・すべての島・4週", s)
+        self.assertIn("嵐が何週か続くことと区別できない", s)
+        self.assertIn("作り方の上でほぼ必ず付く", s)
+        self.assertIn("T-127 の本番の前にコードの定数で決めたもの", s)
+        self.assertNotIn("が先、", s)
         self.assertTrue(f1["chain-private.tsv"].startswith(ch.PRIVATE_HEADER.encode("utf-8")))
         for n, d in f1.items():
             self.assertIsNone(ei.EMAIL_RE.search(d), n)
             if n != "chain-private.tsv":
                 self.assertNotIn(b"AA_0", d, n)
+
+    def test_band_rows_and_topk_note(self):
+        f, _t = self.build()
+        s = f["summary.md"].decode("utf-8")
+        self.assertNotIn("対数損失は下がったのに上位10の島が減ったモデルが", s)   # 合成の結果では上位10の島が増えている
+        d = {"ratio_none": 1.5, "null_none_med": 1.2, "null_none_q": 1.3}
+        self.assertEqual(ch.ratio_text2(d), "比 1.50・偶然の中央値 1.20・90%点 1.30（90%点を超える。中央値で割ると 1.25）")
+        self.assertEqual(ch.ratio_text2(None), "分からない")
 
     def test_write_refuses_existing(self):
         with mock.patch.object(ch.os, "makedirs"), mock.patch.object(ch.os.path, "lexists", return_value=True), \

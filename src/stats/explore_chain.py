@@ -75,7 +75,7 @@ es = sea.es
 ei = sea.ei
 naive = sea.naive
 
-LABEL = "explore-chain-t127-v1"
+LABEL = "explore-chain-t127-v2"   # v2：T-128 で要約の文を手直し（表と作り方は同じ）
 MULTIPLIERS = em.MULTIPLIERS
 HORIZON = em.HORIZON
 DAY = datetime.timedelta(days=1)
@@ -104,6 +104,13 @@ SPLIT_MAIN = "B"
 SPLITS = ("B", "A")
 MAIN_M = 4
 MAIN_KINDS = ("stay", "back")
+# T-128（要約の言い方。本番の前に書いた）
+# 1章の比は、偶然（ずらした系列）の中央値と90%点を並べて書く（"side_by_side"）。偶然の中央値で割った値は参考として添える。
+RATIO_STYLE = "side_by_side"
+# 判定期間（28日）が、きっかけの判定期間と重なる遅れ（k = 1・2・3 で 21・14・7 日重なる）と、重ならない遅れ（4週以上）。
+SUMMARY_BANDS = ((1, 3), (4, 12))
+OVERLAP_MAX_LAG = 3
+# 海域どうしの順序の主の設定：倍率 MAIN_M・ORDER_KINDS[0]（すべて）・max(ORDER_KS) 週（T-127 の本番の前に決めた）。
 
 AFTER_CODE = {"unknown": 0, "back": 1, "stay": 2}
 KIND_CODE = {"stay": 2, "back": 1}
@@ -893,7 +900,7 @@ def build_outputs(tags, mondays, rows, keys, extra, desc, case, seas, fam_order,
              "chain-private.tsv": chain_private, "models.tsv": models_tsv, "coefs.tsv": coefs_tsv,
              "excitation.tsv": exc_tsv,
              "run.json": (json.dumps(run, ensure_ascii=False, sort_keys=True, indent=1) + "\n").encode("utf-8")}
-    files["summary.md"] = summary_md(run, rrows, orows, crows, mres, fam_order, tags, mondays)
+    files["summary.md"] = summary_md(run, rrows, orows, crows, mres, fam_order, tags, mondays, summary_band_rows(desc))
     for name, data in files.items():
         ei.check_public(name, data)
     return files
@@ -925,6 +932,33 @@ def find_rel(rrows, m, kind, rel, lag):
     return None
 
 
+def summary_band_rows(desc):
+    """要約の1章のための、SUMMARY_BANDS の比と偶然の中央値・90%点（表には入れない）。{(倍率, 種類, 関係, lo, hi): dict}"""
+    real, reps = desc[0], desc[1:]
+    out = {}
+    for m in MULTIPLIERS:
+        for kind in TRIGGER_KINDS:
+            for r in EXC_RELATIONS:
+                for lo, hi in SUMMARY_BANDS:
+                    rn, _ra = ratios(band_values(real["rel"], m, kind, r, lo, hi))
+                    nn = sorted(x for x in (ratios(band_values(d["rel"], m, kind, r, lo, hi))[0] for d in reps)
+                                if x is not None)
+                    out[(m, kind, r, lo, hi)] = {"ratio_none": rn, "null_none_med": sea.median(nn),
+                                                 "null_none_q": nearest_rank(nn, NULL_Q)}
+    return out
+
+
+def ratio_text2(d):
+    """比・偶然の中央値・90%点を並べる（RATIO_STYLE = side_by_side）。"""
+    if d is None or d["ratio_none"] is None:
+        return "分からない"
+    med, q = d["null_none_med"], d["null_none_q"]
+    if med is None or q is None:
+        return "比 %.2f（偶然の水準は分からない）" % d["ratio_none"]
+    return "比 %.2f・偶然の中央値 %.2f・90%%点 %.2f（90%%点を%s。中央値で割ると %.2f）" % (
+        d["ratio_none"], med, q, "超える" if d["ratio_none"] > q else "超えない", d["ratio_none"] / med)
+
+
 def ratio_text(d):
     if d is None or d["ratio_none"] is None:
         return "分からない"
@@ -934,7 +968,7 @@ def ratio_text(d):
     return "%.2f 倍（偶然の90%%点 %.2f 倍を%s）" % (d["ratio_none"], q, "超える" if d["ratio_none"] > q else "超えない")
 
 
-def summary_md(run, rrows, orows, crows, mres, fam_order, tags, mondays):
+def summary_md(run, rrows, orows, crows, mres, fam_order, tags, mondays, sb):
     L = []
     a = L.append
     md = ei.md_table
@@ -944,20 +978,28 @@ def summary_md(run, rrows, orows, crows, mres, fam_order, tags, mondays):
     a("この文書は `src/stats/explore_chain.py` が出力したもので、手で書き足していない。島の定義は変えていない。テーマの名前は載せていない"
       "（海域として載せた系統の名前を除く。系統の名前 %d 個のうち %d 個は、一覧に同じ名前のテーマがある）。全部並べ、選ばない・勧めない。"
       % (len(fam_order), same))
+    a("この版（v2）の変更点：1章の比を偶然の中央値・90%点と並べ、判定期間が重なる遅れ（1〜3週）と重ならない遅れ（4〜12週）に分けた。"
+      "海域どうしの順序の言い方を弱め、設定ごとの範囲の外の組の数と、偶然の比べの限界を書いた。事例の「先に網の隣の島」の数に"
+      "見分ける力が無いことと、上位10の島が減ったモデルがあることを書いた。表の sha256 は v1 と同じ。")
     a("")
     a("## 1. やさしい説明")
     a("")
     a("ここで「連鎖」と呼ぶのは、ある予言日に島になったタグ（きっかけ）のあと、1〜12週あとの予言日に、そのタグと関係のあるタグが"
       "島になりやすいかどうか。比は、同じ週の関係の無いタグの島の割合を1としたときの倍数。偶然の比べは、タグごとに予言日の並びを"
-      "乱数で輪のようにずらした %d 本（乱数の種 %d）で同じ比を作ったときの90%%点。" % (NULL_R, NULL_SEED))
+      "乱数で輪のようにずらした %d 本（乱数の種 %d）で同じ比を作ったときの中央値と90%%点。ずらしても関係のあるタグどうしは"
+      "ふだんの島の割合が近いので、偶然の中央値も1より大きく出る。読むのは、比と偶然の中央値・90%%点との差。" % (NULL_R, NULL_SEED))
+    a("")
+    a("きっかけ A の判定期間（w+1〜w+%d）と、k 週あとの B の判定期間は、k = 1・2・3 で 21・14・7 日重なる。1〜3週の遅れの比には、"
+      "同じ出来事で同時に跳ねたものが入りうるので、判定期間が重ならない4〜12週の遅れと分けて書く。" % HORIZON)
     a("")
     for kind in MAIN_KINDS:
         d0 = find_rel(rrows, MAIN_M, kind, "hop1", "1-12")
         a("- 倍率 %d の%s（きっかけ %d 件）のあと：" % (MAIN_M, KIND_JA[kind], d0["triggers"] if d0 else 0))
         for r in EXC_RELATIONS:
             parts = []
-            for lo, hi in LAG_BANDS[:3]:
-                parts.append("%d〜%d週後 %s" % (lo, hi, ratio_text(find_rel(rrows, MAIN_M, kind, r, "%d-%d" % (lo, hi)))))
+            for lo, hi in SUMMARY_BANDS:
+                parts.append("%d〜%d週後（判定期間が%s）%s" % (lo, hi, "重なる" if hi <= OVERLAP_MAX_LAG else "重ならない",
+                                                     ratio_text2(sb.get((MAIN_M, kind, r, lo, hi)))))
             a("  - %s：%s。" % (REL_JA[r], "、".join(parts)))
     a("")
     for kind in MAIN_KINDS:
@@ -965,19 +1007,34 @@ def summary_md(run, rrows, orows, crows, mres, fam_order, tags, mondays):
         ks = [(k, d["ratio_none"]) for k, d in ks if d is not None and d["ratio_none"] is not None]
         if ks:
             kmax = max(ks, key=lambda z: (z[1], -z[0]))
-            a("- 遅れ（倍率 %d、%s、網の1歩の隣）：週ごとの比は %s。比が最も大きかったのは %d 週後（%.2f 倍）。" % (
-                MAIN_M, KIND_JA[kind], "、".join("%d週 %.2f" % (k, x) for k, x in ks), kmax[0], kmax[1]))
+            a("- 遅れ（倍率 %d、%s、網の1歩の隣）：週ごとの比は %s。比が最も大きかったのは %d 週後（%.2f 倍）%s。" % (
+                MAIN_M, KIND_JA[kind], "、".join("%d週 %.2f" % (k, x) for k, x in ks), kmax[0], kmax[1],
+                "で、判定期間が重なる遅れ（同じ出来事で同時に跳ねたものが入りうる）" if kmax[0] <= OVERLAP_MAX_LAG else ""))
     a("")
     main_o = [d for d in orows if d["m"] == MAIN_M and d["kind"] == "all" and d["K"] == max(ORDER_KS)]
     xf = [d for d in main_o if d["direction"] in ("x_first", "y_first")]
-    a("- 海域どうしの順序（倍率 %d、すべての島、%d 週以内）：系統の海域の組 %d のうち、ずらした系列の %d〜%d%% の範囲の外に出た組は %d"
-      "（偶然でも約 %.1f 組は外に出る）。" % (MAIN_M, max(ORDER_KS), len(main_o), round(100 * ORDER_Q[0]),
-                                    round(100 * ORDER_Q[1]), len(xf), len(main_o) * (ORDER_Q[0] + 1 - ORDER_Q[1])))
+    a("- 海域どうしの順序（主の設定は倍率 %d・すべての島・%d 週以内で、T-127 の本番の前にコードの定数で決めたもの）：系統の海域の組 %d の"
+      "うち、向きの差がずらした系列の %d〜%d%% の範囲の外に出た組は %d（偶然でも約 %.1f 組は外に出る）。外に出た組でも lift は1に近く、"
+      "向きの差は小さい。" % (MAIN_M, max(ORDER_KS), len(main_o), round(100 * ORDER_Q[0]), round(100 * ORDER_Q[1]), len(xf),
+                       len(main_o) * (ORDER_Q[0] + 1 - ORDER_Q[1])))
     for d in xf:
         first, second = (d["x"], d["y"]) if d["direction"] == "x_first" else (d["y"], d["x"])
-        a("  - %s が先、%s があと（lift %s→%s %.2f、逆向き %.2f）。" % (
-            first, second, first, second, d["lift_xy"] if d["direction"] == "x_first" else d["lift_yx"],
+        a("  - 範囲の外に出た組：%s → %s（lift %.2f、逆向き %.2f）。" % (
+            first, second, d["lift_xy"] if d["direction"] == "x_first" else d["lift_yx"],
             d["lift_yx"] if d["direction"] == "x_first" else d["lift_xy"]))
+    sets = []
+    for m in MULTIPLIERS:
+        for kind in ORDER_KINDS:
+            for K in ORDER_KS:
+                ds = [d for d in orows if d["m"] == m and d["kind"] == kind and d["K"] == K]
+                out_ = sum(1 for d in ds if d["direction"] in ("x_first", "y_first"))
+                unk = sum(1 for d in ds if d["direction"] == "分からない")
+                sets.append("倍率 %d・%s・%d週 %d / %d%s" % (m, KIND_JA[kind], K, out_, len(ds),
+                                                         "（分からない %d）" % unk if unk else ""))
+    a("  - 設定ごとの範囲の外の組の数：%s。偶然でも、決まった組の約 %d%% は外に出る。" % (
+        "、".join(sets), round(100 * (ORDER_Q[0] + 1 - ORDER_Q[1]))))
+    a("  - 輪のようにずらす偶然の比べは、週ごとの共通の動き（嵐）を壊すので、偶然の範囲が狭く出る。海域どうしの順序は、嵐が何週か"
+      "続くことと区別できない。")
     a("")
     weeks = sorted({r[0] for r in crows})
     a("- 事例（%s〜%s の予言日、倍率 %d）：週ごとの島の数、多い海域、上がったまま、先に（1〜12週前に）網の隣（1歩か2歩）の島が"
@@ -989,6 +1046,15 @@ def summary_md(run, rrows, orows, crows, mres, fam_order, tags, mondays):
         a("  - %s：島 %d（%s）。上がったまま %d、先に網の隣の島 %d。" % (
             w, tot, "、".join("%s %d" % (r[2], r[3]) for r in top) if top else "無し", sum(r[4] for r in rs),
             sum(r[9] for r in rs)))
+    e1 = [v[0] for mk, v in sorted(run["info"]["edges"].items()) if int(mk) in set(run["info"]["case_months"])]
+    e2 = [v[1] for mk, v in sorted(run["info"]["edges"].items()) if int(mk) in set(run["info"]["case_months"])]
+    if e1:
+        a("  - 注：「先に網の隣の島」は、作り方の上でほぼ必ず付く。事例の月の網では、1つのタグあたり1歩の隣が平均 %.1f、2歩先の隣が平均 %.1f"
+          "あり、事例の週の島（倍率 %d）は週に平均 %.1f ある。この数には、連鎖とそうでないものを見分ける力が無い。" % (
+              sum(e1) / len(e1) / run["tags"], sum(e2) / len(e2) / run["tags"], MAIN_M,
+              sum(r[3] for r in crows if r[1] == MAIN_M) / len(weeks) if weeks else 0.0))
+    else:
+        a("  - 注：「先に網の隣の島」は、隣の数と島の割合から、作り方の上でほぼ必ず付く。この数には見分ける力が無い。")
     a("")
     for sp in SPLITS:
         a("- 予測（分け方 %s%s）：" % (sp, "、主" if sp == SPLIT_MAIN else "、参考"))
@@ -999,6 +1065,10 @@ def summary_md(run, rrows, orows, crows, mres, fam_order, tags, mondays):
             rel_ = [100 * x["d_logloss"] / nv["logloss"] for _n, x in rs]
             a("  - 倍率 %d：素朴な予測に励起の量を足した %d のモデルの対数損失の差は %+.2f%%〜%+.2f%%。差の範囲（4週束ね）が0より下に"
               "収まったのは %d。" % (m, len(rs), min(rel_), max(rel_), below))
+            worse = [x["topk"] for _n, x in rs if x["d_logloss"] < 0 and x["d_topk"] < 0]
+            if worse:
+                a("    対数損失は下がったのに上位10の島が減ったモデルが %d ある（素朴な予測の %d → %d〜%d）。" % (
+                    len(worse), nv["topk"], min(worse), max(worse)))
     a("- 2020年の連鎖は、分け方 A の検証の期間（2019-01-07〜）の中にしかない。主の分け方 B（確かめ 2018年）には入っていない。")
     a("")
     a("## 2. 作り方")
