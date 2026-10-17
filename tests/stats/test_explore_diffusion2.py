@@ -217,6 +217,14 @@ class TestOutputs(unittest.TestCase):
         with self.assertRaises(x2.Diffusion2Error):
             x2.check_naive_same(rows, own)
 
+    def test_count_not_in_table(self):
+        data = json.dumps({"official_result": {"themes": [
+            {"name": "A", "in_category_table": False}, {"name": "B", "in_category_table": True},
+            {"name": "C", "in_category_table": False}]}}).encode()
+        with mock.patch.object(ei, "read_nofollow", return_value=data), \
+                mock.patch.object(ex, "DETAIL_SHA256", hashlib.sha256(data).hexdigest()):
+            self.assertEqual(x2.count_not_in_table("/x", ["A", "B"]), 1)
+
     def test_read_t123_checks_sha(self):
         with mock.patch.object(ei, "read_nofollow", return_value=b"a\tb\n1\t2\n"):
             with self.assertRaises(x2.Diffusion2Error):
@@ -242,7 +250,7 @@ class TestOutputs(unittest.TestCase):
               "knn_excl": 4, "knn_excl_present": 3, "knn_excl_at_least_a": 2, "knn_excl_both": 2}
         stats = [(201603, g, dict(st)) for g in x2.NETWORKS_ALL]
         plan = {201603: [(0, "now", "2016-04-11", [0])]}
-        meta = {"phase1_sha256": "0" * 64}
+        meta = {"phase1_sha256": "0" * 64, "excl2_not_in_table": 1}
         ctx = {"refs": {}, "v": V}
         flags = {"EX_A": (True, True), "EX_B": (False, False)}
         f1 = x2.build_outputs(rows, [("B", "m", 0.1, 0.2, 0.3)], stats, [201603], plan, meta, ctx,
@@ -255,7 +263,8 @@ class TestOutputs(unittest.TestCase):
         self.assertNotIn("EX_A", s)
         for n in ("models.tsv", "network.tsv", "hub.tsv"):
             self.assertNotIn(b"EX_A", f1[n])
-        for phrase in ("行って戻る道", "除外したテーマへの線が入る", "shift の差が now の差以下", "1825", ei.CITATION_JA):
+        for phrase in ("行って戻る道", "除外したテーマへの線が入る", "shift の差が now の差以下", "1825", ei.CITATION_JA,
+                       "倍率 2 では 21 / 21", "区別できない", "v1 の4章の shift の文", "区分表に無いテーマ", "2つを同時に変えている"):
             self.assertIn(phrase, s)
         run = json.loads(f1["run.json"])
         self.assertEqual(run["models_per_split_multiplier_all_networks"], 42)

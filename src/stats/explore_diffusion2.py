@@ -55,7 +55,7 @@ ei = ex.ei
 naive = ex.naive
 counting = ei.counting
 
-LABEL = "explore-diffusion2-t124-v1"
+LABEL = "explore-diffusion2-t124-v2"   # v2：T-124 の申し送り（4章の shift の文を数から作る形に。表は同じ）
 PHASE1_LABEL = "explore-diffusion2-phase1-v1"
 MULTIPLIERS = ex.MULTIPLIERS
 HORIZON = ex.HORIZON
@@ -78,6 +78,16 @@ def excl2_rule(theme):
 
 class Diffusion2Error(Exception):
     pass
+
+
+def count_not_in_table(detail_path, names):
+    """names のうち、detail で区分表に無い（in_category_table が偽の）テーマの数。detail の sha256 を照らしてから読む。"""
+    data = ei.read_nofollow(detail_path)
+    if hashlib.sha256(data).hexdigest() != ex.DETAIL_SHA256:
+        raise Diffusion2Error("detail の sha256 が seq 17 の outside と違う")
+    want = set(names)
+    return sum(1 for t in json.loads(data.decode("utf-8"))["official_result"]["themes"]
+               if t["name"] in want and t.get("in_category_table") is False)
 
 
 def load_detail(detail_path, ctx):
@@ -412,6 +422,7 @@ def phase2(root, cache_dir, t123_cache, t117_cache, detail, t123_models, out_dir
     ctx = ei.load_context(root)
     excl, excl2, flags = load_detail(detail, ctx)
     meta = load_cache(cache_dir, ctx, excl2)
+    meta["excl2_not_in_table"] = count_not_in_table(detail, excl2)
     meta123 = ex.load_cache(t123_cache, ctx, excl)
     if meta123["phase1_sha256"] != T123_PHASE1_SHA256:
         raise Diffusion2Error("T-123 のキャッシュの版が違う")
@@ -572,7 +583,8 @@ def build_outputs(rows, hub_info, stats, ends, plan, meta, ctx, excl, excl2, fla
                      [(g, e, e in now_ends, *[s[c] for c in STAT_COLS]) for e, g, s in stats])
     comp = {"excluded_all": len(excl), "present": sum(1 for n in excl if flags[n][0]),
             "at_least_a": sum(1 for n in excl if flags[n][1]),
-            "both": sum(1 for n in excl if flags[n][0] and flags[n][1]), "listexcl2_nodes": len(excl2)}
+            "both": sum(1 for n in excl if flags[n][0] and flags[n][1]), "listexcl2_nodes": len(excl2),
+            "listexcl2_not_in_table": meta.get("excl2_not_in_table")}
     n_models = len(new_variants())
     run = {"label": LABEL, "code": dict(ei._LOADED_SHA, **own_code_shas()), "python": sys.version.split()[0],
            "phase1_sha256": meta["phase1_sha256"], "t123_phase1_sha256": T123_PHASE1_SHA256,
@@ -628,6 +640,11 @@ def summary_md(run, rows, stats, now_ends):
       "外れたもの）を点にした。線は一覧どうし・一覧 × 除外・除外どうしの3種類。" % comp["listexcl2_nodes"])
     a("  - 割り振りの文には「約1825個」とあったが、1825 は平均が A 以上だけの数で、全期間に存在することも満たすものは %d 個。"
       "コードには割り振りの文の条件（両方）を書いた。" % comp["both"])
+    if comp.get("listexcl2_not_in_table") is not None:
+        a("  - listexcl2 の点 %d 個のうち %d 個は、区分表に無いテーマ（データにだけ現れたテーマ。点の条件の上では正しく入る）。" % (
+            comp["listexcl2_nodes"], comp["listexcl2_not_in_table"]))
+    a("  - listexcl2 は、listexcl から点の条件（量の少ないテーマを除く）と線の種類（除外どうしの線を足す）の2つを同時に変えている。"
+      "listexcl との違いが、どちらによるかは分けられない。")
     a("- 除外したテーマは出どころ・通り道としてだけ使い、予言の対象・評価の行には入れていない。")
     a("")
     a("## 1. 網の中身（now の窓 %d 個の中央値。窓ごとの値は network.tsv）" % len(now_ends))
@@ -692,8 +709,15 @@ def summary_md(run, rows, stats, now_ends):
     a("- 拡散の見込みと自分の上がり：k ≥ 2 の P^k s には、隣へ行って戻る道を通して自分の上がりも入る。拡散の見込みは、他の点だけから"
       "来た値ではない（k = 0 の自分の項だけを除いた）。")
     a("- ハブの割り引きの次数：listexcl と listexcl2 では、ハブの割り引きの回帰に使う次数に除外したテーマへの線が入る。list とは意味が違う。")
-    a("- shift の網：分け方 B では、3か月前にずらした網（shift）が now と同じかそれ以上に効いた組み合わせが多い（各結果の章の"
-      "「shift の差が now の差以下」の数）。網と信号が同じ記事から作られることの影響は、この比べ方では見えない。")
+    parts = []
+    for m in MULTIPLIERS:
+        ks = [shift_vs_now(rows, ex.SPLIT_MAIN, m, g) for g in NETWORKS_ALL]
+        parts.append("倍率 %d では %d / %d（%s）" % (m, sum(k for k, _n in ks), sum(n for _k, n in ks),
+                                                 "、".join("%s %d/%d" % (g, k, n) for g, (k, n) in zip(NETWORKS_ALL, ks))))
+    a("- shift の網：分け方 %s で、3か月前にずらした網（shift）の差が now の差以下だった組み合わせの数は、%s。"
+      "網と信号が同じ記事から作られることの影響が有るか無いかは、この比べ方では区別できない。" % (ex.SPLIT_MAIN, "、".join(parts)))
+    a("- この版（v2）の注記：v1 の4章の shift の文は、本番の前に固定で書いたもので、結果（倍率 8 では逆）と合わなかったため、"
+      "各章の数から作る形に替えた。表の sha256 は v1 と同じ。")
     a("")
     a("## 5. 予言の時点のデータだけを使ったことの確かめ")
     a("- 日の比率と上がり：ReadGuard で、一覧のタグは t-399〜t-1、除外したテーマは t-371〜t-1 の外を読むと止まる。")
