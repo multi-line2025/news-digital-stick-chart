@@ -61,7 +61,7 @@ ei = x2.ei
 naive = x2.naive
 candidates = ei.candidates
 
-LABEL = "explore-sea-t125-v1"
+LABEL = "explore-sea-t125-v2"   # v2：T-126 で要約の文と言い方の規則を手直し（表は同じ）
 MULTIPLIERS = em.MULTIPLIERS
 HORIZON = em.HORIZON
 DAY = datetime.timedelta(days=1)
@@ -84,7 +84,13 @@ MISS_RULES = ("M1", "M2", "M3")
 MISS_MAIN = "M1"
 MAIN_M = 4
 # 平易な説明の言い方の目安（海域どうしの三分位と、決まった値）
-SIMILAR_HIGH, SIMILAR_LOW = 0.5, 0.3
+SIMILAR_HIGH, SIMILAR_LOW = 0.5, 0.3      # v1 の目安（v2 の1章では使わない。記録のため残す）
+# T-126：季節の割合と年どうしの相関の偶然の水準（本番の前に書いた）。季節の無い系列を種類ごとに NULL_N 本、同じ season_stats に流す。
+NULL_SEED = 126
+NULL_N = 300
+NULL_AR = 0.9
+NULL_KINDS = ("iid", "ar0.9", "randomwalk")
+NULL_Q = 0.90                             # 偶然の水準：種類ごとの90%点（最近順位）のうち最も大きいもの
 TREND_UP, TREND_DOWN = 0.1, -0.1
 FLOW_HIGH, FLOW_LOW = 0.3, 0.1
 STEP_SHARE_HIGH = 0.3
@@ -511,19 +517,52 @@ SEA_COLS = ("sea", "tags", "targets", "rough", "season", "similar", "trend", "fl
                                                     "missed_years_islands"))
 
 
-def plain_sentence(d, all_rows):
-    """海域の平易な説明（目安は海域どうしの三分位と決まった値）。"""
+def null_levels(weeks):
+    """季節の無い系列（独立な乱数・自己相関 NULL_AR・ランダムウォーク）を種類ごとに NULL_N 本作り、season_stats の
+    (季節の割合, 年どうしの相関) を返す。戻り値：{"kinds": {種類: {"season": [...], "similar": [...]}}, "season": 水準, "similar": 水準}。"""
+    import random
+    rng = random.Random(NULL_SEED)
+    kinds = {}
+    for kind in NULL_KINDS:
+        se, si = [], []
+        for _ in range(NULL_N):
+            x, ys = 0.0, []
+            for _w in weeks:
+                e = rng.gauss(0.0, 1.0)
+                if kind == "iid":
+                    x = e
+                elif kind == "ar0.9":
+                    x = NULL_AR * x + e
+                else:
+                    x = x + e
+                ys.append(x)
+            a, b = season_stats(ys, weeks)
+            se.append(a)
+            si.append(b)
+        kinds[kind] = {"season": sorted(v for v in se if v is not None), "similar": sorted(v for v in si if v is not None)}
+    lev = {stat: max(nearest_rank(kinds[k][stat], NULL_Q) for k in NULL_KINDS) for stat in ("season", "similar")}
+    return dict(lev, kinds=kinds)
+
+
+def plain_sentence(d, all_rows, null):
+    """海域の平易な説明。荒さ・島の起きやすさは海域どうしの三分位、季節風と年ごとの形は偶然の水準との比べ。"""
     rough = tercile_label(d["rough"], [r["rough"] for r in all_rows], ("穏やか", "ふつう", "荒い"))
-    season = tercile_label(d["season"], [r["season"] for r in all_rows], ("弱い", "ふつう", "強い"))
     rate = tercile_label(d["rate_%d" % MAIN_M], [r["rate_%d" % MAIN_M] for r in all_rows],
                          ("起きにくい", "ふつう", "起きやすい"))
     parts = ["ふだんの波の上下は%s" % {"穏やか": "小さく穏やか", "ふつう": "ほかの海と同じくらい", "荒い": "大きく荒い"}.get(rough, "分からない")]
-    if d["similar"] is not None:
-        shape = "毎年ほぼ同じ形" if d["similar"] >= SIMILAR_HIGH else ("年ごとに形が変わる" if d["similar"] < SIMILAR_LOW
-                                                                  else "年ごとにある程度似た形")
+    if d["season"] is None:
+        season = "分からない"
+    elif d["season"] > null["season"]:
+        season = "偶然の水準（%.3f）を超えていて、ありそう" % null["season"]
     else:
-        shape = "形は分からない"
-    parts.append("季節風（毎年同じ時期に来る波）は%s、%s" % (season or "分からない", shape))
+        season = "見分けられない（季節の無い系列でも出る大きさ）"
+    if d["similar"] is None:
+        shape = "年ごとの形の似かたは分からない"
+    elif d["similar"] > null["similar"]:
+        shape = "年ごとの形は偶然の水準（%.3f）より似ている" % null["similar"]
+    else:
+        shape = "年ごとの形の似かたは見分けられない"
+    parts.append("季節風（毎年同じ時期に来る波）は%s。%s" % (season, shape))
     if d["trend"] is not None:
         tr = "上がり気味" if d["trend"] >= TREND_UP else ("下がり気味" if d["trend"] <= TREND_DOWN else "ほぼ横ばい")
     else:
@@ -627,7 +666,12 @@ def build_outputs(tags, mondays, rows, keys, seas, tag_info, storm, island_extra
     files = {"seas.tsv": seas_tsv, "storms.tsv": storms_tsv, "naive_coefs.tsv": coefs_tsv, "missed.tsv": missed_tsv,
              "tags-private.tsv": tags_private, "missed-private.tsv": missed_private,
              "run.json": (json.dumps(run, ensure_ascii=False, sort_keys=True, indent=1) + "\n").encode("utf-8")}
-    files["summary.md"] = summary_md(run, fam, com, storm, mondays, models, missed, summary_missed, mrows, tags)
+    null = null_levels(week_starts())
+    run["null_levels"] = {"season": null["season"], "similar": null["similar"], "seed": NULL_SEED, "n": NULL_N,
+                          "kinds": {k: {stat: [median(v[stat]), nearest_rank(v[stat], NULL_Q)] for stat in ("season", "similar")}
+                                    for k, v in null["kinds"].items()}}
+    files["run.json"] = (json.dumps(run, ensure_ascii=False, sort_keys=True, indent=1) + "\n").encode("utf-8")
+    files["summary.md"] = summary_md(run, fam, com, storm, mondays, models, missed, summary_missed, mrows, tags, null)
     for name, data in files.items():
         ei.check_public(name, data)
     return files
@@ -643,30 +687,49 @@ def write_outputs(out_dir, files):
     return {name: es.write_new(os.path.join(out_dir, name), files[name]) for name in OUT_NAMES}
 
 
-def summary_md(run, fam, com, storm, mondays, models, missed, summary_missed, mrows, tags):
+def null_text(null, stat):
+    names = {"iid": "独立な乱数", "ar0.9": "引き継ぐ系列", "randomwalk": "ランダムウォーク"}
+    return "、".join("%sで中央値 %.3f・90%%点 %.3f" % (names[k], median(null["kinds"][k][stat]),
+                                                    nearest_rank(null["kinds"][k][stat], NULL_Q)) for k in NULL_KINDS)
+
+
+def summary_md(run, fam, com, storm, mondays, models, missed, summary_missed, mrows, tags, null=None):
+    null = null if null is not None else null_levels(week_starts())
     L = []
     a = L.append
     md = ei.md_table
     a("# 海域ごとの波の性状と、素朴な予測が見落とした島（T-125、手法を作る期間）")
     a("")
-    a("この文書は `src/stats/explore_sea.py` が出力したもので、手で書き足していない。島の定義は変えていない。テーマの名前は載せていない。"
+    same = sum(1 for d in fam if d["sea"] in set(tags))
+    a("この文書は `src/stats/explore_sea.py` が出力したもので、手で書き足していない。島の定義は変えていない。テーマの名前は載せていない"
+      "（海域として載せた系統の名前を除く。系統の名前 %d 個のうち %d 個は、一覧に同じ名前のテーマがある）。" % (len(fam), same))
+    a("この版（v2）の注記：v1 の季節風の言い方は海域どうしの三分位で、偶然の水準を考えていなかったため、偶然の水準と比べる形に替えた"
+      "（表の sha256 は v1 と同じ）。"
       "全部並べ、選ばない・勧めない。")
     a("")
     a("## 1. 海域ごとのやさしい説明")
     a("")
     a("ここでの「海域」は、テーマの名前の頭の部分（系統）でまとめたもの。言葉の意味：「荒さ」はふだんの報道量の上下のふれ幅、"
       "「季節風」は毎年同じ時期に来る波、「偏西風」は何年もかけた上り下り、「嵐」は多くの海域が同じ週に一緒に荒れること、"
-      "「海底の隆起」は報道量の水準が段のように変わること。目安は海域どうしの比べ（三分位）で、絶対の基準ではない。")
+      "「海底の隆起」は報道量の水準が段のように変わること。荒さと島の起きやすさの目安は海域どうしの比べ（三分位）で、絶対の基準ではない。")
+    a("")
+    a("季節風について：季節の無い系列（独立な乱数、前の週の値の %.1f 倍を引き継ぐ系列、ランダムウォーク。各 %d 本、乱数の種 %d）を同じ計算に通すと、"
+      "季節で説明できる割合は %s、年どうしの相関は %s になった。季節の割合が %.3f（種類ごとの90%%点のうち最も大きいもの）を超えない海域では、"
+      "季節風は「見分けられない」と書く。年どうしの相関も同じく %.3f と比べる。" % (
+          NULL_AR, NULL_N, NULL_SEED, null_text(null, "season"), null_text(null, "similar"), null["season"],
+          null["similar"]))
     a("")
     for d in fam:
-        a("- %s（テーマ %d）：%s" % (d["sea"], d["tags"], plain_sentence(d, fam)))
+        a("- %s（テーマ %d）：%s" % (d["sea"], d["tags"], plain_sentence(d, fam, null)))
     a("")
     a("## 2. 素朴な予測が見落とした島（やさしい説明）")
     a("")
     for m in MULTIPLIERS:
         tot, mk = summary_missed[(m, MISS_MAIN)]
-        a("- 倍率 %d：%d〜%d年の島 %d 件のうち、素朴な予測が「島になりそうにない」（付けた確率が、学習の行の島の割合より低い）と見たのに"
-          "島になったのは %d 件（%.1f%%）。" % (m, MISS_YEARS[0], MISS_YEARS[-1], tot, mk, 100 * mk / tot if tot else 0))
+        bases = [models[(y, m)]["base"] for y in MISS_YEARS]
+        a("- 倍率 %d：%d〜%d年の島 %d 件のうち、素朴な予測が平均より低い確率を付けた（約 %.1f〜%.1f%% 未満。年ごとの学習の行の島の割合）"
+          "のに島になったのは %d 件（%.1f%%）。" % (m, MISS_YEARS[0], MISS_YEARS[-1], tot, 100 * min(bases), 100 * max(bases), mk,
+                                               100 * mk / tot if tot else 0))
     def top(group, m, k=3):
         c = collections.Counter()
         ci = collections.Counter()
@@ -690,7 +753,7 @@ def summary_md(run, fam, com, storm, mondays, models, missed, summary_missed, mr
         100 * cs["calm"] / cis["calm"] if cis["calm"] else 0))
     a("- 見落とした島のうち、跳ねたあと元に戻ったもの %d 件、上がったままのもの %d 件、区画の外にかかって分からないもの %d 件。" % (
         ca["back"], ca["stay"], ca["unknown"]))
-    a("- 見落としの基準はほかに2つ（M2：その年の確率の下位25%%、M3：学習の行の島の割合の半分より低い）を並べた（4章）。")
+    a("- 見落としの基準はほかに2つ（M2：その年の確率の下位25%、M3：学習の行の島の割合の半分より低い）を並べた（4章）。")
     a("")
     a("## 3. 海域の表（系統）")
     a("")
@@ -743,11 +806,13 @@ def summary_md(run, fam, com, storm, mondays, models, missed, summary_missed, mr
       "戻った、上なら上がったまま、t+%d が区画の外か使える日が %d 未満なら分からない。" % (
           STEP_WEEKS, STEP_MIN_VALUES, BACK_FROM, BACK_TO, BACK_TO, BACK_MIN_DAYS))
     a("- 素朴な予測：予言日の年 y ごとに、判定期間が y の始まりより前に終わる予言日の対象の行で作り直し、年 y の行に確率を付けた（予言日より前の"
-      "データだけで作った確率）。見落とし：M1 確率 < 学習の行の島の割合、M2 確率 ≤ その年の確率の下位25%%、M3 確率 < 学習の行の島の割合の半分。")
-    a("- 1章の言い方の目安：荒さ・季節風・島の起きやすさは海域どうしの三分位。年どうしの相関 %.1f 以上で「毎年ほぼ同じ形」、%.1f 未満で"
-      "「年ごとに形が変わる」。傾き %+.1f 以上で上がり気味、%+.1f 以下で下がり気味。共通の流れ %.1f 以上で一緒に動きやすい、%.1f 未満でばらばら。"
-      "段のあるテーマが %.0f%% 以上で段の文を足す。" % (SIMILAR_HIGH, SIMILAR_LOW, TREND_UP, TREND_DOWN, FLOW_HIGH,
-                                                    FLOW_LOW, 100 * STEP_SHARE_HIGH))
+      "データだけで作った確率）。見落とし：M1 確率 < 学習の行の島の割合、M2 確率 ≤ その年の確率の下位25%、M3 確率 < 学習の行の島の割合の半分。")
+    a("- 1章の言い方の目安：荒さ・島の起きやすさは海域どうしの三分位。季節風と年ごとの形は、海域の中央値を偶然の水準（季節の無い系列の"
+      "種類ごとの90%%点のうち最も大きいもの。季節の割合 %.3f、年どうしの相関 %.3f）と比べ、超えなければ「見分けられない」。季節の無い系列："
+      "季節の割合は %s、年どうしの相関は %s（各 %d 本、乱数の種 %d）。傾き %+.1f 以上で上がり気味、%+.1f 以下で下がり気味。共通の流れ %.1f 以上で"
+      "一緒に動きやすい、%.1f 未満でばらばら。段のあるテーマが %.0f%% 以上で段の文を足す。" % (
+          null["season"], null["similar"], null_text(null, "season"), null_text(null, "similar"), NULL_N, NULL_SEED,
+          TREND_UP, TREND_DOWN, FLOW_HIGH, FLOW_LOW, 100 * STEP_SHARE_HIGH))
     a("")
     a("## 8. 限界")
     a("- 性状の記述は、区画全体のデータ（判定期間より後の日も含む）を使った理解のための記述で、予言の入力にはしていない。予言の時点で"
@@ -757,6 +822,10 @@ def summary_md(run, fam, com, storm, mondays, models, missed, summary_missed, mr
       "見落とした島の一覧（missed-private.tsv）とタグの表（tags-private.tsv）には名前が入るので、公開しない。")
     a("- WB のテーマの段のような上昇（T-116 の要約 6章）は、段の割合と見落としに入りうる。")
     a("- 見落としの数は、同じ出来事で多くのタグが一緒に跳ね、毎週の判定期間が重なるので、独立な件数ではない。")
+    a("- 群れの海域：群れが同じかどうかを、月ごとのラベル（群れの中の最小の番号）で決めている。月をまたいで群れの中身が変わっても、"
+      "最小の番号が同じなら同じ群れと数えるので、「最も多く属した群れ」は近似的な対応である。")
+    a("- 季節風の偶然の水準は、1本の系列の分布（90%点）と、海域の中のタグの値の中央値を比べたもの。中央値は1本の値よりばらつきが小さいので、"
+      "この比べ方は「見分けられない」と書きやすい向きにある。")
     a("")
     a("## 9. 再計算")
     a("```")

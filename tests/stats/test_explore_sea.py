@@ -171,6 +171,37 @@ class TestOutputs(unittest.TestCase):
         self.assertLess(s.index("海域ごとのやさしい説明"), s.index("海域の表"))
         for n, d in f1.items():
             self.assertIsNone(ei.EMAIL_RE.search(d), n)
+        # T-126
+        self.assertEqual(sea.LABEL, "explore-sea-t125-v2")
+        self.assertNotIn("%%", s)
+        self.assertIn("下位25%", s)
+        self.assertIn("v1 の季節風の言い方は海域どうしの三分位で、偶然の水準を考えていなかったため、偶然の水準と比べる形に替えた"
+                      "（表の sha256 は v1 と同じ）", s)
+        self.assertIn("海域として載せた系統の名前を除く。系統の名前 2 個のうち 0 個は、一覧に同じ名前のテーマがある", s)
+        self.assertIn("素朴な予測が平均より低い確率を付けた", s)
+        self.assertIn("近似的な対応", s)
+        null = sea.null_levels(sea.week_starts())
+        self.assertIn("%.3f（種類ごとの90%%点のうち最も大きいもの）" % null["season"], s)
+        for w in ("季節風は弱い", "季節風は強い", "季節風はふつう", "毎年ほぼ同じ形"):
+            self.assertNotIn(w, s)
+        self.assertIn("null_levels", f1["run.json"].decode("utf-8"))
+
+    def test_null_levels_and_wording(self):
+        weeks = sea.week_starts()
+        a, b = sea.null_levels(weeks), sea.null_levels(weeks)
+        self.assertEqual(a, b)
+        self.assertEqual(sorted(a["kinds"]), sorted(sea.NULL_KINDS))
+        for k in sea.NULL_KINDS:
+            self.assertEqual(len(a["kinds"][k]["season"]), sea.NULL_N)
+        self.assertEqual(a["season"], max(sea.nearest_rank(a["kinds"][k]["season"], sea.NULL_Q) for k in sea.NULL_KINDS))
+        base = {"rough": 0.5, "trend": 0.0, "flow": 0.2, "step_share": 0.0, "rate_4": 0.05, "islands_4": 3, "back_4": 1, "stay_4": 1}
+        rows = [dict(base, season=0.1 * i, similar=0.05 * i, rough=0.1 * i, rate_4=0.01 * i) for i in range(10)]
+        lo = sea.plain_sentence(dict(base, season=a["season"], similar=a["similar"]), rows, a)
+        self.assertIn("季節風（毎年同じ時期に来る波）は見分けられない", lo)
+        self.assertIn("年ごとの形の似かたは見分けられない", lo)
+        hi = sea.plain_sentence(dict(base, season=a["season"] + 0.01, similar=a["similar"] + 0.01), rows, a)
+        self.assertIn("偶然の水準（%.3f）を超えていて" % a["season"], hi)
+        self.assertIn("年ごとの形は偶然の水準（%.3f）より似ている" % a["similar"], hi)
 
     def test_write_refuses_existing(self):
         with mock.patch.object(sea.os, "makedirs"), mock.patch.object(sea.os.path, "lexists", return_value=True), \
