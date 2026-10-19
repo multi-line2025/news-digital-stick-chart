@@ -61,7 +61,7 @@ es = ch.es
 ei = ch.ei
 naive = ch.naive
 
-LABEL = "explore-tiers-t134-v2"   # v2：T-134 の差し戻し1回目（較正した段2、識別と較正の分け方、窓をずらす見当、要約の補い）
+LABEL = "explore-tiers-t134-v3"   # v3：T-136 で要約の文だけ手直し（表と作り方は v2 と同じ）。v2：T-134 の差し戻し1回目
 MULTIPLIERS = em.MULTIPLIERS
 HORIZON = em.HORIZON
 
@@ -593,7 +593,7 @@ def build_outputs(tags, mondays, keys, tables, res, coefs, ctx, info, sim):
            "citation": [ei.CITATION_EN, ei.CITATION_JA]}
     files = {"tiers.tsv": tiers_tsv, "diffs.tsv": diffs_tsv, "coefs.tsv": coefs_tsv, "power.tsv": power_tsv,
              "run.json": (json.dumps(run, ensure_ascii=False, sort_keys=True, indent=1) + "\n").encode("utf-8")}
-    files["summary.md"] = summary_md(run, res, tier_of, tags, sim)
+    files["summary.md"] = summary_md(run, res, tier_of, tags, sim, coefs)
     for name, data in files.items():
         ei.check_public(name, data)
     return files
@@ -643,7 +643,7 @@ def step_text(diffs, mets, lab):
             % (len(ds), min(pct), max(pct), below, above, bb, ba, min(tk), max(tk)))
 
 
-def summary_md(run, res, tier_of, tags, sim):
+def summary_md(run, res, tier_of, tags, sim, coefs=()):
     L = []
     a = L.append
     md = ei.md_table
@@ -655,6 +655,8 @@ def summary_md(run, res, tier_of, tags, sim):
       "較正し直した対数損失（識別の目安）と較正の損に分けた列を足した。窓をずらした検出力の見当（power.tsv）を足した。1章に、静的な違い・"
       "段1 基準の上位10・段4 の上位10の減り・較正の注意を書いた。v1 の coefs.tsv は、列の名前が1つずれていた（切片の名前が2回入り、"
       "最後の列の値が落ちていた）ので直した。v1 のほかの表の数（tiers.tsv・diffs.tsv の v1 にあった列）は同じ作り方。")
+    a("この版（v3）の変更点：要約の文だけを直した（T-136）。較正し直した対数損失の歪み、束の下限を満たす窓の数、較正した段2 の傾きと、"
+      "段2 より悪い理由の見立てを1章に書いた。表の sha256 は v2 と同じ。")
     a("")
     a("## 1. やさしい説明")
     a("")
@@ -697,6 +699,26 @@ def summary_md(run, res, tier_of, tags, sim):
       "%.5f〜%.5f、段3 で %.5f。2−1・3−2・N3−2 の差には、この較正の違いが混ざる。識別だけの目安は、diffs.tsv の d_logloss_recal。"
       % (SPLIT_MAIN, MAIN_M, min(eh), max(eh), min(ec), max(ec), mets_b["naive"]["ece"], min(clh), max(clh), min(clc),
          max(clc), mets_b["naive"]["cal_loss"]))
+    gaps = sorted(((mets_b["hcal_" + h]["ll_recal"] - mets_b[h]["ll_recal"], h) for h, _w, _a in hist_forms()),
+                  reverse=True)
+    g, gh = gaps[0]
+    a("- 較正し直した対数損失の歪み：較正し直しにもリッジ 1（切片を含む）を掛けたので、確率の幅が狭い形では大きく歪む。較正した段2 は"
+      "段2 の単調な変換で、並べ方は同じ（AUC は分け方 %s・倍率 %d で %s）なのに、較正し直した対数損失は違った。差が最大の形（%s）で、"
+      "段2 %.5f、較正した段2 %.5f、差 %.4f（段1 と段2 の、較正し直した対数損失の差 %.4f と同じくらいの大きさ）。識別は、当面 AUC を主に読む。"
+      % (SPLIT_MAIN, MAIN_M, "・".join("%.3f" % mets_b[h]["auc"] for h, _w, _a in hist_forms()), gh, mets_b[gh]["ll_recal"],
+         mets_b["hcal_" + gh]["ll_recal"], g, mets_b["null_exp"]["ll_recal"] - mets_b[gh]["ll_recal"]))
+    slopes = {name: dict(zip(["intercept", "lh"], cf)) for sp, m, name, cf, _c in coefs
+              if sp == SPLIT_MAIN and m == MAIN_M and name.startswith("hcal_")}
+    if slopes:
+        sl = sorted(v["lh"] for v in slopes.values())
+        a("- 較正した段2 の傾き（logit(段2) の係数、分け方 %s・倍率 %d）は %.2f〜%.2f（全期間・a = 50 で %.3f）。1 より小さいので、確率の"
+          "幅が段2 より狭い。較正した段2 の対数損失が段2 より大きい形が多いのは、学習の行の多くが、使える過去が短い時期（2016〜2017年）の"
+          "行で、そこで当てはめた傾きが、過去が長くなった確かめの時期に合わないためと見られる（見立てで、確かめていない）。"
+          % (SPLIT_MAIN, MAIN_M, sl[0], sl[-1], slopes.get("hcal_hist_all_a50", {}).get("lh", float("nan"))))
+    for sp in SPLITS:
+        ok = sorted({(w2, wins[0][4]) for s2, _m, _l, _a, _b, w2, wins in sim if s2 == sp and wins and wins[0][4] >= MIN_BLOCKS})
+        a("- 束の下限 %d を満たす窓（分け方 %s）：%s。" % (MIN_BLOCKS, sp, "、".join("%d週の窓（束 %d）" % x for x in ok) if ok
+                                                    else "1つも無い（確かめの週が足りない）"))
     for sp in SPLITS:
         parts = []
         for lab in ("3-1", "2-1", "2c-1", "3-2", "4-3"):

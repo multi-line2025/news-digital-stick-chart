@@ -184,7 +184,8 @@ class TestOutputs(unittest.TestCase):
                             sim.append((sp, m, lab, a, b, ws, tr.window_sim(mets[a], mets[b], wk, ws, stride=4)))
         ctx = {"refs": {}, "v": V}
         info = {"daily_min_read": "2015-03-09", "daily_max_read": "2020-10-12", "network_last_day_minus_t_max_days": -1}
-        coefs = [("B", 2, "naive", [0.1] * 8, True)]
+        coefs = [("B", 2, "naive", [0.1] * 8, True)] + [("B", 4, "hcal_" + h, [-3.0, 0.1 + 0.01 * k], True)
+                                                         for k, (h, _w, _a) in enumerate(tr.hist_forms())]
         tags = ["AA_%02d" % i for i in range(30)]
         return tr.build_outputs(tags, [], list(range(300)), {}, res, coefs, ctx, info, sim)
 
@@ -202,7 +203,10 @@ class TestOutputs(unittest.TestCase):
         for w in ("この版（v2）の変更点", "静的な違い", "名前の順で決まる", "段4 で上位10の島が減り", "較正の損", "窓をずらした見当",
                   "判定には使えない目安"):
             self.assertIn(w, s)
-        self.assertEqual(tr.LABEL, "explore-tiers-t134-v2")
+        self.assertEqual(tr.LABEL, "explore-tiers-t134-v3")
+        for w in ("この版（v3）の変更点", "表の sha256 は v2 と同じ", "較正し直した対数損失の歪み", "識別は、当面 AUC を主に読む",
+                  "較正した段2 の傾き", "0.10〜0.15（全期間・a = 50 で 0.110）", "束の下限 10 を満たす窓（分け方 B）：1つも無い"):
+            self.assertIn(w, s)
         for n, d in f1.items():
             self.assertIsNone(ei.EMAIL_RE.search(d), n)
             self.assertNotIn(b"AA_0", d, n)
