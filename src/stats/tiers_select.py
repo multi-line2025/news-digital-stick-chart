@@ -52,7 +52,8 @@ naive = tr.naive
 candidates = es.candidates
 scoring = es.scoring
 
-LABEL = "tiers-select-t141-v1"
+LABEL = "tiers-select-t142-v2"   # v2：T-142 で対数損失を丸めずに出し、僅差の印と判定不能の行の数を足した（選び方は同じ）
+NEAR_TIE = 1e-6                    # 僅差：選んだ形と、同じ段の次に小さい形の対数損失の差がこれ未満（本番の前に固定）
 MULTS = tuple(candidates.THRESHOLD_MULTIPLIERS)
 HORIZONS = tuple(candidates.HORIZON_DAYS)
 TIER1_FORMS = ("null_exp", "null_fix")
@@ -261,6 +262,8 @@ def build_tables(tags, mondays, lvs_rows, js_rows, exc, nbw, v):
 
 def evaluate_and_build(tags, mondays, lvs_rows, js_rows, exc, nbw, v, ctx, info, workers, log):
     tables, direct, keys_by_h = build_tables(tags, mondays, lvs_rows, js_rows, exc, nbw, v)
+    info = dict(info, scored_rows_by_h={str(h): len(keys_by_h[h]) for h in HORIZONS},
+                unjudged_rows_by_h={str(h): len(lvs_rows) - len(keys_by_h[h]) for h in HORIZONS})
     log("表を作った")
     split_idx = {}
     for h in HORIZONS:
@@ -325,19 +328,48 @@ def own_code_shas():
     return code
 
 
+TIER_FORMS = {1: list(TIER1_FORMS), 2: [f for f, _w, _a in TIER2_FORMS], 4: list(TIER4_FORMS)}
+
+
+def runner_up(r, tier):
+    """選んだ形の次の形（選んだ形を除いた中で、同じ規則で選ぶ形）と、その差（次 − 選んだ形。0 以上）。"""
+    chosen = r["sel"][tier]
+    rest = [f for f in TIER_FORMS[tier] if f != chosen]
+    best = min(r["ll"][f] for f in rest)
+    nxt = [f for f in rest if r["ll"][f] == best][0]
+    return nxt, r["ll"][nxt] - r["ll"][chosen]
+
+
+def fr(x):
+    """丸めない表し方（repr。浮動小数を同じ値に読み戻せる最短の10進）。"""
+    return repr(float(x))
+
+
 def tables_bytes(rows):
     all_rows, sel_rows = [], []
     for r in rows:
         for f in FORM_ORDER:
             tier = FORM_TIER[f]
             chosen = "-" if tier == 3 else ("yes" if r["sel"][tier] == f else "no")
-            all_rows.append((r["h"], r["m"], tier, f, r["n_test"], r["islands_test"], "%.6f" % r["ll"][f], chosen))
-        sel_rows.append((r["h"], r["m"], r["n_train"], r["n_test"], r["islands_test"], r["sel"][1],
-                         "%.6f" % r["ll"][r["sel"][1]], r["sel"][2], "%.6f" % r["ll"][r["sel"][2]], r["sel"][4],
-                         "%.6f" % r["ll"][r["sel"][4]], "%.6f" % r["ll"]["naive"]))
-    a = ei.tsv(("horizon_days", "multiplier", "tier", "form", "n_test", "islands_test", "logloss", "chosen"), all_rows)
-    b = ei.tsv(("horizon_days", "multiplier", "n_train", "n_test", "islands_test", "tier1_form", "tier1_logloss",
-                "tier2_form", "tier2_logloss", "tier4_form", "tier4_logloss", "naive_logloss_reference"), sel_rows)
+            if tier != 3 and r["sel"][tier] == f:
+                nxt, gap = runner_up(r, tier)
+                extra = (nxt, fr(gap), "yes" if gap < NEAR_TIE else "no")
+            else:
+                extra = ("-", "-", "-")
+            all_rows.append((r["h"], r["m"], tier, f, r["n_test"], r["islands_test"], fr(r["ll"][f]), chosen) + extra)
+        cells = []
+        for tier in (1, 2, 4):
+            nxt, gap = runner_up(r, tier)
+            cells += [r["sel"][tier], fr(r["ll"][r["sel"][tier]]), nxt, fr(gap), "yes" if gap < NEAR_TIE else "no"]
+        sel_rows.append((r["h"], r["m"], r["n_train"], r["n_test"], r["islands_test"]) + tuple(cells)
+                        + (fr(r["ll"]["naive"]),))
+    a = ei.tsv(("horizon_days", "multiplier", "tier", "form", "n_test", "islands_test", "logloss", "chosen",
+                "next_form", "gap_to_next", "near_tie"), all_rows)
+    head = ("horizon_days", "multiplier", "n_train", "n_test", "islands_test")
+    for tier in (1, 2, 4):
+        head += ("tier%d_form" % tier, "tier%d_logloss" % tier, "tier%d_next_form" % tier, "tier%d_gap_to_next" % tier,
+                 "tier%d_near_tie" % tier)
+    b = ei.tsv(head + ("naive_logloss_reference",), sel_rows)
     return a, b
 
 
@@ -349,6 +381,7 @@ def build_outputs(rows, ctx, info):
            "multipliers": MULTS, "horizons": HORIZONS, "tier1_forms": TIER1_FORMS,
            "tier2_forms": [f for f, _w, _a in TIER2_FORMS], "tier4_forms": TIER4_FORMS,
            "known_lag_weeks": {str(h): known_lag_weeks(h) for h in HORIZONS}, "not_converged": nc,
+           "near_tie": NEAR_TIE,
            "citation": [ei.CITATION_EN, ei.CITATION_JA]}
     files = {"tiers_select_all.tsv": a, "tiers_select.tsv": b,
              "run.json": (json.dumps(run, ensure_ascii=False, sort_keys=True, indent=1) + "\n").encode("utf-8")}
@@ -361,11 +394,13 @@ def build_outputs(rows, ctx, info):
 def summary_md(run, rows):
     L = []
     a = L.append
-    a("# 21組の段の形の表（T-141、手法を作る期間）")
+    a("# 21組の段の形の表（T-142、手法を作る期間）")
     a("")
     a("この文書は `src/stats/tiers_select.py` が出力したもので、手で書き足していない。採点計画（docs/stats/claims-scoring-plan.md）"
       "8章の「(3) の規則」（オーナーの決定 2026-10-20）を、手法を作る期間の分け方 B の確かめの行で当てはめた。封印していない。"
       "テーマの名前は載せていない。")
+    a("この版（v2、T-142）の変更点：表の対数損失を丸めずに出し、僅差の印（選んだ形と次の形の差が %s 未満）と、判定不能の行の数を足した。"
+      "選び方とデータは T-141 と同じ。" % fr(NEAR_TIE))
     a("")
     a("## 1. 選んだ形")
     a("")
@@ -379,6 +414,17 @@ def summary_md(run, rows):
     a(ei.md_table(["判定期間（日）", "倍率"] + FORM_ORDER,
                   [(r["h"], r["m"]) + tuple("%.6f" % r["ll"][f] for f in FORM_ORDER) for r in rows]))
     a("")
+    ties = [(r["h"], r["m"], tier, r["sel"][tier]) + runner_up(r, tier) for r in rows for tier in (1, 2, 4)
+            if runner_up(r, tier)[1] < NEAR_TIE]
+    a("## 2b. 僅差の組と段")
+    a("")
+    a("選んだ形と、同じ段の次の形の対数損失の差が %s 未満の組と段：%d。差は丸めない値で計算した（表の gap_to_next）。" % (
+        fr(NEAR_TIE), len(ties)))
+    a("")
+    if ties:
+        a(ei.md_table(["判定期間（日）", "倍率", "段", "選んだ形", "次の形", "差"],
+                      [(h, m, t, f, nxt, fr(g)) for h, m, t, f, nxt, g in ties]))
+        a("")
     a("## 3. 作り方")
     a("- 組：倍率 %s × 判定期間 %s 日。" % ("・".join(str(m) for m in MULTS), "・".join(str(h) for h in HORIZONS)))
     a("- 採点する行：判定期間ごとに、状態が target で、7つの倍率の判定がどれも判定不能でない行。分け方 B（学習：予言日 〜%s、"
@@ -387,14 +433,24 @@ def summary_md(run, rows):
         "H = %s で %d 週" % (h, w) for h, w in sorted(run["known_lag_weeks"].items(), key=lambda x: int(x[0]))))
     a("- 段4 の係数は、分け方 B の学習の行で当てはめた（ロジスティック回帰、リッジ 1）。当てはめが収まらなかったもの：%s。" % (
         "、".join(run["not_converged"]) if run["not_converged"] else "無い"))
-    a("- 選び方：段ごとに対数損失が最も小さい形。同じ値なら決まった順で先の形。")
+    a("- 選び方：段ごとに対数損失が最も小さい形。同じ値（浮動小数の完全一致）なら決まった順で先の形。表の対数損失は丸めずに出した"
+      "（repr）。要約の表は小数6桁に丸めたもので、6桁で同じに見える形どうしの順は tiers_select_all.tsv の丸めない値で読む。")
+    a("- 判定不能の行：この期間では、状態が target の行のうち判定不能の行は %s だった（仕組みとしては、判定不能は欠けた日だけで決まり、"
+      "倍率に依らない）。採点する行は %s。" % (
+          "、".join("H = %s で %d 件" % (h, c) for h, c in sorted(run["info"]["unjudged_rows_by_h"].items(),
+                                                              key=lambda x: int(x[0]))),
+          "、".join("H = %s で %d 件" % (h, c) for h, c in sorted(run["info"]["scored_rows_by_h"].items(),
+                                                              key=lambda x: int(x[0])))))
+    a("- 再計算の条件：Python %s。行は予言日・タグ名の昇順に並べ、対数損失は行ごとの値を組み込みの sum で足して行の数で割る"
+      "（Python 3.12 以降の sum は補正付きの足し算）。当てはめは naive.py と同じ手順（ニュートン法、リッジ 1、学習の行は予言日・タグ名の昇順）。"
+      % run["python"])
     a("- 日の比率は ReadGuard（入力は t-399〜t-1、判定は t+1〜t+H）。読んだ日の範囲は %s〜%s。網は予言日ごとに網の最後の日 < 予言日を"
       "確かめた。" % (run["info"]["daily_min_read"], run["info"]["daily_max_read"]))
     a("")
     a("## 4. 限界")
     a("- 分け方 B の確かめの期間（2018年）は、T-117〜T-134 で何度も見た期間で、段4 の候補はその結果を見て作った。")
-    a("- 判定期間 56 日では、学習の行の終わり（2017-12-04）の判定期間が、確かめの期間の初め（2018-01-08）より後まで続く。分け方 B は"
-      "予言日で分けていて、判定期間に依らない（T-117〜T-134 と同じ）。")
+    a("- 判定期間 56 日では、学習の最後の予言日（2017-12-04）の判定期間（〜2018-01-29）が、確かめの最初の予言日（2018-01-08）の判定期間"
+      "（2018-01-09〜）と3週重なる。判定期間 14・28 日では重ならない。分け方 B は予言日で分けていて、判定期間に依らない（T-117〜T-134 と同じ）。")
     a("- 判定期間 28 日・倍率 2・4・8 は、T-134（explore-t134r1）と同じ行・同じ作り方。")
     a("")
     a("## 5. 再計算")

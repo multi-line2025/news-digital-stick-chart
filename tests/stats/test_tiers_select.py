@@ -146,7 +146,8 @@ class TestOutputs(unittest.TestCase):
     def test_build(self):
         ctx = {"refs": {}, "v": V}
         info = {"daily_min_read": "2015-03-09", "daily_max_read": "2020-11-09", "network_last_day_minus_t_max_days": -1,
-                "target_rows": 1}
+                "target_rows": 1, "scored_rows_by_h": {"14": 1, "28": 1, "56": 1},
+                "unjudged_rows_by_h": {"14": 0, "28": 0, "56": 0}}
         f1 = ts.build_outputs(self.rows(), ctx, info)
         f2 = ts.build_outputs(self.rows(), ctx, info)
         self.assertEqual(f1, f2)
@@ -161,9 +162,32 @@ class TestOutputs(unittest.TestCase):
         self.assertTrue(all(c == 1 for c in chosen.values()))
         s = f1["summary.md"].decode("utf-8")
         self.assertIn(ei.CITATION_JA, s)
+        self.assertIn("この版（v2、T-142）の変更点", s)
+        self.assertIn("判定不能の行は H = 14 で 0 件", s)
+        self.assertIn("3週重なる", s)
+        for l in allr[1:]:
+            c = l.split("\t")
+            self.assertEqual(len(c), 11)
+            self.assertEqual(repr(float(c[6])), c[6])
         self.assertNotIn("**", s)
         for n, d in f1.items():
             self.assertIsNone(ei.EMAIL_RE.search(d), n)
+
+    def test_near_tie(self):
+        r = {"h": 28, "m": 16, "n_train": 1, "n_test": 1, "islands_test": 0,
+             "ll": {f: 0.5 for f in ts.FORM_ORDER}, "conv": {f: True for f in ts.TIER4_FORMS}}
+        r["ll"]["null_fix"] = 0.0113810
+        r["ll"]["null_exp"] = 0.0113810 + 1e-8
+        r["sel"] = {1: ts.choose(1, r["ll"]), 2: ts.choose(2, r["ll"]), 4: ts.choose(4, r["ll"])}
+        self.assertEqual(r["sel"][1], "null_fix")
+        nxt, gap = ts.runner_up(r, 1)
+        self.assertEqual(nxt, "null_exp")
+        self.assertLess(gap, ts.NEAR_TIE)
+        nxt2, gap2 = ts.runner_up(r, 2)
+        self.assertEqual((nxt2, gap2), ("hist_all_a50", 0.0))
+        _a, b = ts.tables_bytes([r])
+        line = b.decode("utf-8").splitlines()[1].split("\t")
+        self.assertEqual(line[5:10], ["null_fix", repr(0.011381), "null_exp", repr(r["ll"]["null_exp"] - 0.011381), "yes"])
 
     def test_write_refuses_existing(self):
         with mock.patch.object(ts.os, "makedirs"), mock.patch.object(ts.os.path, "lexists", return_value=True), \
