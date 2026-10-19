@@ -61,7 +61,7 @@ es = ch.es
 ei = ch.ei
 naive = ch.naive
 
-LABEL = "explore-tiers-t134-v1"
+LABEL = "explore-tiers-t134-v2"   # v2：T-134 の差し戻し1回目（較正した段2、識別と較正の分け方、窓をずらす見当、要約の補い）
 MULTIPLIERS = em.MULTIPLIERS
 HORIZON = em.HORIZON
 
@@ -80,6 +80,16 @@ CAL_BINS = 10
 SPLITS = ("B", "A")
 SPLIT_MAIN = "B"
 MAIN_M = 4
+# v2（T-134 の差し戻し1回目。本番の前に書いた）
+# 段2 を学習の行で較正した形：切片と logit(段2 の確率) だけのロジスティック回帰（リッジ 1）。名前は hcal_<段2 の形>。
+# 識別と較正の分け方：確かめの行の上で、確率を [1, logit(p)] でロジスティック回帰し直した（リッジ 1）対数損失を「較正し直した対数損失」
+#   （並べ方＝識別だけで決まる部分の目安）とし、もとの対数損失との差を「較正の損」とする。確かめの行で当てはめるので、前向きでは使えない目安。
+# 窓をずらす見当：分け方ごとの確かめの週の中で、SIM_WINDOWS 週の窓を SIM_STRIDE 週ずつずらし、窓ごとに4週束ねの範囲（同じ
+#   ブートストラップ）を作り、範囲の上端が0より下・下端が0より上の窓の割合を数える。比べる組は N4−N3 を除く上乗せの組。
+# 束の数の下限：MIN_BLOCKS 未満の束での範囲は、狭く出がちなので判定に使わない目安とする（要約に書く）。
+SIM_WINDOWS = (13, 26, 52)
+SIM_STRIDE = 4
+MIN_BLOCKS = 10
 
 
 class TierError(Exception):
@@ -98,6 +108,7 @@ def model_list():
     """(名前, 段, 種類, 形)。種類：null・hist・logit。"""
     out = [(n, 1, "null", n) for n in NULL_FORMS]
     out += [(h, 2, "hist", h) for h, _w, _a in hist_forms()]
+    out += [("hcal_" + h, 2, "logit_only", ("lh_" + h,)) for h, _w, _a in hist_forms()]
     out.append(("naive", 3, "logit", ()))
     out += [("t4_" + f, 4, "logit", tier4_columns(f)) for f in TIER4_FORMS]
     for h, _w, _a in hist_forms():
@@ -113,16 +124,22 @@ def diff_pairs():
     for h, _w, _a in hist_forms():
         for n in NULL_FORMS:
             out.append(("2-1", h, n))
+    for h, _w, _a in hist_forms():
+        for n in NULL_FORMS:
+            out.append(("2c-1", "hcal_" + h, n))
     for n in NULL_FORMS:
         out.append(("3-1", "naive", n))
     for h, _w, _a in hist_forms():
         out.append(("3-2", "naive", h))
+    for h, _w, _a in hist_forms():
+        out.append(("3-2c", "naive", "hcal_" + h))
     for f in TIER4_FORMS:
         out.append(("4-3", "t4_" + f, "naive"))
     for f in TIER4_FORMS:
         out.append(("4-1", "t4_" + f, "null_exp"))
     for h, _w, _a in hist_forms():
         out.append(("N3-2", "N3_" + h, h))
+        out.append(("N3-2c", "N3_" + h, "hcal_" + h))
         for f in TIER4_FORMS:
             out.append(("N4-N3", "N4_%s_%s" % (h, f), "N3_" + h))
     return out
@@ -213,6 +230,41 @@ def metrics(ps, ys, weeks, tags):
             "_ll": ll, "_br": br, "_tk": tk}
 
 
+def recal_logloss(ps, ys):
+    """確かめの行の上で [1, logit(p)] にロジスティック回帰し直した（リッジ 1）対数損失の平均（識別だけで決まる部分の目安）。"""
+    cols = [array.array("d", [1.0] * len(ps)), array.array("d", [logit(p) for p in ps])]
+    fit = em.fit_logistic_cols(cols, list(ys), em.FIXED_LAMBDA)
+    q = em.predict_cols(cols, fit["coef"])
+    ll = es.log_loss_terms(q, ys)
+    return sum(ll) / len(ll), fit["converged"]
+
+
+def _recal_task(args):
+    key, ps, ys = args
+    v, conv = recal_logloss(ps, ys)
+    return key, v, conv
+
+
+def window_sim(a, b, weeks, wsize, stride=SIM_STRIDE):
+    """確かめの週の中で wsize 週の窓を stride 週ずつずらし、窓ごとの対数損失の差（a − b）と4週束ねの範囲。
+    戻り値：[(窓の最初の週, 差, 下端, 上端, 束の数)]。"""
+    by_w = {}
+    for x, xr, w in zip(a["_ll"], b["_ll"], weeks):
+        s = by_w.setdefault(w, [0.0, 0])
+        s[0] += x - xr
+        s[1] += 1
+    wk = sorted(by_w)
+    out = []
+    for st in range(0, len(wk) - wsize + 1, stride):
+        win = wk[st:st + wsize]
+        blks = es.blocks_of(win, es.BLOCK_WEEKS)
+        vals = [(sum(by_w[w][0] for w in bl), sum(by_w[w][1] for w in bl)) for bl in blks]
+        tot = sum(v[0] for v in vals) / sum(v[1] for v in vals)
+        lo, hi = es.bootstrap_diff(vals)
+        out.append((win[0], tot, lo, hi, len(blks)))
+    return out
+
+
 def diff_metrics(a, b, weeks):
     """モデル a と基準 b の差（a − b）と、4週束ねのブートストラップの範囲。"""
     wk_sorted = sorted(set(weeks))
@@ -290,11 +342,17 @@ def fit_predict(tb, m, cols, tri, tei):
     return fit, em.predict_cols([em.column_values(tb, c, tei) for c in cols], fit["coef"])
 
 
+def model_cols(m, kind, extra):
+    if kind == "logit_only":
+        return [em.naive_col(m, "intercept")] + list(extra)
+    return ed.naive_cols(m) + list(extra)
+
+
 def _fit_task(args):
-    sp, m, name, extra = args
+    sp, m, name, cols = args
     tb = _W["tables"][m]
     tri, tei = _W["split_idx"][sp]
-    fit, probs = fit_predict(tb, m, ed.naive_cols(m) + list(extra), tri, tei)
+    fit, probs = fit_predict(tb, m, cols, tri, tei)
     return sp, m, name, list(fit["coef"]), fit["converged"], array.array("d", probs)
 
 
@@ -409,8 +467,8 @@ def evaluate_and_build(tags, mondays, rows, keys, exc, nbw, ctx, info, workers, 
     for sp in SPLITS:
         tr, te = ed.split_rows(keys, mondays, sp)
         split_idx[sp] = ([idx[k] for k in tr], [idx[k] for k in te])
-    tasks = [(sp, m, name, extra) for sp in SPLITS for m in MULTIPLIERS
-             for name, _tier, kind, extra in model_list() if kind == "logit"]
+    tasks = [(sp, m, name, model_cols(m, kind, extra)) for sp in SPLITS for m in MULTIPLIERS
+             for name, _tier, kind, extra in model_list() if kind in ("logit", "logit_only")]
     probs, coefs = {}, []
     with es._pool(workers, _init_fit, (tables, split_idx)) as pool:
         for k, (sp, m, name, coef, conv, p) in enumerate(pool.imap(_fit_task, tasks), 1):
@@ -426,7 +484,20 @@ def evaluate_and_build(tags, mondays, rows, keys, exc, nbw, ctx, info, workers, 
             probs[(sp, m, "null_fix")] = array.array("d", [base] * len(tei))
             for name in ["null_exp"] + [h for h, _w, _a in hist_forms()]:
                 probs[(sp, m, name)] = array.array("d", [direct[m][name][r] for r in tei])
-    res = {}
+    rtasks = []
+    for sp in SPLITS:
+        _tri, tei = split_idx[sp]
+        for m in MULTIPLIERS:
+            ys = array.array("b", [tables[m]["y%d" % m][r] for r in tei])
+            for name, _t, _k, _e in model_list():
+                rtasks.append(((sp, m, name), probs[(sp, m, name)], ys))
+    recal = {}
+    with es._pool(workers, _init_fit, ({}, {})) as pool:
+        for k, (key, v, conv) in enumerate(pool.imap(_recal_task, rtasks), 1):
+            recal[key] = (v, conv)
+            if k % 50 == 0:
+                log("較正し直し %d / %d" % (k, len(rtasks)))
+    res, sim = {}, []
     for sp in SPLITS:
         _tri, tei = split_idx[sp]
         for m in MULTIPLIERS:
@@ -434,18 +505,28 @@ def evaluate_and_build(tags, mondays, rows, keys, exc, nbw, ctx, info, workers, 
             ys = [tb["y%d" % m][r] for r in tei]
             wk = [tb["week"][r] for r in tei]
             tg = [tb["tag"][r] for r in tei]
-            mets = {name: metrics(probs[(sp, m, name)], ys, wk, tg) for name, _t, _k, _e in model_list()}
+            mets = {}
+            for name, _t, _k, _e in model_list():
+                x = metrics(probs[(sp, m, name)], ys, wk, tg)
+                x["ll_recal"], x["recal_converged"] = recal[(sp, m, name)]
+                x["cal_loss"] = x["logloss"] - x["ll_recal"]
+                mets[name] = x
             diffs = [(lab, a, b, diff_metrics(mets[a], mets[b], wk)) for lab, a, b in diff_pairs()]
             res[(sp, m)] = (mets, diffs)
+            for lab, a, b in diff_pairs():
+                if lab == "N4-N3":
+                    continue
+                for ws in SIM_WINDOWS:
+                    sim.append((sp, m, lab, a, b, ws, window_sim(mets[a], mets[b], wk, ws)))
         log("指標 %s" % sp)
-    return build_outputs(tags, mondays, keys, tables, res, coefs, ctx, info)
+    return build_outputs(tags, mondays, keys, tables, res, coefs, ctx, info, sim)
 
 
 # ---------------------------------------------------------------------------
 # 出力
 # ---------------------------------------------------------------------------
 
-OUT_NAMES = ("tiers.tsv", "diffs.tsv", "coefs.tsv", "run.json", "summary.md")
+OUT_NAMES = ("tiers.tsv", "diffs.tsv", "coefs.tsv", "power.tsv", "run.json", "summary.md")
 f6 = es.f6
 
 
@@ -456,7 +537,21 @@ def own_code_shas():
     return code
 
 
-def build_outputs(tags, mondays, keys, tables, res, coefs, ctx, info):
+def sim_rows(sim):
+    out = []
+    for sp, m, lab, a, b, ws, wins in sim:
+        if not wins:
+            out.append((sp, m, HORIZON, lab, a, b, ws, 0, "-", "-", "-", "-", "-", "-"))
+            continue
+        ds = sorted(w[1] for w in wins)
+        out.append((sp, m, HORIZON, lab, a, b, ws, len(wins), wins[0][4],
+                    "%.4f" % (sum(1 for w in wins if w[3] < 0) / len(wins)),
+                    "%.4f" % (sum(1 for w in wins if w[2] > 0) / len(wins)),
+                    f6(sea.median(ds)), f6(ds[0]), f6(ds[-1])))
+    return out
+
+
+def build_outputs(tags, mondays, keys, tables, res, coefs, ctx, info, sim):
     tier_of = {name: tier for name, tier, _k, _e in model_list()}
     trows, drows = [], []
     for sp in SPLITS:
@@ -465,18 +560,24 @@ def build_outputs(tags, mondays, keys, tables, res, coefs, ctx, info):
             for name, tier, _k, _e in model_list():
                 x = mets[name]
                 trows.append((sp, m, HORIZON, tier, name, x["n"], x["pos"], f6(x["logloss"]), f6(x["brier"]),
-                              f6(x["auc"]), x["topk"], f6(x["mean_p"]), f6(x["rate"]), f6(x["ece"])))
+                              f6(x["auc"]), x["topk"], f6(x["mean_p"]), f6(x["rate"]), f6(x["ece"]),
+                              f6(x["ll_recal"]), f6(x["cal_loss"]), x["recal_converged"]))
             for lab, a, b, d in diffs:
                 drows.append((sp, m, HORIZON, lab, a, b, f6(d["d_ll"]), f6(d["ci_ll"][0]), f6(d["ci_ll"][1]),
                               f6(100 * d["d_ll"] / mets[b]["logloss"]), f6(d["d_br"]), f6(d["ci_br"][0]),
-                              f6(d["ci_br"][1]), d["d_tk"], "%.1f" % d["ci_tk"][0], "%.1f" % d["ci_tk"][1]))
+                              f6(d["ci_br"][1]), d["d_tk"], "%.1f" % d["ci_tk"][0], "%.1f" % d["ci_tk"][1],
+                              f6(mets[a]["ll_recal"] - mets[b]["ll_recal"]), f6(mets[a]["cal_loss"] - mets[b]["cal_loss"])))
     tiers_tsv = ei.tsv(("split", "multiplier", "horizon_days", "tier", "model", "n_test", "islands_test", "logloss",
-                        "brier", "auc", "top10_hits", "mean_prob", "island_rate", "ece10"), trows)
+                        "brier", "auc", "top10_hits", "mean_prob", "island_rate", "ece10", "logloss_recal", "cal_loss",
+                        "recal_converged"), trows)
     diffs_tsv = ei.tsv(("split", "multiplier", "horizon_days", "step", "model", "reference", "d_logloss",
                         "d_ll_ci4w_lo", "d_ll_ci4w_hi", "d_logloss_pct", "d_brier", "d_br_ci4w_lo", "d_br_ci4w_hi",
-                        "d_top10", "d_top10_ci4w_lo", "d_top10_ci4w_hi"), drows)
-    colnames = {name: ["intercept"] + list(naive.FEATURES) + list(extra) for name, _t, kind, extra in model_list()
-                if kind == "logit"}
+                        "d_top10", "d_top10_ci4w_lo", "d_top10_ci4w_hi", "d_logloss_recal", "d_cal_loss"), drows)
+    power_tsv = ei.tsv(("split", "multiplier", "horizon_days", "step", "model", "reference", "window_weeks", "windows",
+                        "blocks_per_window", "share_upper_below0", "share_lower_above0", "median_d_logloss",
+                        "min_d_logloss", "max_d_logloss"), sim_rows(sim))
+    colnames = {name: (["intercept"] if kind == "logit_only" else list(naive.FEATURES)) + list(extra)
+                for name, _t, kind, extra in model_list() if kind in ("logit", "logit_only")}
     coefs_tsv = ei.tsv(("split", "multiplier", "model", "converged", "column", "coef"),
                        [(sp, m, name, conv, c, f6(b)) for sp, m, name, cf, conv in coefs
                         for c, b in zip(colnames[name], cf)])
@@ -485,13 +586,14 @@ def build_outputs(tags, mondays, keys, tables, res, coefs, ctx, info):
            "options": {"known_lag_weeks": KNOWN_LAG_WEEKS, "hist_windows": HIST_WINDOWS, "hist_a": HIST_A,
                        "null_forms": NULL_FORMS, "chain_variant": CHAIN_VARIANT, "tier4_forms": TIER4_FORMS,
                        "cal_bins": CAL_BINS, "splits": SPLITS, "split_main": SPLIT_MAIN, "main_multiplier": MAIN_M,
-                       "block_weeks": es.BLOCK_WEEKS, "boot_n": es.BOOT_N, "boot_seed": es.BOOT_SEED},
+                       "block_weeks": es.BLOCK_WEEKS, "boot_n": es.BOOT_N, "boot_seed": es.BOOT_SEED,
+                       "sim_windows": SIM_WINDOWS, "sim_stride": SIM_STRIDE, "min_blocks": MIN_BLOCKS},
            "info": info, "models": [name for name, _t, _k, _e in model_list()],
            "not_converged": sorted({"%s/%d/%s" % (sp, m, name) for sp, m, name, _cf, conv in coefs if not conv}),
            "citation": [ei.CITATION_EN, ei.CITATION_JA]}
-    files = {"tiers.tsv": tiers_tsv, "diffs.tsv": diffs_tsv, "coefs.tsv": coefs_tsv,
+    files = {"tiers.tsv": tiers_tsv, "diffs.tsv": diffs_tsv, "coefs.tsv": coefs_tsv, "power.tsv": power_tsv,
              "run.json": (json.dumps(run, ensure_ascii=False, sort_keys=True, indent=1) + "\n").encode("utf-8")}
-    files["summary.md"] = summary_md(run, res, tier_of, tags)
+    files["summary.md"] = summary_md(run, res, tier_of, tags, sim)
     for name, data in files.items():
         ei.check_public(name, data)
     return files
@@ -514,7 +616,18 @@ def write_outputs(out_dir, files):
 STEP_JA = {"2-1": "段2 − 段1（タグごとの過去の割合の上乗せ）", "3-1": "段3 − 段1（素朴な予測の、全体の割合からの上乗せ）",
            "3-2": "段3 − 段2（素朴な予測の、タグごとの過去の割合からの上乗せ）",
            "4-3": "段4 − 段3（網・波の手がかりの上乗せ）", "4-1": "段4 − 段1",
-           "N3-2": "入れ子：段3＋段2 − 段2", "N4-N3": "入れ子：段4＋段2 − 段3＋段2"}
+           "N3-2": "入れ子：段3＋段2 − 段2", "N4-N3": "入れ子：段4＋段2 − 段3＋段2",
+           "2c-1": "較正した段2 − 段1", "3-2c": "段3 − 較正した段2", "N3-2c": "入れ子：段3＋段2 − 較正した段2"}
+NULL_TOPK_STEPS = ("2-1", "2c-1", "3-1", "4-1")
+
+
+def sim_share(sim, sp, m, lab, ws):
+    """組 lab の窓 ws 週の、範囲の上端が0より下の窓の割合の (最小, 最大, 窓の数, 束の数)。"""
+    xs = [(sum(1 for w in wins if w[3] < 0) / len(wins), len(wins), wins[0][4])
+          for s2, m2, l2, _a, _b, w2, wins in sim if s2 == sp and m2 == m and l2 == lab and w2 == ws and wins]
+    if not xs:
+        return None
+    return min(x[0] for x in xs), max(x[0] for x in xs), xs[0][1], xs[0][2]
 
 
 def step_text(diffs, mets, lab):
@@ -530,7 +643,7 @@ def step_text(diffs, mets, lab):
             % (len(ds), min(pct), max(pct), below, above, bb, ba, min(tk), max(tk)))
 
 
-def summary_md(run, res, tier_of, tags):
+def summary_md(run, res, tier_of, tags, sim):
     L = []
     a = L.append
     md = ei.md_table
@@ -538,6 +651,10 @@ def summary_md(run, res, tier_of, tags):
     a("")
     a("この文書は `src/stats/explore_tiers.py` が出力したもので、手で書き足していない。島の定義は変えていない。テーマの名前は載せていない。"
       "探索で、封印していない。全部並べ、選ばない・勧めない。")
+    a("この版（v2）の変更点：段2 を学習の行で較正した形（hcal）と、その上乗せ（2c−1・3−2c・N3−2c）を足した。対数損失を、確かめの行で"
+      "較正し直した対数損失（識別の目安）と較正の損に分けた列を足した。窓をずらした検出力の見当（power.tsv）を足した。1章に、静的な違い・"
+      "段1 基準の上位10・段4 の上位10の減り・較正の注意を書いた。v1 の coefs.tsv は、列の名前が1つずれていた（切片の名前が2回入り、"
+      "最後の列の値が落ちていた）ので直した。v1 のほかの表の数（tiers.tsv・diffs.tsv の v1 にあった列）は同じ作り方。")
     a("")
     a("## 1. やさしい説明")
     a("")
@@ -553,9 +670,43 @@ def summary_md(run, res, tier_of, tags):
             mets, diffs = res[(sp, m)]
             a("  - 倍率 %d（確かめの行 %d、島 %d、島の割合 %.4f）：" % (m, mets["naive"]["n"], mets["naive"]["pos"],
                                                           mets["naive"]["rate"]))
-            for lab in ("2-1", "3-1", "3-2", "4-3"):
+            for lab in ("2-1", "2c-1", "3-1", "3-2", "3-2c", "4-3"):
                 a("    - %s：%s。" % (STEP_JA[lab], step_text(diffs, mets, lab)))
     a("")
+    mets_b, diffs_b = res[(SPLIT_MAIN, MAIN_M)]
+    d31 = [d for lab, x, y, d in diffs_b if lab == "3-1" and y == "null_exp"][0]
+    a("- 読み方の注意（静的な違い）：段3 − 段1（分け方 %s・倍率 %d で %+.1f%%）には、タグの普段の大きさ（段3 の size）という、"
+      "予言日によらない静的な違いが入る。静的な違いを差し引いた比べは、段2 を基準にした 3−2・3−2c と、入れ子の N3−2・N3−2c。"
+      % (SPLIT_MAIN, MAIN_M, 100 * d31["d_ll"] / mets_b["null_exp"]["logloss"]))
+    a("- 読み方の注意（上位10）：段1 はすべてのタグに同じ確率なので、段1 の上位10の島は名前の順で決まる。段1 を基準にした上位10の島の差"
+      "（%s）は意味を持たない。" % "・".join(NULL_TOPK_STEPS))
+    lows = []
+    for sp in SPLITS:
+        for m in MULTIPLIERS:
+            for lab, x, y, d in res[(sp, m)][1]:
+                if lab == "4-3" and d["ci_tk"][1] < 0:
+                    lows.append("分け方 %s・倍率 %d の %s（%+d、範囲 %.1f〜%.1f）" % (sp, m, x, d["d_tk"], d["ci_tk"][0], d["ci_tk"][1]))
+    a("- 段4 で上位10の島が減り、差の範囲が0より下に収まった形：%s。対数損失が下がっても、上位10の島は減ることがある。" % (
+        "、".join(lows) if lows else "無い"))
+    eh = [mets_b[h]["ece"] for h, _w, _a in hist_forms()]
+    ec = [mets_b["hcal_" + h]["ece"] for h, _w, _a in hist_forms()]
+    clh = [mets_b[h]["cal_loss"] for h, _w, _a in hist_forms()]
+    clc = [mets_b["hcal_" + h]["cal_loss"] for h, _w, _a in hist_forms()]
+    a("- 較正：段2 は縮めた割合をそのまま確率にしたので、較正がずれうる。分け方 %s・倍率 %d で、段2 の ECE は %.4f〜%.4f、学習の行で"
+      "較正した段2（hcal）は %.4f〜%.4f、段3 は %.4f。較正の損（対数損失 − 較正し直した対数損失）は、段2 で %.5f〜%.5f、hcal で "
+      "%.5f〜%.5f、段3 で %.5f。2−1・3−2・N3−2 の差には、この較正の違いが混ざる。識別だけの目安は、diffs.tsv の d_logloss_recal。"
+      % (SPLIT_MAIN, MAIN_M, min(eh), max(eh), min(ec), max(ec), mets_b["naive"]["ece"], min(clh), max(clh), min(clc),
+         max(clc), mets_b["naive"]["cal_loss"]))
+    for sp in SPLITS:
+        parts = []
+        for lab in ("3-1", "2-1", "2c-1", "3-2", "4-3"):
+            for ws in SIM_WINDOWS:
+                x = sim_share(sim, sp, MAIN_M, lab, ws)
+                if x is not None:
+                    parts.append("%s・%d週 %.0f〜%.0f%%（窓 %d、束 %d）" % (lab, ws, 100 * x[0], 100 * x[1], x[2], x[3]))
+        a("- 窓をずらした見当（分け方 %s・倍率 %d）：窓の中の4週束ねの範囲が0より下に収まった窓の割合（形による幅）。%s。"
+          "束が %d 未満の窓の範囲は狭く出がちで、判定には使えない目安。" % (sp, MAIN_M, "、".join(parts) if parts else "窓が無い",
+                                                    MIN_BLOCKS))
     a("- 2020年の連鎖（T-127）は、分け方 A の検証の期間の中にしかない。主の分け方 B の確かめ（2018年）には入っていない。")
     a("- 段4 の3つの形は、T-117〜T-127 の結果（同じ期間・同じ分け方）を見たあとで選んだ。段4 の上乗せは、選んだことで大きめに出うる。")
     a("- 段1 の null_exp と段2 は、予言日ごとに、判定期間がその前に終わった行の判定だけで作った。段1 の null_fix と段3・段4 の係数は、"
@@ -573,6 +724,12 @@ def summary_md(run, res, tier_of, tags):
       "chain（連鎖の励起。T-127 の D = %d、λ = %g）、その両方を足したもの。" % CHAIN_VARIANT)
     a("- 入れ子の並び（参考）：N3 は段3 の特徴量に logit(段2 の確率) を足したもの、N4 はそれに段4 の列を足したもの。段2 と段3 は"
       "入れ子でないので、3 − 2 と、N3 − 2（段2 の情報を持ったうえでの素朴な予測の上乗せ）を並べた。")
+    a("- 較正した段2（hcal）：切片と logit(段2 の確率) だけのロジスティック回帰（リッジ 1）を、分け方の学習の行で当てはめた。")
+    a("- 識別と較正の分け方：確かめの行の上で、確率を [1, logit(p)] にロジスティック回帰し直した（リッジ 1）対数損失を「較正し直した"
+      "対数損失」（識別だけで決まる部分の目安）、もとの対数損失との差を「較正の損」とした。確かめの行で当てはめるので、前向きの予言には"
+      "使えない目安。")
+    a("- 窓をずらした見当：確かめの週の中で %s 週の窓を %d 週ずつずらし、窓ごとに4週束ねの範囲を作った（同じブートストラップ）。"
+      "束の数の下限の目安は %d。" % ("・".join(str(w) for w in SIM_WINDOWS), SIM_STRIDE, MIN_BLOCKS))
     a("- 指標：対数損失、ブライア、AUC、上位10の島（週ごと、同じ確率なら名前の順）、較正（確率の平均・島の割合・%d 区分の ECE）。"
       "差の範囲は %d 週ずつ束ねて %d 回選び直した（乱数の種 %d）。" % (CAL_BINS, es.BLOCK_WEEKS, es.BOOT_N, es.BOOT_SEED))
     a("")
@@ -581,22 +738,34 @@ def summary_md(run, res, tier_of, tags):
             mets, diffs = res[(sp, m)]
             a("## 3. 各段の値（分け方 %s%s、倍率 %d）" % (sp, "、主" if sp == SPLIT_MAIN else "、参考", m))
             a("")
-            a(md(["段", "モデル", "対数損失", "ブライア", "AUC", "上位10の島", "確率の平均", "島の割合", "ECE"],
-                 [(tier_of[name], name, f6(x["logloss"]), f6(x["brier"]), f6(x["auc"]), x["topk"], f6(x["mean_p"]),
-                   f6(x["rate"]), f6(x["ece"])) for name, x in mets.items()
+            a(md(["段", "モデル", "対数損失", "較正し直した対数損失", "較正の損", "ブライア", "AUC", "上位10の島", "確率の平均",
+                  "島の割合", "ECE"],
+                 [(tier_of[name], name, f6(x["logloss"]), f6(x["ll_recal"]), f6(x["cal_loss"]), f6(x["brier"]),
+                   f6(x["auc"]), x["topk"], f6(x["mean_p"]), f6(x["rate"]), f6(x["ece"])) for name, x in mets.items()
                   if not name.startswith("N4_")]))
             a("")
             a("N4 の %d のモデルの値は tiers.tsv。" % sum(1 for name in mets if name.startswith("N4_")))
             a("")
-            a(md(["上乗せ", "モデル", "基準", "対数損失の差（割合）", "差の範囲（4週束ね）", "ブライアの差", "差の範囲（4週束ね）",
-                  "上位10の差", "差の範囲（4週束ね）"],
+            a(md(["上乗せ", "モデル", "基準", "対数損失の差（割合）", "差の範囲（4週束ね）", "較正し直した差", "較正の損の差",
+                  "ブライアの差", "差の範囲（4週束ね）", "上位10の差", "差の範囲（4週束ね）"],
                  [(lab, ma, mb, "%s（%+.2f%%）" % (f6(d["d_ll"]), 100 * d["d_ll"] / mets[mb]["logloss"]),
-                   "%s〜%s" % (f6(d["ci_ll"][0]), f6(d["ci_ll"][1])), f6(d["d_br"]),
-                   "%s〜%s" % (f6(d["ci_br"][0]), f6(d["ci_br"][1])), d["d_tk"],
+                   "%s〜%s" % (f6(d["ci_ll"][0]), f6(d["ci_ll"][1])),
+                   f6(mets[ma]["ll_recal"] - mets[mb]["ll_recal"]), f6(mets[ma]["cal_loss"] - mets[mb]["cal_loss"]),
+                   f6(d["d_br"]), "%s〜%s" % (f6(d["ci_br"][0]), f6(d["ci_br"][1])),
+                   d["d_tk"] if lab not in NULL_TOPK_STEPS else "%d（意味なし）" % d["d_tk"],
                    "%.1f〜%.1f" % d["ci_tk"]) for lab, ma, mb, d in diffs if lab != "N4-N3"]))
             a("")
             a("N4 − N3 の %d 組は diffs.tsv。" % sum(1 for lab, _a, _b, _d in diffs if lab == "N4-N3"))
             a("")
+    a("## 3b. 窓をずらした見当（倍率 %d）" % MAIN_M)
+    a("")
+    a(md(["分け方", "上乗せ", "モデル", "基準", "窓（週）", "窓の数", "束の数", "範囲が0より下の窓", "範囲が0より上の窓",
+          "差の中央値", "差の最小", "差の最大"],
+         [(r[0], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[13]) for r in sim_rows(sim)
+          if r[1] == MAIN_M]))
+    a("")
+    a("倍率 2・8 は power.tsv。束が %d 未満の窓の範囲は判定に使えない目安。" % MIN_BLOCKS)
+    a("")
     a("## 4. 予言の時点のデータだけを使ったことの確かめ")
     a("- 日の比率：ReadGuard で、入力は t-399〜t-1、判定は t+1〜t+28 の外を読むと止まる。読んだ日の範囲は %s〜%s。" % (
         run["info"]["daily_min_read"], run["info"]["daily_max_read"]))

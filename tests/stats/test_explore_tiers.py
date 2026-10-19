@@ -104,11 +104,39 @@ class TestMetrics(unittest.TestCase):
     def test_models_and_pairs(self):
         names = [n for n, _t, _k, _e in tr.model_list()]
         self.assertEqual(len(names), len(set(names)))
-        self.assertEqual(len(names), 2 + 6 + 1 + 3 + 6 + 18)
+        self.assertEqual(len(names), 2 + 6 + 6 + 1 + 3 + 6 + 18)
         for _lab, a, b in tr.diff_pairs():
             self.assertIn(a, names)
             self.assertIn(b, names)
         self.assertEqual(len(tr.CHAIN_COLUMNS), 4)
+
+
+class TestV2(unittest.TestCase):
+    def test_recal_and_window(self):
+        rng = random.Random(8)
+        ps = [rng.random() * 0.4 for _ in range(2000)]
+        ys = [1 if rng.random() < p else 0 for p in ps]
+        good, conv = tr.recal_logloss(ps, ys)
+        self.assertTrue(conv)
+        bad, _c = tr.recal_logloss([min(0.99, 2 * p) for p in ps], ys)
+        # 確率を2倍にしても並べ方は同じなので、較正し直した対数損失はほぼ同じ
+        self.assertAlmostEqual(good, bad, places=2)
+        raw = sum(es.log_loss_terms([min(0.99, 2 * p) for p in ps], ys)) / len(ys)
+        self.assertGreater(raw, bad)
+        wk = [k // 20 for k in range(2000)]
+        tg = ["T%02d" % (k % 20) for k in range(2000)]
+        a = tr.metrics(ps, ys, wk, tg)
+        b = tr.metrics([0.2] * 2000, ys, wk, tg)
+        wins = tr.window_sim(a, b, wk, 13)
+        self.assertEqual(len(wins), len(range(0, 100 - 13 + 1, tr.SIM_STRIDE)))
+        self.assertEqual(wins[0][4], 4)
+        for st, d, lo, hi, nb in wins:
+            self.assertLessEqual(lo, hi)
+
+    def test_model_cols_and_names(self):
+        self.assertEqual(tr.model_cols(4, "logit_only", ("lh_x",)), [tr.em.naive_col(4, "intercept"), "lh_x"])
+        self.assertEqual(tr.model_cols(4, "logit", ("c",)), tr.ed.naive_cols(4) + ["c"])
+        self.assertEqual(tr.naive.FEATURES[0], "intercept")
 
 
 class TestNbwave(unittest.TestCase):
@@ -137,7 +165,7 @@ class TestNbwave(unittest.TestCase):
 class TestOutputs(unittest.TestCase):
     def build(self):
         rng = random.Random(5)
-        res = {}
+        res, sim = {}, []
         for sp in tr.SPLITS:
             for m in tr.MULTIPLIERS:
                 ys = [1 if rng.random() < 0.1 else 0 for _ in range(300)]
@@ -145,13 +173,20 @@ class TestOutputs(unittest.TestCase):
                 tg = ["AA_%02d" % (k % 30) for k in range(300)]
                 mets = {name: tr.metrics([min(0.99, max(0.01, 0.1 + rng.gauss(0, 0.03) + 0.2 * y)) for y in ys], ys, wk, tg)
                         for name, _t, _k, _e in tr.model_list()}
+                for x in mets.values():
+                    x["ll_recal"], x["recal_converged"] = x["logloss"] - 0.001, True
+                    x["cal_loss"] = 0.001
                 diffs = [(lab, a, b, tr.diff_metrics(mets[a], mets[b], wk)) for lab, a, b in tr.diff_pairs()]
                 res[(sp, m)] = (mets, diffs)
+                for lab, a, b in tr.diff_pairs():
+                    if lab != "N4-N3":
+                        for ws in tr.SIM_WINDOWS:
+                            sim.append((sp, m, lab, a, b, ws, tr.window_sim(mets[a], mets[b], wk, ws, stride=4)))
         ctx = {"refs": {}, "v": V}
         info = {"daily_min_read": "2015-03-09", "daily_max_read": "2020-10-12", "network_last_day_minus_t_max_days": -1}
         coefs = [("B", 2, "naive", [0.1] * 8, True)]
         tags = ["AA_%02d" % i for i in range(30)]
-        return tr.build_outputs(tags, [], list(range(300)), {}, res, coefs, ctx, info)
+        return tr.build_outputs(tags, [], list(range(300)), {}, res, coefs, ctx, info, sim)
 
     def test_build(self):
         f1, f2 = self.build(), self.build()
@@ -162,8 +197,12 @@ class TestOutputs(unittest.TestCase):
             self.assertNotIn(bad, s)
         self.assertIn(ei.CITATION_JA, s)
         self.assertIn(ei.CITATION_EN, s)
-        self.assertLess(s.index("やさしい説明"), s.index("作り方"))
+        self.assertLess(s.index("## 1. やさしい説明"), s.index("## 2. 作り方"))
         self.assertIn("2020年の連鎖（T-127）は、分け方 A の検証の期間の中にしかない", s)
+        for w in ("この版（v2）の変更点", "静的な違い", "名前の順で決まる", "段4 で上位10の島が減り", "較正の損", "窓をずらした見当",
+                  "判定には使えない目安"):
+            self.assertIn(w, s)
+        self.assertEqual(tr.LABEL, "explore-tiers-t134-v2")
         for n, d in f1.items():
             self.assertIsNone(ei.EMAIL_RE.search(d), n)
             self.assertNotIn(b"AA_0", d, n)
