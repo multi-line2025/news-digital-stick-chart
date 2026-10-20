@@ -54,7 +54,13 @@ naive = ts.naive
 candidates = ts.candidates
 scoring = ts.scoring
 
-LABEL = "order8-fit-t143-v1"
+LABEL = "order8-fit-t145-v2"   # v2：T-145 で N3・N4 の学習の行を絞った（オーナーの決定 B、2026-10-20）。ほかは v1 と同じ
+# N3・N4 の学習の行（オーナーの決定 B、reviews/T-143.md 末尾。T-143 の係数を見たあとの規則の変更）：
+#   予言日 t の時点で判定が確定した予言日（週）の数が MIN_KNOWN_WEEKS 以上の行だけで当てはめる。
+#   判定が確定した予言日の数 = 手法を作る期間の最初の予言日（2016-04-11、週の番号 0）から、週の番号 ti − ceil((H + 1) / 7) までの
+#   予言日（月曜）の数 = ti − ceil((H + 1) / 7) + 1（タグによらない週の数。2016-04-11 からの経過週ではない）。
+#   段1・段2・段3・段4 の当てはめは変えない。
+MIN_KNOWN_WEEKS = 52
 NAIVE_HISTORY_DAYS = 399
 SELECT_TABLE = os.path.join(ei.PROJECT, "docs", "stats", "tiers-select-t142", "tiers_select.tsv")
 SELECT_TABLE_SHA256 = "13a2784652964f0e1da23d28cba0970744ab8aadcbc715a35edfcf982ffc30b6"
@@ -101,6 +107,16 @@ def sorted_rows(tb, rows):
         if (tb["t"][a], tb["tag"][a]) == (tb["t"][b], tb["tag"][b]):
             raise Order8Error("同じ予言日とタグの行が二つある")
     return out
+
+
+def known_weeks(ti, h):
+    """予言日（週の番号 ti）の時点で判定が確定した予言日の数（2016-04-11 から。タグによらない）。"""
+    return max(0, ti - ts.known_lag_weeks(h) + 1)
+
+
+def n3n4_rows(tb, rows, h):
+    """N3・N4 の学習の行：判定が確定した予言日の数が MIN_KNOWN_WEEKS 以上の行（並びは rows のまま）。"""
+    return [r for r in rows if known_weeks(tb["week"][r], h) >= MIN_KNOWN_WEEKS]
 
 
 def _fit_task(args):
@@ -200,15 +216,21 @@ def run(root, t117_cache, out_dir, workers, log):
             "network_last_day_minus_t_max_days": net_off, "target_rows": len(targets),
             "rows_by_h": {str(h): len(keys_by_h[h]) for h in ts.HORIZONS}}
     coefs, null_fix = [], []
+    info["rows_n3n4_by_h"] = {}
     for h in ts.HORIZONS:
         rows = sorted_rows(tables[(h, ts.MULTS[0])], range(len(keys_by_h[h])))
+        info["rows_n3n4_by_h"][str(h)] = len(n3n4_rows(tables[(h, ts.MULTS[0])], rows, h))
         tasks = []
         for (h2, m, name, extra) in [s for s in model_specs(sel) if s[0] == h]:
             tb = tables[(h, m)]
             colnames = ["intercept"] + list(naive.FEATURES[1:]) + list(extra)
             cols = [em.column_values(tb, em.naive_col(m, f), rows) for f in naive.FEATURES] + \
                 [em.column_values(tb, c, rows) for c in extra]
-            y = [tb["y%d" % m][r] for r in rows]
+            use = rows if name in ("naive", "t4") else n3n4_rows(tb, rows, h)
+            if use is not rows:
+                cols = [em.column_values(tb, em.naive_col(m, f), use) for f in naive.FEATURES] + \
+                    [em.column_values(tb, c, use) for c in extra]
+            y = [tb["y%d" % m][r] for r in use]
             tasks.append((h, m, name, colnames, cols, y))
         for m in ts.MULTS:
             y = tables[(h, m)]["y%d" % m]
@@ -265,7 +287,9 @@ def build_outputs(sel, coefs, null_fix, info, ctx):
            "v": "%d/%d" % (ctx["v"].numerator, ctx["v"].denominator), "info": info,
            "naive_history_days": NAIVE_HISTORY_DAYS, "select_table": "docs/stats/tiers-select-t142/tiers_select.tsv",
            "select_table_sha256": SELECT_TABLE_SHA256, "prediction_dates": "method period, %d dates" % 232,
-           "models": len(coefs), "citation": [ei.CITATION_EN, ei.CITATION_JA]}
+           "models": len(coefs), "min_known_weeks_n3n4": MIN_KNOWN_WEEKS,
+           "rows_n3n4_by_h": {str(h): n for h, n in info.get("rows_n3n4_by_h", {}).items()},
+           "citation": [ei.CITATION_EN, ei.CITATION_JA]}
     files["run.json"] = (json.dumps(run, ensure_ascii=False, sort_keys=True, indent=1) + "\n").encode("utf-8")
     files["summary.md"] = summary_md(run, files)
     for name, data in files.items():
@@ -276,7 +300,7 @@ def build_outputs(sel, coefs, null_fix, info, ctx):
 def summary_md(run, files):
     L = []
     a = L.append
-    a("# 順番7・順番8 と段4・N3・N4 の係数（T-143、封印の前の出力）")
+    a("# 順番7・順番8 と段4・N3・N4 の係数（T-145、封印の前の出力）")
     a("")
     a("この文書は `src/stats/order8_fit.py` が出力したもので、手で書き足していない。封印していない（封印は封印係が行う）。"
       "テーマの名前は載せていない。")
@@ -301,6 +325,10 @@ def summary_md(run, files):
           run["info"]["rows_by_h"].items(), key=lambda x: int(x[0])))))
     a("- 行は予言日・タグ名の昇順。推定は em.fit_logistic_cols（naive.fit_logistic とビット単位で同じ）、リッジ 1（切片にも掛ける）。"
       "当てはめは %d 個で、すべて収まった。" % run["models"])
+    a("- N3・N4 の学習の行（v2。オーナーの決定 B、2026-10-20。T-143 の係数を見たあとの規則の変更）：予言日の時点で判定が確定した"
+      "予言日（2016-04-11 から数えた月曜。タグによらない週の数）が %d 以上の行だけ。行の数：%s。段3・段4 の行は上と同じ（変えていない）。"
+      "変更前（T-143、order8-t143）の係数も残して公開する。" % (run["min_known_weeks_n3n4"], "、".join(
+          "H = %s で %d" % (h, c) for h, c in sorted(run["rows_n3n4_by_h"].items(), key=lambda x: int(x[0])))))
     a("- 段2 の確率（N3・N4 の入力）は、行の予言日の時点で判定が確定した行だけで作った（全期間は 2016-04-11 から）。")
     a("- 21組の表：%s（sha256 %s を照らしてから読んだ）。" % (run["select_table"], run["select_table_sha256"]))
     a("- 日の比率は ReadGuard（入力は t-399〜t-1、判定は t+1〜t+H）。読んだ日の範囲は %s〜%s（区画の終わり 2020-12-14 より前）。"

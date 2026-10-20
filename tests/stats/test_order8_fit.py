@@ -80,6 +80,22 @@ class TestFit(unittest.TestCase):
         self.assertEqual(it, ref["iterations"])
 
 
+class TestN3N4Rows(unittest.TestCase):
+    def test_known_weeks(self):
+        self.assertEqual(o8.MIN_KNOWN_WEEKS, 52)
+        # 週の番号 ti の予言日で、判定が確定した予言日は 0〜ti − ceil((H + 1) / 7)
+        self.assertEqual(o8.known_weeks(0, 28), 0)
+        self.assertEqual(o8.known_weeks(5, 28), 1)
+        self.assertEqual(o8.known_weeks(56, 28), 52)
+        self.assertEqual(o8.known_weeks(55, 28), 51)
+        self.assertEqual(o8.known_weeks(54, 14), 52)
+        self.assertEqual(o8.known_weeks(60, 56), 52)
+
+    def test_rows(self):
+        tb = {"week": [0, 55, 56, 57, 100]}
+        self.assertEqual(o8.n3n4_rows(tb, [4, 0, 1, 2, 3], 28), [4, 2, 3])
+
+
 class TestOutputs(unittest.TestCase):
     def test_periods_output(self):
         out = json.loads(o8.command_output(["src/stats/periods.py", "--naive-history-days", "399",
