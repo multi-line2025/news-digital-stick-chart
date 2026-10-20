@@ -191,6 +191,15 @@ class Clone(unittest.TestCase):
         self.assertIn(old, text)
         return text.replace(old, ledger.sha256_hex(data)).encode("utf-8")
 
+    def retarget(self, rel, new):
+        """対象のファイル rel を new に変えてコミットし、一覧の文書の rel の行の sha256 と「最後に変えたコミット」を合わせて
+        コミットする（統計係が対象と一覧を一緒に直した形）。"""
+        lst = self.set_list_sha(rel, new)
+        self.commit_file(rel, new)
+        lines = lst.decode("utf-8").split("\n")
+        lines = [re.sub(r"[0-9a-f]{40} \|$", self.head() + " |", x) if x.startswith("| " + rel) else x for x in lines]
+        self.commit_file(LIST, "\n".join(lines).encode("utf-8"))
+
     def access(self):
         now = self.tick()
         with mock.patch.object(ledger, "PROJECT_ROOT", self.c):
@@ -349,6 +358,30 @@ class TestForgeries(Clone):
         self.raw(dict(self.doc, head=self.git("rev-parse", "HEAD~1").decode().strip()))
         self.verify_stops("sealed/ledger.jsonl が、この記録を足す直前の記録")
 
+    def test_triggers_not_last(self):
+        """T-148（T-144 の監査 軽-1 の M4）：order7.triggers が、この記録より前の最後の periods-triggers でなく、それより前の
+        同じ値の periods-triggers を指す記録。書く仕組みは書かず、照合を飛ばして足すと verify が止める。"""
+        first = self.records()[-1]
+        self.assertEqual(first["kind"], TRG)
+        self.write_triggers()                                  # 同じ値の periods-triggers をもう1件（これが最後）
+        doc = self.build()
+        self.assertNotEqual(doc["order7"]["triggers"]["seq"], first["seq"])
+        doc = dict(doc, order7=dict(doc["order7"], triggers=dict(ledger.record_ref(first), values=dict(ledger.ORDER7_TRIGGERS))))
+        self.forged(doc, re.escape("order7.triggers が、この記録より前の最後の periods-triggers の記録でない"))
+
+    def test_decision_moved_to_later_commit(self):
+        """T-148（T-144 の監査 軽-1 の M7）：オーナーの決定の行を、その行を入れたコミットでなく、あとのコミット（行は第一の親の版
+        にもある）に付け替えた出どころ。決まった出どころ（ORDER68_DECISIONS）ごと付け替えた場合も、git の照合が止める。"""
+        later = fixed_records.ORDER68_COMMIT
+        moved = tuple((i, later if n == 7 else c, p, h, ls) for n, (i, c, p, h, ls) in enumerate(ledger.ORDER68_DECISIONS, 1))
+        text = "前向きの入力の作り方」（%s:reviews/T-145.md）：第一の親の版にも同じ行がある" % later[:12]
+        with mock.patch.object(ledger, "ORDER68_DECISIONS", moved):
+            doc = self.build()
+            self.assertEqual(doc["decisions"][6]["source"], "%s:reviews/T-145.md" % later)
+            self.forged(doc, re.escape(text))
+        # 付け替えた出どころは、決まった出どころ（ledger の定数）と違うので、定数を戻せば git を使わない照合でも止まる
+        self.verify_stops("decisions が、決まったオーナーの決定の出どころ")
+
     def test_head_not_current_refused(self):
         self.refuses(dict(self.doc, head=self.git("rev-parse", "HEAD~1").decode().strip()), "今の HEAD")
 
@@ -380,27 +413,29 @@ class TestTamperedFiles(Clone):
         self.commit_file(LIST, text.encode("utf-8"))
         self.stops("のコミット 265ab14a6f4a が、最後に変えたコミット 82e0424a3c08 と違う")
 
+    def test_list_commit_not_hex(self):
+        """T-148：一覧の文書の「最後に変えたコミット」の欄が40桁でない行（T-147 より前の書き方）は、照らせないので止める。"""
+        lines = self.file(LIST).decode("utf-8").split("\n")
+        rel = "docs/stats/order8-t145/n3_coefs.tsv"
+        lines = [re.sub(r"[0-9a-f]{40} \|$", "この文書と同じコミット |", x) if x.startswith("| " + rel) else x for x in lines]
+        self.commit_file(LIST, "\n".join(lines).encode("utf-8"))
+        self.stops(re.escape("%s の行の「最後に変えたコミット」の欄が40桁でない" % rel))
+
     def test_data_free_output_changed(self):
         """データを使わない出力を差し替え、一覧の sha256 も合わせた。封印したコードで流し直すと違う。"""
         rel = "docs/stats/order8-t145/naive.json"
         new = self.file(rel).replace(b"naive", b"naivE", 1)
-        lst = self.set_list_sha(rel, new)
-        self.commit_file(rel, new)
-        self.commit_file(LIST, lst)
+        self.retarget(rel, new)
         self.stops("naive.py  を流し直した出力の sha256 .* が、記録の docs/stats/order8-t145/naive.json")
 
     def test_unsealed_code_used(self):
         """封印の対象に無いコードを、流すコードが読み込む（一覧に載っていない入力の作り方）。"""
         rel = "src/stats/explore_tiers.py"
         new = self.file(rel).replace(b"\nimport ", b"\nimport zz_extra  # noqa\nimport ", 1)
-        lst = self.set_list_sha(rel, new)
         with open(os.path.join(self.c, "src", "stats", "zz_extra.py"), "w") as f:
             f.write("X = 1\n")
         self.git("add", "--", "src/stats/zz_extra.py")
-        self.commit_file(rel, new)
-        lines = lst.decode("utf-8").split("\n")
-        lines = [re.sub(r"[0-9a-f]{40} \|$", self.head() + " |", x) if x.startswith("| " + rel) else x for x in lines]
-        self.commit_file(LIST, "\n".join(lines).encode("utf-8"))
+        self.retarget(rel, new)
         self.stops("zz_extra.py（commit .*）は、この記録で封印したコード（targets・sealed_code）でない")
 
     def test_order7_output_changed(self):
@@ -409,9 +444,7 @@ class TestTamperedFiles(Clone):
         out = json.loads(self.file(rel))
         out["rules"]["lookback_days"] = 401
         new = (json.dumps(out, sort_keys=True) + "\n").encode("utf-8")
-        lst = self.set_list_sha(rel, new)
-        self.commit_file(rel, new)
-        self.commit_file(LIST, lst)
+        self.retarget(rel, new)
         self.stops("periods-order7.json の rules が periods の1件目の出力と違う")
 
     def test_decision_line_rewritten(self):

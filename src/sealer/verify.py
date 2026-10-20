@@ -1960,7 +1960,8 @@ def order68_last_change(repo, head, paths):
 
 def order68_list_rows(text):
     """一覧の文書（seal-order6-8.md）の4章の表の行：[(節, パス, sha256, コミットか None)]。節は "4(1)" などの形。コミットの欄が
-    40桁でない行（「この文書と同じコミット」）は None。sha256 の欄が無い行（見出しの行など）は数えない。"""
+    40桁でない行（T-147 より前の「この文書と同じコミット」）は None（check_order68_git が止める）。sha256 の欄が無い行（見出しの
+    行など）は数えない。"""
     rows, sec, in4 = [], None, False
     for line in text.split("\n"):
         if line.startswith("## "):
@@ -2191,7 +2192,11 @@ def check_order68_git(repo, data, records, rec, doc, base, read_json, tmp):
         raise ledger.LedgerError("%s：一覧の文書 %s の4章の表（節・パス・sha256）が、封印する対象と同じでない（行が足りない・多い・"
                                  "値が違う）" % (what, ledger.ORDER68_LIST_DOC))
     for (_s, p, _h, c), t in zip(rows, tg):
-        if c is not None and c != t["commit"]:
+        # T-148：統計係が T-147（67f6b32）で、すべての行の「最後に変えたコミット」を40桁にした。40桁でない行（以前の
+        # 「この文書と同じコミット」）は、照らせないので止める
+        if c is None:
+            raise ledger.LedgerError("%s：一覧の文書の %s の行の「最後に変えたコミット」の欄が40桁でない（照らせない）" % (what, p))
+        if c != t["commit"]:
             raise ledger.LedgerError("%s：一覧の文書の %s のコミット %s が、最後に変えたコミット %s と違う" % (what, p, c[:12], t["commit"][:12]))
     check_order68_decisions(repo, head, what)
     check_order7_output(repo, head, records, doc, read_json, what)

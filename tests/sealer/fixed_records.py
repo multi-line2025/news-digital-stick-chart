@@ -51,7 +51,9 @@ ORDER5_CODE_COMMIT = "c4139b27210dd702757e983b628c9000f87de0e6"
 # 7つ目の固定コミット（T-144）。リードの T-146 の採点記録と T-144 の割り振りのコミット：記録は seq 1〜17（seq 17 が順番5、status
 # ok）、統計係の封印の対象の一覧 docs/stats/seal-order6-8.md（1d644e9）とその対象のファイルがそろった版。順番6〜8 の記録と
 # periods-triggers・threshold-access を、本物の記録の clone に足して確かめるのに使う（test_t144.py）。
-ORDER68_COMMIT = "5e008b44888b4bbb295f86ca5edfa498ac2fb7cb"
+# T-148：統計係が一覧の文書の4章の「最後に変えたコミット」をすべて40桁に直した（T-147、67f6b32）あとの、リードの T-147 の採点
+# 記録のコミットに改めた（記録は seq 1〜17 のまま）。
+ORDER68_COMMIT = "a1db9a3e5674eaaf3e8dd858652ae4ca62e18cc9"
 
 # checkout(code="head") で HEAD の版にそろえるのは、封印係のコードと手順書（テストする側）だけ。ほかのファイル
 # （src/stats・src/collector・docs/stats・data・sealed・reviews など）は固定のコミットの版のまま使う。
