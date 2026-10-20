@@ -600,7 +600,7 @@ class TestOrderUnit(unittest.TestCase):
             self.assertIn(k, ledger.ALLOWED_KINDS)
             self.assertIn(k, seal_records.WRITTEN_KINDS)
             self.assertIn(k, ledger.ORDER4_BEFORE_KINDS)
-        self.assertEqual(ledger.ORDER5_BEFORE_KINDS, (ledger.THRESHOLD_ACCESS_KIND,))
+        self.assertEqual(ledger.ORDER5_BEFORE_KINDS, (ledger.THRESHOLD_ACCESS_KIND, ledger.ORDER68_KIND))   # T-144 で順番6〜8
 
 
 class TestConstantsSameAsOrder5(unittest.TestCase):

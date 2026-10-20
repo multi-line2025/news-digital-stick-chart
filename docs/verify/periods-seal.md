@@ -15,6 +15,7 @@
 11. 統計係の順番3の試み（`stats-order3-attempt`）と順番3の記録（`stats-order3`）、その照合（17章。T-090）
 12. 統計係の順番4（手法を作る期間の区画の、欠けた日の一覧。`stats-order4`）の記録と、その照合・作り直し（18章。T-095）
 13. 統計係の順番5（タグの一覧の結果。`stats-order5-attempt`・`stats-order5`）の記録と、その照合・order5.py に頼らない計算し直し（19章。T-111）
+14. 統計係の順番6〜8 と採点計画（`stats-order6-8`）の記録、順番7のきっかけの値（`periods-triggers`）、threshold-access の関門（20章。T-144）
 
 封印したことは、現時点では公開していない（オーナーの決定）。公開するかどうかは、試運転のあとでオーナーが判断する。オーナーは、封印のハッシュを公開する前に手順3（ファイル一覧の取得）へ進むと決めた（案B。reviews/T-013.md の末尾）。そのため、別の系列が無いことは示せない（7章の「示せないこと」）。
 
@@ -38,7 +39,7 @@
 |---|---|
 | `seq` | 通し番号。1 から始まり、行の順に 1 ずつ増える |
 | `prev_hash` | 直前の行のバイト列（末尾の改行を含めない）の sha256。1 行目は 0 が 64 個 |
-| `kind` | 種類。下の表の17だけ（許可リスト。T-066 で `gkg-run-result`、T-078 で `stats-order2`、T-090 で `stats-order3-attempt`・`stats-order3`、T-095 で `stats-order4`、T-111 で `stats-order5-attempt`・`stats-order5` を加えた）。それ以外の `kind` があれば、鎖の検証（`chain`）で失敗になる |
+| `kind` | 種類。下の表の18だけ（許可リスト。T-066 で `gkg-run-result`、T-078 で `stats-order2`、T-090 で `stats-order3-attempt`・`stats-order3`、T-095 で `stats-order4`、T-111 で `stats-order5-attempt`・`stats-order5`、T-144 で `stats-order6-8` を加えた）。それ以外の `kind` があれば、鎖の検証（`chain`）で失敗になる |
 | `targets` | 対象のファイル。各要素は `path`（ルートからの相対パス）、`role`、`sha256` |
 | `recorded_at` | 記録した日時（UTC）。記録した機械の時計による申告で、証明ではない |
 | `note` | 注記 |
@@ -46,7 +47,7 @@
 | `kind` | 中身 | 対象の `role` | 作る仕組み |
 |---|---|---|---|
 | `periods` | 期間の区切り | doc / code / test / output | `src/sealer/seal_periods.py` |
-| `periods-triggers` | 区切りを作り直すきっかけの値（docs/stats/periods.md 8章 (2)） | triggers | `src/sealer/seal_triggers.py` |
+| `periods-triggers` | 区切りを作り直すきっかけの値（docs/stats/periods.md 8章 (2)）。順番7の値は `seal_order6_8.py` も書く（20章。T-144） | triggers | `src/sealer/seal_triggers.py`、`src/sealer/seal_order6_8.py` |
 | `threshold-access` | 閾値を決める期間の区画（2020-12-15 以降）の情報を初めて「扱う」直前の記録。採用の区切り（形式は 7章） | threshold-access | `src/sealer/seal_access.py` |
 | `acquisition-start` | 試運転の手順3の取得を始める前の記録（形式は 7章） | acquisition-start | `src/sealer/seal_acquisition.py` の `start` |
 | `acquisition-result` | 試運転の手順3の取得の後の記録。対応する `acquisition-start` の seq を参照する（形式は 7章） | acquisition-result | `src/sealer/seal_acquisition.py` の `result` |
@@ -62,6 +63,7 @@
 | `stats-order4` | 統計係の順番4（手法を作る期間の区画の、欠けた日の一覧）。1件だけ。順番3の記録より後、threshold-access より前（形は 18章。T-095） | stats-order4 | `src/sealer/seal_order4.py` の `seal` |
 | `stats-order5-attempt` | 統計係の順番5の試み。order5.py を流す前に書く。何度でも（順番5の記録のあとは書かない）。順番4のあと、threshold-access より前（形は 19章。T-111） | stats-order5-attempt | `src/sealer/seal_order5.py` の `seal` |
 | `stats-order5` | 統計係の順番5（タグの一覧の結果）。直前が試みのときだけ、1件だけ（形は 19章。T-111） | stats-order5 | `src/sealer/seal_order5.py` の `seal` |
+| `stats-order6-8` | 統計係の順番6〜8 と採点計画（docs/stats/seal-order6-8.md の対象のすべて）。順番5（ok）のあと、threshold-access より前。何件でも（関門は最後の1件を使う。形は 20章。T-144） | stats-order6-8 | `src/sealer/seal_order6_8.py` の `seal` |
 
 - T-007 の案にあった `acquisition` は、二つ（`acquisition-start` と `acquisition-result`）に分けたので、許可リストに無い。今の記録にも無い。
 - 許可リストに限る理由：決めていない名前の `kind` を受け付けると、正式な取得や閾値の期間への接触を別の名前で記録して、規則の区切りから外せてしまうため。
@@ -1989,3 +1991,146 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py stats-order | grep -F 
 - stopped の記録のあとは、順番5を書き直せない（上の判断）。
 - 書いたあとで中身を書けなかった形の戻し方（順番4の `--write-content` に当たるもの）は、この入口には無い。起きたら記録を消さずにリードに報告する。
 - 16章の限界のうち、コミットと投稿の前に手で捨てる形、`python` が申告であること、`.pth` のことは、順番5にも当てはまる。試みの記録を手で捨てれば、流した回数は少なく見える（push と投稿の前なら跡は残らない）。
+
+## 20. 順番6〜8 と採点計画の封印（stats-order6-8。T-144）
+
+最初の threshold-access の前に封印するもののうち、統計係の分（`docs/stats/seal-order6-8.md`。以下「一覧の文書」）を封印する。中身は統計係がコミットしたファイルで、封印係の仕組みは値を選ばない。HEAD の版のファイルの sha256 と、最後に変えたコミットと、オーナーの決定の行を記録し、出力が封印したコードから同じに作れることを流し直して確かめてから書く。
+
+### 封印するもの
+
+- 一覧の文書の4章の表の43件（`ledger.ORDER68_TARGETS`。節は文書の見出しのまま `4(1)`・`4(2)`・`4(2b)`・`4(2c)`・`4(3)`）と、一覧の文書そのもの（`list_doc`。自分の sha256 は自分の中に書けないので、記録の側で縛る）。
+  - 4(1)：順番6〜8（naive.py・scoring.py・periods.py・naive-scoring.md・テスト、順番7の出力 `periods-order7.json`、順番8の出力 `naive.json`・`scoring.json`・21組の係数）
+  - 4(2)：採点計画 `claims-scoring-plan.md`、21組の段の形の表、段4・N3・N4 の係数、段1 の定数、それを作るコードとテスト
+  - 4(2b)：変更前の N3・N4 の係数（公開・封印するが採点に使わない）
+  - 4(2c)：chain の d の上限の確かめ（一覧の文書が「参考。封印するかは封印係が決める」とした。前向きの入力の作り方（d ≤ 52）が当てはめと同じ値になる根拠なので、封印する）
+  - 4(3)：段1〜段4・N3・N4 の入力の作り方と推定を定めるコード（explore_*）
+- オーナーの決定の出どころ7件（`ledger.ORDER68_DECISIONS`）：reviews の、その行を入れたコミットの40桁・パス・見出し・行。主張の構成（T-134）、採点計画の選び方（T-137）、8章の確認の項目（T-140）、未決事項2と順番6（T-143）、前向きの予言の曜日（T-143）、N3・N4 の学習の行（T-143）、前向きの入力の作り方（T-145）。
+- 流すコードが読み込む、ほかの記録で封印済みのコード（`sealed_code`）：periods.py（seq 1）、candidates.py（seq 2）、counting.py（seq 6）。
+
+### 記録の形
+
+kind は `stats-order6-8`。targets は中身の1つ（`sealed/stats-order6-8-<sha256>.json`）。中身のキー：
+
+| キー | 中身 |
+|---|---|
+| `kind`・`ledger_head`・`head`・`python` | ほかの順番と同じ。`head` は書いた時点の HEAD の40桁 |
+| `list_doc` | `{path, sha256, commit}`。commit は head の履歴で一覧の文書を最後に変えたコミット |
+| `targets` | `[{section, path, sha256, commit}]`（43件、`ORDER68_TARGETS` の並び） |
+| `sealed_code` | `[{path, sha256, source}]`（記録から決まる） |
+| `decisions` | `[{item, source, heading, lines}]`（`source` は `<コミット>:<パス>`） |
+| `order6` | 改訂なし（`revised: false`）と規則の場所 |
+| `order7` | `{naive_history_days: 399, output, triggers: {seq, record_sha256, values}}`。triggers は、この記録より前の最後の periods-triggers |
+| `periods` | periods の1件目への参照、`lookback_days` 400・`embargo_days` 90、素朴な予測 399・網の最大 396、`rebuild: false`、区画をまたいで過去を読む入力（段2 の履歴、chain の d） |
+| `data_free` | データを使わない出力3件（periods.py・naive.py・scoring.py の引数と出力の sha256） |
+| `reruns` | キャッシュが要る出力3件（order8_fit.py・tiers_select.py・chain_cap_check.py）：出力のフォルダ、それを最後に変えたコミット、比べるファイルの sha256、Python の版 |
+
+位置：順番5の記録（status が ok）のあと、threshold-access より前。何件でも書ける（誤りの訂正は新しい記録。件数は記録の数で決まる）。関門は最後の1件を使う。
+
+### 一つの記録にまとめた理由（判断）
+
+- 前提1：43件は、統計係が一つの文書の一つの版で列挙し、同じ時点（最初の threshold-access の前）に封印するものである（tags-naive.md 5章の順番6〜8 と、採点計画の封印）。
+- 前提2：記録を分けると、一部だけを封印し、残りを、ほかの結果を見てから封印する（または封印しない）道ができる。分けた記録の間に threshold-access を置く並びも作れる。
+- 前提3：一つの記録なら、一覧の文書の sha256 と43件の sha256 とオーナーの決定の行が、一つの行と一つの .ots で同時に縛られる。どれか1件を外せば、一覧の文書の表と合わなくなる（下の照合）。
+- 前提1〜3 から、分けない。順番6・7・8 と採点計画の区別は、中身の `section`（一覧の文書の節）と `order6`・`order7` の欄で示す。
+- 例外として、順番7の値は periods-triggers の記録にも入れる。前提：区切りを作り直すきっかけの値は、periods-triggers の記録の採用（threshold-access より前の最後の記録。9章）で決まり、verify periods・deadline_status の照合・関門がそれを使う（8章・9章）。この仕組みに順番7の値を入れないと、399 は採用の規則の外に置かれる。よって、入口は、同じ値の periods-triggers が最後の記録でなければ、順番6〜8 の記録の前に書く。
+
+### periods のきっかけの値と、区切りの作り直しが要らないこと
+
+一覧の文書 7章 (2) の表（予言日 t の入力が読む最も古い日）：素朴な予測 t-399、普段の水準 t-371、共起の網 最大 t-396、段2 の履歴は 2016-04-11 の予言日の入力から（t によらず 2015-03-09 以降を読み、t が進むと延びる）、chain の d は約 t-728（案C）。
+
+- 記録に足すもの：periods-triggers の記録 `{naive_history_days: 399, last_read_offset_days: null, network_window_days: null, same_week_years: null}`。値は、封印する順番7の出力 `periods-order7.json` の `rebuild_triggers` とちょうど同じにする（`ledger.ORDER7_TRIGGERS`）。
+  - 網の 396 を periods-triggers に入れない理由。前提：periods.md 8章 (2) は、出力の `rebuild_triggers` が記録に追記した値と完全に一致しなければ、その出力を after_deadline として扱うと決めている。封印する順番7の出力は、統計係が `--naive-history-days 399` だけで作ったものである。網の値を足すと、封印する順番7の出力が、この規則で after_deadline になる。網の 396 は 400 以下で、区切りを動かさない。網の作り方（予言日を含む月の前の12か月）そのものは、同じ記録で封印する一覧の文書（7章 (2)）と、網を作るコード（4(3) の explore_chain.py ほか）で縛られる。よって、396 は順番6〜8 の記録の `periods.network_window_days_max` に記録し、periods-triggers には入れない。網もきっかけの値として periods-triggers に入れるなら、統計係が `--network-window-days 396` も付けて順番7の出力を作り直す必要がある（リードへの提案として報告した）。
+  - 段2 の履歴と chain の d は、記録の `periods.cross_block_inputs` に、区画をまたいで過去を読む入力として書く。
+- 作り直しが要らないこと：
+  - 前提1（periods.md 8章 (1)）：過去分 LOOKBACK_DAYS = max(400, 網の日数, N × 366 + 35, 素朴な予測の日数)。素朴な予測は 399、網は最大 396、N は使わない（未決事項2 の決定）。よって 400 のままで、periods の1件目と同じ。
+  - 前提2（periods.md 3章 (3)）：閾値を決める期間と基準値を測る期間では、入力が前の区画に過去の方向に入り込むことを許す。予言日 t の入力は t-1 以前のデータだけで、判定が読むデータはエンバーゴでそれぞれの区画の中で終わる。前向きの予言も、基準値を測る期間のデータを過去分として読む。
+  - 前提3：段2 の履歴と chain の d は、手法を作る期間では 2016-04-11 から数えるので、読む日は 2015-03-09 以降で区画（2015-03-02 から）の中に収まる。手法を作る期間の予言日の範囲の始まりを動かさないので、8章 (1) の四つのきっかけのどれにも当たらない。閾値を決める期間・基準値を測る期間・前向きの予言で 400日を超えて読むのは、前提2 で許された過去の方向だけである。
+  - 前提1〜3 から、区切り（区画の境目、予言日の範囲、エンバーゴ）は作り直さない。記録の `periods.rebuild` は false で、照合は、素朴な予測と網の値が `lookback_days` 以下であること、順番7の出力が `rebuild_triggers`・`deadline_status` のほかは periods の1件目の出力とちょうど同じであること（区画・範囲・過去分・エンバーゴが同じ）を確かめる。
+
+### 照らすこと
+
+書く仕組み（`seal_records.check_new`）と verify（`verify.py stats-order`・`all`）が同じ関数で照らす。
+
+- (0) git を使わない照合（`ledger.check_order68_doc`）：キー、位置、`targets` のパスと節の並び、`sealed_code`、`decisions`（決まった出どころとちょうど同じ）、`order6`、`order7`（399、最後の periods-triggers を指し、その値が順番7の値）、`periods`（periods の1件目から決まる値、作り直し無し）、`data_free`・`reruns` の sha256 が `targets` の値と同じこと。
+- (1) git を使う照合（`verify.check_order68_git`。verify では、記録を最初に含んだコミットを base にする）：
+  - head の版の `sealed/ledger.jsonl` がこの記録の直前までと同じ。head が base の祖先。
+  - `list_doc`・`targets` が、head の版のファイルの sha256 と、head の履歴で最後に変えたコミットから作り直したものと同じ。
+  - 一覧の文書の4章の表の行（節・パス・sha256）が `targets` とちょうど同じ並び（行を1つ消す・足す・値を変えると止まる）。表の「最後に変えたコミット」の欄が40桁の行は、その値が最後に変えたコミットと同じ。
+  - オーナーの決定の行：その行を入れたコミットが head の祖先で、その版で見出しと行がちょうど1行ずつあり、第一の親の版には無く、head の版にも同じ形で残っている。
+  - 順番7の出力の区切りが periods の1件目と同じ（上の節）。
+  - `reruns` のコミットが、head の履歴でその出力のファイルを最後に変えたコミット。
+  - 出力の中のコードの一覧（`order8-t145/run.json`・`chain-cap-t146/chain_cap.json` の `code`）が、そのスクリプトがたどるコードと封印した sha256 にちょうど同じ。
+  - データを使わない出力の流し直し：periods.py（`--naive-history-days 399 --deadline-status before_deadline`）・naive.py・scoring.py を、封印したコードだけを置いた空のフォルダで `-I -B` の Python で流し、標準出力の sha256 が記録と同じ。数秒で終わるので、書く仕組みも verify もいつも流す。
+- (2) キャッシュが要る出力の流し直し（`verify.rerun_order68`）：order8_fit.py・tiers_select.py・chain_cap_check.py を、`reruns` のコミットの版のファイルだけ（スクリプトがたどるコード、そのコミットの `sealed/` と `data/manifest/`、order8_fit.py には21組の表）を置いた空のフォルダで、`--t117-cache <キャッシュ> --out-dir <新しいフォルダ>` を付けて流し、比べるファイルの sha256 が記録と同じ。合わせて約30分（10コア）。
+  - 出力のフォルダを最後に変えたコミットの版で流すのは、出力に、その時点の記録の件数（`refs.ledger_records` = 17）が入るためである。コードは、そのコミットの版が封印した sha256 と同じことを確かめてから置く。
+  - 出力に Python の版が入るので、記録の `python` と違う版で流すときは「照らさなかった」と出す。
+  - 書く仕組みは (2) を必ず行う（`--t117-cache` が無ければ書かない）。入口は、書く前の確かめで1回流し、書く前の照合では、同じスクリプト・同じコミット・同じキャッシュの結果を使う（`memo`）。verify は `--t117-cache` を渡したときだけ行う。
+- 流すコードの閉包（`verify.stats_import_closure`）：スクリプトから、import の名前と、文字列の定数がちょうど `src/stats/<名前>.py` の形のもの（explore_islands がパスで読み込むもの、order8_fit が流すもの）を ast でたどる。たどったコードのどれかが、この記録で封印したコード（`targets` の .py と `sealed_code`）と sha256 で同じでなければ止まる（一覧の文書に載っていないコードを使う形を見つける）。`__import__`・`import_module` を使うコードは、静的にたどれないので止まる。
+
+### threshold-access の関門
+
+最初の threshold-access より前に、正式な run の gkg-run-result か順番3の記録があるなら（順番4の関門と同じ条件。T-100）、その threshold-access より前に次がなければならない（`ledger.check_threshold_access_after_order68`）。
+
+1. status が ok の順番5の記録。
+2. 順番6〜8 の記録が1件以上。
+3. そのうち最後の記録の `order7.triggers` が、その threshold-access の時点で採用される periods-triggers（threshold-access より前の最後の記録）を指す。
+
+書く仕組み（seal_access。`check_stats_order` の中）、関門（`ledger.require_threshold_access`）、verify のどれでも照らす。順番6〜8 の記録のあとに違う値の periods-triggers を書く仕組み（seal_triggers）は拒む（`ledger.check_triggers_append`）。照合を飛ばして足しても、3 で threshold-access が止まる。順番6〜8 の記録は threshold-access のあとには書けず、順番4・順番5 の記録は順番6〜8 のあとには書けない。
+
+### 書く入口と、1回の実行の順
+
+```sh
+CACHE="$HOME/Desktop/news-stick-data/explore-t117-cache/run2"
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/seal_order6_8.py --t117-cache "$CACHE"
+```
+
+- `--t117-cache` は、手法を作る期間のキャッシュ（Git の外、プロジェクトの外）。終了コード：書いてコミットしたら 0。何も書かずに止まったら 1（「失敗（記録は書いていない）」）。書いたあとで止まったら 1（「止まった（記録は書いた）」）。
+- 順：0. 鎖とすべての .ots を検証し、作業ツリーがきれいで HEAD（A）が決まる。1. 書く前の確かめ（(0)〜(2)。何も書かない。約30分）。2. 最後の periods-triggers が順番7の値でなければ、periods-triggers を書いてコミットする（HEAD は B）。3. 順番6〜8 の記録を書く（書く前の照合で (0)〜(2) を B の版でもう一度。(2) は 1 の結果を使う）。recorded_at は追記の直前に取る（T-112）。.ots を作り、パス指定でコミットする（作成者とコミッタは noreply の1件、追記行なし。seal_order2.commit_record）。
+- 書いたがコミットしていないときは `seal_order6_8.py --commit-written`。
+
+### 本番の実行の手順（T-144）
+
+オーナーの承認のあと、キャッシュを持つ運営が、プロジェクトのルートで、この順に行う。途中で止まったら、それより後のことはしない。
+
+1. `verify.py all --rev auto` が 0。順番5（seq 17、status ok）があり、threshold-access が無い。作業ツリーがきれいで、一覧の文書と対象が HEAD にコミットしてある。流しているあいだ（約1時間）にコミットや checkout をしない。
+2. 書く（上のコマンド）。0 で終われば、periods-triggers（要るときだけ）と順番6〜8 の記録がコミットされている。画面の記録の行とコミットの40桁を控える。1 で終わったら、記録は消さずにリードに報告する。
+3. 書いたあとの照合（どちらも 0 で終わること。2つ目は約30分）：
+   ```sh
+   PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/verify.py all --rev auto
+   OUT="${TMPDIR:-/tmp}/order68-verify.txt"
+   PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B src/sealer/verify.py stats-order --rev auto --t117-cache "$CACHE" > "$OUT"
+   ```
+   `$OUT` に「データを使わない出力 3 件を封印したコードで流し直した。記録と同じ」と「3 個のスクリプト（…）を封印したコードで流し直した。出力のファイルの sha256 は記録と同じ」の2行があること。
+4. `privacy_scan.py --all-history` が 0 なら、結果（記録の行、`$OUT` の順番6〜8 の行、Python の版）をリードに渡す。push と、記録の時刻から24時間以内の投稿（二つの記録のハッシュと時刻）はリードが行う。
+
+### 第三者の確かめ方
+
+<!-- test:order68 -->
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py all --rev auto
+PYTHONDONTWRITEBYTECODE=1 python3 -B src/sealer/verify.py stats-order --rev auto | grep -F '（順番6〜8 と採点計画）'
+```
+
+- 1行目が 0 で終わり、2行目に順番6〜8 の記録の行（head、一覧の文書の sha256、対象の件数、オーナーの決定の件数、順番7 の値と periods-triggers の seq、区切りの作り直し）が出る。この2つで (0) と (1)（データを使わない出力の流し直しを含む）を照らす。
+- 手法を作る期間のキャッシュを作れれば（一覧の文書 5章。日の集計が要る）、`verify.py stats-order --rev auto --t117-cache <キャッシュ>` で (2) を照らせる。
+
+### 限界
+
+- **(2) を照らせるのは、手法を作る期間のキャッシュ（日の集計から作る）を持つ者だけ**である。持たない第三者が照らせるのは、ファイルの sha256、一覧の文書との一致、オーナーの決定の行、データを使わない出力、出力の中のコードの一覧までで、係数と表の値が封印したコードから出たことは照らせない。
+- **一覧の文書に載っていない対象**は、流すコードの閉包の確かめと、出力の中のコードの一覧の確かめで見つかる範囲（係数と表を作るコード）のほかは、見つけられない。統計係が検討して載せなかったものがあるかは、記録からは確かめられない。
+- **オーナーの決定の行**は、リードが reviews に原文として記録したものである。オーナー本人の発言であることは、記録からは確かめられない。照らすのは、その行がそのコミットで入り、書き換えられていないことだけである。
+- **「この文書と同じコミット」の行**のコミットは、一覧の文書の文と照らさず、git の履歴から決まる値（最後に変えたコミット）を記録する。
+- **網の 396 は periods-triggers に入れていない**（上の判断）。periods-triggers だけを見る照合（verify periods）は、網の値を知らない。網の値は順番6〜8 の記録の `periods` で照らす。
+- 手元で閾値を決める期間のデータを見たかどうかは、記録からは分からない（一覧の文書 6章の限界と同じ）。記録が示すのは、封印する出力が、封印したコードと手法を作る期間のデータから第三者に作り直せることと、threshold-access より前に封印されたことである。
+- 16章の限界のうち、コミットと投稿の前に手で捨てる形、`python` が申告であること、`.pth` のことは、順番6〜8 にも当てはまる。
+
+### テスト
+
+`tests/sealer/test_t144.py`（本物の記録の固定したコミット `fixed_records.ORDER68_COMMIT`（seq 1〜17）の clone で書く。キャッシュが要るスクリプトを流す `verify.run_order68_script` だけを、clone の git の版の出力を書き出す仮のものに差し替える）：
+
+- 書く → コミット → verify（`TestWrite`）：periods-triggers（seq 18）と順番6〜8（seq 19）、作成者・本文・ファイル、verify all が 0、`--t117-cache` を渡すと3つ流し直す。同じ値の periods-triggers があれば書き足さない。2件目の記録。作業ツリーが汚れていれば書かない。流し直しの結果が違えば何も書かない（periods-triggers も）。Python の版が違えば照らさない（書かない）。キャッシュが無ければ書かない。この章の第三者の確かめ方の塊が 0 で終わる。
+- 作り物（`TestForgeries`）：対象の sha256 を偽る・外す・足す、一覧の文書の sha256、オーナーの決定の行を変える・外す、順番6 を改訂ありにする、順番7 の値と参照、区切りの作り直しを要るにする・過去分を変える、データを使わない出力の sha256、流し直しの commit と出力、封印済みのコード、キーを足す、head が今の HEAD でない。書く仕組みは書かず、照合を飛ばして足すと verify が止める。
+- ファイルの改ざん（`TestTamperedFiles`）：対象を変えて一覧を直していない、一覧の行を消す、一覧のコミットの欄が違う、データを使わない出力を差し替える、封印していないコードを読み込む、順番7の出力の区切りを変える、reviews のオーナーの行を書き換える、書いたあとの流し直しが違う。
+- 欠番（`TestMissing`）：periods-triggers の行を消す、最後の行を消す。
+- 関門（`TestThresholdGate`・`TestGateUnit`）：順番6〜8 の前の threshold-access は書かない・書いたあとは書ける・そのあとに順番6〜8 は書けない、照合を飛ばした threshold-access は verify と関門が止める、順番6〜8 のあとに違う値の periods-triggers は書かない・足すと threshold-access が止まる、順番5 が stopped・無い、位置。
+- 部品（`TestUnits`）：閉包のたどり方と `__import__` の拒否、`-I -B` で流す起こし方、一覧の表の読み方、399 と出力の名前が統計係のコードの定数と同じこと、`ORDER68_TARGETS` が固定したコミットの一覧の文書の表と同じこと。

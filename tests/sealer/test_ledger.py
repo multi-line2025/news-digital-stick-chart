@@ -303,7 +303,8 @@ class TestChain(LedgerCase):
                           "stats-order2",                        # T-078：順番2の試み
                           "stats-order3-attempt", "stats-order3",  # T-090：順番3の試みと順番3の記録
                           "stats-order4",                        # T-095：順番4（欠けた日の一覧）
-                          "stats-order5-attempt", "stats-order5"})  # T-111：順番5の試みと順番5の記録
+                          "stats-order5-attempt", "stats-order5",  # T-111：順番5の試みと順番5の記録
+                          "stats-order6-8"})                     # T-144：順番6〜8 と採点計画
         self.assertNotIn("acquisition", ledger.ALLOWED_KINDS)
         self.add(n=1)
         for i, k in enumerate(ledger.ALLOWED_KINDS):

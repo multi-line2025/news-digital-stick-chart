@@ -37,6 +37,9 @@ check_acquisition_pairs と同じ。
          時機の条件の計算し直し（verify.check_order2_git）。書く入口は seal_order2.py
        - stats-order4（T-095）：ledger_head、形・位置・参照・一覧のつじつま（ledger.check_order4_records。check_stats_order の
          中）、head が今の HEAD、コードの版（verify.check_order4_git）、privacy_scan と同じ検査。書く入口は seal_order4.py
+       - stats-order6-8（T-144）：ledger_head、形・位置・参照・決まった値（ledger.check_order68_records。check_stats_order の中）、
+         head が今の HEAD、git からの照合とデータを使わない出力の流し直し（verify.check_order68_git）、キャッシュが要る出力の
+         流し直し（verify.rerun_order68）、privacy_scan と同じ検査。書く入口は seal_order6_8.py
        - stats-order3-attempt・stats-order3（T-090）：ledger_head、形（ledger.check_order3_records。check_stats_order の中）、
          head が今の HEAD、git からの計算し直し（verify.check_order3_git）、試みの gate を封印した版の order3_gate() で計算し
          直した結果と同じこと（verify.recompute_order3_gate）、privacy_scan と同じ検査。書く入口は seal_order3.py
@@ -111,7 +114,7 @@ WRITTEN_KINDS = (ledger.THRESHOLD_ACCESS_KIND, ledger.ACQ_START_KIND, ledger.ACQ
                  ledger.METHOD_ACCESS_KIND, ledger.GKG_RUN_KIND, ledger.ORDER1_KIND,
                  ledger.ORDER1B_KIND, ledger.GKG_RESULT_KIND, ledger.ORDER2_KIND,
                  ledger.ORDER3_ATTEMPT_KIND, ledger.ORDER3_KIND, ledger.ORDER4_KIND,
-                 ledger.ORDER5_ATTEMPT_KIND, ledger.ORDER5_KIND)
+                 ledger.ORDER5_ATTEMPT_KIND, ledger.ORDER5_KIND, ledger.ORDER68_KIND)
 
 
 def _paths(project):
@@ -184,7 +187,7 @@ def head_manifest(project, rel):
     return r.stdout
 
 
-def check_new(project, data_after, records_after, rec, doc, order4_store=None, order5_inputs=None):
+def check_new(project, data_after, records_after, rec, doc, order4_store=None, order5_inputs=None, order68_inputs=None):
     """手順 3。追記した後の記録に対して、新しい記録の照合をする。"""
     kind = rec["kind"]
     if kind not in WRITTEN_KINDS:
@@ -292,6 +295,27 @@ def check_new(project, data_after, records_after, rec, doc, order4_store=None, o
             except verify.Unchecked as e:
                 raise ledger.LedgerError("%s の記録を計算し直せない（%s）。書かない" % (kind, e)) from None
         return
+    if kind == ledger.ORDER68_KIND:
+        # T-144：順番6〜8 と採点計画。形・位置・参照・決まった値（ledger.check_order68_records。check_stats_order の中）に加えて、
+        # privacy_scan と同じ検査、ledger_head、head が今の HEAD、git からの照合とデータを使わない出力の流し直し
+        # （verify.check_order68_git）。キャッシュが要る出力も流し直す（verify.rerun_order68）。キャッシュが無ければ書かない
+        check_privacy(rec, doc)
+        ledger.check_ledger_head(data_after, rec, doc)
+        repo = verify.Repo(project)
+        head = verify._rgit(repo, "rev-parse", "--verify", "HEAD^{commit}").decode().strip()
+        if doc["head"] != head:
+            raise ledger.LedgerError("%s の記録の head %s が、今の HEAD %s と違う。書かない" % (kind, doc["head"][:12], head[:12]))
+        if not order68_inputs or not order68_inputs.get("cache"):
+            raise ledger.LedgerError("%s の記録は、手法を作る期間のキャッシュ（--t117-cache）で係数と表を流し直してからでなければ"
+                                     "書かない" % kind)
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                verify.check_order68_git(repo, data_after, records_after, rec, doc, head, read, tmp)
+                verify.rerun_order68(repo, doc, order68_inputs["cache"], tmp, "seq %d の %s" % (rec["seq"], kind),
+                                     memo=order68_inputs.get("memo"))
+            except verify.Unchecked as e:
+                raise ledger.LedgerError("%s の記録の出力を流し直せない（%s）。書かない" % (kind, e)) from None
+        return
     if kind == ledger.GKG_RESULT_KIND:
         # T-066：中身の形・ledger_head・指す gkg-run-start、マニフェストの先頭と run-complete の行
         ledger.check_gkg_result_doc(records_after, rec, doc, read, data_after)
@@ -349,7 +373,7 @@ def utc_now():
 
 
 def write_doc_record(project, kind, doc, data, note, now, ots_cmd, runner=subprocess.run, content_after_append=False,
-                     order4_store=None, order5_inputs=None):
+                     order4_store=None, order5_inputs=None, order68_inputs=None):
     """手順 3〜6。返り値: (記録, 中身のパス, .ots のパス か None)。
     content_after_append（T-095 差し戻し1回目 軽-1。順番4の入口が使う）：真なら、中身のファイルを記録に追記したあとで書く。
     追記の前で止まったときに、中身（一覧）の入ったファイルが作業ツリーに残らないようにするため。追記のあとで中身を書けな
@@ -368,7 +392,8 @@ def write_doc_record(project, kind, doc, data, note, now, ots_cmd, runner=subpro
     _records, rec, line = ledger.build_next_record(data, kind, targets, note, utc_now() if late else now)
     data_after = data + line
     records_after = ledger.verify_chain(data_after)
-    check_new(project, data_after, records_after, rec, doc, order4_store=order4_store, order5_inputs=order5_inputs)
+    check_new(project, data_after, records_after, rec, doc, order4_store=order4_store, order5_inputs=order5_inputs,
+              order68_inputs=order68_inputs)
     if late:
         # 追記の直前の時刻で作り直す。recorded_at のほかは照合した記録と同じであること
         now = utc_now()

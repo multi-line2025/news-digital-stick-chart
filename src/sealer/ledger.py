@@ -7,8 +7,9 @@
 1 行の形（キーはこの 6 つだけ。ほかのキーがあれば検証で失敗にする）
     seq          通し番号。1 から始まり、行の順に 1 ずつ増える。
     prev_hash    直前の行のバイト列（末尾の改行を含めない）の sha256。1 行目は 0 が 64 個。
-    kind         種類。許可リスト（ALLOWED_KINDS）の 17 だけ（T-066 で gkg-run-result、T-078 で stats-order2、T-090 で
-                 stats-order3-attempt・stats-order3、T-095 で stats-order4、T-111 で stats-order5-attempt・stats-order5 を加えた）。
+    kind         種類。許可リスト（ALLOWED_KINDS）の 18 だけ（T-066 で gkg-run-result、T-078 で stats-order2、T-090 で
+                 stats-order3-attempt・stats-order3、T-095 で stats-order4、T-111 で stats-order5-attempt・stats-order5、
+                 T-144 で stats-order6-8 を加えた）。
                  それ以外は検証で失敗にする。
                  gkg-run-start（GKG の取得の run の開始。T-031）、stats-order1・stats-order1b
                  （統計係の順番1・順番1b の事前の封印。T-037）を加えた。
@@ -161,10 +162,13 @@ ORDER4_KIND = "stats-order4"
 # T-111：統計係の順番5（タグの一覧の結果）の試みと、順番5の記録
 ORDER5_ATTEMPT_KIND = "stats-order5-attempt"
 ORDER5_KIND = "stats-order5"
+# T-144：統計係の順番6〜8 と採点計画（docs/stats/seal-order6-8.md の対象のすべて）を1件で封印する記録
+ORDER68_KIND = "stats-order6-8"
 ALLOWED_KINDS = (PERIODS_KIND, TRIGGERS_KIND, THRESHOLD_ACCESS_KIND, ACQ_START_KIND,
                  ACQ_RESULT_KIND, CANDIDATES_KIND, METHOD_ACCESS_KIND, GKG_RUN_KIND,
                  ORDER1_KIND, ORDER1B_KIND, GKG_RESULT_KIND, ORDER2_KIND,
-                 ORDER3_ATTEMPT_KIND, ORDER3_KIND, ORDER4_KIND, ORDER5_ATTEMPT_KIND, ORDER5_KIND)
+                 ORDER3_ATTEMPT_KIND, ORDER3_KIND, ORDER4_KIND, ORDER5_ATTEMPT_KIND, ORDER5_KIND,
+                 ORDER68_KIND)
 
 # stamp で使う公開カレンダー（ots の既定と同じ 4 つ）と、その集約先が返す Pending の宛先
 # （実体のカレンダー）。stamp.py はこの左側に送る。.ots の Pending の宛先は右側に限る。
@@ -778,6 +782,11 @@ def check_triggers_append(records, read_json, values):
     """
     j_max = candidates_j_max(records, read_json)
     j = values.get("last_read_offset_days")
+    o68 = [r for r in records if r["kind"] == ORDER68_KIND]
+    if o68 and first_threshold_access(records) is None and dict(values) != ORDER7_TRIGGERS:
+        # T-144：順番6〜8 の記録のあとに違う値を足すと、それが採用されて threshold-access の関門が通らなくなる
+        raise LedgerError("順番6〜8 の記録（seq %d）がある。そのあとに書けるきっかけの値は、順番7の値 %s だけ。%s は追記しない"
+                          % (o68[-1]["seq"], json.dumps(ORDER7_TRIGGERS, sort_keys=True), json.dumps(values, sort_keys=True)))
     m = next((r for r in records if r["kind"] == METHOD_ACCESS_KIND), None)
     if m is not None and j is not None and j != j_max:
         raise LedgerError("method-access の記録（seq %d）がある。その後に書ける J（last_read_offset_days）は"
@@ -1967,9 +1976,11 @@ def check_stats_order(records, read_json):
     o3 = check_order3_records(records, read_json)              # T-090
     o4 = check_order4_records(records, read_json)              # T-095
     o5 = check_order5_records(records, read_json)              # T-111
+    o68 = check_order68_records(records, read_json)            # T-144
     check_threshold_access_after_order4(records, read_json)    # T-100（T-097）
+    check_threshold_access_after_order68(records, read_json)   # T-144（T-111 の監査 軽-3）
     return {"order1": o1, "order1b": o1b, "order2": o2, "order3_attempt": o3["attempt"], "order3": o3["order3"],
-            "order4": o4, "order5_attempt": o5["attempt"], "order5": o5["order5"]}
+            "order4": o4, "order5_attempt": o5["attempt"], "order5": o5["order5"], "order68": o68}
 
 
 # ---- T-073：順番2の前の関門と、順番2の記録の照合
@@ -2989,7 +3000,8 @@ ORDER4_DOC_FILES = ("docs/stats/missing-days-method.md", "tests/stats/test_missi
 # 流すフォルダに取り出すもの：コード、関門が読む封印の記録、マニフェスト（HEAD の版のこの下のファイルすべて）
 ORDER4_TREE_PREFIXES = ("data/manifest/", "sealed/", "src/")
 # 順番4の記録より後にだけ置ける kind。順番5とモデルの kind を作るときは、ここに足す（missing-days-method.md 5章）
-ORDER4_BEFORE_KINDS = (THRESHOLD_ACCESS_KIND, ORDER5_ATTEMPT_KIND, ORDER5_KIND)   # T-111 で順番5を足した
+ORDER4_BEFORE_KINDS = (THRESHOLD_ACCESS_KIND, ORDER5_ATTEMPT_KIND, ORDER5_KIND,   # T-111 で順番5を足した
+                       ORDER68_KIND)                                            # T-144 で順番6〜8 を足した
 ORDER4_DOC_KEYS = ("code", "head", "kind", "ledger_head", "list", "list_sha256", "python", "refs")
 ORDER4_REF_KEYS = ("candidates", "gkg_run_result", "order1b", "order3", "periods")
 ORDER4_CODE_KEYS = ("docs", "imports", "script", "tree")
@@ -3379,7 +3391,7 @@ def check_ref_order4(records, record, ref, read_json, what=None):
 # ORDER5_BEFORE_KINDS に足す）。
 ORDER5_SCRIPT = "src/stats/order5.py"
 ORDER5_DOC_FILES = ("docs/stats/order5-tag-list.md", "tests/stats/test_order5.py")
-ORDER5_BEFORE_KINDS = (THRESHOLD_ACCESS_KIND,)
+ORDER5_BEFORE_KINDS = (THRESHOLD_ACCESS_KIND, ORDER68_KIND)          # T-144 で順番6〜8 を足した
 ORDER5_OUT_NAMES = {"main": "order5-main.json", "detail": "order5-detail.json", "extra": "order5-extra.json"}
 # 順番5の main の refs のキー（order5.py の出力と同じ）と、記録の refs のキー（試みを足したもの）
 ORDER5_REF_KEYS = ("gkg_run_result", "order1", "order1b", "order2", "order3", "order4")
@@ -3746,6 +3758,291 @@ def check_order5_records(records, read_json):
     for r in o5:
         check_order5_doc(records, r, read_json(r, ORDER5_KIND), read_json)
     return {"attempt": att, "order5": o5}
+
+
+# ---- T-144：順番6〜8 と採点計画の封印（kind: stats-order6-8）
+#
+# 統計係の封印の対象の一覧（docs/stats/seal-order6-8.md）のすべてを、1件の記録で封印する。tags-naive.md 5章の順番6（冷却と
+# 「対象なし」の規則の改訂。改訂なし）・順番7（naive_history_days = 399）・順番8（素朴な予測の最後の版と21組の係数）と、
+# 採点計画（docs/stats/claims-scoring-plan.md）・段の形の21組の表・段4・N3・N4 の係数・段1 の定数・変更前の N3・N4 の係数・
+# chain の d の上限の確かめ・入力の作り方と推定を定めるコードを、まとめて一つの中身に入れる（分けない理由は手順書20章）。
+# 中身は、対象のファイルのパス・sha256・最後に変えたコミット、統計係の一覧の文書の sha256、オーナーの決定の出どころ
+# （reviews のコミットの40桁・見出し・行）。順番7の値は、periods の作り直しのきっかけの値として、periods-triggers の記録にも
+# 入れる（書く入口が、同じ値の periods-triggers が最後の記録でなければ先に書く）。
+# 位置：順番5（status が ok）の記録のあと、threshold-access より前。何件でも書ける（誤りの訂正は新しい記録。採用は
+# threshold-access より前の最後の1件）。最初の threshold-access の関門は、この記録と順番5（ok）を求める
+# （check_threshold_access_after_order68）。
+ORDER68_LIST_DOC = "docs/stats/seal-order6-8.md"
+# 一覧の文書の4章の表と同じ並び：(節, パス)。節は文書の見出し（4章 (1)・(2)・(2b)・(2c)・(3)）
+ORDER68_TARGETS = (
+    ("4(1)", "src/stats/naive.py"), ("4(1)", "src/stats/scoring.py"), ("4(1)", "src/stats/periods.py"),
+    ("4(1)", "docs/stats/naive-scoring.md"), ("4(1)", "tests/stats/test_t019.py"), ("4(1)", "tests/stats/test_periods.py"),
+    ("4(1)", "docs/stats/order8-t145/periods-order7.json"), ("4(1)", "docs/stats/order8-t145/naive.json"),
+    ("4(1)", "docs/stats/order8-t145/scoring.json"), ("4(1)", "docs/stats/order8-t145/naive_coefs.tsv"),
+    ("4(2)", "docs/stats/claims-scoring-plan.md"), ("4(2)", "docs/stats/tiers-select-t142/tiers_select.tsv"),
+    ("4(2)", "docs/stats/tiers-select-t142/tiers_select_all.tsv"), ("4(2)", "docs/stats/tiers-select-t142/summary.md"),
+    ("4(2)", "src/stats/tiers_select.py"), ("4(2)", "tests/stats/test_tiers_select.py"), ("4(2)", "src/stats/order8_fit.py"),
+    ("4(2)", "tests/stats/test_order8_fit.py"), ("4(2)", "docs/stats/order8-t145/tier4_coefs.tsv"),
+    ("4(2)", "docs/stats/order8-t145/n3_coefs.tsv"), ("4(2)", "docs/stats/order8-t145/n4_coefs.tsv"),
+    ("4(2)", "docs/stats/order8-t145/tier1_null_fix.tsv"), ("4(2)", "docs/stats/order8-t145/forms.tsv"),
+    ("4(2)", "docs/stats/order8-t145/run.json"), ("4(2)", "docs/stats/order8-t145/summary.md"),
+    ("4(2b)", "docs/stats/order8-t143/n3_coefs.tsv"), ("4(2b)", "docs/stats/order8-t143/n4_coefs.tsv"),
+    ("4(2b)", "docs/stats/order8-t143/run.json"),
+    ("4(2c)", "src/stats/chain_cap_check.py"), ("4(2c)", "tests/stats/test_chain_cap_check.py"),
+    ("4(2c)", "docs/stats/chain-cap-t146/chain_cap.json"), ("4(2c)", "docs/stats/chain-cap-t146/summary.md"),
+    ("4(3)", "src/stats/explore_islands.py"), ("4(3)", "src/stats/explore_signals.py"), ("4(3)", "src/stats/explore_models.py"),
+    ("4(3)", "src/stats/explore_graph.py"), ("4(3)", "src/stats/explore_denominator.py"),
+    ("4(3)", "src/stats/explore_diffusion.py"), ("4(3)", "src/stats/explore_diffusion2.py"), ("4(3)", "src/stats/explore_sea.py"),
+    ("4(3)", "src/stats/explore_chain.py"), ("4(3)", "src/stats/explore_tiers.py"), ("4(3)", "tests/stats/test_explore_models.py"),
+)
+ORDER68_SECTIONS = ("4(1)", "4(2)", "4(2b)", "4(2c)", "4(3)")
+ORDER68_DOC_KEYS = ("data_free", "decisions", "head", "kind", "ledger_head", "list_doc", "order6", "order7", "periods",
+                    "python", "reruns", "sealed_code", "targets")
+# 順番7：素朴な予測が要る過去分（naive.naive_lookback_days()）。periods の作り直しのきっかけの値（periods.md 8章 (1)）
+ORDER7_NAIVE_HISTORY_DAYS = 399
+ORDER7_OUTPUT = "docs/stats/order8-t145/periods-order7.json"
+ORDER7_TRIGGERS = {"last_read_offset_days": None, "naive_history_days": ORDER7_NAIVE_HISTORY_DAYS,
+                   "network_window_days": None, "same_week_years": None}
+# 順番6：改訂なし（seal-order6-8.md 1章）
+ORDER6 = {"revised": False, "rules": ["src/stats/scoring.py", "docs/stats/naive-scoring.md"],
+          "where": "src/stats/scoring.py の target_status()・recently_jumped()・week_summary()、docs/stats/naive-scoring.md 4章 (1)(2)",
+          "decision": "未決事項2と順番6"}
+# periods（seal-order6-8.md 7章 (2) の表）：区切りの作り直しのきっかけになりうる、予言日 t の入力が読む過去の日数
+ORDER68_NETWORK_WINDOW_DAYS_MAX = 396
+ORDER68_CROSS_BLOCK_INPUTS = (
+    "段2 の履歴：2016-04-11 からのすべての月曜を続けて数える（案A。reviews/T-145.md）。読む最も古い日は 2015-03-09 で t に"
+    "よらず一定。閾値を決める期間・基準値を測る期間・前向きの予言では、前の区画のデータを過去として読み、t が進むと 400日を超える",
+    "chain の続いた週数 d：予言日から前へ最大52個の月曜までだけ数える（案C。reviews/T-145.md）。読む最も古い日は約 t-728 で、"
+    "閾値を決める期間・基準値を測る期間・前向きの予言では 400日を超える",
+)
+ORDER68_PERIODS_RULE = ("docs/stats/periods.md 3章 (3)（過去の方向に入り込むのは許す）・8章 (1)（過去分は max(400, 網の日数, N × 366 + 35,"
+                        " 素朴な予測の日数)）")
+# オーナーの決定の出どころ：(項目, その行を入れたコミット, パス, 見出し, 行)。行は、そのコミットの版でちょうど1行ずつあり、
+# その前で最も近い「## 」の見出しが、ちょうど1行ある見出しと同じ。そのコミットの第一の親の版では、そうなっていない
+ORDER68_DECISIONS = (
+    ("主張の構成と比べる階層", "6a272c4b1de4658d314872f5810b279596295373", "reviews/T-134.md",
+     "## 2026-10-19 オーナーの決定（原文。主張の構成と比べる階層）", ("> 階層としては、", "> 主張の順番は1でその次2だ。")),
+    ("採点計画の選び方", "81532914652231493ca1b7a594014a0f76253044", "reviews/T-137.md",
+     "## 2026-10-20 オーナーの決定（原文。採点計画の選び方）", ("> おすすめ通りでいきましょう",)),
+    ("採点計画 8章の確認の項目", "e3cc763b017108c5a101b457ad9fd98552b76eaf", "reviews/T-140.md",
+     "## 2026-10-20 オーナーの決定（原文。採点計画 8章の確認の項目）", ("> おすすめ通りでよいです",)),
+    ("未決事項2と順番6", "8b2b9fed62364565dd969a140fe9c6f5fe3b6fdb", "reviews/T-143.md",
+     "## 2026-10-20 オーナーの決定（原文）", ("> Aの2つはおすすめ通りで良いです",)),
+    ("前向きの予言の曜日", "c41b8dc05108d88466ba8de20b3ca0fbb6e36b73", "reviews/T-143.md",
+     "## 2026-10-20 オーナーの決定（原文。前向きの予言の曜日）", ("  > 月曜日で良いです",)),
+    ("N3・N4 の学習の行", "2d90275e189ce502f74e5216a9e06c6bb3da8c81", "reviews/T-143.md",
+     "## 2026-10-20 オーナーの決定（原文。N3・N4 の学習の行）", ("  > Bでいこう",)),
+    ("前向きの入力の作り方", "36479be9d0524ca3b3bc80942d2f25bcd4984a12", "reviews/T-145.md",
+     "## 2026-10-20 オーナーの決定（原文。前向きの入力の作り方、採点計画 8章 (15)）",
+     ("  > •\t段2 の過去の割合：A（2016-04-11 からのすべての月曜を、続けて数える）",
+      "  > \t•\t連鎖の手がかり：C（直近52週分までだけ数える）", "  > でいこう")),
+)
+# データを使わずに流し直せる出力：(スクリプト, 引数, 出力のパス)。書く仕組みも verify も、いつも流し直す
+ORDER68_DATA_FREE = (
+    ("src/stats/periods.py", ("--naive-history-days", str(ORDER7_NAIVE_HISTORY_DAYS), "--deadline-status", "before_deadline"),
+     ORDER7_OUTPUT),
+    ("src/stats/naive.py", (), "docs/stats/order8-t145/naive.json"),
+    ("src/stats/scoring.py", (), "docs/stats/order8-t145/scoring.json"),
+)
+# 手法を作る期間のキャッシュ（Git の外）が要る出力：(スクリプト, 出力のフォルダ, 比べるファイル, 流すフォルダに足すファイル)。
+# 書く仕組みは必ず流し直し（--t117-cache）、verify は --t117-cache を渡したときだけ流し直す
+ORDER68_RERUNS = (
+    ("src/stats/order8_fit.py", "docs/stats/order8-t145",
+     ("periods-order7.json", "naive.json", "scoring.json", "naive_coefs.tsv", "tier4_coefs.tsv", "n3_coefs.tsv",
+      "n4_coefs.tsv", "tier1_null_fix.tsv", "forms.tsv", "run.json", "summary.md"),
+     ("docs/stats/tiers-select-t142/tiers_select.tsv",)),
+    ("src/stats/tiers_select.py", "docs/stats/tiers-select-t142",
+     ("tiers_select.tsv", "tiers_select_all.tsv", "summary.md"), ()),
+    ("src/stats/chain_cap_check.py", "docs/stats/chain-cap-t146", ("chain_cap.json", "summary.md"), ()),
+)
+# 流すコードが import してよい、ほかの記録で封印済みのコード：(パス, 記録の kind, 欄)
+ORDER68_SEALED = (("src/stats/periods.py", PERIODS_KIND, "targets:code"),
+                  ("src/stats/candidates.py", CANDIDATES_KIND, "targets:code"),
+                  ("src/stats/counting.py", ORDER1B_KIND, "files"))
+
+
+def order68_targets_shape():
+    return [{"section": s, "path": p} for s, p in ORDER68_TARGETS]
+
+
+def expected_order68_decisions():
+    return [{"item": i, "source": "%s:%s" % (c, p), "heading": h, "lines": list(ls)} for i, c, p, h, ls in ORDER68_DECISIONS]
+
+
+def order68_sealed_code(records, read_json):
+    """流すコードが import する、ほかの記録で封印済みのコード：[{path, sha256, source}]。periods・candidates は最初の記録の
+    targets（role code）、counting.py は seq の最も大きい stats-order1b の files。決まらなければ LedgerError。"""
+    out = []
+    for path, kind, field in ORDER68_SEALED:
+        if field == "targets:code":
+            r = _first_of_kind(records, kind)
+            v = None if r is None else _target_sha(r, "code", path)
+        else:
+            o1b = [r for r in records if r["kind"] == kind]
+            r = o1b[-1] if o1b else None
+            v = None if r is None else {f.get("path"): f.get("sha256") for f in read_json(r, kind).get("files", [])}.get(path)
+        if not (isinstance(v, str) and HEX64.match(v)):
+            raise LedgerError("%s の sha256 が、%s の記録から決まらない" % (path, kind))
+        out.append({"path": path, "sha256": v, "source": "seq %d %s %s" % (r["seq"], kind, field)})
+    return out
+
+
+def check_order68_position(records, record, read_json):
+    """順番6〜8 の記録の位置：前に順番5の記録がちょうど1件あり、その status が ok。前に threshold-access が無い。"""
+    seq = record["seq"]
+    before = [r for r in records if r["seq"] < seq]
+    o5 = [r for r in before if r["kind"] == ORDER5_KIND]
+    if len(o5) != 1:
+        raise LedgerError("seq %d の %s より前に、順番5（%s）の記録がちょうど1件ない（順番6〜8 は順番5のあと。tags-naive.md 5章）"
+                          % (seq, record["kind"], ORDER5_KIND))
+    if read_json(o5[0], ORDER5_KIND).get("status") != "ok":
+        raise LedgerError("順番5の記録（seq %d）の status が ok でない（止まった順番5のあとに、順番6〜8 は封印しない）" % o5[0]["seq"])
+    late = [r for r in before if r["kind"] == THRESHOLD_ACCESS_KIND]
+    if late:
+        raise LedgerError("threshold-access の記録（seq %d）より後に、順番6〜8 の記録は置けない（最初の threshold-access より前に"
+                          "封印する。tags-naive.md 5章）" % late[0]["seq"])
+
+
+def _order68_ref(records, ref, kind, seq, what):
+    by = {r["seq"]: r for r in records}
+    r = by.get(ref.get("seq")) if isinstance(ref, dict) else None
+    if r is None or r["kind"] != kind or r["seq"] >= seq or record_ref(r) != {k: ref.get(k) for k in ("seq", "record_sha256")}:
+        raise LedgerError("%s が、前にある %s の記録の {seq, record_sha256} でない" % (what, kind))
+    return r
+
+
+def check_order68_doc(records, record, doc, read_json):
+    """順番6〜8 の記録の、git を使わない照合（書く仕組みも verify も。check_stats_order から）：
+      - targets（ちょうど1つ）、キー、kind、head、python、位置（check_order68_position）。
+      - list_doc・targets の形（パスと節は ORDER68_TARGETS と同じ並び、sha256 と commit の形）。
+      - sealed_code が記録から決まる値（order68_sealed_code）。decisions が決まった出どころ（ORDER68_DECISIONS）。
+      - order6 が決まった値。order7 の値が 399 で、triggers がこの記録より前の最後の periods-triggers を指し、その値が
+        ORDER7_TRIGGERS と同じ。
+      - periods：base が periods の1件目で、lookback_days・embargo_days がその出力の rules と同じ。過去分のきっかけ
+        （399 と網の 396）が lookback_days 以下で、rebuild が false（区切りの作り直しは要らない）。
+      - data_free・reruns の形と、それぞれの sha256 が targets の値と同じこと。
+    ファイルの sha256 が head の版のファイルと同じこと、決定の行、流し直しは verify.check_order68_git・rerun_order68 が照らす。"""
+    what = "seq %d の %s（順番6〜8）" % (record["seq"], ORDER68_KIND)
+    check_single_target(record, what)
+    _check_doc_kind(record, doc)
+    if set(doc) != set(ORDER68_DOC_KEYS):
+        raise LedgerError("%s の中身のキーが、決まったもの（%s）と一致しない" % (what, "、".join(ORDER68_DOC_KEYS)))
+    _check_hex(doc["head"], HEX40, what + " の head")
+    if not isinstance(doc["python"], str) or not doc["python"]:
+        raise LedgerError("%s の python が文字列でない" % what)
+    check_order68_position(records, record, read_json)
+    ld = doc["list_doc"]
+    if not isinstance(ld, dict) or sorted(ld) != ["commit", "path", "sha256"] or ld["path"] != ORDER68_LIST_DOC:
+        raise LedgerError("%s の list_doc が {path: %s, sha256, commit} でない" % (what, ORDER68_LIST_DOC))
+    _check_hex(ld["sha256"], HEX64, what + " の list_doc.sha256")
+    _check_hex(ld["commit"], HEX40, what + " の list_doc.commit")
+    tg = doc["targets"]
+    if not isinstance(tg, list) or [{"section": t.get("section"), "path": t.get("path")} if isinstance(t, dict) else None
+                                    for t in tg] != order68_targets_shape():
+        raise LedgerError("%s の targets のパスと節が、決まった一覧（ORDER68_TARGETS。seal-order6-8.md 4章）と同じ並びでない" % what)
+    for t in tg:
+        if sorted(t) != ["commit", "path", "section", "sha256"]:
+            raise LedgerError("%s の targets の %s が {section, path, sha256, commit} でない" % (what, t["path"]))
+        _check_hex(t["sha256"], HEX64, "%s の targets の %s の sha256" % (what, t["path"]))
+        _check_hex(t["commit"], HEX40, "%s の targets の %s の commit" % (what, t["path"]))
+    sha = {t["path"]: t["sha256"] for t in tg}
+    sealed = order68_sealed_code(records, read_json)
+    if doc["sealed_code"] != sealed:
+        raise LedgerError("%s の sealed_code が、封印の記録（periods・candidates・stats-order1b）から決まる値と違う" % what)
+    if doc["decisions"] != expected_order68_decisions():
+        raise LedgerError("%s の decisions が、決まったオーナーの決定の出どころ（ORDER68_DECISIONS）と違う" % what)
+    if doc["order6"] != ORDER6:
+        raise LedgerError("%s の order6 が、決まった値（改訂なし）と違う" % what)
+    o7 = doc["order7"]
+    if not isinstance(o7, dict) or sorted(o7) != ["naive_history_days", "output", "triggers"] \
+            or o7["naive_history_days"] != ORDER7_NAIVE_HISTORY_DAYS or o7["output"] != ORDER7_OUTPUT:
+        raise LedgerError("%s の order7 が {naive_history_days: %d, output: %s, triggers} でない"
+                          % (what, ORDER7_NAIVE_HISTORY_DAYS, ORDER7_OUTPUT))
+    tref = o7["triggers"]
+    if not isinstance(tref, dict) or sorted(tref) != ["record_sha256", "seq", "values"]:
+        raise LedgerError("%s の order7.triggers が {seq, record_sha256, values} でない" % what)
+    trec = _order68_ref(records, tref, TRIGGERS_KIND, record["seq"], what + " の order7.triggers")
+    if _last_before(records, TRIGGERS_KIND, record["seq"]) is not trec:
+        raise LedgerError("%s の order7.triggers が、この記録より前の最後の periods-triggers の記録でない" % what)
+    if tref["values"] != ORDER7_TRIGGERS or triggers_values(read_json(trec, "triggers")) != ORDER7_TRIGGERS:
+        raise LedgerError("%s の order7.triggers の値（と、その periods-triggers の記録の値）が、順番7の値 %s と違う"
+                          % (what, json.dumps(ORDER7_TRIGGERS, sort_keys=True)))
+    per = doc["periods"]
+    p1 = _first_of_kind(records, PERIODS_KIND)
+    out1 = read_json(p1, "output")
+    rules = out1.get("rules") if isinstance(out1, dict) else None
+    want = {"base": record_ref(p1), "lookback_days": (rules or {}).get("lookback_days"),
+            "embargo_days": periods_embargo_days(out1), "naive_history_days": ORDER7_NAIVE_HISTORY_DAYS,
+            "network_window_days_max": ORDER68_NETWORK_WINDOW_DAYS_MAX, "rebuild": False,
+            "cross_block_inputs": list(ORDER68_CROSS_BLOCK_INPUTS), "rule": ORDER68_PERIODS_RULE}
+    if type(want["lookback_days"]) is not int:
+        raise LedgerError("periods の1件目の出力に rules.lookback_days（整数）が無い")
+    if max(ORDER7_NAIVE_HISTORY_DAYS, ORDER68_NETWORK_WINDOW_DAYS_MAX) > want["lookback_days"]:
+        raise LedgerError("%s：過去分のきっかけ（素朴な予測 %d、網 %d）が、periods の1件目の lookback_days %d を超える。区切りの"
+                          "作り直しが要る（periods.md 8章 (1)）ので、この記録は書かない"
+                          % (what, ORDER7_NAIVE_HISTORY_DAYS, ORDER68_NETWORK_WINDOW_DAYS_MAX, want["lookback_days"]))
+    if per != want:
+        raise LedgerError("%s の periods が、periods の1件目と決まった値から決まるもの（作り直し無し）と違う" % what)
+    df = doc["data_free"]
+    want_df = [{"script": s, "args": list(a), "output": o, "sha256": sha[o]} for s, a, o in ORDER68_DATA_FREE]
+    if df != want_df:
+        raise LedgerError("%s の data_free が、決まったスクリプトと引数と、targets の出力の sha256 と違う" % what)
+    rr = doc["reruns"]
+    if not isinstance(rr, list) or len(rr) != len(ORDER68_RERUNS):
+        raise LedgerError("%s の reruns が %d 個でない" % (what, len(ORDER68_RERUNS)))
+    for x, (script, out_dir, names, _extra) in zip(rr, ORDER68_RERUNS):
+        if not isinstance(x, dict) or sorted(x) != ["commit", "files", "out_dir", "python", "script"] \
+                or x["script"] != script or x["out_dir"] != out_dir:
+            raise LedgerError("%s の reruns の %s が {script, out_dir, commit, files, python} でない" % (what, script))
+        _check_hex(x["commit"], HEX40, "%s の reruns の %s の commit" % (what, script))
+        if x["files"] != [{"name": n, "sha256": sha["%s/%s" % (out_dir, n)]} for n in names]:
+            raise LedgerError("%s の reruns の %s の files が、targets の出力の sha256 と違う" % (what, script))
+        if x["python"] != doc["python"]:
+            raise LedgerError("%s の reruns の %s の python が、記録の python と違う" % (what, script))
+    for path, s in ((p["path"], p["sha256"]) for p in sealed):
+        if path in sha and sha[path] != s:
+            raise LedgerError("%s の targets の %s の sha256 が、封印済みの値と違う" % (what, path))
+
+
+def check_order68_records(records, read_json):
+    """順番6〜8 の記録をすべて照らす（check_stats_order から）。返り値：記録の一覧。"""
+    out = [r for r in records if r["kind"] == ORDER68_KIND]
+    for r in out:
+        check_order68_doc(records, r, read_json(r, ORDER68_KIND), read_json)
+    return out
+
+
+def check_threshold_access_after_order68(records, read_json):
+    """最初の threshold-access の関門（T-144。T-111 の監査 軽-3 の申し送り）：その threshold-access より前に、正式な run の
+    gkg-run-result か順番3の記録があるなら（check_threshold_access_after_order4 と同じ条件）、その前に次がなければならない。
+      - 順番5の記録（status が ok）。
+      - 順番6〜8（stats-order6-8）の記録が1件以上。
+      - そのうち最後の記録の order7.triggers が、threshold-access の時点で採用される periods-triggers（threshold-access より前の
+        最後の記録）を指す（順番6〜8 のあとに、違う値のきっかけの値を足していない）。
+    違えば LedgerError。書く仕組み（seal_records の threshold-access。check_stats_order の中）、関門（require_threshold_access）、
+    verify のどれでも照らす。"""
+    ta = first_threshold_access(records)
+    if ta is None:
+        return
+    before = [r for r in records if r["seq"] < ta["seq"]]
+    trigger = [r for r in before if r["kind"] == ORDER3_KIND or (
+        r["kind"] == GKG_RESULT_KIND and read_json(r, GKG_RESULT_KIND).get("mode") == "official")]
+    if not trigger:
+        return
+    o5 = [r for r in before if r["kind"] == ORDER5_KIND]
+    if not o5 or read_json(o5[-1], ORDER5_KIND).get("status") != "ok":
+        raise LedgerError("threshold-access の記録（seq %d）より前に、status が ok の順番5（%s）の記録が無い（タグの一覧の結果を、"
+                          "閾値を決める期間に触れる前に封印する）" % (ta["seq"], ORDER5_KIND))
+    o68 = [r for r in before if r["kind"] == ORDER68_KIND]
+    if not o68:
+        raise LedgerError("threshold-access の記録（seq %d）より前に、順番6〜8（%s）の記録が無い（順番6〜8 と採点計画は、最初の"
+                          "threshold-access より前に封印する。tags-naive.md 5章）" % (ta["seq"], ORDER68_KIND))
+    ref = read_json(o68[-1], ORDER68_KIND)["order7"]["triggers"]
+    adopted = _last_before(records, TRIGGERS_KIND, ta["seq"])
+    if adopted is None or record_ref(adopted) != {"seq": ref["seq"], "record_sha256": ref["record_sha256"]}:
+        raise LedgerError("threshold-access の記録（seq %d）の時点で採用される periods-triggers（%s）が、最後の順番6〜8 の記録"
+                          "（seq %d）が指す periods-triggers（seq %d）と違う"
+                          % (ta["seq"], "無し" if adopted is None else "seq %d" % adopted["seq"], o68[-1]["seq"], ref["seq"]))
 
 
 def themes_manifest_commits(git):
@@ -4553,6 +4850,9 @@ def require_threshold_access():
         check_candidates_ready(root, records, rec["seq"])
         check_horizon_embargo(records, lambda r, role: read_target_json(root, r, role))
         check_deadline_statuses(records, lambda r, role: read_target_json(root, r, role))
+        # T-144：順番4・順番5（ok）・順番6〜8 が、この threshold-access より前にあること（書く仕組みと verify と同じ規則）
+        check_threshold_access_after_order4(records, lambda r, role: read_target_json(root, r, role))
+        check_threshold_access_after_order68(records, lambda r, role: read_target_json(root, r, role))
     except ThresholdAccessRequired:
         raise
     except LedgerError as e:

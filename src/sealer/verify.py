@@ -1934,6 +1934,416 @@ def check_order5_entries(st, attempts, recs, store, themes_store, outside_dir):
             print("照らさなかった：%s が置き場所に無い" % a_)
 
 
+# ---- T-144：順番6〜8 と採点計画（stats-order6-8）の git を使う照合と流し直し
+
+ORDER68_TIMEOUT_SECONDS = 2 * 3600
+ORDER68_TREE_PREFIXES = ("data/manifest/", "sealed/")
+ORDER68_ROW_RE = re.compile(r"\A\| *([^|（]+?) *(?:（[^|]*）)? *\|")
+ORDER68_SUB_RE = re.compile(r"\A### \((\w+)\)")
+STATS_PATH_RE = re.compile(r"\Asrc/stats/[A-Za-z0-9_]+\.py\Z")
+
+
+def _blob(repo, commit, rel):
+    """commit の版の rel のバイト列（無ければ None）。filter・textconv を通らない。"""
+    if not _git_ok(repo, "cat-file", "-e", "%s:%s" % (commit, rel)):
+        return None
+    return _rgit(repo, "cat-file", "blob", "%s:%s" % (commit, rel))
+
+
+def order68_last_change(repo, head, paths):
+    """head の履歴で、paths のどれかを最後に変えたコミットの40桁。"""
+    c = _rgit(repo, "log", "-1", "--format=%H", head, "--", *paths).decode("ascii").strip()
+    if not ledger.HEX40.match(c):
+        raise ledger.LedgerError("head %s の履歴に %s を変えたコミットが無い" % (head[:12], "・".join(paths)))
+    return c
+
+
+def order68_list_rows(text):
+    """一覧の文書（seal-order6-8.md）の4章の表の行：[(節, パス, sha256, コミットか None)]。節は "4(1)" などの形。コミットの欄が
+    40桁でない行（「この文書と同じコミット」）は None。sha256 の欄が無い行（見出しの行など）は数えない。"""
+    rows, sec, in4 = [], None, False
+    for line in text.split("\n"):
+        if line.startswith("## "):
+            in4 = line.startswith("## 4.")
+            sec = None
+            continue
+        m = ORDER68_SUB_RE.match(line)
+        if in4 and m:
+            sec = "4(%s)" % m.group(1)
+            continue
+        if not (in4 and sec and line.startswith("|")):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        shas = [c for c in cells if ledger.HEX64.match(c)]
+        if not shas:
+            continue
+        if len(shas) != 1:
+            raise ledger.LedgerError("一覧の文書の4章の行に、sha256 が %d 個ある: %s" % (len(shas), line[:80]))
+        path = cells[0].split("（", 1)[0].strip().strip("`")
+        last = cells[-1]
+        rows.append((sec, path, shas[0], last if ledger.HEX40.match(last) else None))
+    return rows
+
+
+def order68_targets_at(repo, head):
+    """head の版の封印の対象：[{section, path, sha256, commit}]（ORDER68_TARGETS の並び。commit は head の履歴でそのファイルを
+    最後に変えたコミット）。無いファイルがあれば LedgerError。"""
+    out = []
+    for sec, path in ledger.ORDER68_TARGETS:
+        data = _blob(repo, head, path)
+        if data is None:
+            raise ledger.LedgerError("head %s の版に %s が無い" % (head[:12], path))
+        out.append({"section": sec, "path": path, "sha256": ledger.sha256_hex(data),
+                    "commit": order68_last_change(repo, head, [path])})
+    return out
+
+
+def order68_list_doc_at(repo, head):
+    data = _blob(repo, head, ledger.ORDER68_LIST_DOC)
+    if data is None:
+        raise ledger.LedgerError("head %s の版に %s が無い" % (head[:12], ledger.ORDER68_LIST_DOC))
+    return {"path": ledger.ORDER68_LIST_DOC, "sha256": ledger.sha256_hex(data),
+            "commit": order68_last_change(repo, head, [ledger.ORDER68_LIST_DOC])}, data
+
+
+def _decision_ok(text, heading, lines):
+    """text（行の一覧）で、heading がちょうど1行、lines の各行がちょうど1行あり、その前で最も近い「## 」の見出しが heading。"""
+    if text is None or sum(1 for x in text if x == heading) != 1:
+        return False
+    for line in lines:
+        idx = [i for i, x in enumerate(text) if x == line]
+        if len(idx) != 1:
+            return False
+        heads = [x for x in text[:idx[0]] if x.startswith("## ")]
+        if not heads or heads[-1] != heading:
+            return False
+    return True
+
+
+def check_order68_decisions(repo, head, what):
+    """オーナーの決定の出どころ（ledger.ORDER68_DECISIONS）を git で照らす：そのコミットが head の祖先で、その版で行と見出しが
+    決まった形にあり（_decision_ok）、第一の親の版ではそうなっていない（その行を入れたコミット）。head の版にも同じ形で残って
+    いる（reviews は書き換えない）。違えば LedgerError。"""
+    def lines_of(c, path):
+        b = _blob(repo, c, path)
+        return None if b is None else b.decode("utf-8").split("\n")
+    for item, commit, path, heading, lines in ledger.ORDER68_DECISIONS:
+        where = "%s の オーナーの決定「%s」（%s:%s）" % (what, item, commit[:12], path)
+        if not _git_ok(repo, "merge-base", "--is-ancestor", commit, head):
+            raise ledger.LedgerError("%s：コミットが head %s の祖先でない" % (where, head[:12]))
+        if not _decision_ok(lines_of(commit, path), heading, lines):
+            raise ledger.LedgerError("%s：その版に、見出しの下の決まった行が無い" % where)
+        parent = _rgit(repo, "rev-parse", "--verify", commit + "^1").decode("ascii").strip()
+        if _decision_ok(lines_of(parent, path), heading, lines):
+            raise ledger.LedgerError("%s：第一の親の版にも同じ行がある（その行を入れたコミットでない）" % where)
+        if not _decision_ok(lines_of(head, path), heading, lines):
+            raise ledger.LedgerError("%s：head %s の版で、見出しの下の決まった行が変わった" % (where, head[:12]))
+
+
+def stats_import_closure(blobs, script):
+    """script（src/stats/ の .py）が使う src/stats/ のコードを、ast でたどった閉包（パスの昇順。script を含む）。
+    blobs は {パス: バイト列}（src/stats/ の .py）。たどるもの：import の名前が src/stats/<名前>.py にあるもの（標準ライブラリは
+    たどらない）と、文字列の定数がちょうど "src/stats/<名前>.py" の形のもの（explore_islands の _load_verified がパスで読み込む
+    periods.py・candidates.py・counting.py・scoring.py・naive.py と、order8_fit の command_output が流す periods.py など）。
+    __import__・importlib を使うものがあれば LedgerError（静的にたどれないため）。"""
+    import ast
+    seen, todo = set(), [script]
+    while todo:
+        p = todo.pop()
+        if p in seen:
+            continue
+        if p not in blobs:
+            raise ledger.LedgerError("%s が無い（import をたどれない）" % p)
+        seen.add(p)
+        tree = ast.parse(blobs[p].decode("utf-8"), filename=p)
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [a.name.split(".")[0] for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                names = [node.module.split(".")[0]]
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str) and STATS_PATH_RE.match(node.value):
+                if node.value in blobs:
+                    todo.append(node.value)
+            elif isinstance(node, ast.Name) and node.id == "__import__" or \
+                    isinstance(node, ast.Attribute) and node.attr == "import_module":
+                raise ledger.LedgerError("%s が __import__ か import_module を使う（import を静的にたどれない）" % p)
+            for n in names:
+                q = "src/stats/%s.py" % n
+                if q in blobs:
+                    todo.append(q)
+    return sorted(seen)
+
+
+def order68_bound_shas(doc):
+    """流すコードとして使ってよいファイルの {パス: sha256}：記録の targets（.py）と sealed_code。同じパスで値が違えば
+    LedgerError（ledger.check_order68_doc も照らす）。"""
+    out = {}
+    for x in [t for t in doc["targets"] if t["path"].endswith(".py")] + list(doc["sealed_code"]):
+        if out.setdefault(x["path"], x["sha256"]) != x["sha256"]:
+            raise ledger.LedgerError("%s の sha256 が、targets と sealed_code で違う" % x["path"])
+    return out
+
+
+def order68_code_files(repo, commit, script, bound, what):
+    """commit の版の src/stats/ の .py から、script の import の閉包を作り、どれもが bound（封印した sha256）と同じことを確かめる。
+    返り値：[(パス, sha256, バイト列)]。封印していないファイルを使う・sha256 が違うなら LedgerError。"""
+    listing = _rgit(repo, "ls-tree", "-r", "-z", "--full-tree", "--name-only", commit, "--", "src/stats/").split(b"\0")
+    blobs = {}
+    for name in listing:
+        p = name.decode("utf-8")
+        if p.endswith(".py") and p.count("/") == 2:
+            blobs[p] = _rgit(repo, "cat-file", "blob", "%s:%s" % (commit, p))
+    out = []
+    for p in stats_import_closure(blobs, script):
+        s = ledger.sha256_hex(blobs[p])
+        if bound.get(p) != s:
+            raise ledger.LedgerError("%s：%s が import する %s（commit %s の版。sha256 %s）は、この記録で封印したコード（targets・"
+                                     "sealed_code）でない" % (what, script, p, commit[:12], s[:12]))
+        out.append((p, s, blobs[p]))
+    return out
+
+
+def _run_bound(bound_dir, script, args, what, timeout, runner=True):
+    """bound_dir の中の script を -I・-B・空の pycache_prefix の Python で、args を付けて流す。返り値：標準出力。0 以外で終われば
+    LedgerError、Python を起動できなければ Unchecked。runner が真なら RUNNER（スクリプトのフォルダを sys.path の先頭に戻す。
+    naive.py・scoring.py は同じフォルダのモジュールを読み込むが、自分では sys.path に足さない）を通す。偽なら、スクリプトの
+    パスをそのまま渡す（キャッシュが要るスクリプトは自分でフォルダを足し、multiprocessing の子が __main__ をパスから読み直す）。"""
+    with tempfile.TemporaryDirectory() as pycache:
+        head = [sys.executable, "-I", "-B", "-X", "pycache_prefix=" + pycache]
+        cmd = head + (["-c", RUNNER, script] if runner else [script]) + list(args)
+        try:
+            r = subprocess.run(cmd, cwd=bound_dir, capture_output=True, env=_child_env(), timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise ledger.LedgerError("%s：%s が %d 秒の上限の中に終わらなかった" % (what, script, timeout)) from None
+        except OSError as e:
+            raise Unchecked("%s：Python を起動できない（%s）" % (what, e.__class__.__name__)) from None
+    if r.returncode != 0:
+        last = (r.stderr.decode("utf-8", "replace").strip().splitlines() or [""])[-1][:300]
+        raise ledger.LedgerError("%s：封印したコードの %s が終了コード %d で終わった（%s）" % (what, script, r.returncode, last))
+    return r.stdout
+
+
+def run_order68_data_free(repo, head, doc, tmp, what):
+    """データを使わない出力（ledger.ORDER68_DATA_FREE。順番7の periods.py の出力、naive.py・scoring.py の出力）を、封印した
+    コードだけを置いた空のフォルダで流し直し、標準出力の sha256 が記録（targets の出力の値）と同じことを確かめる。違えば
+    LedgerError。返り値：流した数。"""
+    bound = order68_bound_shas(doc)
+    for x in doc["data_free"]:
+        files = order68_code_files(repo, head, x["script"], bound, what)
+        b = _BoundDir(None, None, [(p, s) for p, s, _d in files], tmp, what, blobs={p: d for p, _s, d in files})
+        out = _run_bound(b.dir, x["script"], x["args"], what, RUN_TIMEOUT_SECONDS)
+        if ledger.sha256_hex(out) != x["sha256"]:
+            raise ledger.LedgerError("%s：%s %s を流し直した出力の sha256 %s が、記録の %s（%s）と違う"
+                                     % (what, x["script"], " ".join(x["args"]), ledger.sha256_hex(out)[:12], x["output"],
+                                        x["sha256"][:12]))
+    return len(doc["data_free"])
+
+
+def check_order7_output(repo, head, records, doc, read_json, what):
+    """順番7の出力（periods-order7.json）の rebuild_triggers が順番7の値で、deadline_status が before_deadline で、ほかのキーが
+    periods の1件目の出力と同じ（区画・予言日の範囲・過去分・エンバーゴが変わらない＝区切りの作り直しが要らない）。"""
+    raw = _blob(repo, head, ledger.ORDER7_OUTPUT)
+    try:
+        out = json.loads(raw.decode("utf-8"))
+    except (AttributeError, UnicodeDecodeError, ValueError):
+        raise ledger.LedgerError("%s：%s が JSON でない" % (what, ledger.ORDER7_OUTPUT)) from None
+    first = read_json(ledger._first_of_kind(records, ledger.PERIODS_KIND), "output")
+    if out.get("rebuild_triggers") != ledger.ORDER7_TRIGGERS or out.get("deadline_status") != "before_deadline":
+        raise ledger.LedgerError("%s：%s の rebuild_triggers・deadline_status が、順番7の値 %s と before_deadline でない"
+                                 % (what, ledger.ORDER7_OUTPUT, json.dumps(ledger.ORDER7_TRIGGERS, sort_keys=True)))
+    rest = sorted(set(out) | set(first))
+    diff = [k for k in rest if k not in ("rebuild_triggers", "deadline_status") and out.get(k) != first.get(k)]
+    if diff or ledger.check_blocks(first, out):
+        raise ledger.LedgerError("%s：%s の %s が periods の1件目の出力と違う（区切りが変わる）"
+                                 % (what, ledger.ORDER7_OUTPUT, "・".join(diff) or "区画"))
+
+
+def check_order68_git(repo, data, records, rec, doc, base, read_json, tmp):
+    """順番6〜8 の記録の、git を使う照合（書く仕組み（base は HEAD）と verify（base は記録を最初に含んだコミット））：
+      - head の commit があり、その版の sealed/ledger.jsonl がこの記録を足す直前の記録と同じ、head が base の祖先。
+      - list_doc・targets が head の版から作り直したもの（order68_list_doc_at・order68_targets_at）と同じ。一覧の文書の4章の表の
+        行（節・パス・sha256、40桁のコミットの欄）が targets と同じ。
+      - オーナーの決定の出どころ（check_order68_decisions）。順番7の出力（check_order7_output）。
+      - reruns の commit が、head の履歴でその出力のファイルを最後に変えたコミット。
+      - データを使わない出力の流し直し（run_order68_data_free）。
+    違えば LedgerError。"""
+    what = "seq %d の %s" % (rec["seq"], rec["kind"])
+    head = doc["head"]
+    if not _git_ok(repo, "cat-file", "-e", head + "^{commit}"):
+        raise ledger.LedgerError("%s の head %s の commit が、このリポジトリに無い" % (what, head[:12]))
+    if _version_or_empty(repo, head, LEDGER_REL) != ledger.prefix_bytes(data, rec["seq"] - 1):
+        raise ledger.LedgerError("%s の head %s の版の sealed/ledger.jsonl が、この記録を足す直前の記録（先頭 %d 行）と"
+                                 "一致しない" % (what, head[:12], rec["seq"] - 1))
+    if base != head and not _git_ok(repo, "merge-base", "--is-ancestor", head, base):
+        raise ledger.LedgerError("%s の head %s が、%s の祖先でない" % (what, head[:12], base[:12]))
+    ld, text = order68_list_doc_at(repo, head)
+    if ld != doc["list_doc"]:
+        raise ledger.LedgerError("%s の list_doc が、head %s の版の %s（sha256 と最後に変えたコミット）と違う"
+                                 % (what, head[:12], ledger.ORDER68_LIST_DOC))
+    tg = order68_targets_at(repo, head)
+    if tg != doc["targets"]:
+        bad = [t["path"] for t, u in zip(tg, doc["targets"]) if t != u]
+        raise ledger.LedgerError("%s の targets が、head %s の版のファイル（sha256 と最後に変えたコミット）と違う（%s）"
+                                 % (what, head[:12], "・".join(bad[:3])))
+    rows = order68_list_rows(text.decode("utf-8"))
+    if [(s, p, h) for s, p, h, _c in rows] != [(t["section"], t["path"], t["sha256"]) for t in tg]:
+        raise ledger.LedgerError("%s：一覧の文書 %s の4章の表（節・パス・sha256）が、封印する対象と同じでない（行が足りない・多い・"
+                                 "値が違う）" % (what, ledger.ORDER68_LIST_DOC))
+    for (_s, p, _h, c), t in zip(rows, tg):
+        if c is not None and c != t["commit"]:
+            raise ledger.LedgerError("%s：一覧の文書の %s のコミット %s が、最後に変えたコミット %s と違う" % (what, p, c[:12], t["commit"][:12]))
+    check_order68_decisions(repo, head, what)
+    check_order7_output(repo, head, records, doc, read_json, what)
+    for x, (script, out_dir, names, _extra) in zip(doc["reruns"], ledger.ORDER68_RERUNS):
+        c = order68_last_change(repo, head, ["%s/%s" % (out_dir, n) for n in names])
+        if x["commit"] != c:
+            raise ledger.LedgerError("%s の reruns の %s の commit が、head の履歴で %s のファイルを最後に変えたコミット %s と違う"
+                                     % (what, script, out_dir, c[:12]))
+    check_order68_code_lists(repo, head, doc, what)
+    run_order68_data_free(repo, head, doc, tmp, what)
+    return []
+
+
+# 出力の中に、計算に使ったコードの sha256 の一覧を持つもの：(スクリプト, 出力のパス)。一覧が、そのスクリプトの閉包
+# （stats_import_closure）と封印した sha256 にちょうど同じこと
+ORDER68_CODE_LISTS = (("src/stats/order8_fit.py", "docs/stats/order8-t145/run.json"),
+                      ("src/stats/chain_cap_check.py", "docs/stats/chain-cap-t146/chain_cap.json"))
+
+
+def check_order68_code_lists(repo, head, doc, what):
+    """出力の code の欄（計算に使ったコードの {パス: sha256}）が、head の版でそのスクリプトがたどるコードの閉包と、この記録で
+    封印した sha256 にちょうど同じこと（データを使わずに、出力が封印したコードで作られたと名乗っていることを照らす）。"""
+    bound = order68_bound_shas(doc)
+    for script, rel in ORDER68_CODE_LISTS:
+        files = order68_code_files(repo, head, script, bound, what)
+        try:
+            got = json.loads(_blob(repo, head, rel).decode("utf-8")).get("code")
+        except (AttributeError, UnicodeDecodeError, ValueError):
+            raise ledger.LedgerError("%s：%s が JSON でない" % (what, rel)) from None
+        if got != {p: s_ for p, s_, _d in files}:
+            raise ledger.LedgerError("%s：%s の code の欄が、%s がたどるコードと封印した sha256 と違う" % (what, rel, script))
+
+
+def run_order68_script(bound_dir, script, cache, out_dir, what):
+    """手法を作る期間のキャッシュが要るスクリプトを、bound_dir の中で `--t117-cache <cache> --out-dir <out_dir>` を付けて流す。
+    テストが差し替える。"""
+    _run_bound(bound_dir, script, ["--t117-cache", cache, "--out-dir", out_dir], what, ORDER68_TIMEOUT_SECONDS, runner=False)
+
+
+def order68_rerun_tree(repo, commit, script, extra, doc, what):
+    """流し直すフォルダに置くファイル：commit の版の、script の import の閉包（封印したコードと同じであること）、sealed/ と
+    data/manifest/ のすべて、extra（封印した targets と同じであること）。返り値：[(パス, sha256, バイト列)]。"""
+    bound = order68_bound_shas(doc)
+    files = order68_code_files(repo, commit, script, bound, what)
+    tsha = {t["path"]: t["sha256"] for t in doc["targets"]}
+    for rel in extra:
+        b = _blob(repo, commit, rel)
+        if b is None or ledger.sha256_hex(b) != tsha.get(rel):
+            raise ledger.LedgerError("%s：commit %s の版の %s が、封印した値と違う" % (what, commit[:12], rel))
+        files.append((rel, tsha[rel], b))
+    listing = _rgit(repo, "ls-tree", "-r", "-z", "--full-tree", commit, "--", *ORDER68_TREE_PREFIXES)
+    for item in listing.split(b"\0"):
+        if not item:
+            continue
+        meta, _tab, name = item.partition(b"\t")
+        mode, typ, obj = meta.decode("ascii").split()
+        path = name.decode("utf-8")
+        if typ != "blob" or mode not in ("100644", "100755"):
+            raise ledger.LedgerError("%s：commit %s の版の %s が普通のファイルでない" % (what, commit[:12], path))
+        b = _rgit(repo, "cat-file", "blob", obj)
+        files.append((path, ledger.sha256_hex(b), b))
+    files.sort(key=lambda x: x[0])
+    return files
+
+
+def rerun_order68(repo, doc, cache, tmp, what, memo=None):
+    """手法を作る期間のキャッシュが要る出力（ledger.ORDER68_RERUNS）を、記録の reruns の commit の版のファイル（order68_rerun_tree。
+    封印したコードと、その時点の sealed/・data/manifest/）だけを置いた空のフォルダで流し直し、出力のファイルのバイト列の sha256 が
+    記録と同じことを確かめる。流した Python の版が記録の python と違えば Unchecked（出力に版が入るため）。
+    memo（書く入口が使う）：{(スクリプト, commit, キャッシュ): {名前: sha256}}。同じ鍵で流したことがあれば、流さずにその値と
+    照らす（同じ実行の中で、試みの前に流した結果を、書く前の照合で使う）。返り値：照らしたスクリプトの数。"""
+    if sys.version.split()[0] != doc["python"]:
+        raise Unchecked("流し直しの Python %s が、記録の python %s と違う（出力に版が入る）"
+                        % (sys.version.split()[0], doc["python"]))
+    cache = os.path.realpath(cache)
+    if not os.path.isdir(cache):
+        raise ledger.LedgerError("キャッシュの置き場所 %s がフォルダでない" % cache)
+    for x, (script, _out_dir, names, extra) in zip(doc["reruns"], ledger.ORDER68_RERUNS):
+        key = (script, x["commit"], cache)
+        got = None if memo is None else memo.get(key)
+        if got is None:
+            tree = order68_rerun_tree(repo, x["commit"], script, extra, doc, what)
+            b = _BoundDir(None, None, [(p, s) for p, s, _d in tree], tmp, what, blobs={p: d for p, _s, d in tree})
+            out_dir = tempfile.mkdtemp(prefix="order68-out-", dir=tmp)
+            out_dir = os.path.join(out_dir, "out")
+            run_order68_script(b.dir, script, cache, out_dir, what)
+            got = {}
+            for n in names:
+                p = os.path.join(out_dir, n)
+                if os.path.islink(p) or not os.path.isfile(p):
+                    raise ledger.LedgerError("%s：%s を流し直したが、%s が出ていない" % (what, script, n))
+                got[n] = ledger.sha256_file(p)
+            if memo is not None:
+                memo[key] = got
+        want = {f["name"]: f["sha256"] for f in x["files"]}
+        bad = [n for n in names if got.get(n) != want[n]]
+        if bad:
+            raise ledger.LedgerError("%s：%s を流し直した出力の %s の sha256 が、記録と違う" % (what, script, "・".join(bad)))
+    return len(doc["reruns"])
+
+
+def check_order68_entries(st, recs, cache):
+    """順番6〜8 の記録ごとに、ledger_head を照らし、行を出す（T-144）。git の照合（check_order68_git。データを使わない出力の
+    流し直しを含む）。--t117-cache を渡したときだけ、キャッシュが要る出力を流し直す（rerun_order68）。"""
+    repo = Repo(st.root)
+    why = None
+    try:
+        repo.git("rev-parse", "--git-dir")
+    except (ledger.LedgerError, OSError):
+        why = "git の履歴が無い"
+    if why is None and not _not_shallow(repo):
+        why = "浅い clone"
+    commits = None
+    for r in recs:
+        doc = st.file_json(r, r["kind"])
+        ledger.check_ledger_head(st.data, r, doc)
+        t = doc["order7"]["triggers"]
+        print("  %s seq %d（順番6〜8 と採点計画）: head %s、一覧 %s の sha256 %s、対象 %d 件、オーナーの決定 %d 件、順番7 "
+              "naive_history_days %d（periods-triggers seq %d）、区切りの作り直し %s"
+              % (r["kind"], r["seq"], doc["head"], doc["list_doc"]["path"], doc["list_doc"]["sha256"], len(doc["targets"]),
+                 len(doc["decisions"]), doc["order7"]["naive_history_days"], t["seq"], "要る" if doc["periods"]["rebuild"] else "要らない"))
+        c = None
+        if why is None:
+            if commits is None:
+                commits = repo.commit_for_seq(st.data, partial=True)
+            c = commits.get(r["seq"])
+        if c is None:
+            reason = why or "記録がまだコミットされていない"
+            st.unchecked.append("seq %d の順番6〜8 の記録の git からの照合（%s）" % (r["seq"], reason))
+            print("照らさなかった：%s なので、seq %d の対象のファイルを git から照らしていない" % (reason, r["seq"]))
+            continue
+        with tempfile.TemporaryDirectory() as tmp:
+            check_order68_git(repo, st.data, st.records, r, doc, c, st.file_json, tmp)
+        print("    head %s の版の一覧の文書と対象 %d 件の sha256・最後に変えたコミット、オーナーの決定 %d 件の行、順番7の出力を git から"
+              "照らした。データを使わない出力 %d 件を封印したコードで流し直した。記録と同じ"
+              % (doc["head"][:12], len(doc["targets"]), len(doc["decisions"]), len(doc["data_free"])))
+        if not cache:
+            st.unchecked.append("seq %d の順番6〜8 の、キャッシュが要る出力（order8_fit.py・tiers_select.py・chain_cap_check.py）の"
+                                "流し直し（--t117-cache を渡していない）" % r["seq"])
+            print("照らさなかった：手法を作る期間のキャッシュの置き場所（--t117-cache）を渡していないので、seq %d の係数と表を"
+                  "流し直していない" % r["seq"])
+            continue
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                n = rerun_order68(repo, doc, cache, tmp, "seq %d の順番6〜8" % r["seq"])
+            print("    手法を作る期間のキャッシュで、%d 個のスクリプト（%s）を封印したコードで流し直した。出力のファイルの sha256 は記録と"
+                  "同じ（流した Python：%s）" % (n, "・".join(x["script"] for x in doc["reruns"]), sys.version.split()[0]))
+        except Unchecked as e:
+            st.unchecked.append("seq %d の順番6〜8 の流し直し（%s）" % (r["seq"], e))
+            print("照らさなかった：seq %d の順番6〜8 の流し直し（%s）" % (r["seq"], e))
+
+
 def cmd_stats_order(st, a):
     """統計係の順番1・順番1b の記録の照合と一覧。T-037（差し戻し1回目で改めた）、T-056。"""
     got = ledger.check_stats_order(st.records, st.file_json)
@@ -1973,6 +2383,8 @@ def cmd_stats_order(st, a):
     if got["order5_attempt"] or got["order5"]:
         check_order5_entries(st, got["order5_attempt"], got["order5"], getattr(a, "store", None),
                              getattr(a, "themes_store", None), getattr(a, "order5_outside", None))   # T-111
+    if got["order68"]:
+        check_order68_entries(st, got["order68"], getattr(a, "t117_cache", None))                     # T-144
     o1 = ledger.first_order1(st.records)
     print("除外の規則の kind（%s）の記録：%s（1 件だけ）。順番1・1b は最初の method-access より前、"
           "最初の gkg-run-start の前に順番1b。" % (ledger.ORDER1_KIND, "無し" if o1 is None else "seq %d" % o1["seq"]))
@@ -2828,6 +3240,8 @@ def main(argv=None):
         # T-111：区分表のファイルの置き場所（順番5の計算し直し）と、Git の外の detail・extra の置き場所
         parsers[name].add_argument("--themes-store")
         parsers[name].add_argument("--order5-outside")
+        # T-144：手法を作る期間のキャッシュ（explore-t117-cache/run2。Git の外）。渡したときだけ、順番6〜8 の係数と表を流し直す
+        parsers[name].add_argument("--t117-cache")
     for name in ("gkg-runs", "all"):
         # T-066：日の集計（と取得の記録）の置き場所。渡したときだけ sha256 を照らす（第三者はディスクを持たない）。
         # all では、順番2の decide() の流し直しにも使う（T-078）

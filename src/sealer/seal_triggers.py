@@ -63,7 +63,7 @@ def seal(project, values, now, ots_cmd, runner=subprocess.run):
     ledger.check_triggers_append(records, read, doc)
     ledger.check_triggers_against_rebuilds(records, read, doc)
     if ots_cmd is not None:
-        stamp.check_ots(ots_cmd)
+        stamp.check_ots(ots_cmd, runner=runner)   # T-144：入口から偽の ots で試せるように、runner を渡す
     content = ledger.canonical_line(doc) + b"\n"
     sha = ledger.sha256_hex(content)
     rel = "sealed/periods-triggers-%s.json" % sha

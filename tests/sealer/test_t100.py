@@ -148,17 +148,18 @@ class TestThresholdAccess(t95.Clone):
 
     def test_refused_before_order4_then_allowed(self):
         """正式な run の gkg-run-result（seq 12）と順番3（seq 14）がある記録で、順番4より前の threshold-access は書かない。
-        順番4を書いたあとは書ける。"""
+        T-144 から、順番4を書いたあとも、順番5（ok）と順番6〜8 が無ければ書かない（書ける並びは tests/sealer/test_t144.py の
+        TestThresholdGate が確かめる）。"""
         text = re.escape("threshold-access の記録（seq 15）より前に、順番4（stats-order4）の記録が無い")
         before = self.ledger_bytes()
         with self.assertRaisesRegex(ledger.LedgerError, text):
             self.access()
         self.assertEqual(self.ledger_bytes(), before)
-        rec4 = self.seal()[0]
-        rec, _rel, _o = self.access()
-        self.assertEqual((rec["seq"], rec["kind"]), (rec4["seq"] + 1, TA))
-        self.git("add", "-A")
-        self.git("commit", "-q", "-m", "threshold-access（テスト）")
+        self.seal()
+        before = self.ledger_bytes()
+        with self.assertRaisesRegex(ledger.LedgerError, re.escape("status が ok の順番5（stats-order5）の記録が無い")):
+            self.access()
+        self.assertEqual(self.ledger_bytes(), before)
         self.verify_zero("stats-order")
 
     def test_forged_threshold_access_stops_verify(self):

@@ -48,6 +48,11 @@ THEMES_FAILED_COMMIT = "e3784c29ee2bc8500be467ede043635e10cd0064"
 # result の行、src/stats/order5.py は v2。順番5の試みと記録を、本物の記録の clone に足して確かめるのに使う（test_t111.py）。
 ORDER5_CODE_COMMIT = "c4139b27210dd702757e983b628c9000f87de0e6"
 
+# 7つ目の固定コミット（T-144）。リードの T-146 の採点記録と T-144 の割り振りのコミット：記録は seq 1〜17（seq 17 が順番5、status
+# ok）、統計係の封印の対象の一覧 docs/stats/seal-order6-8.md（1d644e9）とその対象のファイルがそろった版。順番6〜8 の記録と
+# periods-triggers・threshold-access を、本物の記録の clone に足して確かめるのに使う（test_t144.py）。
+ORDER68_COMMIT = "5e008b44888b4bbb295f86ca5edfa498ac2fb7cb"
+
 # checkout(code="head") で HEAD の版にそろえるのは、封印係のコードと手順書（テストする側）だけ。ほかのファイル
 # （src/stats・src/collector・docs/stats・data・sealed・reviews など）は固定のコミットの版のまま使う。
 # この中でも、固定した記録が縛るパス（記録の targets と、targets の中身の JSON に書かれたパス）は固定の版のまま

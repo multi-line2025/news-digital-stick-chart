@@ -658,7 +658,7 @@ class TestPositionUnit(unittest.TestCase):
 
     def test_before_kinds(self):
         self.assertEqual(ledger.ORDER4_BEFORE_KINDS, (ledger.THRESHOLD_ACCESS_KIND, ledger.ORDER5_ATTEMPT_KIND,
-                                                     ledger.ORDER5_KIND))     # T-111 で順番5の二つを足した
+                                                     ledger.ORDER5_KIND, ledger.ORDER68_KIND))   # T-111 で順番5、T-144 で順番6〜8
         self.assertIn(O4, ledger.ALLOWED_KINDS)
         self.assertIn(O4, seal_records.WRITTEN_KINDS)
 
