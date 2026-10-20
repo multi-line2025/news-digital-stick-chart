@@ -61,10 +61,10 @@
 | docs/stats/naive-scoring.md | ef2a32bc1f224fbeec2e6046577bbf39e4757a7609c01f801efb78b529bac301 | 33154f10e3fa6128b646812a8f251813e64c0d1e |
 | tests/stats/test_t019.py | 6b159f8b796cc8fe664b16b975047e23baa678be1bcc4661798c8605bff74a5c | 98510c18927e1d84c972573259e771642971bb4f |
 | tests/stats/test_periods.py | 653e96509b89006466c69954d4c2af0cbcf14e6f14ecc470e25cc6e7a1e914d7 | 265ab14a6f4ad41d2d35b0b281d2df58853f4069 |
-| docs/stats/order8-t145/periods-order7.json（順番7の出力） | 00cc722724347c6e8fe38d6bde1d6ecd21abcf80c8baec31e59b75bebcf2b02c | この文書と同じコミット |
-| docs/stats/order8-t145/naive.json（順番8の出力） | 3fa64ef423e948446f5696e31ebd621440cb9910dbbf8ce40f67c0726b80951b | この文書と同じコミット |
-| docs/stats/order8-t145/scoring.json（順番8の出力） | dbbad062aade5eb0578e4b9a13cf4ef2cad3fdd8e3ec5105b3c461f64d87e2bb | この文書と同じコミット |
-| docs/stats/order8-t145/naive_coefs.tsv（21組の係数） | 684a196098b60340a8f4d09320b515d072c195a4a015f887a4b8ecfabdf2ceb5 | この文書と同じコミット |
+| docs/stats/order8-t145/periods-order7.json（順番7の出力） | 00cc722724347c6e8fe38d6bde1d6ecd21abcf80c8baec31e59b75bebcf2b02c | 310e24d82943154b2b457b08629cdf2fc3ea1bae |
+| docs/stats/order8-t145/naive.json（順番8の出力） | 3fa64ef423e948446f5696e31ebd621440cb9910dbbf8ce40f67c0726b80951b | 310e24d82943154b2b457b08629cdf2fc3ea1bae |
+| docs/stats/order8-t145/scoring.json（順番8の出力） | dbbad062aade5eb0578e4b9a13cf4ef2cad3fdd8e3ec5105b3c461f64d87e2bb | 310e24d82943154b2b457b08629cdf2fc3ea1bae |
+| docs/stats/order8-t145/naive_coefs.tsv（21組の係数） | 684a196098b60340a8f4d09320b515d072c195a4a015f887a4b8ecfabdf2ceb5 | 310e24d82943154b2b457b08629cdf2fc3ea1bae |
 
 - 上の4つの出力は、docs/stats/order8-t143/ の同じ名前のファイルと同じバイト列である。
 
@@ -72,7 +72,7 @@
 
 | 対象 | sha256 | 最後に変えたコミット |
 |---|---|---|
-| docs/stats/claims-scoring-plan.md | 7af787865ac11516ef890e7221c17682c72d488b296587985b180ecba2f91d57 | この文書と同じコミット |
+| docs/stats/claims-scoring-plan.md | 7af787865ac11516ef890e7221c17682c72d488b296587985b180ecba2f91d57 | 1d644e909909abb1bd609f253812bccdd43aabeb |
 | docs/stats/tiers-select-t142/tiers_select.tsv（21組の選んだ形） | 13a2784652964f0e1da23d28cba0970744ab8aadcbc715a35edfcf982ffc30b6 | c27890895497ae0fac1229d10f553dee5f57406d |
 | docs/stats/tiers-select-t142/tiers_select_all.tsv（全形の対数損失） | 7678f199260ac268686bfaa8eaa281852f712239b3d9b86a60daa726a499707b | c27890895497ae0fac1229d10f553dee5f57406d |
 | docs/stats/tiers-select-t142/summary.md | 6be938e7934ae0928546d1fbd82ccbd7ffe6c7cd203c2e79edadfef8b897736c | c27890895497ae0fac1229d10f553dee5f57406d |
@@ -80,13 +80,13 @@
 | tests/stats/test_tiers_select.py | 45c3029af2e3489a02a956cc58dc4e2d2c29db9c0cd498e51ff13ea5815f5b25 | 7850119848c86b943026f0e210ce5f0feca27444 |
 | src/stats/order8_fit.py（v2） | d7c6c469b9376a60d6a74971bb95ffee93357bc1284ae48c677f4eb550aad877 | 7f85bfbdc0683dc24db6169d29b1b47461048801 |
 | tests/stats/test_order8_fit.py | 2a7d3035e712544874f3a25931748da3bfa3c38f3ea607abd0fea0c90eeab8f3 | 7f85bfbdc0683dc24db6169d29b1b47461048801 |
-| docs/stats/order8-t145/tier4_coefs.tsv（段4 の21組の係数） | 57680479f8f2d36799f0744aba92867fb95104a7420d36dacef9c72691cdede1 | この文書と同じコミット |
-| docs/stats/order8-t145/n3_coefs.tsv（N3 の21組の係数。決定 B の行） | 0c4cb4c26b177ef2a72139c79520a0b5510dd2401797ab28d77cb7af0325e15a | この文書と同じコミット |
-| docs/stats/order8-t145/n4_coefs.tsv（N4 の21組の係数。決定 B の行） | f8e0a2c353add2b1fe9c03489940fa188cb8321b4f57a9297f8d0e1215aecfe9 | この文書と同じコミット |
-| docs/stats/order8-t145/tier1_null_fix.tsv（段1 の null_fix の定数） | 0de7a69c5540012babfb5b41ce30c36e8a03091df4da496c4b603b21aa15083b | この文書と同じコミット |
-| docs/stats/order8-t145/forms.tsv（21組の選んだ形と、段2 の W・a、段4 の列） | b5dbb9813c9527fe8692343b82468d11b4bfda7ce42bdc39d4c688236334421c | この文書と同じコミット |
-| docs/stats/order8-t145/run.json（計算に使ったコードの sha256 の一覧を含む） | 5b0c96948c7af88c6f02f67c2e6c492a4af377a579abd5363f3c6a00605441ff | この文書と同じコミット |
-| docs/stats/order8-t145/summary.md | 460157f65faadb9aeced7678f12e054cf9a6e227801af8be083e6f37619de57d | この文書と同じコミット |
+| docs/stats/order8-t145/tier4_coefs.tsv（段4 の21組の係数） | 57680479f8f2d36799f0744aba92867fb95104a7420d36dacef9c72691cdede1 | 310e24d82943154b2b457b08629cdf2fc3ea1bae |
+| docs/stats/order8-t145/n3_coefs.tsv（N3 の21組の係数。決定 B の行） | 0c4cb4c26b177ef2a72139c79520a0b5510dd2401797ab28d77cb7af0325e15a | 310e24d82943154b2b457b08629cdf2fc3ea1bae |
+| docs/stats/order8-t145/n4_coefs.tsv（N4 の21組の係数。決定 B の行） | f8e0a2c353add2b1fe9c03489940fa188cb8321b4f57a9297f8d0e1215aecfe9 | 310e24d82943154b2b457b08629cdf2fc3ea1bae |
+| docs/stats/order8-t145/tier1_null_fix.tsv（段1 の null_fix の定数） | 0de7a69c5540012babfb5b41ce30c36e8a03091df4da496c4b603b21aa15083b | 310e24d82943154b2b457b08629cdf2fc3ea1bae |
+| docs/stats/order8-t145/forms.tsv（21組の選んだ形と、段2 の W・a、段4 の列） | b5dbb9813c9527fe8692343b82468d11b4bfda7ce42bdc39d4c688236334421c | 310e24d82943154b2b457b08629cdf2fc3ea1bae |
+| docs/stats/order8-t145/run.json（計算に使ったコードの sha256 の一覧を含む） | 5b0c96948c7af88c6f02f67c2e6c492a4af377a579abd5363f3c6a00605441ff | 310e24d82943154b2b457b08629cdf2fc3ea1bae |
+| docs/stats/order8-t145/summary.md | 460157f65faadb9aeced7678f12e054cf9a6e227801af8be083e6f37619de57d | 310e24d82943154b2b457b08629cdf2fc3ea1bae |
 
 ### (2b) 変更前（公開・封印するが採点に使わない）
 
@@ -104,8 +104,8 @@ N3・N4 を全部の行で当てはめた T-143 の版。決定 B（2026-10-20 �
 |---|---|---|
 | src/stats/chain_cap_check.py | c95412c1d9b2ed52fb55aaff86b919639d1ad65dbfe55d2cbc78b1752bce262a | e5a2ba770aa1839ba589550e2b3950c3b50cb1be |
 | tests/stats/test_chain_cap_check.py | c479ccc7b89661d2706b3a9de4a792e95c8f11c03a46b804d9818abbc860d8d3 | e5a2ba770aa1839ba589550e2b3950c3b50cb1be |
-| docs/stats/chain-cap-t146/chain_cap.json | 7a9428f4f3086b44f5a59c317fa00964c099a6e2a1c00a0bad63dfa7ac19449a | この文書と同じコミット |
-| docs/stats/chain-cap-t146/summary.md | 4805b9bf9d01273dc5f196397333ea52090c36750ff735efc504a51f13de7dbc | この文書と同じコミット |
+| docs/stats/chain-cap-t146/chain_cap.json | 7a9428f4f3086b44f5a59c317fa00964c099a6e2a1c00a0bad63dfa7ac19449a | 1d644e909909abb1bd609f253812bccdd43aabeb |
+| docs/stats/chain-cap-t146/summary.md | 4805b9bf9d01273dc5f196397333ea52090c36750ff735efc504a51f13de7dbc | 1d644e909909abb1bd609f253812bccdd43aabeb |
 
 ### (3) 段1〜段4・N3・N4 の入力の作り方と推定を定めるコード
 
