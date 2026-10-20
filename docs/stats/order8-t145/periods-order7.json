@@ -1,0 +1,72 @@
+{
+  "deadline_status": "before_deadline",
+  "max_last_read_offset_days": 90,
+  "periods": [
+    {
+      "block_end": "2020-12-14",
+      "block_start": "2015-03-02",
+      "first_prediction_date": "2016-04-11",
+      "label_ja": "手法を作る期間",
+      "last_prediction_date": "2020-09-14",
+      "name": "method",
+      "prediction_count": 232,
+      "prediction_first": "2016-04-05",
+      "prediction_last": "2020-09-15"
+    },
+    {
+      "block_end": "2023-11-06",
+      "block_start": "2020-12-15",
+      "first_prediction_date": "2020-12-21",
+      "label_ja": "閾値を決める期間",
+      "last_prediction_date": "2023-08-07",
+      "name": "threshold",
+      "prediction_count": 138,
+      "prediction_first": "2020-12-15",
+      "prediction_last": "2023-08-08"
+    },
+    {
+      "block_end": "2026-09-30",
+      "block_start": "2023-11-07",
+      "first_prediction_date": "2023-11-13",
+      "label_ja": "基準値を測る期間",
+      "last_prediction_date": "2026-06-29",
+      "name": "baseline",
+      "prediction_count": 138,
+      "prediction_first": "2023-11-07",
+      "prediction_last": "2026-07-02"
+    }
+  ],
+  "rebuild_triggers": {
+    "last_read_offset_days": null,
+    "naive_history_days": 399,
+    "network_window_days": null,
+    "same_week_years": null
+  },
+  "rules": {
+    "block_weights": [
+      2,
+      1,
+      1
+    ],
+    "data_settle_days": 5,
+    "data_start": "2015-03-02",
+    "embargo_days": 90,
+    "embargo_days_floor": 90,
+    "frozen_on_rebuild": [
+      "data_start",
+      "today",
+      "data_settle_days",
+      "block_weights",
+      "median_window_days",
+      "seasonal_margin_days"
+    ],
+    "lookback_days": 400,
+    "lookback_days_floor": 400,
+    "median_window_days": 365,
+    "prediction_weekday": 0,
+    "proposed_label": "periods-v1",
+    "seasonal_margin_days": 35,
+    "timezone": "UTC",
+    "today": "2026-10-06"
+  }
+}
