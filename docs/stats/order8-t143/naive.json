@@ -1,0 +1,49 @@
+{
+  "definitions": {
+    "L": "max(m * B(t), V)",
+    "g": "log((x + V) / (L + V))",
+    "recent": "g(c(t)), c = candidates.current_level",
+    "recent_peak": "g(max complete 7-day mean ending t-28 .. t-1); none -> c(t)",
+    "season_exact": "g(max complete 7-day mean inside [t+1-365, t+H-365]); none -> season_wide value",
+    "season_none": "1 if the wide window has no complete block (then season_exact = season_wide = 0)",
+    "season_wide": "g(max complete 7-day mean inside [t+1-365-35, t+H-365+35])",
+    "size": "log((B(t) + V) / V)"
+  },
+  "features": [
+    "intercept",
+    "recent",
+    "recent_peak",
+    "season_exact",
+    "season_wide",
+    "season_none",
+    "size"
+  ],
+  "fit": {
+    "max_iter": 100,
+    "method": "Newton with step halving (max 30)",
+    "not_converged": "model not used; stop and report",
+    "penalize_intercept": true,
+    "ridge_lambda": 1.0,
+    "start": "zeros",
+    "tol": 1e-10
+  },
+  "latest_season_day_offset": {
+    "14": 316,
+    "28": 302,
+    "56": 274
+  },
+  "model": "logistic regression per (m, H) combination, 21 models, fit on method-period prediction dates, targets per scoring.target_status, labels per candidates.judge (null labels dropped)",
+  "periods_trigger": {
+    "lookback_after": 400,
+    "naive_history_days": 399,
+    "periods_lookback_days": 400,
+    "rebuild_needed": false
+  },
+  "proposed_label": "naive-v1",
+  "recent_peak_days": 28,
+  "revision_rule": "during the method period, the only allowed change is adding features (never removing or changing one), as a new sealed version; ridge_lambda, max_iter, tol, the fitting procedure, the training-data selection and the row order stay at the naive-v1 values; added features also go into the stick-chart model; v1 results are published alongside",
+  "row_order": "rows sorted by (prediction date, tag name) ascending before fitting (fit_rows); tag names are unique within the tag list; duplicate (date, tag) stops the fit",
+  "season_margin_days": 35,
+  "season_shift_days": 365,
+  "training_data": "all prediction dates (prediction weekday) in the method period's prediction range; all tags of the sealed tag list with status target; label = candidates.judge with the sealed V; null labels dropped; nothing else dropped"
+}

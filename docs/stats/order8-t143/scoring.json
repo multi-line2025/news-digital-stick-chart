@@ -1,0 +1,30 @@
+{
+  "empty_weeks": {
+    "clusters": "time clusters with no scored prediction are dropped from interval estimates; the number dropped is published",
+    "kinds": [
+      "has_targets",
+      "no_target_missing",
+      "no_target_quiet"
+    ],
+    "rule": "a prediction date with no target is not a trial: no probability, not scored, not in the rate table; it is still recorded (forward: sealed weekly record with zero predictions) and its count and kind are published",
+    "same_treatment": "stick chart, naive and baseline use the same week records",
+    "undeterminable": "targets whose judgment is null are not scored; a week whose targets are all null is counted separately as an undeterminable week"
+  },
+  "jumped_tags": {
+    "applies_to": "stick chart, naive, threshold-period rate table, baseline period, forward",
+    "cooldown_days": 56,
+    "jump_multiplier": 2,
+    "reads": "t-62 .. t-1",
+    "rule": "not a target at t if any complete 7-day mean ending t-56 .. t-1 exceeds max(2 * B(t), V); B(t) is the value at t",
+    "same_for_all_combinations": true
+  },
+  "proposed_label": "scoring-partial-v1",
+  "revision": "the cooldown rule and the empty-week rule may be revised only while working on the method period, as a new sealed version with owner approval, sealed before the first threshold-access record; the same version applies to every series; no change after threshold-access; earlier versions are published alongside",
+  "statuses": [
+    "target",
+    "no_baseline",
+    "no_current",
+    "above_baseline",
+    "cooldown"
+  ]
+}

@@ -1,0 +1,62 @@
+{
+ "citation": [
+  "Data: The GDELT Project (https://www.gdeltproject.org/). This project is not affiliated with or endorsed by the GDELT Project.",
+  "データ出典：GDELT Project（https://www.gdeltproject.org/）。本プロジェクトは GDELT Project と提携・承認の関係にありません。"
+ ],
+ "code": {
+  "src/stats/candidates.py": "21b5838782991596057be2fdffdeac596bf4548517ef077e5c4547a719512e89",
+  "src/stats/counting.py": "6f25985b21cd8ac93680b81308f3d1860b4ae6496577e10141d1e17ecf8c9fd3",
+  "src/stats/explore_chain.py": "f384b64eff9799933218cf70c67d31d57fefd5b067a3ab062e5927db0254f0cb",
+  "src/stats/explore_denominator.py": "55f292c869915006f771b49aa062c84ca5ce1928e204f6a858345b31b3062588",
+  "src/stats/explore_diffusion.py": "05bcc0598dc59aaf098c92c0411b8d6475bbdf7dad2b17ffe78fbc6165b291bd",
+  "src/stats/explore_diffusion2.py": "31826ada9946166c64d689634e555a9b77db5e56fa6ce37f6abc18e64d8d8d22",
+  "src/stats/explore_graph.py": "e13ec18c180e29cd45a56d31453e333d0d86b11de51741e8f4d56dcd4cfbac55",
+  "src/stats/explore_islands.py": "ed8231f3fc9b6975bf72de52a02bc425aff82b1cc81eb02a7ff1ef876fd58a48",
+  "src/stats/explore_models.py": "bae60264bf66af1c512d85d500725b28e0f9982780ea074bb09e1359ec72f432",
+  "src/stats/explore_sea.py": "1fe1854fb176adfbcc2d353331f4e230e72e95ad7dd7ce651f363c1363472d54",
+  "src/stats/explore_signals.py": "ac29132784462c254b27bdf57c698965eec275412753e5add573a33686084613",
+  "src/stats/explore_tiers.py": "9fc7aae626c9445cb980fa059b5f0dab96b81e2d4c672adecd847e1a4c73e84c",
+  "src/stats/naive.py": "859947f442b6843a332922d5ee1159403e36e38394bfa99f64594b229c35373a",
+  "src/stats/order8_fit.py": "a136e4a7f14582f602baf76e805f2e512fa65fd6194225156b6743312bf5e58b",
+  "src/stats/periods.py": "81de229d065196a26e15d90c5a80eb1043ca534a6eaf66cdebd36285ae087605",
+  "src/stats/scoring.py": "ae30815f5690bf3d9faaabcdb25cce821c8c627282620e1e705220f79a9a4300",
+  "src/stats/tiers_select.py": "19e4b858109741e33ea3befa66561462bdc46710e03addcb76300de2bee3c331"
+ },
+ "info": {
+  "daily_max_read": "2020-11-09",
+  "daily_min_read": "2015-03-09",
+  "network_last_day_minus_t_max_days": -1,
+  "rows_by_h": {
+   "14": 292625,
+   "28": 292625,
+   "56": 292625
+  },
+  "target_rows": 292625
+ },
+ "label": "order8-fit-t143-v1",
+ "models": 84,
+ "naive_history_days": 399,
+ "prediction_dates": "method period, 232 dates",
+ "python": "3.14.2",
+ "refs": {
+  "ledger_records": 17,
+  "seq12": {
+   "manifest_lines": 2118,
+   "manifest_path": "data/manifest/gdelt-gkg-method.jsonl",
+   "manifest_sha256": "e4f269eab5dab2fbaec54abbc317bf31ca1dcb4d8446868987545f5ddd7555b2",
+   "record_sha256": "3fd2a33d3787f89dafb5ac22a50348b97c1b9915610f6838d8de98f316606475",
+   "run_id": "4199ae53d35b918a"
+  },
+  "seq15": {
+   "list_sha256": "6343bcc7d1ad2b406cdb2a5013b029a750c476f93098715f1a822831f283a35d",
+   "record_sha256": "0fcd141b371dcda804f724251bbc90cefaa357cbd4098629c19907adb0e7847f"
+  },
+  "seq17": {
+   "main_sha256": "b73c16e9b5d2de7e402d1783b633c679d747d224fb9cd74cef3bd7034ae1ebe7",
+   "record_sha256": "342b4889894b47aa252c9079cab1fcf117551439d0cba513ec4a857f45f9990b"
+  }
+ },
+ "select_table": "docs/stats/tiers-select-t142/tiers_select.tsv",
+ "select_table_sha256": "13a2784652964f0e1da23d28cba0970744ab8aadcbc715a35edfcf982ffc30b6",
+ "v": "1/543539"
+}
